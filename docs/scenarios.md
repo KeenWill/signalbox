@@ -875,15 +875,16 @@ those tests.
   cancellation delivery and acknowledgement mechanics, and whether direct
   interrupt-only reconciliation is ever added.
 
-## S28 — Import a Claude Code conversation and continue natively
+## S28 — Import an external conversation and continue natively
 
-- **User intent:** Preserve an external Claude Code conversation as durable
-  Signalbox history, later select any imported entry boundary, and continue in a
-  new resume-style or fork-style session without pretending Signalbox executed
-  the imported work.
-- **Durable commands:** Pure ingestion converts one explicitly selected Claude
-  Code JSONL source through [conversation import](spec/conversation-import.md).
-  At any later time, session creation selects an imported frontier under
+- **User intent:** Preserve an external Claude Code or Codex conversation as
+  durable Signalbox history, later select any imported entry boundary, and
+  continue in a new resume-style or fork-style session without pretending
+  Signalbox executed the imported work.
+- **Durable commands:** Pure ingestion converts one explicitly selected
+  supported JSONL source through
+  [conversation import](spec/conversation-import.md). At any later time, session
+  creation selects an imported frontier under
   [sessions and transcript](spec/sessions-and-transcript.md); ordinary native
   input then uses the existing command path.
 - **State transitions:** Ingestion, later session creation, imported seed
@@ -894,7 +895,7 @@ those tests.
   [model-call execution](spec/model-call-execution.md).
 - **Transient updates:** None are required for import. Scripted-model deltas, if
   any, follow the ordinary transient/final-content boundary.
-- **Owning component:** The Claude Code edge converter owns JSONL quirks; the
+- **Owning component:** Each source edge converter owns its JSONL quirks; the
   imported-conversation store owns content-addressed raw records and idempotent
   snapshots; session creation owns later frontier/mode selection and seed
   projection; the existing scheduler and model path own all native execution

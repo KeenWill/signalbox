@@ -27,6 +27,8 @@ const STORAGE_VERSION: i16 = 1;
 const CLAUDE_CODE_FORMAT: &str = "claude_code_session_jsonl";
 const CLAUDE_CODE_VERSION_ONE: i16 = 1;
 const CLAUDE_CODE_VERSION_TWO: i16 = 2;
+const CODEX_FORMAT: &str = "codex_rollout_jsonl";
+const CODEX_VERSION_ONE: i16 = 1;
 const TRANSCRIPT_ENTRY_IDENTITY_UNIQUE: &str = "imported_transcript_entry_identity_unique";
 
 /// Why a versioned imported domain-algebra encoding is invalid.
@@ -775,6 +777,7 @@ fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
         }
+        ImportedConversationFormat::CodexRolloutJsonlV1 => (CODEX_FORMAT, CODEX_VERSION_ONE),
     }
 }
 
@@ -789,7 +792,15 @@ fn decode_format(
         (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO) => {
             Ok(ImportedConversationFormat::ClaudeCodeSessionJsonlV2)
         }
+        (CODEX_FORMAT, CODEX_VERSION_ONE) => Ok(ImportedConversationFormat::CodexRolloutJsonlV1),
         (_, version) if format == CLAUDE_CODE_FORMAT => {
+            Err(ImportedConversationCorruption::Unsupported {
+                field: "converter version",
+                value: version.to_string(),
+            }
+            .into())
+        }
+        (_, version) if format == CODEX_FORMAT => {
             Err(ImportedConversationCorruption::Unsupported {
                 field: "converter version",
                 value: version.to_string(),
@@ -953,11 +964,11 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO, EncodedEntry,
-        EncodedRawRecord, ImportedConversationFormat, ImportedRawRecordConversionDigest,
-        ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRecordEntryPosition,
-        ImportedTranscriptEntryId, ImportedTranscriptPosition, decode_format, encode_format,
-        entries_in_key_order, raw_blobs_in_key_order,
+        CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO, CODEX_FORMAT,
+        CODEX_VERSION_ONE, EncodedEntry, EncodedRawRecord, ImportedConversationFormat,
+        ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
+        ImportedRecordEntryPosition, ImportedTranscriptEntryId, ImportedTranscriptPosition,
+        decode_format, encode_format, entries_in_key_order, raw_blobs_in_key_order,
     };
 
     fn encoded_raw(key: u8) -> EncodedRawRecord {
@@ -1001,6 +1012,19 @@ mod tests {
             decode_format(CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
                 .expect("version two remains readable"),
             ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+        );
+    }
+
+    #[test]
+    fn s28_inv038_codex_rollout_converter_has_distinct_storage_mapping() {
+        assert_eq!(
+            encode_format(ImportedConversationFormat::CodexRolloutJsonlV1),
+            (CODEX_FORMAT, CODEX_VERSION_ONE)
+        );
+        assert_eq!(
+            decode_format(CODEX_FORMAT, CODEX_VERSION_ONE)
+                .expect("Codex rollout version one remains readable"),
+            ImportedConversationFormat::CodexRolloutJsonlV1
         );
     }
 

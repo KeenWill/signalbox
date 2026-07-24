@@ -19,6 +19,7 @@ use signalbox_application::{
     ImportedConversationIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
@@ -851,6 +852,73 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
         .load(winner)
         .await?
         .expect("durable imported conversation must survive pool restart");
+    assert_eq!(restarted, stored);
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-038: Codex rollout entries use the same append-only,
+/// content-addressed persistence boundary as every imported conversation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_codex_rollout_round_trip_is_idempotent_and_restart_safe()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let source = concat!(
+        "{\"timestamp\":\"t0\",\"type\":\"response_item\",\"payload\":",
+        "{\"type\":\"message\",\"role\":\"user\",\"content\":",
+        "[{\"type\":\"input_text\",\"text\":\"question\"}]}}\n",
+        "{\"timestamp\":\"t1\",\"type\":\"response_item\",\"payload\":",
+        "{\"type\":\"function_call\",\"call_id\":\"call-1\",",
+        "\"name\":\"lookup\",\"arguments\":\"{\\\"key\\\":\\\"value\\\"}\"}}\n",
+        "{\"timestamp\":\"t2\",\"type\":\"response_item\",\"payload\":",
+        "{\"type\":\"function_call_output\",\"call_id\":\"call-1\",",
+        "\"output\":\"result\"}}"
+    );
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x8100));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x8100, 0x8200], 0x8300..0x8306),
+        CodexRolloutJsonlConverter,
+        repository,
+    );
+
+    assert_eq!(
+        service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+    assert_eq!(
+        service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::AlreadyImported {
+            conversation: winner
+        }
+    );
+    let (_, _, repository) = service.into_parts();
+    let stored = repository
+        .load(winner)
+        .await?
+        .expect("inserted Codex rollout must load");
+    assert_eq!(
+        stored.format(),
+        ImportedConversationFormat::CodexRolloutJsonlV1
+    );
+    assert_eq!(stored.raw_records().len(), 3);
+    assert_eq!(stored.entries().len(), 3);
+    assert_eq!(stored.frontiers().count(), 3);
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let restarted = ImportedConversationRepository::new(restarted_pool.clone())
+        .load(winner)
+        .await?
+        .expect("durable Codex rollout must survive pool restart");
     assert_eq!(restarted, stored);
 
     restarted_pool.close().await;

@@ -2,10 +2,11 @@
 
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
-format-versioned converter seam, the first Claude Code JSONL converter, and the
-append-only Postgres import store. Later session creation from one imported
-frontier is owned by [sessions-and-transcript](sessions-and-transcript.md);
-native turn activation and model-call rendering are owned by
+format-versioned converter seam, Claude Code session and Codex rollout JSONL
+converters, and the append-only Postgres import store. Later session creation
+from one imported frontier is owned by
+[sessions-and-transcript](sessions-and-transcript.md); native turn activation
+and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -35,8 +36,9 @@ SHA-256 over this exact preimage:
 
 1. the ASCII domain tag `signalbox.imported-conversation.source-digest.v1`,
    prefixed by its unsigned 64-bit big-endian byte length;
-2. the converter version's ASCII format tag (`claude-code-session-jsonl-v1` or
-   `claude-code-session-jsonl-v2`), prefixed by the same length encoding;
+2. the converter version's ASCII format tag (`claude-code-session-jsonl-v1`,
+   `claude-code-session-jsonl-v2`, or `codex-rollout-jsonl-v1`), prefixed by the
+   same length encoding;
 3. the raw-record count as an unsigned 64-bit big-endian integer; and
 4. for each raw record in physical order, its 32-byte SHA-256 content hash
    prefixed by the unsigned 64-bit big-endian value 32.
@@ -46,7 +48,9 @@ raw hash `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`. Its
 version-1 source-content digest is
 `b836a3fb00465c2c7ec01cf2c4b2c98845cbc9cdaf28892b910ce225d2079a5c`; its
 version-2 source-content digest is
-`117ac9599571f7ff2839069ae5252236d79ea148fe518baa1f914d629fba00df`.
+`117ac9599571f7ff2839069ae5252236d79ea148fe518baa1f914d629fba00df`. The same
+vector's Codex rollout version-1 source-content digest is
+`67666ac67ac3b0215f3b5e5e74968c8e2f2ee7574718f4779173696cecf624df`.
 
 Reingesting the same format and exact raw record sequence returns the existing
 imported conversation identity; caller-supplied candidate identities from that
@@ -84,8 +88,10 @@ source-neutral structured-value algebra. Non-message records produce a typed
 Under Claude Code version 2, a source-defined message block without a more
 specific normalized variant produces a typed `SourceMessageBlock`, so its
 boundary and type remain explicit while the complete normalized owning record
-retains every block field. The normalized sequence and every entry's raw-record
-reference make each conversion decision traceable back to exact source bytes.
+retains every block field. Codex rollout version 1 applies the same generic
+variant to source-defined message and reasoning blocks. The normalized sequence
+and every entry's raw-record reference make each conversion decision traceable
+back to exact source bytes.
 
 Each occurrence additionally stores an `ImportedRawRecordConversionDigest` that
 authenticates its exact raw hash and complete normalized structured value
@@ -145,6 +151,17 @@ members `isSidechain` and `isMeta`, with the same omission/null behavior, an
 attested JSON Boolean value, and rejection for every other type. Repeating any
 of these six consulted members rejects the complete conversion.
 
+Codex rollout version 1 maps source record identity from exact `payload.id`,
+source session identity from exact `payload.session_id`, and source timestamp
+from exact top-level `timestamp`. The other three metadata fields are
+`NotAttested`; the converter does not infer them from session metadata,
+filenames, adjacent records, item call identities, or item kinds. Omission,
+null, string, wrong-type, and repeated-member handling follows the same
+attestation rules above. A recognized `response_item` message also maps its
+exact `user` or `assistant` role into both speaker and message-role
+attestations. Every other role remains a `SourceEvent` with no speaker
+assertion, while the complete normalized record retains the exact source role.
+
 Imported text retains the exact decoded Unicode scalar sequence, including an
 empty sequence, whitespace, line endings, normalization distinctions, and
 U+0000. Imported structured values use a source-neutral JSON algebra rather than
@@ -163,7 +180,7 @@ JSON; it is never replaced or retained as a pseudo-character.
 The closed normalized content vocabulary is:
 
 - `SourceEvent`, retaining the source record-type attestation and complete
-  normalized record for a non-message record;
+  normalized record for anything not normalized as a user or assistant message;
 - `SourceMessageBlock`, retaining the source block-type attestation and complete
   normalized owning record for a source-defined message block;
 - `Text`, retaining attested exact user or assistant text or the field's precise
@@ -354,6 +371,73 @@ record and modeled nested value. U+0000, empty strings, and a source containing
 only non-message records do not. In version 2, unknown source block
 discriminators likewise do not: raw and normalized storage retain them.
 
+## Codex rollout JSONL version 1
+
+`CodexRolloutJsonlConverter` implements
+`CodexRolloutJsonl { converter_version: 1 }`. It uses the same exact physical
+JSONL record, UTF-8, JSON structure, number, Unicode, 128-container depth,
+duplicate-consulted-member, and blank-line rules specified for Claude Code
+above.
+
+The converter treats `response_item` as Codex's semantic conversation stream.
+All other top-level item kinds, including `session_meta`, `turn_context`,
+`event_msg`, `world_state`, `compacted`, and source-defined future kinds,
+produce one `SourceEvent`. This retains administrative and presentation events
+without reclassifying their mirrored text or tool progress as duplicate
+conversation entries. A source event keeps its exact top-level `type`
+attestation and complete normalized record.
+
+A `response_item` must have an object-valued `payload`. Recognized payloads map
+as follows:
+
+1. A `message` with exact role `user` or `assistant` emits one entry per
+   `content` block. `input_text` and `output_text` map exact `text` to `Text`;
+   every other object-valued block maps to `SourceMessageBlock` with its exact
+   type attestation. String-valued legacy content maps to one `Text`. Omitted,
+   null, or empty-array content maps to the corresponding
+   `MessageContentAbsent`. Other roles produce one `SourceEvent` and do not
+   assert a user or assistant speaker.
+
+2. A `reasoning` item emits one `Thinking` entry for every `summary_text`,
+   `reasoning_text`, or `text` block in exact `summary` then `content` order.
+   Its exact text is the thinking attestation and signature is `NotAttested`.
+   Other object-valued blocks become `SourceMessageBlock`. An omitted
+   `encrypted_content` emits no redacted entry, null emits
+   `RedactedThinking(AttestedAbsent)`, and a string emits
+   `RedactedThinking(Attested(exact data))`. If the item emits no specific
+   entry, it remains one `SourceEvent`.
+
+3. `function_call` and `custom_tool_call` map exact `call_id` and `name` to
+   `ToolCall`. Their exact `arguments` or `input` JSON string remains a
+   source-neutral structured string rather than being reparsed as nested JSON;
+   raw and complete normalized records therefore retain its lexical form.
+   `tool_search_call` and `local_shell_call` map exact structured `arguments` or
+   `action` respectively, with no fabricated tool name. `web_search_call` maps
+   exact item `id` as its call identity and structured `action` as input, also
+   with no fabricated name. Codex does not attest caller metadata for these
+   records.
+
+4. `function_call_output` and `custom_tool_call_output` map exact `call_id` and
+   `output` to `ToolResult`. Omitted, null, and string output become
+   `NotAttested`, `AttestedAbsent`, and exact text. Array output preserves
+   order: `input_text` becomes a text result block; `input_image` becomes an
+   image result block whose kind and exact `image_url` are attested and whose
+   media type is `NotAttested`; every other object-valued block becomes
+   `SourceResultBlock`. Codex does not attest an error Boolean in these records.
+
+5. `tool_search_output` maps exact `call_id` to `ToolResult`. Its omitted or
+   null `tools` value is typed absence; an array emits one ordered
+   `SourceResultBlock` per source element, retaining an object element's exact
+   type attestation when present. The complete normalized record retains every
+   tool field.
+
+Every other structurally valid `response_item` payload type remains one
+`SourceEvent`, including response-item variants introduced after this converter
+version. A malformed modeled envelope, role, content, reasoning, tool call, tool
+result, or consulted member rejects the complete conversion. No non-message
+response item acquires a fabricated assistant speaker merely because Codex
+produced it.
+
 ## Persistence and reconstitution
 
 The Postgres representation uses append-only `imported_raw_source_record` blobs,
@@ -403,11 +487,11 @@ member, gap, duplicate, unknown discriminator/version, contradictory variant
 columns, invalid source value, or domain correlation failure is typed
 corruption. Complete storage records pass through the domain-owned
 reconstitution seam; adapters never default or drop a malformed value. For each
-Claude Code converter version, that seam independently re-derives every expected
-entry using that version's fixed interpretation and requires exact agreement in
-entry count, order, content, speaker, and source metadata. It also reapplies the
-128-container bound to complete records and entry-carried structured values
-(INV-002).
+Claude Code and Codex converter version, that seam independently re-derives
+every expected entry using that version's fixed interpretation and requires
+exact agreement in entry count, order, content, speaker, and source metadata. It
+also reapplies the 128-container bound to complete records and entry-carried
+structured values (INV-002).
 
 ## Test data and local validation
 
@@ -418,11 +502,12 @@ only aggregate counts and typed failure classes: it never prints paths, source
 identifiers, raw bytes, text, tool arguments/results, thinking, media data, or
 JSON parser excerpts. Its checks include complete conversion, raw hash
 round-trip, addressable frontier count, Postgres reconstitution, and
-second-import idempotency.
+second-import idempotency. Claude Code and Codex use separate opt-in variables,
+so neither private corpus is selected implicitly.
 
 ## Open edges
 
-- Exact mappings for additional source formats and the unimplemented import
+- Exact mappings for further source formats and the unimplemented import
   operational surfaces remain in the
   [conversation-import questions](../open-questions.md#conversation-import).
 - Rich model rendering of imported source events, content absence, tools,

@@ -27,6 +27,8 @@ pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
     /// Claude Code session JSONL interpreted by converter version 2.
     ClaudeCodeSessionJsonlV2,
+    /// Codex rollout JSONL interpreted by converter version 1.
+    CodexRolloutJsonlV1,
 }
 
 impl ImportedConversationFormat {
@@ -34,6 +36,7 @@ impl ImportedConversationFormat {
         match self {
             Self::ClaudeCodeSessionJsonlV1 => b"claude-code-session-jsonl-v1",
             Self::ClaudeCodeSessionJsonlV2 => b"claude-code-session-jsonl-v2",
+            Self::CodexRolloutJsonlV1 => b"codex-rollout-jsonl-v1",
         }
     }
 }
@@ -751,7 +754,7 @@ pub enum ImportedToolResultValue {
 /// Maximum-fidelity normalized imported entry content.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ImportedTranscriptContent {
-    /// One non-message record and its source type.
+    /// One record not normalized as a user or assistant message.
     SourceEvent {
         /// Exact, explicit-null, or omitted top-level source type.
         source_type: ImportedSourceAttestation<ImportedText>,
@@ -1870,11 +1873,12 @@ fn validate_speaker(
                 position: entry.raw_record_position,
             },
         )?;
-    let record_speaker = normalized_record_speaker(record.normalized()).map_err(|()| {
-        ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
-            entry: entry.identity,
-        }
-    })?;
+    let record_speaker =
+        normalized_record_speaker(input.format, record.normalized()).map_err(|()| {
+            ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
+                entry: entry.identity,
+            }
+        })?;
 
     if let ImportedTranscriptContent::SourceEvent { source_type } = &entry.content {
         if entry.source_speaker != ImportedSourceAttestation::NotAttested {
@@ -1899,28 +1903,38 @@ fn validate_speaker(
         return Ok(());
     }
 
-    let ImportedSourceAttestation::Attested(speaker) = entry.source_speaker else {
-        return Err(
-            ImportedConversationReconstitutionFailure::MessageSpeakerUnavailable {
-                entry: entry.identity,
-            },
-        );
-    };
-    if record_speaker != Some(speaker) {
-        return Err(
-            ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
-                entry: entry.identity,
-            },
-        );
-    }
-    if let ImportedSourceAttestation::Attested(message_role) = entry.source.message_role
-        && message_role != speaker
-    {
-        return Err(
-            ImportedConversationReconstitutionFailure::MessageRoleMismatch {
-                entry: entry.identity,
-            },
-        );
+    match (record_speaker, &entry.source_speaker) {
+        (Some(record_speaker), ImportedSourceAttestation::Attested(entry_speaker))
+            if record_speaker == *entry_speaker =>
+        {
+            if let ImportedSourceAttestation::Attested(message_role) = entry.source.message_role
+                && message_role != *entry_speaker
+            {
+                return Err(
+                    ImportedConversationReconstitutionFailure::MessageRoleMismatch {
+                        entry: entry.identity,
+                    },
+                );
+            }
+        }
+        (None, ImportedSourceAttestation::NotAttested) => {}
+        (Some(_), ImportedSourceAttestation::NotAttested)
+        | (Some(_), ImportedSourceAttestation::AttestedAbsent)
+        | (None, ImportedSourceAttestation::Attested(_))
+        | (None, ImportedSourceAttestation::AttestedAbsent) => {
+            return Err(
+                ImportedConversationReconstitutionFailure::MessageSpeakerUnavailable {
+                    entry: entry.identity,
+                },
+            );
+        }
+        (Some(_), ImportedSourceAttestation::Attested(_)) => {
+            return Err(
+                ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
+                    entry: entry.identity,
+                },
+            );
+        }
     }
     Ok(())
 }
@@ -1949,9 +1963,48 @@ fn normalized_record_type(
 }
 
 fn normalized_record_speaker(
+    format: ImportedConversationFormat,
     normalized: &ImportedStructuredValue,
 ) -> Result<Option<ImportedSpeaker>, ()> {
-    match normalized_record_type(normalized).map_err(|_| ())? {
+    if format == ImportedConversationFormat::CodexRolloutJsonlV1 {
+        return normalized_codex_record_speaker(normalized);
+    }
+    match normalized_record_type(normalized)? {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "user" => {
+            Ok(Some(ImportedSpeaker::User))
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "assistant" => {
+            Ok(Some(ImportedSpeaker::Assistant))
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => Ok(None),
+    }
+}
+
+fn normalized_codex_record_speaker(
+    normalized: &ImportedStructuredValue,
+) -> Result<Option<ImportedSpeaker>, ()> {
+    let ImportedStructuredValue::Object(record) = normalized else {
+        return Err(());
+    };
+    if !matches!(
+        projected_text_attestation(record, "type")?,
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "response_item"
+    ) {
+        return Ok(None);
+    }
+    let payload = match unique_structured_field(record, "payload")? {
+        Some(ImportedStructuredValue::Object(payload)) => payload,
+        None | Some(_) => return Err(()),
+    };
+    if !matches!(
+        projected_text_attestation(payload, "type")?,
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "message"
+    ) {
+        return Ok(None);
+    }
+    match projected_text_attestation(payload, "role")? {
         ImportedSourceAttestation::Attested(value) if value.as_str() == "user" => {
             Ok(Some(ImportedSpeaker::User))
         }
@@ -2056,7 +2109,489 @@ fn projected_entries(
         ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
             project_claude_code_record(normalized, ClaudeCodeProjectionVersion::Two)
         }
+        ImportedConversationFormat::CodexRolloutJsonlV1 => project_codex_record(normalized),
     }
+}
+
+fn project_codex_record(normalized: &ImportedStructuredValue) -> Result<Vec<ProjectedEntry>, ()> {
+    let ImportedStructuredValue::Object(record) = normalized else {
+        return Err(());
+    };
+    let source_type = projected_text_attestation(record, "type")?;
+    if !matches!(
+        &source_type,
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "response_item"
+    ) {
+        return Ok(vec![projected_codex_source_event(
+            record,
+            projected_codex_optional_object(record, "payload")?,
+            source_type,
+            ImportedSourceAttestation::NotAttested,
+        )?]);
+    }
+    let payload = match unique_structured_field(record, "payload")? {
+        Some(ImportedStructuredValue::Object(payload)) => payload,
+        None | Some(_) => return Err(()),
+    };
+    let payload_type = projected_text_attestation(payload, "type")?;
+    match &payload_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "message" => {
+            project_codex_message(record, payload, source_type)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "reasoning" => {
+            project_codex_reasoning(record, payload, source_type)
+        }
+        ImportedSourceAttestation::Attested(value)
+            if matches!(value.as_str(), "function_call" | "custom_tool_call") =>
+        {
+            project_codex_named_tool_call(record, payload)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_search_call" => {
+            project_codex_structured_tool_call(record, payload, "arguments")
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "local_shell_call" => {
+            project_codex_structured_tool_call(record, payload, "action")
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "web_search_call" => {
+            project_codex_web_search_call(record, payload)
+        }
+        ImportedSourceAttestation::Attested(value)
+            if matches!(
+                value.as_str(),
+                "function_call_output" | "custom_tool_call_output"
+            ) =>
+        {
+            project_codex_tool_result(record, payload)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_search_output" => {
+            project_codex_tool_search_result(record, payload)
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => Ok(vec![projected_codex_source_event(
+            record,
+            Some(payload),
+            source_type,
+            ImportedSourceAttestation::NotAttested,
+        )?]),
+    }
+}
+
+fn project_codex_message(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+    source_type: ImportedSourceAttestation<ImportedText>,
+) -> Result<Vec<ProjectedEntry>, ()> {
+    let role = projected_text_attestation(payload, "role")?;
+    let speaker = match &role {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "user" => {
+            Some(ImportedSpeaker::User)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "assistant" => {
+            Some(ImportedSpeaker::Assistant)
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => None,
+    };
+    let Some(speaker) = speaker else {
+        return Ok(vec![projected_codex_source_event(
+            record,
+            Some(payload),
+            source_type,
+            projected_codex_role_for_metadata(&role),
+        )?]);
+    };
+    let content = match unique_structured_field(payload, "content")? {
+        None => vec![ImportedTranscriptContent::MessageContentAbsent(
+            ImportedMessageContentAbsence::ContentNotAttested,
+        )],
+        Some(ImportedStructuredValue::Null) => {
+            vec![ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::ContentAttestedAbsent,
+            )]
+        }
+        Some(ImportedStructuredValue::String(value)) => vec![ImportedTranscriptContent::Text(
+            ImportedSourceAttestation::Attested(value.clone()),
+        )],
+        Some(ImportedStructuredValue::Array(blocks)) if blocks.is_empty() => {
+            vec![ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::EmptyBlockArray,
+            )]
+        }
+        Some(ImportedStructuredValue::Array(blocks)) => blocks
+            .iter()
+            .map(projected_codex_message_block)
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(()),
+    };
+    let source = projected_codex_source_metadata(
+        record,
+        Some(payload),
+        ImportedSourceAttestation::Attested(speaker),
+    )?;
+    Ok(content
+        .into_iter()
+        .map(|content| ProjectedEntry {
+            source_speaker: ImportedSourceAttestation::Attested(speaker),
+            content,
+            source: source.clone(),
+        })
+        .collect())
+}
+
+fn projected_codex_role_for_metadata(
+    role: &ImportedSourceAttestation<ImportedText>,
+) -> ImportedSourceAttestation<ImportedSpeaker> {
+    match role {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "user" => {
+            ImportedSourceAttestation::Attested(ImportedSpeaker::User)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "assistant" => {
+            ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant)
+        }
+        ImportedSourceAttestation::Attested(_) => ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::AttestedAbsent => ImportedSourceAttestation::AttestedAbsent,
+        ImportedSourceAttestation::NotAttested => ImportedSourceAttestation::NotAttested,
+    }
+}
+
+fn projected_codex_message_block(
+    value: &ImportedStructuredValue,
+) -> Result<ImportedTranscriptContent, ()> {
+    let ImportedStructuredValue::Object(members) = value else {
+        return Err(());
+    };
+    let source_type = projected_text_attestation(members, "type")?;
+    match &source_type {
+        ImportedSourceAttestation::Attested(value)
+            if matches!(value.as_str(), "input_text" | "output_text") =>
+        {
+            Ok(ImportedTranscriptContent::Text(projected_text_attestation(
+                members, "text",
+            )?))
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => {
+            Ok(ImportedTranscriptContent::SourceMessageBlock { source_type })
+        }
+    }
+}
+
+fn project_codex_reasoning(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+    source_type: ImportedSourceAttestation<ImportedText>,
+) -> Result<Vec<ProjectedEntry>, ()> {
+    let mut content = Vec::new();
+    projected_codex_reasoning_blocks(payload, "summary", &mut content)?;
+    projected_codex_reasoning_blocks(payload, "content", &mut content)?;
+    match unique_structured_field(payload, "encrypted_content")? {
+        None => {}
+        Some(ImportedStructuredValue::Null) => {
+            content.push(ImportedTranscriptContent::RedactedThinking {
+                data: ImportedSourceAttestation::AttestedAbsent,
+            });
+        }
+        Some(ImportedStructuredValue::String(value)) => {
+            content.push(ImportedTranscriptContent::RedactedThinking {
+                data: ImportedSourceAttestation::Attested(value.clone()),
+            });
+        }
+        Some(_) => return Err(()),
+    }
+    if content.is_empty() {
+        return Ok(vec![projected_codex_source_event(
+            record,
+            Some(payload),
+            source_type,
+            ImportedSourceAttestation::NotAttested,
+        )?]);
+    }
+    let source = projected_codex_source_metadata(
+        record,
+        Some(payload),
+        ImportedSourceAttestation::NotAttested,
+    )?;
+    Ok(content
+        .into_iter()
+        .map(|content| ProjectedEntry {
+            source_speaker: ImportedSourceAttestation::NotAttested,
+            content,
+            source: source.clone(),
+        })
+        .collect())
+}
+
+fn projected_codex_reasoning_blocks(
+    payload: &[ImportedStructuredObjectMember],
+    field: &str,
+    content: &mut Vec<ImportedTranscriptContent>,
+) -> Result<(), ()> {
+    let Some(value) = unique_structured_field(payload, field)? else {
+        return Ok(());
+    };
+    let blocks = match value {
+        ImportedStructuredValue::Null => return Ok(()),
+        ImportedStructuredValue::Array(blocks) => blocks,
+        _ => return Err(()),
+    };
+    for block in blocks {
+        let ImportedStructuredValue::Object(members) = block else {
+            return Err(());
+        };
+        let source_type = projected_text_attestation(members, "type")?;
+        content.push(match &source_type {
+            ImportedSourceAttestation::Attested(value)
+                if matches!(value.as_str(), "summary_text" | "reasoning_text" | "text") =>
+            {
+                ImportedTranscriptContent::Thinking {
+                    thinking: projected_text_attestation(members, "text")?,
+                    signature: ImportedSourceAttestation::NotAttested,
+                }
+            }
+            ImportedSourceAttestation::Attested(_)
+            | ImportedSourceAttestation::AttestedAbsent
+            | ImportedSourceAttestation::NotAttested => {
+                ImportedTranscriptContent::SourceMessageBlock { source_type }
+            }
+        });
+    }
+    Ok(())
+}
+
+fn project_codex_named_tool_call(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+) -> Result<Vec<ProjectedEntry>, ()> {
+    let payload_type = projected_text_attestation(payload, "type")?;
+    let input_field = match &payload_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "function_call" => {
+            "arguments"
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "custom_tool_call" => {
+            "input"
+        }
+        _ => return Err(()),
+    };
+    projected_codex_typed_entry(
+        record,
+        payload,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: projected_text_attestation(payload, "call_id")?,
+            name: projected_text_attestation(payload, "name")?,
+            input: projected_structured_attestation(payload, input_field)?,
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    )
+    .map(|entry| vec![entry])
+}
+
+fn project_codex_structured_tool_call(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+    input_field: &str,
+) -> Result<Vec<ProjectedEntry>, ()> {
+    projected_codex_typed_entry(
+        record,
+        payload,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: projected_text_attestation(payload, "call_id")?,
+            name: ImportedSourceAttestation::NotAttested,
+            input: projected_structured_attestation(payload, input_field)?,
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    )
+    .map(|entry| vec![entry])
+}
+
+fn project_codex_web_search_call(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+) -> Result<Vec<ProjectedEntry>, ()> {
+    projected_codex_typed_entry(
+        record,
+        payload,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: projected_text_attestation(payload, "id")?,
+            name: ImportedSourceAttestation::NotAttested,
+            input: projected_structured_attestation(payload, "action")?,
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    )
+    .map(|entry| vec![entry])
+}
+
+fn project_codex_tool_result(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+) -> Result<Vec<ProjectedEntry>, ()> {
+    let content = match unique_structured_field(payload, "output")? {
+        None => ImportedSourceAttestation::NotAttested,
+        Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
+        Some(ImportedStructuredValue::String(value)) => {
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(value.clone()))
+        }
+        Some(ImportedStructuredValue::Array(blocks)) => {
+            let blocks = blocks
+                .iter()
+                .map(projected_codex_tool_result_block)
+                .collect::<Result<Vec<_>, _>>()?;
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                blocks.into_boxed_slice(),
+            ))
+        }
+        Some(_) => return Err(()),
+    };
+    projected_codex_typed_entry(
+        record,
+        payload,
+        ImportedTranscriptContent::ToolResult {
+            source_call_id: projected_text_attestation(payload, "call_id")?,
+            content,
+            is_error: ImportedSourceAttestation::NotAttested,
+        },
+    )
+    .map(|entry| vec![entry])
+}
+
+fn projected_codex_tool_result_block(
+    value: &ImportedStructuredValue,
+) -> Result<ImportedToolResultBlock, ()> {
+    let ImportedStructuredValue::Object(members) = value else {
+        return Err(());
+    };
+    let source_type = projected_text_attestation(members, "type")?;
+    match &source_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "input_text" => Ok(
+            ImportedToolResultBlock::Text(projected_text_attestation(members, "text")?),
+        ),
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "input_image" => {
+            Ok(ImportedToolResultBlock::Image(
+                projected_codex_image_attestation(members, source_type.clone())?,
+            ))
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => {
+            Ok(ImportedToolResultBlock::SourceResultBlock { source_type })
+        }
+    }
+}
+
+fn project_codex_tool_search_result(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+) -> Result<Vec<ProjectedEntry>, ()> {
+    let content = match unique_structured_field(payload, "tools")? {
+        None => ImportedSourceAttestation::NotAttested,
+        Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
+        Some(ImportedStructuredValue::Array(tools)) => {
+            let blocks = tools
+                .iter()
+                .map(|tool| {
+                    let source_type = match tool {
+                        ImportedStructuredValue::Object(members) => {
+                            projected_text_attestation(members, "type")?
+                        }
+                        _ => ImportedSourceAttestation::NotAttested,
+                    };
+                    Ok(ImportedToolResultBlock::SourceResultBlock { source_type })
+                })
+                .collect::<Result<Vec<_>, ()>>()?;
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                blocks.into_boxed_slice(),
+            ))
+        }
+        Some(_) => return Err(()),
+    };
+    projected_codex_typed_entry(
+        record,
+        payload,
+        ImportedTranscriptContent::ToolResult {
+            source_call_id: projected_text_attestation(payload, "call_id")?,
+            content,
+            is_error: ImportedSourceAttestation::NotAttested,
+        },
+    )
+    .map(|entry| vec![entry])
+}
+
+fn projected_codex_typed_entry(
+    record: &[ImportedStructuredObjectMember],
+    payload: &[ImportedStructuredObjectMember],
+    content: ImportedTranscriptContent,
+) -> Result<ProjectedEntry, ()> {
+    Ok(ProjectedEntry {
+        source_speaker: ImportedSourceAttestation::NotAttested,
+        content,
+        source: projected_codex_source_metadata(
+            record,
+            Some(payload),
+            ImportedSourceAttestation::NotAttested,
+        )?,
+    })
+}
+
+fn projected_codex_source_event(
+    record: &[ImportedStructuredObjectMember],
+    payload: Option<&[ImportedStructuredObjectMember]>,
+    source_type: ImportedSourceAttestation<ImportedText>,
+    message_role: ImportedSourceAttestation<ImportedSpeaker>,
+) -> Result<ProjectedEntry, ()> {
+    Ok(ProjectedEntry {
+        source_speaker: ImportedSourceAttestation::NotAttested,
+        content: ImportedTranscriptContent::SourceEvent { source_type },
+        source: projected_codex_source_metadata(record, payload, message_role)?,
+    })
+}
+
+fn projected_codex_source_metadata(
+    record: &[ImportedStructuredObjectMember],
+    payload: Option<&[ImportedStructuredObjectMember]>,
+    message_role: ImportedSourceAttestation<ImportedSpeaker>,
+) -> Result<ImportedSourceMetadata, ()> {
+    let record_id = payload
+        .map(|payload| projected_text_attestation(payload, "id"))
+        .transpose()?
+        .unwrap_or(ImportedSourceAttestation::NotAttested);
+    let source_session_id = payload
+        .map(|payload| projected_text_attestation(payload, "session_id"))
+        .transpose()?
+        .unwrap_or(ImportedSourceAttestation::NotAttested);
+    Ok(ImportedSourceMetadata::new(
+        record_id,
+        ImportedSourceAttestation::NotAttested,
+        source_session_id,
+        projected_text_attestation(record, "timestamp")?,
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+        message_role,
+    ))
+}
+
+fn projected_codex_optional_object<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<Option<&'members [ImportedStructuredObjectMember]>, ()> {
+    match unique_structured_field(members, name)? {
+        Some(ImportedStructuredValue::Object(value)) => Ok(Some(value)),
+        None | Some(_) => Ok(None),
+    }
+}
+
+fn projected_codex_image_attestation(
+    members: &[ImportedStructuredObjectMember],
+    source_type: ImportedSourceAttestation<ImportedText>,
+) -> Result<ImportedSourceAttestation<ImportedMediaSource>, ()> {
+    Ok(ImportedSourceAttestation::Attested(
+        ImportedMediaSource::new(
+            source_type,
+            ImportedSourceAttestation::NotAttested,
+            projected_text_attestation(members, "image_url")?,
+        ),
+    ))
 }
 
 fn project_claude_code_record(
@@ -2919,6 +3454,17 @@ mod tests {
             &[
                 17, 122, 201, 89, 149, 113, 247, 255, 40, 57, 6, 154, 229, 37, 34, 54, 215, 158,
                 161, 72, 254, 81, 139, 170, 31, 145, 77, 98, 159, 186, 0, 223,
+            ]
+        );
+        assert_eq!(
+            ImportedConversationSourceDigest::derive(
+                ImportedConversationFormat::CodexRolloutJsonlV1,
+                &records,
+            )
+            .as_bytes(),
+            &[
+                103, 102, 106, 198, 122, 195, 176, 33, 95, 59, 94, 94, 116, 150, 140, 142, 47, 46,
+                231, 87, 71, 24, 244, 119, 145, 115, 105, 108, 236, 246, 36, 223,
             ]
         );
     }
