@@ -48,10 +48,12 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 - **Projection and summarization beyond the implemented role mappings.** The
   [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
-  and [conversation-import](spec/conversation-import.md) own the implemented
-  projections. Rich imported tool/result/media projection, semantic compaction,
-  selective omission, summarization, rebasing, and context-window policy remain
-  routed through the accepted frontier extension gate owned by
+  and [model-call execution](spec/model-call-execution.md) own the implemented
+  model-input projections; [conversation-import](spec/conversation-import.md)
+  owns only normalized imported source content. Rich imported tool/result/media
+  projection, semantic compaction, selective omission, summarization, rebasing,
+  and context-window policy remain routed through the accepted frontier
+  extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)

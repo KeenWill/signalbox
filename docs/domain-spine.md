@@ -100,6 +100,12 @@ impl ImportedRawRecordHash {
     pub fn digest(bytes: &[u8]) -> Self;
 }
 
+pub struct ImportedRawRecordConversionDigest(/* private [u8; 32] */);
+impl ImportedRawRecordConversionDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
 pub struct ImportedConversationSourceDigest(/* private [u8; 32] */);
 impl ImportedConversationSourceDigest {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
@@ -250,7 +256,7 @@ impl ImportedRawSourceRecord {
         bytes: Vec<u8>,
         normalized: ImportedStructuredValue,
     ) -> Self;
-    // accessors: content_hash(), bytes(), normalized()
+    // accessors: content_hash(), conversion_digest(), bytes(), normalized()
 }
 // Debug redacts bytes and normalized content.
 
@@ -259,10 +265,12 @@ impl ImportedRawSourceRecordReconstitutionInput {
     pub fn new(
         position: ImportedRawRecordPosition,
         stored_hash: ImportedRawRecordHash,
+        stored_conversion_digest: ImportedRawRecordConversionDigest,
         bytes: Vec<u8>,
         normalized: ImportedStructuredValue,
     ) -> Self;
-    // accessors: position(), stored_hash(), bytes(), normalized()
+    // accessors: position(), stored_hash(), stored_conversion_digest(), bytes(),
+    //   normalized()
 }
 // Debug redacts bytes and normalized content.
 
@@ -339,6 +347,9 @@ pub enum ImportedConversationReconstitutionFailure {
     RawRecordHashCollision {
         position: ImportedRawRecordPosition,
     },
+    RawRecordConversionDigestMismatch {
+        position: ImportedRawRecordPosition,
+    },
     RawRecordNormalizedValueNotObject {
         position: ImportedRawRecordPosition,
     },
@@ -405,7 +416,8 @@ pub enum ImportedConversationReconstitutionFailure {
 }
 
 pub struct ImportedConversationReconstitutionError { /* private */ }
-// sealed: Err of ImportedConversationReconstitutionInput::reconstitute
+// sealed: Err of ImportedConversation::from_converted_records or
+// ImportedConversationReconstitutionInput::reconstitute
 impl ImportedConversationReconstitutionError {
     pub fn into_parts(
         self,
@@ -3331,7 +3343,7 @@ impl<
 | ------------------------------------- | -------------------- |
 | domain: lib.rs identities             | 11                   |
 | domain: actor                         | 1                    |
-| domain: imported_conversation         | 28                   |
+| domain: imported_conversation         | 29                   |
 | domain: session                       | 18                   |
 | domain: configuration                 | 19                   |
 | domain: accepted_input                | 5                    |
@@ -3350,7 +3362,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **241 (+1 free fn)** |
+| **signalbox-domain total**            | **242 (+1 free fn)** |
 | application: conversation_import      | 8 (incl. 3 traits)   |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
