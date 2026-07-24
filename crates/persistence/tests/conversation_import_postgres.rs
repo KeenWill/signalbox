@@ -21,11 +21,11 @@ use signalbox_application::{
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-    ImportedConversationReconstitutionFailure, ImportedRawRecordPosition, ImportedRawSourceRecord,
-    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
-    ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
-    ImportedTranscriptPosition,
+    ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
+    ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSourceAttestation,
+    ImportedSourceMetadata, ImportedSpeaker, ImportedStructuredObjectMember,
+    ImportedStructuredValue, ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId,
+    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
     conversation_import::{
@@ -77,6 +77,40 @@ impl ImportedConversationIdGenerator for FixedIds {
         self.entries
             .pop_front()
             .expect("fixture supplies every imported-entry identity")
+    }
+}
+
+struct SequentialIds {
+    conversations: VecDeque<ImportedConversationId>,
+    next_entry: u128,
+}
+
+impl SequentialIds {
+    fn new(conversations: [u128; 2], next_entry: u128) -> Self {
+        Self {
+            conversations: conversations
+                .into_iter()
+                .map(|value| ImportedConversationId::from_uuid(Uuid::from_u128(value)))
+                .collect(),
+            next_entry,
+        }
+    }
+}
+
+impl ImportedConversationIdGenerator for SequentialIds {
+    fn next_conversation_id(&mut self) -> ImportedConversationId {
+        self.conversations
+            .pop_front()
+            .expect("real transcript validation supplies two candidate identities")
+    }
+
+    fn next_entry_id(&mut self) -> ImportedTranscriptEntryId {
+        let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(self.next_entry));
+        self.next_entry = self
+            .next_entry
+            .checked_add(1)
+            .expect("real transcript entry identity range is not exhausted");
+        identity
     }
 }
 
@@ -774,26 +808,51 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
         collect_transcripts(&root, &mut paths).map_err(|()| "real inputs unavailable")?;
     }
     paths.sort();
-    let path = paths
-        .first()
-        .ok_or("real transcript directory contained no JSONL files")?;
-    let source = fs::read(path).map_err(|_| "real input unavailable")?;
+    if paths.is_empty() {
+        return Err("real transcript directory contained no JSONL files".into());
+    }
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x600));
+    for (file_index, path) in paths.into_iter().enumerate() {
+        let source = fs::read(path).map_err(|_| "real input unavailable")?;
+        validate_real_transcript(&pool, &source, file_index).await?;
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn validate_real_transcript(
+    pool: &PgPool,
+    source: &[u8],
+    file_index: usize,
+) -> Result<(), Box<dyn Error>> {
+    let ordinal = u128::try_from(file_index)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or("too many real transcript inputs")?;
+    let first_candidate = ordinal
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(0x600))
+        .ok_or("too many real transcript inputs")?;
+    let second_candidate = first_candidate
+        .checked_add(1)
+        .ok_or("too many real transcript inputs")?;
+    let first_entry = ordinal
+        .checked_mul(1_u128 << 64)
+        .ok_or("too many real transcript inputs")?;
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x600, 0x700], 0x1000..0x100000),
+        SequentialIds::new([first_candidate, second_candidate], first_entry),
         ClaudeCodeJsonlConverter,
         repository,
     );
+    let winner = match service.execute(source).await? {
+        ImportConversationOutcome::Inserted { conversation }
+        | ImportConversationOutcome::AlreadyImported { conversation } => conversation,
+    };
     assert_eq!(
-        service.execute(&source).await?,
-        ImportConversationOutcome::Inserted {
-            conversation: winner
-        }
-    );
-    assert_eq!(
-        service.execute(&source).await?,
+        service.execute(source).await?,
         ImportConversationOutcome::AlreadyImported {
             conversation: winner
         }
@@ -804,9 +863,12 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
         .await?
         .ok_or("real imported conversation disappeared")?;
     assert_eq!(stored.frontiers().count(), stored.entries().len());
+    assert!(
+        stored.raw_records().iter().all(|record| {
+            record.content_hash() == ImportedRawRecordHash::digest(record.bytes())
+        })
+    );
 
-    pool.close().await;
-    drop(container);
     Ok(())
 }
 
