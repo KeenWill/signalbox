@@ -351,6 +351,10 @@ Every encoded top-level value carries a fixed format version and payload-kind
 discriminator; a decoder rejects a value from another column kind rather than
 reinterpreting it. Encoded collection counts bound parsing but never directly
 drive capacity allocation: collections grow fallibly after each decoded element.
+Structured-value and source-metadata encodings remain version 1. New content
+encodings use version 2, whose closed additions are `SourceMessageBlock` and
+`SourceResultBlock`; content decoding retains version 1 for its original closed
+tags and rejects either addition beneath a version-1 header.
 
 One transaction resolves or inserts a complete aggregate:
 

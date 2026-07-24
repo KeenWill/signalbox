@@ -5,7 +5,8 @@ use signalbox_domain::{
     ImportedTranscriptContent,
 };
 
-const ENCODING_VERSION: u8 = 1;
+const ENCODING_VERSION_ONE: u8 = 1;
+const ENCODING_VERSION_TWO: u8 = 2;
 const STRUCTURED_PAYLOAD: u8 = 0;
 const CONTENT_PAYLOAD: u8 = 1;
 const SOURCE_METADATA_PAYLOAD: u8 = 2;
@@ -27,7 +28,7 @@ pub(crate) enum ImportedConversationEncodingFailure {
 pub(crate) fn encode_structured(
     value: &ImportedStructuredValue,
 ) -> Result<Vec<u8>, ImportedConversationEncodingFailure> {
-    let mut bytes = encoding_header(STRUCTURED_PAYLOAD);
+    let mut bytes = encoding_header(ENCODING_VERSION_ONE, STRUCTURED_PAYLOAD);
     encode_structured_value(&mut bytes, value, 0)?;
     Ok(bytes)
 }
@@ -35,7 +36,7 @@ pub(crate) fn encode_structured(
 pub(crate) fn decode_structured(
     bytes: &[u8],
 ) -> Result<ImportedStructuredValue, ImportedConversationEncodingFailure> {
-    let mut decoder = Decoder::new(bytes, STRUCTURED_PAYLOAD)?;
+    let mut decoder = Decoder::new(bytes, STRUCTURED_PAYLOAD, ENCODING_VERSION_ONE)?;
     let value = decoder.structured(0)?;
     decoder.finish()?;
     Ok(value)
@@ -44,7 +45,7 @@ pub(crate) fn decode_structured(
 pub(crate) fn encode_content(
     content: &ImportedTranscriptContent,
 ) -> Result<Vec<u8>, ImportedConversationEncodingFailure> {
-    let mut bytes = encoding_header(CONTENT_PAYLOAD);
+    let mut bytes = encoding_header(ENCODING_VERSION_TWO, CONTENT_PAYLOAD);
     match content {
         ImportedTranscriptContent::SourceEvent { source_type } => {
             push(&mut bytes, 0);
@@ -120,7 +121,7 @@ pub(crate) fn encode_content(
 pub(crate) fn decode_content(
     bytes: &[u8],
 ) -> Result<ImportedTranscriptContent, ImportedConversationEncodingFailure> {
-    let mut decoder = Decoder::new(bytes, CONTENT_PAYLOAD)?;
+    let mut decoder = Decoder::new(bytes, CONTENT_PAYLOAD, ENCODING_VERSION_TWO)?;
     let content = match decoder.byte()? {
         0 => ImportedTranscriptContent::SourceEvent {
             source_type: decoder.attestation(Decoder::text)?,
@@ -160,9 +161,11 @@ pub(crate) fn decode_content(
                 });
             }
         }),
-        8 => ImportedTranscriptContent::SourceMessageBlock {
-            source_type: decoder.attestation(Decoder::text)?,
-        },
+        8 if decoder.version() >= ENCODING_VERSION_TWO => {
+            ImportedTranscriptContent::SourceMessageBlock {
+                source_type: decoder.attestation(Decoder::text)?,
+            }
+        }
         value => {
             return Err(ImportedConversationEncodingFailure::UnsupportedTag {
                 kind: "imported transcript content",
@@ -177,7 +180,7 @@ pub(crate) fn decode_content(
 pub(crate) fn encode_source_metadata(
     source: &ImportedSourceMetadata,
 ) -> Result<Vec<u8>, ImportedConversationEncodingFailure> {
-    let mut bytes = encoding_header(SOURCE_METADATA_PAYLOAD);
+    let mut bytes = encoding_header(ENCODING_VERSION_ONE, SOURCE_METADATA_PAYLOAD);
     encode_attestation(&mut bytes, source.record_id(), encode_text)?;
     encode_attestation(&mut bytes, source.parent_record_id(), encode_text)?;
     encode_attestation(&mut bytes, source.source_session_id(), encode_text)?;
@@ -191,7 +194,7 @@ pub(crate) fn encode_source_metadata(
 pub(crate) fn decode_source_metadata(
     bytes: &[u8],
 ) -> Result<ImportedSourceMetadata, ImportedConversationEncodingFailure> {
-    let mut decoder = Decoder::new(bytes, SOURCE_METADATA_PAYLOAD)?;
+    let mut decoder = Decoder::new(bytes, SOURCE_METADATA_PAYLOAD, ENCODING_VERSION_ONE)?;
     let source = ImportedSourceMetadata::new(
         decoder.attestation(Decoder::text)?,
         decoder.attestation(Decoder::text)?,
@@ -375,28 +378,25 @@ fn push(bytes: &mut Vec<u8>, value: u8) {
     bytes.push(value);
 }
 
-fn encoding_header(payload_kind: u8) -> Vec<u8> {
-    vec![ENCODING_VERSION, payload_kind]
+fn encoding_header(version: u8, payload_kind: u8) -> Vec<u8> {
+    vec![version, payload_kind]
 }
 
 struct Decoder<'bytes> {
     bytes: &'bytes [u8],
     index: usize,
+    version: u8,
 }
 
 impl<'bytes> Decoder<'bytes> {
     fn new(
         bytes: &'bytes [u8],
         expected_payload_kind: u8,
+        latest_supported_version: u8,
     ) -> Result<Self, ImportedConversationEncodingFailure> {
         let Some((&version, remainder)) = bytes.split_first() else {
             return Err(ImportedConversationEncodingFailure::UnexpectedEnd);
         };
-        if version != ENCODING_VERSION {
-            return Err(ImportedConversationEncodingFailure::UnsupportedVersion(
-                version,
-            ));
-        }
         let Some(&actual_payload_kind) = remainder.first() else {
             return Err(ImportedConversationEncodingFailure::UnexpectedEnd);
         };
@@ -406,7 +406,20 @@ impl<'bytes> Decoder<'bytes> {
                 actual: actual_payload_kind,
             });
         }
-        Ok(Self { bytes, index: 2 })
+        if version == 0 || version > latest_supported_version {
+            return Err(ImportedConversationEncodingFailure::UnsupportedVersion(
+                version,
+            ));
+        }
+        Ok(Self {
+            bytes,
+            index: 2,
+            version,
+        })
+    }
+
+    const fn version(&self) -> u8 {
+        self.version
     }
 
     fn finish(self) -> Result<(), ImportedConversationEncodingFailure> {
@@ -589,9 +602,11 @@ impl<'bytes> Decoder<'bytes> {
             2 => Ok(ImportedToolResultBlock::ToolReference {
                 tool_name: self.attestation(Self::text)?,
             }),
-            3 => Ok(ImportedToolResultBlock::SourceResultBlock {
-                source_type: self.attestation(Self::text)?,
-            }),
+            3 if self.version() >= ENCODING_VERSION_TWO => {
+                Ok(ImportedToolResultBlock::SourceResultBlock {
+                    source_type: self.attestation(Self::text)?,
+                })
+            }
             value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
                 kind: "tool-result block",
                 value,
@@ -661,12 +676,30 @@ mod tests {
 
     #[track_caller]
     fn assert_version_one_content(content: ImportedTranscriptContent, expected: &[u8]) {
+        let encoded = encode_content(&content).expect("fixture content must encode");
+        assert_eq!(
+            encoded.first(),
+            Some(&2),
+            "new content encodings must use version two"
+        );
+        assert_eq!(
+            decode_content(expected).expect("literal version-one bytes must decode"),
+            content
+        );
+        assert_eq!(
+            decode_content(&encoded).expect("new version-two bytes must decode"),
+            content
+        );
+    }
+
+    #[track_caller]
+    fn assert_version_two_content(content: ImportedTranscriptContent, expected: &[u8]) {
         assert_eq!(
             encode_content(&content).expect("fixture content must encode"),
             expected
         );
         assert_eq!(
-            decode_content(expected).expect("literal version-one bytes must decode"),
+            decode_content(expected).expect("literal version-two bytes must decode"),
             content
         );
     }
@@ -886,7 +919,7 @@ mod tests {
             },
             &[1, 1, 3, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 118, 1],
         );
-        assert_version_one_content(
+        assert_version_two_content(
             ImportedTranscriptContent::ToolResult {
                 source_call_id: ImportedSourceAttestation::NotAttested,
                 content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
@@ -898,7 +931,7 @@ mod tests {
                 is_error: ImportedSourceAttestation::NotAttested,
             },
             &[
-                1, 1, 3, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 1, 120, 0,
+                2, 1, 3, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 1, 120, 0,
             ],
         );
         assert_version_one_content(
@@ -954,11 +987,29 @@ mod tests {
             ),
             &[1, 1, 7, 4],
         );
-        assert_version_one_content(
+        assert_version_two_content(
             ImportedTranscriptContent::SourceMessageBlock {
                 source_type: attested_text("f"),
             },
-            &[1, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 1, 102],
+            &[2, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 1, 102],
+        );
+    }
+
+    #[test]
+    fn inv002_version_one_content_rejects_version_two_only_tags() {
+        assert_eq!(
+            decode_content(&[1, 1, 8, 0]),
+            Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "imported transcript content",
+                value: 8,
+            })
+        );
+        assert_eq!(
+            decode_content(&[1, 1, 3, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0,]),
+            Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "tool-result block",
+                value: 3,
+            })
         );
     }
 
