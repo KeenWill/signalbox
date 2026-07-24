@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
+
+**Context.** The finished-pull-request rules required push-time reviewer
+replies, but expressed the requirement inside a dense paragraph. An agent could
+incorrectly treat the disposition round as stack-wide batching and move to a
+child pull request after pushing fixes without replying on the reviewed pull
+request.
+
+**Decision.** Make the existing timing operationally explicit in
+[AGENTS.md](../AGENTS.md): accepted findings are replied to after their fixing
+commits are pushed; declined findings may be answered immediately or with the
+pull request's disposition round; and all replies and eligible resolutions are
+complete before work moves to another pull request, propagates a stack, or
+requests another review wave.
+
+**Rejected alternatives.** Retaining the compact wording leaves the sequencing
+easy to overlook. Requiring immediate replies to declined findings prevents a
+useful single disposition round without improving traceability.
+
+**Affects.** The finished-pull-request workflow and every future review loop. It
+changes no code, review-wave limit, merge authority, or validation rule.
+
 ## 2026-07-24 — Keep ordinary imported-session loads bounded
 
 **Context.** Imported seed correctness requires full comparison with the
