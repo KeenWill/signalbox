@@ -3336,10 +3336,17 @@ fn reconstitute(
             current_call.as_ref().map(CurrentModelCall::state)
         ),
         (CurrentTurnAttemptState::Prepared, None)
-            | (
-                CurrentTurnAttemptState::Prepared,
-                Some(CurrentModelCallState::Prepared)
-            ) if !running_tool_round
+            if !running_tool_round
+                || (running_tool_continuation && uncommitted_tool_result_projection)
+    ) || matches!(
+        (
+            current_attempt.state(),
+            current_call.as_ref().map(CurrentModelCall::state)
+        ),
+        (
+            CurrentTurnAttemptState::Prepared,
+            Some(CurrentModelCallState::Prepared)
+        ) if !running_tool_round || running_tool_continuation
     ) || matches!(
         (
             current_attempt.state(),
@@ -4866,6 +4873,51 @@ mod tests {
                 .expect_err("a durably visible resolved frontier requires its prepared call")
                 .failure(),
             ModelCallExecutionReconstitutionFailure::LifecycleMismatch
+        );
+        let mut prepared_denial = input.clone();
+        prepared_denial.active_turn =
+            prepared_denial
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(35)),
+                });
+        assert_eq!(
+            prepared_denial
+                .clone()
+                .reconstitute()
+                .expect_err("a prepared denial continuation still requires atomic projection proof")
+                .failure(),
+            ModelCallExecutionReconstitutionFailure::LifecycleMismatch
+        );
+        let prepared_denial =
+            prepared_denial.with_uncommitted_tool_result_projection(projection.clone());
+        let prepared_denial_call = prepared_denial
+            .clone()
+            .reconstitute()
+            .expect("a denied-only continuation preserves its prepared attempt")
+            .prepare_initial_call(model_call_id(39))
+            .expect("the prepared denial continuation admits its next call");
+        let mut prepared_denial_reload = prepared_denial;
+        prepared_denial_reload.call_snapshot = prepared_denial_reload.continuation_snapshot.take();
+        prepared_denial_reload.uncommitted_tool_result_projection = None;
+        prepared_denial_reload.calls = vec![ModelCallReconstitutionInput::new(
+            prepared_denial_call.call().id(),
+            prepared_denial_call.turn(),
+            prepared_denial_call.attempt(),
+            prepared_denial_call.call().selection(),
+            prepared_denial_call.call().target(),
+            prepared_denial_call.call().frontier().snapshot(),
+            ModelCallReconstitutionState::Prepared,
+        )];
+        assert_eq!(
+            prepared_denial_reload
+                .reconstitute()
+                .expect("the denied-only prepared continuation reloads")
+                .resume_prepared_call()
+                .expect("the denial continuation call remains resumable")
+                .call()
+                .id(),
+            prepared_denial_call.call().id()
         );
         let input = input.with_uncommitted_tool_result_projection(projection);
         let resumed = input
