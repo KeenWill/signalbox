@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_are_content_silent_and_conversion_is_complete() {
+    fn s28_inv038_unknown_content_block_fails_complete_conversion() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[",
@@ -1046,6 +1046,21 @@ mod tests {
             error.failure(),
             ClaudeCodeJsonlConversionFailure::UnknownContentBlockType { line: 2, block: 1 }
         );
+    }
+
+    #[test]
+    fn s28_inv038_conversion_error_rendering_is_content_silent() {
+        let source = concat!(
+            "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[",
+            "{\"type\":\"future-secret-kind\",\"payload\":\"secret-after\"}]}}"
+        );
+        let error = ClaudeCodeJsonlConverter
+            .convert(conversation(), source.as_bytes(), || {
+                ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
+            })
+            .expect_err("unknown synthetic block must produce a content-silent error");
+
         let debug = format!("{error:?}");
         assert!(!debug.contains("secret"));
         assert_eq!(error.to_string(), "Claude Code JSONL conversion failed");
@@ -1085,6 +1100,20 @@ mod tests {
         assert_eq!(
             error.failure(),
             ClaudeCodeJsonlConversionFailure::BlankLine { line: 2 }
+        );
+    }
+
+    #[test]
+    fn s28_inv038_rejects_utf8_bom_at_record_start() {
+        let error = ClaudeCodeJsonlConverter
+            .convert(conversation(), b"\xef\xbb\xbf{\"type\":\"system\"}", || {
+                ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
+            })
+            .expect_err("a UTF-8 BOM is not part of a version-one JSONL record");
+
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::InvalidJson { line: 1 }
         );
     }
 
