@@ -17,11 +17,10 @@ through owner-briefed review sweeps but never committed, so autonomous agents
 and reviewers reading only the repository could not know it; the tree stayed
 clean by construction rather than by rule.
 
-**Decision.** `AGENTS.md` gains the public-source hygiene rule: repository
-content cites only public sources and never includes or alludes to non-public
-material of any organization — internal systems, documents, or vocabulary —
-regardless of origin; citing public open-source work is fine regardless of
-publisher. A warning-mode reviewer check mirrors the verdict logic.
+**Decision.** `AGENTS.md` gains the public-source hygiene rule — repository
+content cites only public sources — and is its one statement of record; the
+rule's scope and allowances live there, not here. A warning-mode reviewer check
+in `.coderabbit.yaml` mirrors the verdict logic.
 
 **Rejected alternatives.** Keeping the rule as out-of-band owner guidance:
 invisible to agents and reviewers, unenforceable at review time. Committing a
