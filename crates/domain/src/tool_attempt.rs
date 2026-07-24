@@ -773,7 +773,9 @@ impl ToolAttemptReconstitutionInput {
     /// the first dispatch generation.
     pub fn reconstitute(self) -> Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError> {
         if self.generation != ToolDispatchGeneration::first() {
-            return Err(ToolAttemptReconstitutionError { input: self });
+            return Err(ToolAttemptReconstitutionError {
+                input: Box::new(self),
+            });
         }
         let Self {
             attempt,
@@ -829,7 +831,7 @@ impl ToolAttemptReconstitutionInput {
 /// Stored attempt facts used a dispatch generation outside version one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolAttemptReconstitutionError {
-    input: ToolAttemptReconstitutionInput,
+    input: Box<ToolAttemptReconstitutionInput>,
 }
 
 impl ToolAttemptReconstitutionError {
@@ -840,7 +842,7 @@ impl ToolAttemptReconstitutionError {
 
     /// Returns the unchanged stored facts.
     pub fn into_input(self) -> ToolAttemptReconstitutionInput {
-        self.input
+        *self.input
     }
 }
 

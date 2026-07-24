@@ -2920,7 +2920,10 @@ pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn owner_command(command: PreparedDecideToolRequest) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
-    pub const fn session_blanket(request: ToolRequestId) -> Self;
+    pub const fn session_blanket(
+        request: ToolRequestId,
+        frozen_posture: DangerousToolAutoApproval,
+    ) -> Self;
     pub fn reconstitute(
         self,
     ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;

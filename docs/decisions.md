@@ -52,6 +52,53 @@ focused capability.
 crate-specific exception in `deny.toml`; stored argument kinds, canonical
 encoding, and byte limits do not change.
 
+## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
+
+**Context.** The finished-pull-request rules required push-time reviewer
+replies, but expressed the requirement inside a dense paragraph. An agent could
+incorrectly treat the disposition round as stack-wide batching and move to a
+child pull request after pushing fixes without replying on the reviewed pull
+request.
+
+**Decision.** Make the existing timing operationally explicit in
+[AGENTS.md](../AGENTS.md): accepted findings are replied to after their fixing
+commits are pushed; declined findings may be answered immediately or with the
+pull request's disposition round; and all replies and eligible resolutions are
+complete before work moves to another pull request, propagates a stack, or
+requests another review wave.
+
+**Rejected alternatives.** Retaining the compact wording leaves the sequencing
+easy to overlook. Requiring immediate replies to declined findings prevents a
+useful single disposition round without improving traceability.
+
+**Affects.** The finished-pull-request workflow and every future review loop. It
+changes no code, review-wave limit, merge authority, or validation rule.
+
+## 2026-07-24 — Version tool-bearing process projection as protocol three
+
+**Context.** Process protocol versions one and two use closed tagged unions.
+Emitting tool wait states, tool transcript entries, tool-batch events, or a
+changed reconciliation payload under either accepted version would make an
+upgraded hub send frames that an existing client must reject.
+
+**Decision.** Preserve versions one and two byte-for-byte for native model-call
+states and events, and add protocol version three for tool-bearing projection.
+Version three is a superset of version two, keeps the existing model-call
+reconciliation shapes, and adds distinct tool reconciliation state and event
+variants. A version-one or version-two read/follow request selecting existing
+tool history, or a live follow that first encounters a tool-only event, returns
+`unsupported_version` naming version three before emitting an unknown variant.
+The stack's terminal client uses version three. See
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Extending an older closed union violates its
+compatibility contract. Replacing the model-call reconciliation payload with a
+tagged operation would break old clients even for tool-free sessions. Removing
+older versions would unnecessarily drop their supported projections.
+
+**Affects.** INV-033; process wire types, hub projection gates, terminal-client
+decoding, transcript snapshots, durable follow events, and compatibility tests.
+
 ## 2026-07-24 — Complete tool rounds inside one hub-owned turn
 
 **Context.** The owner fixed the tool-loop semantics on 2026-07-23. The
