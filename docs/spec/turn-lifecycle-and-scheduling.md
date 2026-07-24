@@ -379,14 +379,15 @@ is unimplemented (open edge); `TranscriptFrontier` itself is
 Evidence validation is implemented for the scheduling seam: stored active phases
 are conclusions derived from complete owner facts, never trusted discriminators.
 
-- `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
-  facts (an `ambiguous` terminal call correlated with its ended attempt —
-  `ambiguous` from a live loss, `lost` from startup recovery). A `StopRequested`
-  current attempt reconstructs only when its stored interrupt command,
-  predecessor, configured immediate successor, applied result, and
-  cancellation-requested call form the exact proof. `AwaitingApproval` still has
-  no production constructor (compile-fail-tested); a bare wait subject cannot
-  become a phase until a complete correlated owner projection exists.
+- `AwaitingRecoveryDecision` reconstitutes from complete operation-owner facts:
+  an `ambiguous` terminal model call or tool attempt correlated with its ended
+  turn attempt (`ambiguous` from a live loss, `lost` from startup recovery). A
+  `StopRequested` current attempt reconstructs only when its stored interrupt
+  command, predecessor, configured immediate successor, applied result, and
+  cancellation-requested call form the exact proof. `AwaitingApproval`
+  reconstructs only from the complete tool batch proving its earliest undecided
+  request and absence of a live attempt; a bare wait subject cannot become a
+  phase.
 - A failed terminal turn that ended through a physical attempt durably names its
   exact ended attempt and optional terminal call
   (`turn_lifecycle.terminal_attempt_id`, `terminal_model_call_id`, backfilled
@@ -404,13 +405,14 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   before any call was prepared, or its one correlated terminal `cancelled` call.
   Its terminal frontier must extend the starting or call frontier by exactly the
   correlated `TurnCancelled` marker.
-- A reconciliation-required terminal turn names its exact ended attempt and
-  required terminal `ambiguous` call. The attempt end is either
-  `WithoutStop(Ambiguous|Lost)` with a later turn-correlated applied interrupt,
-  or `AfterCancellation(Ambiguous|Lost)` carrying that same proof. Its terminal
-  frontier is an equal-content boundary over the ambiguous call's frontier. The
-  checked scheduling input validates those correlations before the turn can
-  serve as a terminal predecessor.
+- A reconciliation-required terminal turn names its exact ended turn attempt and
+  exactly one required terminal `ambiguous` model call or tool attempt. The
+  attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
+  turn-correlated applied interrupt, or `AfterCancellation(Ambiguous|Lost)`
+  carrying that same proof. Its terminal frontier is an equal-content boundary
+  over the ambiguous operation's source frontier. The checked scheduling input
+  validates those correlations before the turn can serve as a terminal
+  predecessor.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session

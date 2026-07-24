@@ -267,23 +267,26 @@ those tests.
   terminal/cancelled and exact applied-interrupt proof. `Running` → directly
   ended/cancelled only when every guard already holds, otherwise
   `StopRequested(CancellationOnly)` with that proof while retaining the exact
-  attempt and slot. Approval wait → cancelled with the same proof; recovery wait
-  → reconciliation-required with that proof and the wait's exact operation set.
-  Every direct terminal path atomically records the interrupt-created immediate
-  successor and reclassifies pending steering before releasing the slot. If
-  fatal mismatch already requested stop, the first interrupt populates its
-  interrupt field without reauthorizing work; either event order preserves both
-  facts. A running predecessor then uses the common precedence: unacknowledged
-  ambiguity yields the exact interrupt/fatal reconciliation marker; otherwise
-  sufficient outcome-authoritative non-mismatched completion or atomic refusal
-  controls only without fatal stop, followed by known failure or
-  applied-and-confirmed interrupt cancellation. A raced completion/refusal under
-  fatal stop remains non-authoritative. Resolving mismatch evidence after
-  terminal ambiguity preserves that operation state, producing failure when no
-  other ambiguity remains and exact fatal reconciliation otherwise. An already
-  accepted ambiguity risk remains marked while interruption is classified
-  normally. The interrupt-created turn is always the immediate queued successor;
-  no standalone active-turn cancellation exists in the baseline.
+  attempt and slot. An approval wait remains parked until its canonical decision
+  command resolves the approval obligation; deny-and-end records the denial
+  first, then applies the interrupt after decision progression opens execution.
+  Recovery wait → reconciliation-required with that proof and the wait's exact
+  operation set. Every direct terminal path atomically records the
+  interrupt-created immediate successor and reclassifies pending steering before
+  releasing the slot. If fatal mismatch already requested stop, the first
+  interrupt populates its interrupt field without reauthorizing work; either
+  event order preserves both facts. A running predecessor then uses the common
+  precedence: unacknowledged ambiguity yields the exact interrupt/fatal
+  reconciliation marker; otherwise sufficient outcome-authoritative
+  non-mismatched completion or atomic refusal controls only without fatal stop,
+  followed by known failure or applied-and-confirmed interrupt cancellation. A
+  raced completion/refusal under fatal stop remains non-authoritative. Resolving
+  mismatch evidence after terminal ambiguity preserves that operation state,
+  producing failure when no other ambiguity remains and exact fatal
+  reconciliation otherwise. An already accepted ambiguity risk remains marked
+  while interruption is classified normally. The interrupt-created turn is
+  always the immediate queued successor; no standalone active-turn cancellation
+  exists in the baseline.
 - **Transient updates:** Cancellation signals to provider or runner and
   “stopping” progress.
 - **Owning component:** Hub owns ordering and state; adapters attempt prompt
@@ -414,8 +417,10 @@ those tests.
   attempt exists only to continue conversational orchestration with the denial
   outcome. Duplicate or delayed approval messages cannot reverse the denial
   without an explicit new decision path. Deny-and-end records this same denial
-  and composes the existing applied-interrupt stop path; it does not invent a
-  second cancellation authority.
+  and resolves every earlier approval-order obligation, then composes the
+  existing applied-interrupt stop path after decision progression opens
+  execution; it does not invent a second cancellation authority or treat an
+  interrupt as an approval decision.
 - **Required invariants:** INV-009, INV-012, INV-019, INV-020, INV-027.
 - **Remaining questions:** Whether future reconsideration creates a new request.
   Baseline continuation in a new turn attempt is decided by

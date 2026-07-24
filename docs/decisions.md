@@ -18,19 +18,24 @@ transcript reserves `AssistantToolUse` and the active-turn algebra reserves
 `AwaitingApproval`. Storage deliberately blocks both. Shipping the first tool
 requires the request, approval, physical-attempt, result, continuation, and
 restart boundaries to land together; otherwise a provider response could create
-unowned work or a side effect could outlive its evidence.
+unowned work or a side effect could outlive its evidence. Interrupts must also
+order against the in-process executor boundary without making an interrupt an
+approval decision.
 
 **Decision.** Adopt the complete hub-owned loop specified by
 [tool-loop](spec/tool-loop.md): tool-using model completions yield within the
 same logical turn; requests and reference-only semantic entries commit
 atomically; approval sources remain explicit; the dangerous session blanket is
 versioned and frozen per turn; execution is serialized behind catalog/executor
-ports and durably fenced; 1 MiB bounds both normalized arguments and admitted
-text results; crash classification follows recorded effect class; and the
-proposal-ordered all-resolved boundary atomically projects results, consumes
-steering, and prepares the next model call. `current_time` is the first
-effect-free auto tool, with an injected clock and IANA conversion supplied by
-the focused `jiff` dependency.
+ports and durably fenced; a process-shared turn dispatch gate orders execution
+against interrupts; deny-and-end records the canonical denial before applying
+the interrupt from execution; interrupting an ambiguous tool recovery wait
+retains that exact ambiguity in the proof-bearing terminal boundary; 1 MiB
+bounds both normalized arguments and admitted text results; crash classification
+follows recorded effect class; and the proposal-ordered all-resolved boundary
+atomically projects results, consumes steering, and prepares the next model
+call. `current_time` is the first effect-free auto tool, with an injected clock
+and IANA conversion supplied by the focused `jiff` dependency.
 
 **Rejected alternatives.** Making each round a new turn would fragment one
 conversational outcome and misplace `TurnCompleted`. Process-local approvals or

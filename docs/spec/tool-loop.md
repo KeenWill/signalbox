@@ -109,8 +109,11 @@ tool result at the continuation boundary and the turn continues. There is no
 separate denial source that can claim cancellation authority. Deny-and-end
 composes that same recorded denial with the existing applied-interrupt stop
 path; the interrupt remains the proof-bearing authority for ending the turn
-(INV-029, INV-037). A terminal stop materializes the denial result before its
-terminal marker.
+(INV-029, INV-037). The caller first records the denial (and resolves any
+earlier approval-order obligations); once decision progression opens the
+executing phase, it submits the interrupt. An interrupt alone against an
+approval wait is not a denial and does not bypass the decision command. A
+terminal stop materializes the denial result before its terminal marker.
 
 ## Registry and effect metadata
 
@@ -121,6 +124,12 @@ compiled catalog, but catalog lookup and iteration are ports rather than a
 static global. Later database, MCP, or runner-enrollment sources can compose
 declarations behind that port without changing request, approval, execution, or
 model-operation types.
+
+Each provider operation carries one exact definition snapshot. Initial approval
+for proposals returned by that operation is derived from that same advertised
+snapshot, never from a later catalog lookup. A dynamic catalog change while the
+provider call is in flight therefore cannot upgrade a proposal from `Confirm` to
+unattended execution.
 
 The registry is advisory input to policy and execution, never request-content
 authority. A model may propose an unknown name; fail-closed policy requires
@@ -169,6 +178,22 @@ execution and continuation. For each next approved request:
    INV-021). The row moves monotonically to `Completed`, `KnownFailed`, or
    `Ambiguous` and never reopens.
 
+A process-shared turn-keyed dispatch gate orders immediate interrupts against
+the authorize → executor → result-commit window. Tool execution holds the gate
+from before authorization until the returned evidence commits; interrupt
+handling acquires the same gate before its atomic command transaction. An
+interrupt that wins before authorization closes the checkpointed attempt as
+crash-lost and terminalizes without entering the executor. An interrupt that
+waits behind executor work reloads the committed result before closing the
+batch, so it cannot strand an issued request or roll back its command.
+
+If trustworthy executor evidence returns but its commit fails, the service
+retains that exact correlated observation as an opaque linear same-incarnation
+value. A later pass rereads the exact attempt first: `Pending` recommits the
+unchanged observation, while `AlreadyCommitted` finishes without invoking the
+executor again. The service never downgrades still-owned evidence to restart
+crash loss.
+
 Unknown names, `Undecodable` arguments, and argument-schema decode failures end
 their prepared attempt `KnownFailed` with `UnknownTool` or `InvalidArguments`
 error evidence without crossing the executor boundary. An executor-reported
@@ -176,6 +201,13 @@ failure becomes `ExecutionFailed`. These typed errors resolve the logical
 request and are visible to the next model round; they do not by themselves fail
 the turn. Physical ambiguity remains a turn-level recovery wait and does not
 become an ordinary error result.
+
+An interrupt against a tool recovery wait does not reinterpret or erase the
+ambiguous attempt. It terminalizes the turn as `ReconciliationRequired` with an
+equal-content frontier, the exact tool attempt as its ambiguity set, and the
+applied-interrupt proof; the typed lifecycle and outbox boundaries retain the
+tool-attempt reference instead of fabricating a model call (INV-006, INV-025,
+INV-029, INV-037).
 
 The schema independently enforces no live tool attempt while the lifecycle is
 `awaiting_approval`, at most one nonterminal tool attempt per turn, immutable
@@ -199,7 +231,9 @@ Semantic tool-result entries contain references only:
 - `ToolExecutionResult { attempt }` references executed success/error evidence;
 - `ToolDenied { request }` references the request's durable denial; and
 - `ToolClosed { request }` references a request closed because its turn ended
-  before a decision.
+  before it could complete ordinary execution, whether it remained undecided,
+  was approved but not yet attempted, or owned an unsent checkpoint classified
+  crash-lost by the interrupt boundary.
 
 No result entry copies output, error detail, or denial reason. Attempt evidence
 commits as soon as execution ends, independently of semantic projection. Once
@@ -218,10 +252,10 @@ another tool batch the loop repeats in the same turn; if it proposes no tools,
 its assistant text and `TurnCompleted` marker terminalize the turn.
 
 If an applied stop terminalizes before continuation, the same materialization
-algorithm appends results for executed and denied requests, closes every still
-undecided request as `ToolClosed` in proposal order, then appends the
-proof-bearing terminal marker. A request can therefore never remain an open
-logical dependency behind a terminal turn (INV-006).
+algorithm appends results for executed and denied requests, closes every request
+that did not complete ordinary execution as `ToolClosed` in proposal order, then
+appends the proof-bearing terminal marker. A request can therefore never remain
+an open logical dependency behind a terminal turn (INV-006).
 
 ## Approval waits and restart
 
@@ -249,6 +283,14 @@ tool-result message parts. It derives the provider-visible tool-call correlation
 from `ToolRequestId`, so provider-native identifier types and messages never
 cross the application boundary (INV-002). Every rendered result resolves its
 referenced durable record first; missing or cross-wired content fails closed.
+All text and tool proposals produced by one model call are coalesced into one
+assistant message, and the proposal-ordered results for that batch are coalesced
+into the immediately following user message. OpenAI carries typed failure JSON
+as ordinary tool-message content because its wire shape has no failure flag;
+Anthropic also receives the provider-neutral failure flag. Malformed proposal
+arguments remain exact on the durable request but replay as an object-shaped
+invalid-arguments placeholder, allowing the paired typed error result to reach
+either provider without pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 
@@ -273,6 +315,10 @@ three result-entry shapes, and introduces append-only `tool_request`,
 constraints assert complete call-response/request-entry batches, approval-wait
 evidence, result-entry materialization, and terminal closure. The session
 scheduler row remains the first explicit lock for every turn-side transaction.
+Preparing a model operation collects all frontier-referenced tool requests,
+attempts, and approval decisions in one batched query per record family before
+reconstructing provider history in frontier order; it performs no per-entry
+database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the owner-global durable-command registry as its own
 typed record family. Because adding the dangerous posture changes the canonical

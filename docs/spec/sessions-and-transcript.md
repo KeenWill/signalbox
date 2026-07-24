@@ -202,7 +202,9 @@ and closed:
   by the referenced attempt;
 - `ToolDenied { request }` — a denial owned by the referenced request and
   decision;
-- `ToolClosed { request }` — an undecided request closed by turn end;
+- `ToolClosed { request }` — a request closed by turn end before it completed
+  ordinary execution, including undecided, approved-but-unattempted, and
+  interrupt-classified crash-lost requests;
 - `TurnCompleted { turn }` — the explicit final marker for a completed turn; and
 - `TurnCancelled { turn }` — the explicit final marker for a turn ended by its
   applied interrupt.

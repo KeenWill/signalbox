@@ -258,7 +258,7 @@ ended attempt and optional `known_failed`/`cancelled` call provenance
 (backfilled and closed by migration `202607220003`). Cancelled and
 reconciliation-required terminal turns additionally supply their exact
 proof-bearing attempt end, applied-interrupt result, and optional cancelled or
-required ambiguous call through the scheduling input described in
+required ambiguous operation through the scheduling input described in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). The
 scheduling load proves its own completeness — it counts `queued_input_origin`
 against `turn_lifecycle` and fails on mismatch — rather than trusting whichever
@@ -305,6 +305,13 @@ the active lifecycle terminalizes `reconciliation_required` with an
 equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
+
+The parallel tool path resolves `awaiting_tool_recovery` without changing its
+terminal ambiguous tool attempt. Its equal-content terminal frontier,
+`terminal_tool_attempt_id`, typed reconciliation outbox record, original ended
+turn attempt, and applied interrupt commit atomically. Scheduling reconstruction
+reloads the producing tool round and exact ambiguous attempt before admitting
+that terminal state; a tool ambiguity never occupies the model-call reference.
 
 ## Corruption taxonomy
 
@@ -380,7 +387,8 @@ protocol scope). Implemented storage:
   `turn_reconciliation_required_outbox_event` — with a deferred trigger
   requiring exactly one typed record per header. The header and typed record
   tables are append-only (`reject_immutable_record_change`), and every outbox
-  table rejects `TRUNCATE`.
+  table rejects `TRUNCATE`. A reconciliation record names exactly one ambiguous
+  model call or tool attempt.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -403,10 +411,11 @@ Model-call state transitions append `model_call_transition`, completion closure
 appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
-`turn_reconciliation_required`. A guarded transition that changes zero rows
-appends zero events. Why: writing the event in the committing transaction makes
-the dual-write failure (state without event, or event without state)
-unrepresentable.
+`turn_reconciliation_required`; an interrupt against a parked ambiguous tool
+attempt appends the same event kind with that exact tool-attempt reference. A
+guarded transition that changes zero rows appends zero events. Why: writing the
+event in the committing transaction makes the dual-write failure (state without
+event, or event without state) unrepresentable.
 
 ## Open edges
 
