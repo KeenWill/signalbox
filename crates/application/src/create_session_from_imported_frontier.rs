@@ -527,32 +527,47 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_reserved_command_rejected(
+        identity: DurableCommandId,
+        selected: ImportedTranscriptFrontier,
+        expected: InvalidDurableCommandId,
+    ) {
+        assert_eq!(
+            CreateSessionFromImportedFrontierRequest::try_new(
+                identity,
+                selected,
+                ImportedSessionRelationship::Fork,
+                defaults(20),
+            ),
+            Err(expected)
+        );
+    }
+
+    #[track_caller]
+    fn assert_uuid_v7(candidate: Uuid) {
+        assert_eq!(candidate.get_variant(), Variant::RFC4122);
+        assert_eq!(candidate.get_version(), Some(Version::SortRand));
+        assert!(!candidate.is_nil());
+        assert!(!candidate.is_max());
+    }
+
     /// S28 / INV-001 / INV-012: reserved identities fail before construction
     /// or any application effect.
     #[test]
     fn s28_inv001_inv012_request_rejects_reserved_command_identifiers() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
-        for (identity, expected) in [
-            (
-                DurableCommandId::from_uuid(Uuid::nil()),
-                InvalidDurableCommandId::Nil,
-            ),
-            (
-                DurableCommandId::from_uuid(Uuid::max()),
-                InvalidDurableCommandId::Max,
-            ),
-        ] {
-            assert_eq!(
-                CreateSessionFromImportedFrontierRequest::try_new(
-                    identity,
-                    selected,
-                    ImportedSessionRelationship::Fork,
-                    defaults(20),
-                ),
-                Err(expected)
-            );
-        }
+        assert_reserved_command_rejected(
+            DurableCommandId::from_uuid(Uuid::nil()),
+            selected,
+            InvalidDurableCommandId::Nil,
+        );
+        assert_reserved_command_rejected(
+            DurableCommandId::from_uuid(Uuid::max()),
+            selected,
+            InvalidDurableCommandId::Max,
+        );
 
         let service = CreateSessionFromImportedFrontierService::new(
             FakeIds::expecting_no_calls(),
@@ -600,19 +615,12 @@ mod tests {
         assert_ne!(first_session, second_session);
         assert_ne!(first_entry, second_entry);
         assert_ne!(first_frontier, second_frontier);
-        for candidate in [
-            first_session.into_uuid(),
-            first_entry.into_uuid(),
-            first_frontier.into_uuid(),
-            second_session.into_uuid(),
-            second_entry.into_uuid(),
-            second_frontier.into_uuid(),
-        ] {
-            assert_eq!(candidate.get_variant(), Variant::RFC4122);
-            assert_eq!(candidate.get_version(), Some(Version::SortRand));
-            assert!(!candidate.is_nil());
-            assert!(!candidate.is_max());
-        }
+        assert_uuid_v7(first_session.into_uuid());
+        assert_uuid_v7(first_entry.into_uuid());
+        assert_uuid_v7(first_frontier.into_uuid());
+        assert_uuid_v7(second_session.into_uuid());
+        assert_uuid_v7(second_entry.into_uuid());
+        assert_uuid_v7(second_frontier.into_uuid());
     }
 
     /// S28 / INV-038 / INV-039: one invocation passes fixed candidates once
@@ -716,29 +724,33 @@ mod tests {
     fn s28_inv039_missing_target_passes_through_without_semantic_generation() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
-        let expected = [
+        let missing_conversation =
             CreateSessionFromImportedFrontierOutcome::ImportedConversationNotFound {
                 conversation: selected.conversation(),
-            },
-            CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound {
-                frontier: selected,
-            },
-        ];
+            };
+        let missing_frontier = CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound {
+            frontier: selected,
+        };
         let mut service = CreateSessionFromImportedFrontierService::new(
             FakeIds::new(
                 [session_id(30), session_id(31)],
                 [],
                 [context_frontier_id(40), context_frontier_id(41)],
             ),
-            FakeTransaction::returning(expected.into_iter().map(FakeResponse::Return)),
+            FakeTransaction::returning([
+                FakeResponse::Return(missing_conversation),
+                FakeResponse::Return(missing_frontier),
+            ]),
         );
 
-        for outcome in expected {
-            assert_eq!(
-                run_ready(service.execute(request(command_id(1), selected))),
-                Ok(outcome)
-            );
-        }
+        assert_eq!(
+            run_ready(service.execute(request(command_id(1), selected))),
+            Ok(missing_conversation)
+        );
+        assert_eq!(
+            run_ready(service.execute(request(command_id(2), selected))),
+            Ok(missing_frontier)
+        );
         let (ids, transaction) = service.into_parts();
         assert_eq!(ids.session_calls, 2);
         assert_eq!(ids.frontier_calls, 2);
