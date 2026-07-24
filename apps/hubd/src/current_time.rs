@@ -266,6 +266,11 @@ fn current_time_evidence(
         }
     };
     let zoned = timestamp.to_zoned(resolved.time_zone);
+    if !(0..=9999).contains(&zoned.year()) {
+        return Ok(ToolExecutorEvidence::KnownFailed {
+            detail: Some(clock_out_of_range_detail.clone()),
+        });
+    }
     if zoned.offset().seconds() % 60 != 0 {
         return Ok(ToolExecutorEvidence::KnownFailed {
             detail: Some(offset_not_rfc3339_detail.clone()),
@@ -393,6 +398,27 @@ mod tests {
             ToolExecutorEvidence::CompletedText(String::from(
                 r#"{"datetime":"1970-01-01T00:00:00+00:00","timezone":"UTC"}"#
             ))
+        );
+    }
+
+    /// S15: negative civil years cannot enter the RFC 3339 success shape.
+    #[test]
+    fn s15_current_time_rejects_negative_rfc3339_year() {
+        let before_year_zero =
+            SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(62_198_841_600);
+        let evidence = current_time_evidence(
+            before_year_zero,
+            &arguments(r#"{"timezone":"UTC"}"#),
+            &clock_failure_detail(),
+            &offset_failure_detail(),
+        )
+        .expect("a representable negative year returns typed evidence");
+
+        assert_eq!(
+            evidence,
+            ToolExecutorEvidence::KnownFailed {
+                detail: Some(clock_failure_detail()),
+            }
         );
     }
 
