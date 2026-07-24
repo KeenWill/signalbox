@@ -423,17 +423,18 @@ cursor only after consumer acceptance. Consumer retry or exit before the commit
 request leaves the prefix unchanged for redelivery. A lost commit response is
 resolved by the next locked cursor read: a committed advance proceeds, while a
 rolled-back advance redelivers. The injected rolled-back-commit PostgreSQL test
-enforces ordered at-least-once behavior. Before offering a record, the
-dispatcher proves that its header does not exceed the allocator cursor and that
-an activation agrees with the durable turn's active current attempt or retained
-terminal attempt; a terminal model-call transition agrees with the authoritative
-call's exact terminal disposition; and failed, completed, refused, cancelled,
-and reconciliation-required records agree with the durable turn, terminal
-frontier, semantic marker where present, and terminal model call where present.
-Historical Prepared and InFlight transition records remain dispatchable after
-their call advances. Exhausted delivery still validates the allocator singleton
-and cursor. Hub task ownership, polling, fan-out, and client observation
-semantics are owned by [process-protocol](process-protocol.md).
+enforces ordered at-least-once behavior. Before offering a record or reporting
+idle, the dispatcher proves that no header exceeds the allocator cursor. An
+activation must agree with the durable turn's active current attempt or retained
+terminal attempt; a model-call transition must be reachable from the
+authoritative monotonic call state, with an exact disposition match at terminal;
+and failed, completed, refused, cancelled, and reconciliation-required records
+must agree with the durable turn, terminal frontier, semantic marker where
+present, and terminal model call where present. Historical Prepared and InFlight
+transition records remain dispatchable after their call advances. Exhausted
+delivery still validates the allocator singleton and cursor. Hub task ownership,
+polling, fan-out, and client observation semantics are owned by
+[process-protocol](process-protocol.md).
 
 ## Open edges
 
