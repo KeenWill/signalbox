@@ -3,7 +3,9 @@
 //! This crate coordinates domain decisions and external effects while
 //! depending inward on `signalbox-domain`.
 
+mod conversation_import;
 mod create_session;
+mod create_session_from_imported_frontier;
 mod load_session;
 mod model_execution;
 mod operator_failure;
@@ -15,10 +17,21 @@ mod submit_input;
 mod tool_dispatch_gate;
 mod tool_loop_ports;
 
+pub use conversation_import::{
+    ImportConversationError, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationConverter, ImportedConversationIdGenerator, ImportedConversationStore,
+    ImportedConversationStoreOutcome, UuidV7ImportedConversationIdGenerator,
+};
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     CreateSessionTransaction, InvalidDurableCommandId, SessionIdGenerator,
     UuidV7SessionIdGenerator,
+};
+pub use create_session_from_imported_frontier::{
+    CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    CreateSessionFromImportedFrontierTransaction,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator,
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{

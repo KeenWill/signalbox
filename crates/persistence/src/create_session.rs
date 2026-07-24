@@ -194,7 +194,10 @@ impl CreateSessionRepository {
                 transaction.rollback().await?;
                 return Ok(outcome);
             }
-            Some(CommandKind::ReplaceSessionDefaults) => {
+            Some(
+                CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -229,12 +232,12 @@ impl CreateSessionRepository {
                         ))?;
                     existing_outcome(&prepared, &recorded)
                 }
-                Some(CommandKind::ReplaceSessionDefaults) => {
-                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
-                }
-                Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
-                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
-                }
+                Some(
+                    CommandKind::CreateSessionFromImportedFrontier
+                    | CommandKind::ReplaceSessionDefaults
+                    | CommandKind::SubmitInput
+                    | CommandKind::DecideToolRequest,
+                ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
                         CreateSessionCorruption::Inconsistent("winner claim disappeared").into(),
@@ -269,12 +272,12 @@ impl CreateSessionRepository {
             Some(CommandKind::CreateSession) => {
                 load_from_connection(&mut connection, command_id).await
             }
-            Some(CommandKind::ReplaceSessionDefaults) => {
-                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
-            }
-            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
-                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
-            }
+            Some(
+                CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest,
+            ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 }
