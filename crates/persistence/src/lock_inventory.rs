@@ -49,3 +49,8 @@ pub(crate) const OUTBOX_DELIVERY: &str = "SELECT delivered_through
            FROM outbox_delivery_state
           WHERE singleton
           FOR UPDATE";
+
+pub(crate) const HUB_FENCE_GENERATION: &str = "SELECT generation
+           FROM hub_fence_state
+          WHERE singleton
+          FOR UPDATE";

@@ -12,6 +12,7 @@ mod conversation_import_codec;
 mod lock_inventory;
 
 pub mod create_session;
+pub mod hub_fence;
 pub mod mapping;
 pub mod model_execution;
 pub mod outbox;
