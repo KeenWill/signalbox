@@ -2121,6 +2121,18 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             if ambiguous.turn() == waiting.turn
                 && ambiguous.call().id() == waiting.call
     ));
+    let waiting_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(waiting.session)
+        .await?
+        .expect("the ambiguous call has a transcript projection");
+    assert_eq!(
+        waiting_snapshot.turns()[0].state(),
+        &ProcessTurnState::ActiveAwaitingModelCallRecovery {
+            ended_attempt: waiting.attempt,
+            recovery_call: waiting.call,
+        }
+    );
+    assert_eq!(waiting_snapshot.entries().len(), 1);
     let submit_repository = SubmitInputRepository::new(pool.clone());
     let waiting_steering_command = input_with_delivery(
         waiting_seed + 0x100,
@@ -3061,11 +3073,32 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
-/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-036: the scripted
+#[track_caller]
+fn assert_projected_steering_entry(
+    entry: &ProcessTranscriptEntry,
+    expected_input: AcceptedInputId,
+    expected_turn: TurnId,
+    expected_content: &str,
+) {
+    assert!(matches!(
+        entry,
+        ProcessTranscriptEntry::User {
+            accepted_input,
+            turn,
+            content,
+            ..
+        } if *accepted_input == expected_input
+            && *turn == expected_turn
+            && content == expected_content
+    ));
+}
+
+/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-032 / INV-036: the scripted
 /// application path consumes multiple steering inputs at preparation, renders
-/// them to the provider in acceptance order, rejects noncontiguous stored
-/// snapshot ordinals before resume, preserves the staged terminal commits, and
-/// replays each immutable pending-steering receipt after consumption.
+/// them immediately in the process projection and to the provider in acceptance
+/// order, rejects noncontiguous stored snapshot ordinals before resume,
+/// preserves the staged terminal commits, and replays each immutable
+/// pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_inv014_inv015_application_service_completes_scripted_reply()
@@ -3302,6 +3335,23 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         service.execute(session).await?,
         ModelCallExecutionOutcome::Checkpointed(call)
     );
+    let prepared_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the prepared call has a transcript projection");
+    assert_eq!(prepared_snapshot.entries().len(), 3);
+    assert_projected_steering_entry(
+        &prepared_snapshot.entries()[1],
+        steering_inputs[0],
+        turn,
+        "first steering",
+    );
+    assert_projected_steering_entry(
+        &prepared_snapshot.entries()[2],
+        steering_inputs[1],
+        turn,
+        "second steering",
+    );
     sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -3439,16 +3489,18 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         .read_transcript(session)
         .await?
         .expect("the completed session has a transcript projection");
-    for (entry, expected_input) in transcript.entries()[1..=2].iter().zip(steering_inputs) {
-        assert!(matches!(
-            entry,
-            ProcessTranscriptEntry::User {
-                accepted_input,
-                turn: source_turn,
-                ..
-            } if *accepted_input == expected_input && *source_turn == turn
-        ));
-    }
+    assert_projected_steering_entry(
+        &transcript.entries()[1],
+        steering_inputs[0],
+        turn,
+        "first steering",
+    );
+    assert_projected_steering_entry(
+        &transcript.entries()[2],
+        steering_inputs[1],
+        turn,
+        "second steering",
+    );
     let successor_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e4));
     let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x1ae4));
     let successor = submit_repository

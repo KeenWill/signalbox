@@ -485,7 +485,9 @@ impl ProcessReadRepository {
                 accepted.origin_turn_id,
                 accepted.content_text AS accepted_content,
                 current_call.model_call_id AS current_model_call_id,
-                current_call.state_kind AS current_model_call_state_kind
+                current_call.state_kind AS current_model_call_state_kind,
+                current_call.context_frontier_id AS current_model_call_frontier_id,
+                recovery_call.context_frontier_id AS recovery_model_call_frontier_id
                FROM turn_lifecycle AS turn
                LEFT JOIN accepted_input AS accepted
                  ON accepted.accepted_input_id = turn.origin_accepted_input_id
@@ -495,6 +497,12 @@ impl ProcessReadRepository {
                 AND current_call.turn_id = turn.turn_id
                 AND current_call.session_id = turn.session_id
                 AND current_call.state_kind <> 'terminal'
+               LEFT JOIN model_call AS recovery_call
+                 ON recovery_call.model_call_id = turn.recovery_model_call_id
+                AND recovery_call.turn_attempt_id = turn.current_attempt_id
+                AND recovery_call.turn_id = turn.turn_id
+                AND recovery_call.session_id = turn.session_id
+                AND recovery_call.state_kind = 'terminal'
                LEFT JOIN model_call AS terminal_call
                  ON terminal_call.model_call_id = turn.terminal_model_call_id
                 AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
@@ -722,6 +730,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("terminal_model_call_disposition_kind")?;
     let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
     let current_model_call_state: Option<String> = row.try_get("current_model_call_state_kind")?;
+    let current_model_call_frontier: Option<Uuid> =
+        row.try_get("current_model_call_frontier_id")?;
+    let recovery_model_call_frontier: Option<Uuid> =
+        row.try_get("recovery_model_call_frontier_id")?;
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
         return Err(ProcessReadCorruption::Unsupported {
@@ -751,21 +763,36 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         }
         .into());
     }
-    let current_model_call = match (current_model_call, current_model_call_state.as_deref()) {
-        (None, None) => None,
-        (Some(call), Some("prepared")) => Some(ProcessCurrentModelCall {
-            call: ModelCallId::from_uuid(call),
-            state: ProcessCurrentModelCallState::Prepared,
-        }),
-        (Some(call), Some("in_flight")) => Some(ProcessCurrentModelCall {
-            call: ModelCallId::from_uuid(call),
-            state: ProcessCurrentModelCallState::InFlight,
-        }),
-        (Some(call), Some("cancellation_requested")) => Some(ProcessCurrentModelCall {
-            call: ModelCallId::from_uuid(call),
-            state: ProcessCurrentModelCallState::CancellationRequested,
-        }),
-        (Some(_), Some(value)) => {
+    let (current_model_call, current_model_call_frontier) = match (
+        current_model_call,
+        current_model_call_state.as_deref(),
+        current_model_call_frontier,
+    ) {
+        (None, None, None) => (None, None),
+        (Some(call), Some("prepared"), Some(frontier)) => (
+            Some(ProcessCurrentModelCall {
+                call: ModelCallId::from_uuid(call),
+                state: ProcessCurrentModelCallState::Prepared,
+            }),
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (Some(call), Some("in_flight"), Some(frontier)) => (
+            Some(ProcessCurrentModelCall {
+                call: ModelCallId::from_uuid(call),
+                state: ProcessCurrentModelCallState::InFlight,
+            }),
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (Some(call), Some("cancellation_requested"), Some(frontier)) => (
+            Some(ProcessCurrentModelCall {
+                call: ModelCallId::from_uuid(call),
+                state: ProcessCurrentModelCallState::CancellationRequested,
+            }),
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (Some(_), Some(value), _)
+            if !matches!(value, "prepared" | "in_flight" | "cancellation_requested") =>
+        {
             return Err(ProcessReadCorruption::Unsupported {
                 field: "current model call state",
                 value: value.to_owned(),
@@ -776,6 +803,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             return Err(ProcessReadCorruption::Inconsistent("current model call shape").into());
         }
     };
+    let recovery_model_call_frontier =
+        recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
 
     let (state, latest_frontier) = match (
         state_kind.as_str(),
@@ -814,11 +843,14 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                 current_attempt: TurnAttemptId::from_uuid(attempt),
                 current_model_call,
             },
-            Some(ContextFrontierId::from_uuid(frontier)),
+            Some(
+                current_model_call_frontier
+                    .unwrap_or_else(|| ContextFrontierId::from_uuid(frontier)),
+            ),
         ),
         (
             "active",
-            Some(frontier),
+            Some(_),
             None,
             Some("awaiting_model_call_recovery"),
             Some(attempt),
@@ -828,13 +860,18 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
             None,
-        ) => (
-            ProcessTurnState::ActiveAwaitingModelCallRecovery {
-                ended_attempt: TurnAttemptId::from_uuid(attempt),
-                recovery_call: ModelCallId::from_uuid(call),
-            },
-            Some(ContextFrontierId::from_uuid(frontier)),
-        ),
+        ) => {
+            let call_frontier = recovery_model_call_frontier.ok_or(
+                ProcessReadCorruption::Inconsistent("recovery model call frontier"),
+            )?;
+            (
+                ProcessTurnState::ActiveAwaitingModelCallRecovery {
+                    ended_attempt: TurnAttemptId::from_uuid(attempt),
+                    recovery_call: ModelCallId::from_uuid(call),
+                },
+                Some(call_frontier),
+            )
+        }
         (
             "terminal",
             Some(_),
