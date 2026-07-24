@@ -399,10 +399,9 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    ([model-call-execution](spec/model-call-execution.md)).
 4. **A smoke against a real provider** — landed for the owner-run smoke
    ([model-call-execution](spec/model-call-execution.md),
-   [runtime-substrate](spec/runtime-substrate.md)); the production security
-   posture for outbound provider calls remains open per
-   [provider-call-security](open-questions.md#provider-call-security). This was
-   the gate before destination-feature milestones.
+   [runtime-substrate](spec/runtime-substrate.md)), including the production
+   security posture for outbound provider calls. This was the gate before
+   destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
    tool. Blocked on the tool-policy and approval decisions, which do not yet
