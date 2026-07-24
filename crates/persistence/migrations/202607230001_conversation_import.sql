@@ -275,19 +275,27 @@ BEGIN
        OR EXISTS (
            SELECT 1
              FROM imported_transcript_entry AS entry
+             JOIN (
+                 SELECT raw_record_position,
+                        COALESCE(
+                            sum(declared_entry_count) OVER (
+                                ORDER BY raw_record_position
+                                ROWS BETWEEN UNBOUNDED PRECEDING
+                                    AND 1 PRECEDING
+                            ),
+                            0
+                        ) AS earlier_entry_count
+                   FROM imported_conversation_raw_record
+                  WHERE imported_conversation_id =
+                            checked_imported_conversation_id
+             ) AS raw_record_prefix
+               ON raw_record_prefix.raw_record_position =
+                      entry.raw_record_position
             WHERE entry.imported_conversation_id =
                       checked_imported_conversation_id
-              AND entry.imported_entry_position <> (
-                  SELECT COALESCE(
-                      sum(earlier.declared_entry_count),
-                      0
-                  ) + entry.record_entry_position
-                    FROM imported_conversation_raw_record AS earlier
-                   WHERE earlier.imported_conversation_id =
-                             entry.imported_conversation_id
-                     AND earlier.raw_record_position <
-                             entry.raw_record_position
-              )
+              AND entry.imported_entry_position <>
+                      raw_record_prefix.earlier_entry_count
+                      + entry.record_entry_position
        )
     THEN
         RAISE EXCEPTION

@@ -688,6 +688,14 @@ mod tests {
         assert_eq!(store.observed.len(), 1);
     }
 
+    #[track_caller]
+    fn assert_uuid_v7_candidate(value: Uuid) {
+        assert_eq!(value.get_variant(), Variant::RFC4122);
+        assert_eq!(value.get_version(), Some(Version::SortRand));
+        assert!(!value.is_nil());
+        assert!(!value.is_max());
+    }
+
     /// INV-001: production generators supply fresh UUIDv7 values for both
     /// imported identity kinds.
     #[test]
@@ -698,17 +706,10 @@ mod tests {
         let first_entry = ids.next_entry_id().into_uuid();
         let second_entry = ids.next_entry_id().into_uuid();
 
-        for value in [
-            first_conversation,
-            second_conversation,
-            first_entry,
-            second_entry,
-        ] {
-            assert_eq!(value.get_variant(), Variant::RFC4122);
-            assert_eq!(value.get_version(), Some(Version::SortRand));
-            assert!(!value.is_nil());
-            assert!(!value.is_max());
-        }
+        assert_uuid_v7_candidate(first_conversation);
+        assert_uuid_v7_candidate(second_conversation);
+        assert_uuid_v7_candidate(first_entry);
+        assert_uuid_v7_candidate(second_entry);
         assert_ne!(first_conversation, second_conversation);
         assert_ne!(first_conversation, first_entry);
         assert_ne!(first_conversation, second_entry);
