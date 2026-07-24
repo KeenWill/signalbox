@@ -364,12 +364,7 @@ header does not exist. Once a header exists, a hash mismatch, missing blob or
 member, gap, duplicate, unknown discriminator/version, contradictory variant
 columns, invalid source value, or domain correlation failure is typed
 corruption. Complete storage records pass through the domain-owned
-reconstitution seam; adapters never default or drop a malformed value. For
-Claude Code version 1, that seam independently re-derives every expected entry
-from each complete normalized record and requires exact agreement in entry
-count, order, content, speaker, and source metadata. It also reapplies the
-128-container bound to complete records and entry-carried structured values
-(INV-002).
+reconstitution seam; adapters never default or drop a malformed value (INV-002).
 
 ## Test data and local validation
 
