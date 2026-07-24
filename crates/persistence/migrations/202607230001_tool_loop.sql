@@ -1519,6 +1519,289 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION assert_model_call_steering_final_state(
+    checked_model_call_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_turn uuid;
+    predecessor_attempt uuid;
+    checked_frontier uuid;
+    starting_frontier uuid;
+    starting_count numeric(20, 0);
+    checked_count numeric(20, 0);
+    result_boundary uuid;
+    result_producing_call uuid;
+    result_boundary_count numeric(20, 0);
+    result_request_count bigint;
+    suffix_start_count numeric(20, 0);
+    suffix_count bigint;
+    consumed_count bigint;
+    malformed_result_count bigint;
+    malformed_count bigint;
+BEGIN
+    SELECT
+        call.session_id,
+        call.turn_id,
+        attempt.continued_from_attempt_id,
+        call.context_frontier_id,
+        lifecycle.starting_frontier_id
+      INTO
+        checked_session,
+        checked_turn,
+        predecessor_attempt,
+        checked_frontier,
+        starting_frontier
+      FROM model_call AS call
+      JOIN turn_attempt AS attempt
+        ON attempt.turn_attempt_id = call.turn_attempt_id
+       AND attempt.turn_id = call.turn_id
+       AND attempt.session_id = call.session_id
+      JOIN turn_lifecycle AS lifecycle
+        ON lifecycle.turn_id = call.turn_id
+       AND lifecycle.session_id = call.session_id
+     WHERE call.model_call_id = checked_model_call_id;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT member_count
+      INTO starting_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = starting_frontier;
+    SELECT member_count
+      INTO checked_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_frontier;
+
+    IF starting_count IS NULL
+       OR checked_count IS NULL
+       OR checked_count < starting_count
+       OR (
+            checked_frontier <> starting_frontier
+            AND checked_count = starting_count
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM context_frontier_member AS starting
+              LEFT JOIN context_frontier_member AS checked
+                ON checked.owning_session_id = starting.owning_session_id
+               AND checked.context_frontier_id = checked_frontier
+               AND checked.member_position = starting.member_position
+             WHERE starting.owning_session_id = checked_session
+               AND starting.context_frontier_id = starting_frontier
+               AND ROW(
+                    checked.source_session_id,
+                    checked.semantic_entry_id
+               ) IS DISTINCT FROM ROW(
+                    starting.source_session_id,
+                    starting.semantic_entry_id
+               )
+       )
+    THEN
+        RAISE EXCEPTION
+            'model call frontier does not preserve its turn-start prefix'
+            USING ERRCODE = '23514';
+    END IF;
+
+    suffix_start_count := starting_count;
+    IF predecessor_attempt IS NOT NULL THEN
+        SELECT
+            round.boundary_frontier_id,
+            producing_call.model_call_id,
+            boundary.member_count,
+            round.request_count
+          INTO
+            result_boundary,
+            result_producing_call,
+            result_boundary_count,
+            result_request_count
+          FROM model_call AS producing_call
+          JOIN tool_round AS round
+            ON round.producing_model_call_id = producing_call.model_call_id
+           AND round.turn_id = producing_call.turn_id
+           AND round.session_id = producing_call.session_id
+          JOIN context_frontier AS boundary
+            ON boundary.owning_session_id = round.session_id
+           AND boundary.context_frontier_id = round.boundary_frontier_id
+         WHERE producing_call.turn_attempt_id = predecessor_attempt
+           AND producing_call.turn_id = checked_turn
+           AND producing_call.session_id = checked_session
+           AND producing_call.state_kind = 'terminal'
+           AND producing_call.terminal_disposition_kind = 'completed'
+           AND round.boundary_kind = 'continuing';
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION
+                'continued model call lacks its predecessor tool round'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF checked_count < result_boundary_count + result_request_count
+           OR EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS boundary
+                  LEFT JOIN context_frontier_member AS checked
+                    ON checked.owning_session_id =
+                       boundary.owning_session_id
+                   AND checked.context_frontier_id = checked_frontier
+                   AND checked.member_position = boundary.member_position
+                 WHERE boundary.owning_session_id = checked_session
+                   AND boundary.context_frontier_id = result_boundary
+                   AND ROW(
+                        checked.source_session_id,
+                        checked.semantic_entry_id
+                   ) IS DISTINCT FROM ROW(
+                        boundary.source_session_id,
+                        boundary.semantic_entry_id
+                   )
+           )
+        THEN
+            RAISE EXCEPTION
+                'continued model call omits its tool-round boundary'
+                USING ERRCODE = '23514';
+        END IF;
+
+        SELECT count(*)
+          INTO malformed_result_count
+          FROM generate_series(
+                0,
+                result_request_count - 1
+          ) AS expected(request_ordinal)
+          JOIN tool_request AS request
+            ON request.producing_model_call_id = result_producing_call
+           AND request.request_ordinal = expected.request_ordinal
+          LEFT JOIN context_frontier_member AS member
+            ON member.owning_session_id = checked_session
+           AND member.context_frontier_id = checked_frontier
+           AND member.member_position =
+               result_boundary_count + expected.request_ordinal + 1
+          LEFT JOIN semantic_transcript_entry AS entry
+            ON entry.source_session_id = member.source_session_id
+           AND entry.semantic_entry_id = member.semantic_entry_id
+          LEFT JOIN tool_attempt AS attempt
+            ON attempt.attempt_id = entry.tool_result_attempt_id
+         WHERE member.source_session_id IS DISTINCT FROM checked_session
+            OR (
+                (
+                    entry.payload_kind = 'tool_execution_result'
+                    AND attempt.request_id = request.request_id
+                )
+                OR (
+                    entry.payload_kind = 'tool_denied'
+                    AND entry.tool_result_request_id = request.request_id
+                )
+            ) IS NOT TRUE;
+
+        IF malformed_result_count <> 0 THEN
+            RAISE EXCEPTION
+                'continued model call lacks proposal-ordered tool results'
+                USING ERRCODE = '23514';
+        END IF;
+        suffix_start_count :=
+            result_boundary_count + result_request_count;
+    END IF;
+
+    SELECT count(*)
+      INTO suffix_count
+      FROM context_frontier_member
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_frontier
+       AND member_position > suffix_start_count;
+
+    SELECT count(*)
+      INTO consumed_count
+      FROM accepted_input
+     WHERE session_id = checked_session
+       AND expected_active_turn_id = checked_turn
+       AND disposition_kind = 'consumed_as_steering'
+       AND consuming_model_call_id = checked_model_call_id;
+
+    SELECT count(*)
+      INTO malformed_count
+      FROM context_frontier_member AS member
+      LEFT JOIN semantic_transcript_entry AS entry
+        ON entry.source_session_id = member.source_session_id
+       AND entry.semantic_entry_id = member.semantic_entry_id
+      LEFT JOIN accepted_input AS accepted
+        ON accepted.accepted_input_id = entry.origin_accepted_input_id
+       AND accepted.session_id = entry.source_session_id
+     WHERE member.owning_session_id = checked_session
+       AND member.context_frontier_id = checked_frontier
+       AND member.member_position > suffix_start_count
+       AND (
+            entry.payload_kind IS DISTINCT FROM 'steering_accepted_input'
+            OR entry.source_session_id IS DISTINCT FROM checked_session
+            OR entry.steering_source_turn_id IS DISTINCT FROM checked_turn
+            OR accepted.disposition_kind IS DISTINCT FROM
+               'consumed_as_steering'
+            OR accepted.expected_active_turn_id IS DISTINCT FROM checked_turn
+            OR accepted.consuming_model_call_id IS DISTINCT FROM
+               checked_model_call_id
+       );
+
+    IF suffix_count IS DISTINCT FROM consumed_count
+       OR malformed_count <> 0
+       OR EXISTS (
+            SELECT 1
+              FROM accepted_input AS earlier
+              JOIN accepted_input AS consumed
+                ON consumed.session_id = earlier.session_id
+               AND consumed.expected_active_turn_id =
+                   earlier.expected_active_turn_id
+               AND consumed.disposition_kind = 'consumed_as_steering'
+               AND consumed.consuming_model_call_id =
+                   checked_model_call_id
+               AND consumed.acceptance_position >
+                   earlier.acceptance_position
+             WHERE earlier.session_id = checked_session
+               AND earlier.expected_active_turn_id = checked_turn
+               AND earlier.disposition_kind IN (
+                    'pending_steering',
+                    'reclassified_as_turn_origin'
+               )
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM (
+                    SELECT
+                        accepted.acceptance_position,
+                        row_number() OVER (
+                            ORDER BY accepted.acceptance_position
+                        ) AS acceptance_order,
+                        row_number() OVER (
+                            ORDER BY member.member_position
+                        ) AS member_order
+                      FROM context_frontier_member AS member
+                      JOIN semantic_transcript_entry AS entry
+                        ON entry.source_session_id =
+                           member.source_session_id
+                       AND entry.semantic_entry_id =
+                           member.semantic_entry_id
+                      JOIN accepted_input AS accepted
+                        ON accepted.accepted_input_id =
+                           entry.origin_accepted_input_id
+                       AND accepted.session_id = entry.source_session_id
+                     WHERE member.owning_session_id = checked_session
+                       AND member.context_frontier_id = checked_frontier
+                       AND member.member_position > suffix_start_count
+              ) AS ordered
+             WHERE ordered.acceptance_order <> ordered.member_order
+       )
+    THEN
+        RAISE EXCEPTION
+            'model call steering suffix is not the exact accepted order'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
 ALTER FUNCTION assert_model_call_final_state(uuid)
     RENAME TO assert_model_call_final_state_without_tool_round;
 
