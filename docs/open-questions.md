@@ -157,6 +157,11 @@ questions below remain open.
 - **Multiple runners in one turn.** Leaning: at most one selected runner
   initially, counting hub-local tools separately. Constrains version one.
   (S13–S16)
+- **Runner result protocol.** The exact runner wire envelope must bind each
+  result to its tool attempt and authorized dispatch generation or equivalent
+  fence. Duplicate/stale acknowledgements, compatibility, subscriber
+  observation, and retention of rejected evidence remain undecided. Blocks
+  runner result delivery. (S05, S06, S12–S16)
 
 ## Tool safety
 
@@ -228,8 +233,9 @@ questions below remain open.
   decisions for client identity, authentication, authorization, revocation, and
   credential delivery. (S01, S24)
 - **Browser transport.** Technology remains open and blocks the web client;
-  snapshot and transient-stream semantics are defined by
-  [process-protocol](spec/process-protocol.md). (S02, S24)
+  snapshot and durable-update semantics are defined by
+  [process-protocol](spec/process-protocol.md), while transient model-update
+  streaming remains open below. (S02, S24)
 - **Compatibility after exact process-protocol version one.** Version one has
   its owning [specification](spec/process-protocol.md). A future compatibility
   window, negotiation scheme, and generated-client policy remain undecided.

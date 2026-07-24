@@ -10,6 +10,45 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Expose ambiguous commits as a stable process error
+
+**Context.** A lost PostgreSQL commit response can leave `create_session` or
+`submit_input` durably applied even though the hub cannot observe the outcome.
+Mapping that state to the same `unavailable` code as a definitely uncommitted
+failure leaves only unstable human text to tell a client whether replay is
+required.
+
+**Decision.** Version one uses the distinct stable error code `commit_ambiguous`
+when a mutation may have committed. The client retries the exact durable command
+identity and payload to discover the recorded outcome; `unavailable` means no
+mutation may have committed.
+
+**Rejected alternatives.** A free-form message is not protocol state. An
+optional flag complicates every otherwise detail-free error and admits a missing
+value, while generating a new command identity defeats durable replay.
+
+**Affects.** Process error encoding, commit-failure classification, mutation
+serving, and terminal-client diagnostics.
+
+## 2026-07-23 — Require session-affine PostgreSQL for hub fencing
+
+**Context.** PostgreSQL session advisory locks belong to one server backend.
+Transaction- or statement-pooled proxies may execute successive operations from
+one logical client on different backends, invalidating both the dedicated
+single-hub guard and per-connection generation fence.
+
+**Decision.** `DATABASE_URL` must name a direct or otherwise session-affine
+PostgreSQL endpoint. Transaction- and statement-pooled proxy modes are
+unsupported while hub fencing uses session advisory locks.
+
+**Rejected alternatives.** Treating pooled proxies as supported silently weakens
+the singleton invariant. Replacing session locks with a proxy-safe fencing
+design is a materially different persistence protocol without an accepted
+implementation.
+
+**Affects.** Hub deployment requirements, database configuration, fencing
+documentation, and operator guidance.
+
 ## 2026-07-23 — Bind follow rereads to their terminal trigger
 
 **Context.** A transcript reread started by one terminal follow event can
@@ -251,6 +290,28 @@ terminal-client crates, hubd configuration/composition, outbox consumption,
 INV-032/INV-033 enforcement, S01/S02/S24, and
 [open questions](open-questions.md#protocols-and-persistence). Authenticated
 transports and remote clients remain explicitly open upgrade paths.
+
+## 2026-07-23 — Owner-curated work backlog under docs/agents
+
+**Context.** With the domain core landed, throughput is bounded by how many
+non-colliding work items can run concurrently across goal sessions. Ordering
+lived in the target model's priority order (coarse) and in owner sessions
+(unrecorded); collision analysis was redone by hand for every launch.
+
+**Decision.** `docs/agents/backlog.md` is the owner-curated granular expansion
+of the priority order: pullable entries carrying status, size, and
+`Owns`/`Collides-with` collision groups so concurrent launches are mechanical.
+It is an ordering and parallelism artifact, not a design document — designs
+remain specification diffs at pickup. Goal-mode selection consults it when a
+goal names no milestone. The owner reorders; agents never do.
+
+**Rejected alternatives.** An external task tracker: invisible to goal agents
+and review bots, and a dead end once the platform itself hosts orchestration.
+Design detail in backlog entries: recreates a living record corpus with
+consistency obligations.
+
+**Affects.** `docs/agents/backlog.md` (new), `docs/agents/goal-mode.md`
+(selection rule), launch workflow for concurrent goal sessions.
 
 ## 2026-07-23 — Bound and authenticate every provider exchange
 
