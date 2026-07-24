@@ -462,15 +462,16 @@ closed, the dispatcher stops starting transactions, and the scheduler stops
 admitting passes. Finite request handlers, the current dispatcher transaction,
 and in-flight scheduler passes share the bounded 30-second grace window to let
 authoritative transactions commit or abort. A clean exit closes the fenced pool,
-removes only this hub's revalidated socket, and releases the advisory locks by
-closing its dedicated guard connection. Window expiry abandons remaining tasks,
-warns, and skips the unbounded pool drain; process exit releases its sessions.
-Why signal-driven shutdown is polish, not correctness: abrupt exit at any point
-is safe because durable rows plus the next guarded startup scan recover work and
-the durable outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so
-the grace window buys only latency. Repositories and services are cheap
-per-invocation clones over the shared pool; no shared locked service instance
-exists.
+waits on the guard session's exclusive current-generation fence so even detached
+pool sessions have ended, removes only this hub's identity-pinned and
+revalidated socket, and releases the advisory locks by closing its dedicated
+guard connection. Window expiry abandons remaining tasks, warns, and skips the
+unbounded pool drain; process exit releases its sessions. Why signal-driven
+shutdown is polish, not correctness: abrupt exit at any point is safe because
+durable rows plus the next guarded startup scan recover work and the durable
+outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so the grace
+window buys only latency. Repositories and services are cheap per-invocation
+clones over the shared pool; no shared locked service instance exists.
 
 ## Open edges
 
