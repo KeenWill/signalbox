@@ -18,15 +18,12 @@ disjoint `Owns`/`Collides-with` groups may run concurrently. This is a
 parallelism-and-collision map, not a design document — designs happen as
 specification diffs when an item is picked up.
 
-Entry order here is curated through owner sessions and does not override the
-milestone priority; the owner revises it anytime. Milestone priority remains the
-target model's priority order plus explicit owner flags. The owner-flagged next
-major milestone comes first regardless of its position below: the tool-loop
-foundation today. Because it is blocked on an owner design pass, a
-milestone-less run proposes scheduling that design pass rather than selecting a
-lower `ready` item; only when nothing is owner-flagged does selection fall to
-the top `ready` non-colliding entry. The owner reorders, adds, and retires
-entries; agents never reorder.
+Entry order is curated through owner sessions and does not override milestone
+priority (the target model's priority order plus explicit owner flags — the
+owner-flagged next major milestone today is the tool-loop foundation). How a
+milestone-less run selects from this file is defined once, in
+[goal-mode.md](goal-mode.md); this file does not restate it. The owner reorders,
+adds, and retires entries; agents never reorder.
 
 Entry format: status is `ready`, `in-flight`, or `blocked-on: <what>`; size is
 S/M/L/XL. Standing engineering cautions for every entry: hold typed identities
