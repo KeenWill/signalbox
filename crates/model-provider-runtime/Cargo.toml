@@ -12,7 +12,7 @@ signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
 serde = "1.0.219"
-serde_json = { version = "1.0.140", features = ["unbounded_depth"] }
+serde_json = { version = "1.0.140", features = ["raw_value", "unbounded_depth"] }
 serde_stacker = "0.1.14"
 
 [dev-dependencies]

@@ -74,11 +74,13 @@ impl ToolDefinition {
         description: impl Into<String>,
         input_schema: serde_json::Value,
     ) -> Self {
-        Self::with_raw_schema(
-            name,
-            description,
-            to_raw_value(&input_schema).expect("serde_json::Value always serializes as JSON"),
-        )
+        #[expect(
+            clippy::expect_used,
+            reason = "serde_json::Value has no fallible serialization shape"
+        )]
+        let input_schema =
+            to_raw_value(&input_schema).expect("serde_json::Value always serializes as JSON");
+        Self::with_raw_schema(name, description, input_schema)
     }
 
     /// Declares a tool with an already validated, stack-safe raw schema.
