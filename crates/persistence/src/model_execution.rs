@@ -3592,7 +3592,9 @@ async fn persist_tool_round_authority(
         .execute(&mut *connection)
         .await?;
     }
-    for entry in assistant_entries {
+    for (response_part_ordinal, entry) in assistant_entries.iter().enumerate() {
+        let response_part_ordinal = u64::try_from(response_part_ordinal)
+            .map_err(|_| ModelCallCorruption::Inconsistent("tool response part ordinal"))?;
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantText {
                 producing_call,
@@ -3601,13 +3603,15 @@ async fn persist_tool_round_authority(
                 sqlx::query(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
-                         assistant_text_value, producing_model_call_id)
-                     VALUES ($1, $2, 'assistant_text', $3, $4)",
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'assistant_text', $3, $4, $5)",
                 )
                 .bind(session_id_to_uuid(entry.source_session()))
                 .bind(entry.identity().into_uuid())
                 .bind(value.as_str())
                 .bind(producing_call.into_uuid())
+                .bind(Decimal::from(response_part_ordinal))
                 .execute(&mut *connection)
                 .await?;
             }
@@ -3618,13 +3622,15 @@ async fn persist_tool_round_authority(
                 sqlx::query(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
-                         producing_model_call_id, assistant_tool_request_id)
-                     VALUES ($1, $2, 'assistant_tool_use', $3, $4)",
+                         producing_model_call_id, assistant_tool_request_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'assistant_tool_use', $3, $4, $5)",
                 )
                 .bind(session_id_to_uuid(entry.source_session()))
                 .bind(entry.identity().into_uuid())
                 .bind(producing_call.into_uuid())
                 .bind(tool_request_id_to_uuid(*request))
+                .bind(Decimal::from(response_part_ordinal))
                 .execute(&mut *connection)
                 .await?;
             }

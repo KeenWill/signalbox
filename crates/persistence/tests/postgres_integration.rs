@@ -1169,6 +1169,61 @@ async fn checkpoint_confirmed_tool_round(
     Ok((fixture, model_repository, observation, request))
 }
 
+/// S10 / INV-005: stored tool arguments use the same exact canonical JSON or
+/// undecodable representation admitted by the domain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7380;
+    let canonical = r#"{"exponent":1e+400,"wide":18446744073709551617}"#;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", canonical).await?;
+    let stored: (String, String) = sqlx::query_as(
+        "SELECT arguments_kind, arguments_text
+           FROM tool_request
+          WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, (String::from("json"), String::from(canonical)));
+
+    for (offset, kind, text) in [
+        (0_u128, "json", "{broken"),
+        (1, "json", r#"{"b":2,"a":1}"#),
+        (2, "undecodable", "{}"),
+    ] {
+        let error = sqlx::query(
+            "INSERT INTO tool_request
+                (request_id, session_id, turn_id, producing_model_call_id,
+                 request_ordinal, tool_name, arguments_kind, arguments_text)
+             VALUES ($1, $2, $3, $4, $5, 'invalid_fixture', $6, $7)",
+        )
+        .bind(Uuid::from_u128(seed + 100 + offset))
+        .bind(fixture.session.into_uuid())
+        .bind(fixture.turn.into_uuid())
+        .bind(fixture.call.into_uuid())
+        .bind(Decimal::from(1_u64 + u64::try_from(offset)?))
+        .bind(kind)
+        .bind(text)
+        .execute(&pool)
+        .await
+        .expect_err("kind and stored argument representation must agree");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("tool_request_arguments_representation")
+        );
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027 / INV-036: one confirmed
 /// proposal survives a repository restart, records a replay-safe owner
 /// decision, executes through an exact durable fence, and projects one
@@ -1385,6 +1440,58 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_shape, (1, 1, 1, 1, 1, 1, 1, 1));
+
+    let duplicate_result_error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id)
+         VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 90))
+    .bind(request.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("one request cannot have attempt- and request-referenced results");
+    assert_eq!(
+        duplicate_result_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23505".into())
+    );
+
+    let mut missing_current_result = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE context_frontier_member
+         DISABLE TRIGGER context_frontier_member_is_append_only",
+    )
+    .execute(&mut *missing_current_result)
+    .await?;
+    sqlx::query(
+        "DELETE FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND source_session_id = $1
+            AND semantic_entry_id = $3",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(continuation_frontier.into_uuid())
+    .bind(result_entry.into_uuid())
+    .execute(&mut *missing_current_result)
+    .await?;
+    let missing_result_error = sqlx::query("SELECT assert_model_call_final_state_without_stop($1)")
+        .bind(continuation_call.into_uuid())
+        .execute(&mut *missing_current_result)
+        .await
+        .expect_err("a continuation call requires every current-round result");
+    assert_eq!(
+        missing_result_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    missing_current_result.rollback().await?;
+
     assert!(
         restarted_repository
             .load_active_batch(fixture.session, fixture.turn)
@@ -2148,24 +2255,22 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
         ]
     );
 
-    let assistant_positions: Vec<(Uuid, Decimal)> = sqlx::query_as(
+    let response_positions: Vec<(Uuid, Decimal)> = sqlx::query_as(
         "SELECT entry.semantic_entry_id, member.member_position
-           FROM tool_request AS request
-           JOIN semantic_transcript_entry AS entry
-             ON entry.assistant_tool_request_id = request.request_id
-            AND entry.payload_kind = 'assistant_tool_use'
+           FROM semantic_transcript_entry AS entry
            JOIN context_frontier_member AS member
              ON member.owning_session_id = entry.source_session_id
             AND member.context_frontier_id = $1
             AND member.semantic_entry_id = entry.semantic_entry_id
-          WHERE request.producing_model_call_id = $2
-          ORDER BY request.request_ordinal",
+          WHERE entry.producing_model_call_id = $2
+            AND entry.payload_kind IN ('assistant_text', 'assistant_tool_use')
+          ORDER BY entry.assistant_response_part_ordinal",
     )
     .bind(Uuid::from_u128(seed + 30))
     .bind(fixture.call.into_uuid())
     .fetch_all(&pool)
     .await?;
-    assert_eq!(assistant_positions.len(), 2);
+    assert_eq!(response_positions.len(), 3);
     let mut swapped = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE context_frontier_member
@@ -2182,7 +2287,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     )
     .bind(fixture.session.into_uuid())
     .bind(Uuid::from_u128(seed + 30))
-    .bind(assistant_positions[0].0)
+    .bind(response_positions[0].0)
     .execute(&mut *swapped)
     .await?;
     sqlx::query(
@@ -2192,10 +2297,10 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
             AND context_frontier_id = $3
             AND semantic_entry_id = $4",
     )
-    .bind(assistant_positions[0].1)
+    .bind(response_positions[0].1)
     .bind(fixture.session.into_uuid())
     .bind(Uuid::from_u128(seed + 30))
-    .bind(assistant_positions[1].0)
+    .bind(response_positions[1].0)
     .execute(&mut *swapped)
     .await?;
     sqlx::query(
@@ -2205,17 +2310,17 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
             AND context_frontier_id = $3
             AND semantic_entry_id = $4",
     )
-    .bind(assistant_positions[1].1)
+    .bind(response_positions[1].1)
     .bind(fixture.session.into_uuid())
     .bind(Uuid::from_u128(seed + 30))
-    .bind(assistant_positions[0].0)
+    .bind(response_positions[0].0)
     .execute(&mut *swapped)
     .await?;
     let swapped_error = sqlx::query("SELECT assert_tool_round_final_state($1)")
         .bind(fixture.call.into_uuid())
         .execute(&mut *swapped)
         .await
-        .expect_err("swapped request entries must fail proposal-order validation");
+        .expect_err("swapped text/tool parts must fail complete response-order validation");
     assert_eq!(
         swapped_error
             .as_database_error()

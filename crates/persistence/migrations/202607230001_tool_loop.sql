@@ -370,6 +370,111 @@ CREATE TABLE tool_round (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+-- Mirror the domain's JSON normalization without converting numbers through
+-- jsonb: recursively sort object keys, compact structural whitespace, retain
+-- arbitrary-precision number lexemes, and normalize exponent spelling.
+CREATE FUNCTION canonical_tool_json_number(value_text text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    exponent_at integer;
+    exponent_text text;
+BEGIN
+    IF value_text = '-0' THEN
+        RETURN '0';
+    END IF;
+    exponent_at := strpos(lower(value_text), 'e');
+    IF exponent_at = 0 THEN
+        RETURN value_text;
+    END IF;
+    exponent_text := substr(value_text, exponent_at + 1);
+    IF left(exponent_text, 1) NOT IN ('+', '-') THEN
+        exponent_text := '+' || exponent_text;
+    END IF;
+    RETURN substr(value_text, 1, exponent_at - 1)
+        || 'e'
+        || exponent_text;
+END;
+$$;
+
+CREATE FUNCTION canonical_tool_json_value(checked_value json)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    value_kind text;
+    canonical text;
+BEGIN
+    value_kind := json_typeof(checked_value);
+    CASE value_kind
+        WHEN 'object' THEN
+            SELECT '{' || COALESCE(
+                string_agg(
+                    to_json(member_key)::text
+                        || ':'
+                        || canonical_tool_json_value(member_value),
+                    ','
+                    ORDER BY member_key COLLATE "C"
+                ),
+                ''
+            ) || '}'
+              INTO canonical
+              FROM (
+                    SELECT DISTINCT ON (member_key)
+                        member_key,
+                        member_value
+                      FROM json_each(checked_value) WITH ORDINALITY
+                           AS member(member_key, member_value, member_position)
+                     ORDER BY
+                        member_key COLLATE "C",
+                        member_position DESC
+              ) AS last_member;
+        WHEN 'array' THEN
+            SELECT '[' || COALESCE(
+                string_agg(
+                    canonical_tool_json_value(member_value),
+                    ','
+                    ORDER BY member_position
+                ),
+                ''
+            ) || ']'
+              INTO canonical
+              FROM json_array_elements(checked_value) WITH ORDINALITY
+                   AS member(member_value, member_position);
+        WHEN 'string' THEN
+            canonical := to_json(checked_value #>> '{}')::text;
+        WHEN 'number' THEN
+            canonical := canonical_tool_json_number(checked_value::text);
+        WHEN 'boolean' THEN
+            canonical := checked_value::text;
+        WHEN 'null' THEN
+            canonical := 'null';
+        ELSE
+            RETURN NULL;
+    END CASE;
+    RETURN canonical;
+END;
+$$;
+
+CREATE FUNCTION canonical_tool_json(value_text text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+BEGIN
+    RETURN canonical_tool_json_value(value_text::json);
+EXCEPTION
+    WHEN invalid_text_representation THEN
+        RETURN NULL;
+END;
+$$;
+
 CREATE TABLE tool_request (
     request_id uuid PRIMARY KEY,
     session_id uuid NOT NULL,
@@ -391,6 +496,18 @@ CREATE TABLE tool_request (
         CHECK (arguments_kind IN ('json', 'undecodable')),
     CONSTRAINT tool_request_arguments_bounded
         CHECK (octet_length(arguments_text) <= 1048576),
+    CONSTRAINT tool_request_arguments_representation
+        CHECK (
+            (
+                arguments_kind = 'json'
+                AND canonical_tool_json(arguments_text) IS NOT NULL
+                AND arguments_text = canonical_tool_json(arguments_text)
+            )
+            OR (
+                arguments_kind = 'undecodable'
+                AND canonical_tool_json(arguments_text) IS NULL
+            )
+        ),
     CONSTRAINT tool_request_call_ordinal_once
         UNIQUE (producing_model_call_id, request_ordinal),
     CONSTRAINT tool_request_correlation_key
@@ -695,6 +812,7 @@ EXECUTE FUNCTION reject_tool_attempt_invalid_change();
 ALTER TABLE semantic_transcript_entry
     ADD COLUMN tool_result_request_id uuid,
     ADD COLUMN tool_result_attempt_id uuid,
+    ADD COLUMN assistant_response_part_ordinal numeric(10, 0),
     DROP CONSTRAINT semantic_transcript_entry_payload_kind_closed,
     DROP CONSTRAINT semantic_transcript_entry_payload_shape,
     DROP CONSTRAINT semantic_transcript_entry_tool_use_unavailable;
@@ -861,10 +979,97 @@ ALTER TABLE semantic_transcript_entry
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT semantic_transcript_entry_response_part_ordinal_shape
+        CHECK (
+            assistant_response_part_ordinal IS NULL
+            OR (
+                payload_kind IN ('assistant_text', 'assistant_tool_use')
+                AND producing_model_call_id IS NOT NULL
+                AND assistant_response_part_ordinal BETWEEN 0 AND 4294967295
+            )
+        ),
+    ADD CONSTRAINT semantic_transcript_entry_response_part_ordinal_once
+        UNIQUE (
+            producing_model_call_id,
+            assistant_response_part_ordinal
+        ),
     ADD CONSTRAINT semantic_transcript_entry_tool_result_request_once
         UNIQUE (tool_result_request_id),
     ADD CONSTRAINT semantic_transcript_entry_tool_result_attempt_once
         UNIQUE (tool_result_attempt_id);
+
+CREATE FUNCTION assert_tool_request_single_result(checked_request_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    result_count bigint;
+BEGIN
+    IF checked_request_id IS NULL THEN
+        RETURN;
+    END IF;
+    SELECT count(*)
+      INTO result_count
+      FROM semantic_transcript_entry AS entry
+      LEFT JOIN tool_attempt AS attempt
+        ON attempt.attempt_id = entry.tool_result_attempt_id
+     WHERE entry.payload_kind IN (
+            'tool_execution_result',
+            'tool_denied',
+            'tool_closed_by_turn_end'
+       )
+       AND (
+            entry.tool_result_request_id = checked_request_id
+            OR attempt.request_id = checked_request_id
+       );
+    IF result_count > 1 THEN
+        RAISE EXCEPTION
+            'tool request % has more than one logical result',
+            checked_request_id
+            USING ERRCODE = '23505';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION require_single_tool_result()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    old_request_id uuid;
+    new_request_id uuid;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        old_request_id := OLD.tool_result_request_id;
+        IF old_request_id IS NULL AND OLD.tool_result_attempt_id IS NOT NULL THEN
+            SELECT request_id
+              INTO old_request_id
+              FROM tool_attempt
+             WHERE attempt_id = OLD.tool_result_attempt_id;
+        END IF;
+        PERFORM assert_tool_request_single_result(old_request_id);
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        new_request_id := NEW.tool_result_request_id;
+        IF new_request_id IS NULL AND NEW.tool_result_attempt_id IS NOT NULL THEN
+            SELECT request_id
+              INTO new_request_id
+              FROM tool_attempt
+             WHERE attempt_id = NEW.tool_result_attempt_id;
+        END IF;
+        IF new_request_id IS DISTINCT FROM old_request_id THEN
+            PERFORM assert_tool_request_single_result(new_request_id);
+        END IF;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER semantic_entry_one_logical_tool_result
+AFTER INSERT OR UPDATE OR DELETE ON semantic_transcript_entry
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_single_tool_result();
 
 -- A stored active phase names its exact tool batch and wait subject. Approval
 -- waits have no live turn attempt. Serialized execution has one; ambiguity
@@ -1512,22 +1717,29 @@ BEGIN
        OR boundary_count < source_count + round_record.response_part_count
        OR EXISTS (
             SELECT 1
-              FROM semantic_transcript_entry AS entry
-             WHERE entry.source_session_id = round_record.session_id
+              FROM generate_series(
+                    0,
+                    round_record.response_part_count::bigint - 1
+              ) AS expected(response_part_ordinal)
+              LEFT JOIN semantic_transcript_entry AS entry
+                ON entry.source_session_id = round_record.session_id
                AND entry.producing_model_call_id = checked_model_call_id
                AND entry.payload_kind IN (
                     'assistant_text',
                     'assistant_tool_use'
                )
-               AND NOT EXISTS (
-                    SELECT 1
-                      FROM context_frontier_member AS member
-                     WHERE member.owning_session_id = round_record.session_id
-                       AND member.context_frontier_id =
-                           round_record.boundary_frontier_id
-                       AND member.source_session_id = entry.source_session_id
-                       AND member.semantic_entry_id = entry.semantic_entry_id
-               )
+               AND entry.assistant_response_part_ordinal =
+                   expected.response_part_ordinal
+              LEFT JOIN context_frontier_member AS member
+                ON member.owning_session_id = round_record.session_id
+               AND member.context_frontier_id =
+                   round_record.boundary_frontier_id
+               AND member.member_position =
+                   source_count + expected.response_part_ordinal + 1
+               AND member.source_session_id = entry.source_session_id
+               AND member.semantic_entry_id = entry.semantic_entry_id
+             WHERE entry.semantic_entry_id IS NULL
+                OR member.member_position IS NULL
        )
        OR EXISTS (
             SELECT 1
@@ -2799,8 +3011,105 @@ $$;
 -- A continuation turn attempt has already entered `running` while dispatching
 -- its tool batch. Its next model call is still checkpointed as `prepared`.
 -- Retain the original guard for initial calls and admit the running form only
--- when the attempt is a continuation and the call frontier carries durable
--- tool-result evidence.
+-- when the call frontier prefix extends the immediately preceding tool round
+-- with every proposal-ordered result before any steering suffix.
+CREATE FUNCTION continuation_frontier_closes_predecessor_tool_round(
+    checked_attempt_id uuid,
+    checked_turn_id uuid,
+    checked_session_id uuid,
+    checked_frontier_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM turn_attempt AS continuation_attempt
+          JOIN model_call AS predecessor_call
+            ON predecessor_call.turn_attempt_id =
+               continuation_attempt.continued_from_attempt_id
+           AND predecessor_call.turn_id = continuation_attempt.turn_id
+           AND predecessor_call.session_id = continuation_attempt.session_id
+           AND predecessor_call.state_kind = 'terminal'
+           AND predecessor_call.terminal_disposition_kind = 'completed'
+          JOIN tool_round AS predecessor_round
+            ON predecessor_round.producing_model_call_id =
+               predecessor_call.model_call_id
+           AND predecessor_round.turn_id = predecessor_call.turn_id
+           AND predecessor_round.session_id = predecessor_call.session_id
+           AND predecessor_round.boundary_kind = 'continuing'
+          JOIN context_frontier AS boundary
+            ON boundary.owning_session_id = predecessor_round.session_id
+           AND boundary.context_frontier_id =
+               predecessor_round.boundary_frontier_id
+         WHERE continuation_attempt.turn_attempt_id = checked_attempt_id
+           AND continuation_attempt.turn_id = checked_turn_id
+           AND continuation_attempt.session_id = checked_session_id
+           AND continuation_attempt.continued_from_attempt_id IS NOT NULL
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS boundary_member
+                  LEFT JOIN context_frontier_member AS checked_member
+                    ON checked_member.owning_session_id =
+                       boundary_member.owning_session_id
+                   AND checked_member.context_frontier_id =
+                       checked_frontier_id
+                   AND checked_member.member_position =
+                       boundary_member.member_position
+                   AND checked_member.source_session_id =
+                       boundary_member.source_session_id
+                   AND checked_member.semantic_entry_id =
+                       boundary_member.semantic_entry_id
+                 WHERE boundary_member.owning_session_id =
+                       predecessor_round.session_id
+                   AND boundary_member.context_frontier_id =
+                       predecessor_round.boundary_frontier_id
+                   AND checked_member.member_position IS NULL
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM generate_series(
+                        0,
+                        predecessor_round.request_count::bigint - 1
+                  ) AS expected(request_ordinal)
+                  JOIN tool_request AS request
+                    ON request.producing_model_call_id =
+                       predecessor_round.producing_model_call_id
+                   AND request.request_ordinal =
+                       expected.request_ordinal
+                  LEFT JOIN context_frontier_member AS result_member
+                    ON result_member.owning_session_id =
+                       predecessor_round.session_id
+                   AND result_member.context_frontier_id =
+                       checked_frontier_id
+                   AND result_member.member_position =
+                       boundary.member_count + expected.request_ordinal + 1
+                  LEFT JOIN semantic_transcript_entry AS result_entry
+                    ON result_entry.source_session_id =
+                       result_member.source_session_id
+                   AND result_entry.semantic_entry_id =
+                       result_member.semantic_entry_id
+                   AND result_entry.payload_kind IN (
+                       'tool_execution_result',
+                       'tool_denied',
+                       'tool_closed_by_turn_end'
+                   )
+                  LEFT JOIN tool_attempt AS result_attempt
+                    ON result_attempt.attempt_id =
+                       result_entry.tool_result_attempt_id
+                 WHERE result_member.member_position IS NULL
+                    OR result_entry.semantic_entry_id IS NULL
+                    OR (
+                        result_entry.tool_result_request_id
+                            IS DISTINCT FROM request.request_id
+                        AND result_attempt.request_id
+                            IS DISTINCT FROM request.request_id
+                    )
+           )
+    );
+$$;
+
 DO $migration$
 DECLARE
     definition text;
@@ -2812,33 +3121,11 @@ OR (
                 attempt_state IS DISTINCT FROM 'prepared'
                 AND NOT (
                     attempt_state = 'running'
-                    AND EXISTS (
-                        SELECT 1
-                          FROM turn_attempt AS continuation_attempt
-                         WHERE continuation_attempt.turn_attempt_id =
-                                   checked_attempt_id
-                           AND continuation_attempt.turn_id = checked_turn_id
-                           AND continuation_attempt.session_id =
-                                   checked_session_id
-                           AND continuation_attempt.continued_from_attempt_id
-                                   IS NOT NULL
-                    )
-                    AND EXISTS (
-                        SELECT 1
-                          FROM context_frontier_member AS member
-                          JOIN semantic_transcript_entry AS entry
-                            ON entry.source_session_id =
-                                   member.source_session_id
-                           AND entry.semantic_entry_id =
-                                   member.semantic_entry_id
-                         WHERE member.owning_session_id = checked_session_id
-                           AND member.context_frontier_id =
-                                   checked_frontier_id
-                           AND entry.payload_kind IN (
-                               'tool_execution_result',
-                               'tool_denied',
-                               'tool_closed_by_turn_end'
-                           )
+                    AND continuation_frontier_closes_predecessor_tool_round(
+                        checked_attempt_id,
+                        checked_turn_id,
+                        checked_session_id,
+                        checked_frontier_id
                     )
                 )
             )
