@@ -401,86 +401,114 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION canonical_tool_json_value(checked_value json)
-RETURNS text
-LANGUAGE plpgsql
-IMMUTABLE
-STRICT
-AS $$
-DECLARE
-    value_kind text;
-    canonical text;
-BEGIN
-    value_kind := json_typeof(checked_value);
-    CASE value_kind
-        WHEN 'object' THEN
-            SELECT '{' || COALESCE(
-                string_agg(
-                    to_json(member_key)::text
-                        || ':'
-                        || canonical_tool_json_value(member_value),
-                    ','
-                    ORDER BY member_key COLLATE "C"
-                ),
-                ''
-            ) || '}'
-              INTO canonical
-              FROM (
-                    SELECT
-                        member_key,
-                        member_value
-                      FROM (
-                            SELECT
-                                member_key,
-                                member_value,
-                                row_number() OVER (
-                                    PARTITION BY member_key COLLATE "C"
-                                    ORDER BY member_position DESC
-                                ) AS duplicate_rank
-                              FROM json_each(checked_value) WITH ORDINALITY
-                                   AS member(
-                                       member_key,
-                                       member_value,
-                                       member_position
-                                   )
-                      ) AS ranked_member
-                     WHERE duplicate_rank = 1
-              ) AS last_member;
-        WHEN 'array' THEN
-            SELECT '[' || COALESCE(
-                string_agg(
-                    canonical_tool_json_value(member_value),
-                    ','
-                    ORDER BY member_position
-                ),
-                ''
-            ) || ']'
-              INTO canonical
-              FROM json_array_elements(checked_value) WITH ORDINALITY
-                   AS member(member_value, member_position);
-        WHEN 'string' THEN
-            canonical := to_json(checked_value #>> '{}')::text;
-        WHEN 'number' THEN
-            canonical := canonical_tool_json_number(checked_value::text);
-        WHEN 'boolean' THEN
-            canonical := checked_value::text;
-        WHEN 'null' THEN
-            canonical := 'null';
-        ELSE
-            RETURN NULL;
-    END CASE;
-    RETURN canonical;
-END;
-$$;
-
 CREATE FUNCTION canonical_tool_json(value_text text)
 RETURNS text
 LANGUAGE plpgsql
 IMMUTABLE
 STRICT
 AS $$
+DECLARE
+    checked_value json;
+    character_index integer := 1;
+    character_count integer := char_length(value_text);
+    current_character text;
+    string_start integer;
+    string_literal text;
+    string_escape boolean := false;
+    malformed_node boolean;
 BEGIN
-    RETURN canonical_tool_json_value(value_text::json);
+    checked_value := value_text::json;
+
+    -- Validate compact canonical string spelling iteratively. The JSON parser
+    -- establishes grammar; this scan rejects insignificant whitespace and
+    -- escape spellings that serde_json's serializer would rewrite.
+    WHILE character_index <= character_count LOOP
+        current_character := substr(value_text, character_index, 1);
+        IF string_start IS NULL THEN
+            IF current_character ~ '[[:space:]]' THEN
+                RETURN NULL;
+            ELSIF current_character = '"' THEN
+                string_start := character_index;
+                string_escape := false;
+            END IF;
+        ELSIF string_escape THEN
+            string_escape := false;
+        ELSIF current_character = chr(92) THEN
+            string_escape := true;
+        ELSIF current_character = '"' THEN
+            string_literal := substr(
+                value_text,
+                string_start,
+                character_index - string_start + 1
+            );
+            IF to_json(string_literal::json #>> '{}')::text
+               IS DISTINCT FROM string_literal
+            THEN
+                RETURN NULL;
+            END IF;
+            string_start := NULL;
+        END IF;
+        character_index := character_index + 1;
+    END LOOP;
+
+    -- Walk the parsed tree through PostgreSQL's iterative recursive-CTE
+    -- executor. Each object must already have distinct C-lexical keys, and
+    -- every number must have the same spelling as the domain canonicalizer.
+    WITH RECURSIVE json_node(node_value) AS (
+        SELECT checked_value
+        UNION ALL
+        SELECT child.node_value
+          FROM json_node AS parent
+          CROSS JOIN LATERAL (
+                SELECT element AS node_value
+                  FROM json_array_elements(
+                        CASE json_typeof(parent.node_value)
+                            WHEN 'array' THEN parent.node_value
+                            ELSE '[]'::json
+                        END
+                  ) AS array_member(element)
+                UNION ALL
+                SELECT member_value AS node_value
+                  FROM json_each(
+                        CASE json_typeof(parent.node_value)
+                            WHEN 'object' THEN parent.node_value
+                            ELSE '{}'::json
+                        END
+                  ) AS object_member(member_key, member_value)
+          ) AS child
+    )
+    SELECT EXISTS (
+        SELECT 1
+          FROM json_node
+         WHERE (
+                json_typeof(node_value) = 'number'
+                AND canonical_tool_json_number(node_value::text)
+                    IS DISTINCT FROM node_value::text
+           )
+            OR (
+                json_typeof(node_value) = 'object'
+                AND EXISTS (
+                    SELECT 1
+                      FROM json_each(node_value) WITH ORDINALITY
+                           AS member(
+                               member_key,
+                               member_value,
+                               member_position
+                           )
+                    HAVING count(*) <>
+                               count(DISTINCT member_key COLLATE "C")
+                        OR array_agg(member_key ORDER BY member_position)
+                           IS DISTINCT FROM
+                           array_agg(member_key ORDER BY member_key COLLATE "C")
+                )
+           )
+    )
+      INTO malformed_node;
+
+    IF malformed_node THEN
+        RETURN NULL;
+    END IF;
+    RETURN value_text;
 EXCEPTION
     WHEN invalid_text_representation THEN
         RETURN NULL;
@@ -1484,6 +1512,7 @@ AS $$
 DECLARE
     command_record decide_tool_request_command%ROWTYPE;
     approval_count bigint;
+    earliest_correlation_count bigint;
 BEGIN
     SELECT *
       INTO command_record
@@ -1502,6 +1531,28 @@ BEGIN
        AND approval.decision_kind = command_record.decision_kind
        AND approval.denial_reason
            IS NOT DISTINCT FROM command_record.denial_reason;
+
+    SELECT count(*)
+      INTO earliest_correlation_count
+      FROM tool_request AS requested
+      JOIN tool_request AS earliest
+        ON earliest.request_id =
+           command_record.result_earliest_undecided_request_id
+       AND earliest.producing_model_call_id =
+           requested.producing_model_call_id
+       AND earliest.request_ordinal < requested.request_ordinal
+     WHERE requested.request_id = command_record.request_id;
+
+    IF command_record.rejection_kind = 'not_earliest_undecided'
+       AND earliest_correlation_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'tool decision command names an uncorrelated earlier request'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'decide_tool_request_command_earliest_correlation';
+    END IF;
 
     IF (
         command_record.result_kind = 'applied'
@@ -2509,7 +2560,11 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    IF lifecycle.terminal_disposition_kind IN ('completed', 'cancelled') THEN
+    IF lifecycle.terminal_disposition_kind IN (
+        'completed',
+        'cancelled',
+        'reconciliation_required'
+    ) THEN
         SELECT count(*)
           INTO unresolved_result_count
           FROM tool_request AS request
@@ -2552,6 +2607,8 @@ DECLARE
     checked_tool_attempt uuid;
     checked_terminal_frontier uuid;
     source_frontier uuid;
+    source_tool_round uuid;
+    source_frontier_count bigint;
     member_mismatch_count bigint;
     contradictory_entry_count bigint;
     outbox_count bigint;
@@ -2662,8 +2719,12 @@ BEGIN
         END IF;
         PERFORM assert_model_call_final_state(checked_call);
     ELSE
-        SELECT round.boundary_frontier_id
-          INTO source_frontier
+        SELECT
+            round.boundary_frontier_id,
+            round.producing_model_call_id
+          INTO
+            source_frontier,
+            source_tool_round
           FROM tool_attempt AS attempt
           JOIN tool_request AS request
             ON request.request_id = attempt.request_id
@@ -2686,33 +2747,117 @@ BEGIN
         END IF;
     END IF;
 
-    SELECT count(*)
-      INTO member_mismatch_count
-      FROM (
-            (
-                SELECT member_position, source_session_id, semantic_entry_id
-                  FROM context_frontier_member
-                 WHERE owning_session_id = checked_session
-                   AND context_frontier_id = source_frontier
-                EXCEPT
-                SELECT member_position, source_session_id, semantic_entry_id
-                  FROM context_frontier_member
-                 WHERE owning_session_id = checked_session
-                   AND context_frontier_id = checked_terminal_frontier
-            )
+    IF checked_call IS NOT NULL THEN
+        SELECT count(*)
+          INTO member_mismatch_count
+          FROM (
+                (
+                    SELECT
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id
+                      FROM context_frontier_member
+                     WHERE owning_session_id = checked_session
+                       AND context_frontier_id = source_frontier
+                    EXCEPT
+                    SELECT
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id
+                      FROM context_frontier_member
+                     WHERE owning_session_id = checked_session
+                       AND context_frontier_id =
+                           checked_terminal_frontier
+                )
+                UNION ALL
+                (
+                    SELECT
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id
+                      FROM context_frontier_member
+                     WHERE owning_session_id = checked_session
+                       AND context_frontier_id =
+                           checked_terminal_frontier
+                    EXCEPT
+                    SELECT
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id
+                      FROM context_frontier_member
+                     WHERE owning_session_id = checked_session
+                       AND context_frontier_id = source_frontier
+                )
+          ) AS mismatch;
+    ELSE
+        SELECT count(*)
+          INTO source_frontier_count
+          FROM context_frontier_member
+         WHERE owning_session_id = checked_session
+           AND context_frontier_id = source_frontier;
+
+        WITH expected_member AS (
+            SELECT
+                member_position,
+                source_session_id,
+                semantic_entry_id
+              FROM context_frontier_member
+             WHERE owning_session_id = checked_session
+               AND context_frontier_id = source_frontier
             UNION ALL
-            (
-                SELECT member_position, source_session_id, semantic_entry_id
-                  FROM context_frontier_member
-                 WHERE owning_session_id = checked_session
-                   AND context_frontier_id = checked_terminal_frontier
-                EXCEPT
-                SELECT member_position, source_session_id, semantic_entry_id
-                  FROM context_frontier_member
-                 WHERE owning_session_id = checked_session
-                   AND context_frontier_id = source_frontier
-            )
-      ) AS mismatch;
+            SELECT
+                source_frontier_count + request.request_ordinal + 1,
+                result.source_session_id,
+                result.semantic_entry_id
+              FROM tool_request AS request
+              JOIN semantic_transcript_entry AS result
+                ON result.source_session_id = checked_session
+               AND result.payload_kind IN (
+                    'tool_execution_result',
+                    'tool_denied',
+                    'tool_closed_by_turn_end'
+               )
+              LEFT JOIN tool_attempt AS result_attempt
+                ON result_attempt.attempt_id =
+                   result.tool_result_attempt_id
+             WHERE request.producing_model_call_id = source_tool_round
+               AND (
+                    result.tool_result_request_id = request.request_id
+                    OR result_attempt.request_id = request.request_id
+               )
+        )
+        SELECT count(*)
+          INTO member_mismatch_count
+          FROM (
+                (
+                    SELECT *
+                      FROM expected_member
+                    EXCEPT
+                    SELECT
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id
+                      FROM context_frontier_member
+                     WHERE owning_session_id = checked_session
+                       AND context_frontier_id =
+                           checked_terminal_frontier
+                )
+                UNION ALL
+                (
+                    SELECT
+                        member_position,
+                        source_session_id,
+                        semantic_entry_id
+                      FROM context_frontier_member
+                     WHERE owning_session_id = checked_session
+                       AND context_frontier_id =
+                           checked_terminal_frontier
+                    EXCEPT
+                    SELECT *
+                      FROM expected_member
+                )
+          ) AS mismatch;
+    END IF;
 
     SELECT count(*)
       INTO contradictory_entry_count

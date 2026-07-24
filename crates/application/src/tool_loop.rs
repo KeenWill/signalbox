@@ -1016,22 +1016,6 @@ where
                 ),
             },
         };
-        if let Some(error) = preflight {
-            let ended = self
-                .transaction
-                .commit_preflight_error(
-                    prepared.session(),
-                    prepared.turn(),
-                    prepared.attempt(),
-                    error,
-                )
-                .await
-                .map_err(ToolExecutionServiceError::PreflightCommit)?;
-            return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
-                ended,
-            )));
-        }
-        let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let dispatch_permit = self.gate.acquire(prepared.turn()).await;
         let Some(revalidated_batch) = self
             .transaction
@@ -1054,6 +1038,22 @@ where
             return Err(ToolExecutionServiceError::CatalogDrift);
         }
         let prepared = revalidated.clone();
+        if let Some(error) = preflight {
+            let ended = self
+                .transaction
+                .commit_preflight_error(
+                    prepared.session(),
+                    prepared.turn(),
+                    prepared.attempt(),
+                    error,
+                )
+                .await
+                .map_err(ToolExecutionServiceError::PreflightCommit)?;
+            return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
+                ended,
+            )));
+        }
+        let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let authorized = match self
             .transaction
             .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
@@ -1118,6 +1118,7 @@ where
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
+        let effect_class = definition.effect_class();
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let evidence = self
@@ -1125,7 +1126,7 @@ where
             .execute(invocation)
             .await
             .map_err(ToolExecutionServiceError::Executor)?;
-        let observation = admit_executor_evidence(evidence);
+        let observation = admit_executor_evidence(evidence, effect_class);
         self.commit_executor_observation(observation, dispatch_permit)
             .await
     }
@@ -1216,6 +1217,7 @@ where
 
 fn admit_executor_evidence(
     evidence: CorrelatedToolExecutorEvidence,
+    effect_class: ToolEffectClass,
 ) -> CorrelatedToolAttemptObservation {
     let observation = match evidence.evidence {
         ToolExecutorEvidence::CompletedText(value) => match ToolResultText::try_new(value) {
@@ -1237,6 +1239,11 @@ fn admit_executor_evidence(
         ToolExecutorEvidence::KnownFailed { detail } => ToolAttemptObservation::KnownFailed {
             error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, detail),
         },
+        ToolExecutorEvidence::Ambiguous if effect_class == ToolEffectClass::EffectFree => {
+            ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+            }
+        }
         ToolExecutorEvidence::Ambiguous => ToolAttemptObservation::Ambiguous,
     };
     evidence.correlation.bind(observation)
@@ -1882,6 +1889,94 @@ mod tests {
         let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-037: pure preflight evidence shares the interrupt gate
+    /// and cannot commit against a checkpoint an interrupt already consumed.
+    #[tokio::test]
+    async fn inv011_inv037_preflight_revalidates_interrupt_consumed_attempt() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: true,
+            load_count: 0,
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            NoToolCatalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("consumed preflight checkpoint is cleanly absent"),
+            ToolExecutionServiceOutcome::NoWork
+        );
+        let (_, _, _, executor, _, _) = service.into_parts();
+        assert_eq!(executor.calls, 0);
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-024: an effect-free executor cannot strand an impossible ambiguity;
+    /// external-effect evidence retains its recovery-significant distinction.
+    #[test]
+    fn inv024_effect_class_admits_only_external_effect_ambiguity() {
+        for (effect_class, expected) in [
+            (
+                ToolEffectClass::EffectFree,
+                ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                },
+            ),
+            (
+                ToolEffectClass::ExternalEffect,
+                ToolAttemptObservation::Ambiguous,
+            ),
+        ] {
+            let (batch, _) = prepared_batch("{}", effect_class);
+            let current = match batch.attempt(batch.requests()[0].id()) {
+                Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => {
+                    current.clone()
+                }
+                _ => panic!("fixture has one prepared attempt"),
+            };
+            let authorized = current
+                .authorize()
+                .expect("prepared fixture authorizes exactly once");
+            let expected_correlation = authorized.correlation();
+            let invocation = ToolExecutionInvocation::try_new(
+                batch.requests()[0].clone(),
+                definition("known", ToolPermissionDefault::Auto, effect_class),
+                &authorized,
+            )
+            .expect("fixture invocation matches durable authority");
+            let observation = admit_executor_evidence(
+                invocation.bind(ToolExecutorEvidence::Ambiguous),
+                effect_class,
+            );
+
+            assert_eq!(observation.observation(), &expected);
+            assert_eq!(observation.correlation(), &expected_correlation);
+        }
     }
 
     /// INV-011 / INV-024: the definition selected by successful preflight is

@@ -2169,10 +2169,10 @@ pub(crate) fn attach_interrupt_reclassification_candidates(
 }
 
 pub(crate) fn attach_recovery_interrupt_reclassification_candidates(
-    identities: signalbox_domain::CancelledModelCallTurnIdentities,
+    identities: signalbox_domain::AmbiguousModelCallTurnIdentities,
     active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
-) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
+) -> Result<signalbox_domain::AmbiguousModelCallTurnIdentities, ModelCallRepositoryError> {
     Ok(identities.with_pending_steering_reclassifications(
         pending_reclassification_candidates_for_active(active_turn, next_turn)?,
     ))
@@ -3320,6 +3320,9 @@ pub(crate) async fn persist_tool_reconciliation_required(
     connection: &mut PgConnection,
     reconciliation: &ReconciliationRequiredToolTurn,
 ) -> Result<(), ModelCallRepositoryError> {
+    crate::tool_loop::persist_result_entry_slice(connection, reconciliation.tool_result_entries())
+        .await
+        .map_err(map_tool_evidence_error)?;
     insert_snapshot(connection, reconciliation.terminal_snapshot()).await?;
     persist_reclassified_pending_steering(
         connection,
