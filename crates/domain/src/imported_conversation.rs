@@ -444,6 +444,11 @@ pub enum ImportedTranscriptContent {
         /// Exact, explicit-null, or omitted top-level source type.
         source_type: ImportedSourceAttestation<ImportedText>,
     },
+    /// One source-defined block inside a user or assistant message.
+    SourceMessageBlock {
+        /// Exact source block type.
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
     /// Exact or absent decoded user or assistant text.
     Text(ImportedSourceAttestation<ImportedText>),
     /// One source tool call.
@@ -1769,23 +1774,41 @@ mod tests {
         ));
     }
 
+    #[track_caller]
+    fn assert_valid_json_number(value: &str) {
+        assert_eq!(
+            ImportedJsonNumber::try_new(String::from(value))
+                .expect("fixture is valid")
+                .as_str(),
+            value
+        );
+    }
+
+    #[track_caller]
+    fn assert_invalid_json_number_is_redacted(value: &str) {
+        let error =
+            ImportedJsonNumber::try_new(String::from(value)).expect_err("fixture is invalid");
+        assert_eq!(error.value(), value);
+        assert!(!format!("{error:?}").contains(value));
+    }
+
     #[test]
     fn imported_json_number_checks_complete_grammar_without_exposing_value_in_debug() {
-        for valid in ["0", "-0", "12", "-12.5", "1e9", "1E-9"] {
-            assert_eq!(
-                ImportedJsonNumber::try_new(String::from(valid))
-                    .expect("fixture is valid")
-                    .as_str(),
-                valid
-            );
-        }
-        for invalid in ["", "01", "-", ".1", "1.", "1e", "+1", "NaN"] {
-            let error =
-                ImportedJsonNumber::try_new(String::from(invalid)).expect_err("fixture is invalid");
-            assert_eq!(error.value(), invalid);
-            if !invalid.is_empty() {
-                assert!(!format!("{error:?}").contains(invalid));
-            }
-        }
+        assert_valid_json_number("0");
+        assert_valid_json_number("-0");
+        assert_valid_json_number("12");
+        assert_valid_json_number("-12.5");
+        assert_valid_json_number("1e9");
+        assert_valid_json_number("1E-9");
+
+        let empty = ImportedJsonNumber::try_new(String::new()).expect_err("fixture is invalid");
+        assert!(empty.value().is_empty());
+        assert_invalid_json_number_is_redacted("01");
+        assert_invalid_json_number_is_redacted("-");
+        assert_invalid_json_number_is_redacted(".1");
+        assert_invalid_json_number_is_redacted("1.");
+        assert_invalid_json_number_is_redacted("1e");
+        assert_invalid_json_number_is_redacted("+1");
+        assert_invalid_json_number_is_redacted("NaN");
     }
 }
