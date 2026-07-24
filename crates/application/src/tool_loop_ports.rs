@@ -224,7 +224,7 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> impl Future<Output = Result<signalbox_domain::CurrentToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<signalbox_domain::CurrentToolAttempt>, Self::Error>> + Send;
 
     /// Authorizes one exact Prepared attempt.
     fn authorize_attempt(

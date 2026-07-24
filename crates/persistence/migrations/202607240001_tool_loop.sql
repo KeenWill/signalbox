@@ -630,6 +630,67 @@ CREATE TABLE tool_approval_decision (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE FUNCTION require_session_blanket_approval_provenance()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_turn uuid;
+    checked_session uuid;
+    blanket_root_count bigint;
+BEGIN
+    IF NEW.decision_source <> 'session_blanket' THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT turn_id, session_id
+      INTO checked_turn, checked_session
+      FROM tool_request
+     WHERE request_id = NEW.request_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'session blanket approval lacks its tool request'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'tool_approval_session_blanket_requires_frozen_approve_all';
+    END IF;
+
+    WITH RECURSIVE configuration_origin AS (
+        SELECT stored.*
+          FROM queued_input_origin AS stored
+         WHERE stored.turn_id = checked_turn
+           AND stored.session_id = checked_session
+        UNION
+        SELECT source.*
+          FROM configuration_origin AS current
+          JOIN queued_input_origin AS source
+            ON source.turn_id = current.source_configuration_turn_id
+           AND source.session_id = current.session_id
+    )
+    SELECT count(*)
+      INTO blanket_root_count
+      FROM configuration_origin
+     WHERE source_configuration_turn_id IS NULL
+       AND dangerous_tool_auto_approval = 'approve_all';
+
+    IF blanket_root_count <> 1 THEN
+        RAISE EXCEPTION
+            'session blanket approval requires frozen approve-all authority'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'tool_approval_session_blanket_requires_frozen_approve_all';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER tool_approval_session_blanket_provenance
+AFTER INSERT OR UPDATE ON tool_approval_decision
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_session_blanket_approval_provenance();
+
 CREATE TABLE tool_attempt (
     attempt_id uuid PRIMARY KEY,
     request_id uuid NOT NULL UNIQUE,
@@ -2309,6 +2370,9 @@ DECLARE
     completion_count bigint;
     failure_count bigint;
     cancellation_count bigint;
+    terminal_member_count numeric(20, 0);
+    terminal_marker uuid;
+    matching_terminal_round_count bigint;
     round_id uuid;
 BEGIN
     SELECT *
@@ -2560,8 +2624,164 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF lifecycle.terminal_disposition_kind IN ('failed', 'cancelled') THEN
+        SELECT semantic_entry_id
+          INTO terminal_marker
+          FROM semantic_transcript_entry
+         WHERE source_session_id = lifecycle.session_id
+           AND (
+                (
+                    payload_kind = 'turn_failed'
+                    AND failed_turn_id = lifecycle.turn_id
+                )
+                OR (
+                    payload_kind = 'turn_cancelled'
+                    AND cancelled_turn_id = lifecycle.turn_id
+                )
+           );
+        SELECT member_count
+          INTO terminal_member_count
+          FROM context_frontier
+         WHERE owning_session_id = lifecycle.session_id
+           AND context_frontier_id = lifecycle.terminal_frontier_id;
+        IF NOT EXISTS (
+            SELECT 1
+              FROM context_frontier_member
+             WHERE owning_session_id = lifecycle.session_id
+               AND context_frontier_id = lifecycle.terminal_frontier_id
+               AND member_position = terminal_member_count
+               AND source_session_id = lifecycle.session_id
+               AND semantic_entry_id = terminal_marker
+        ) THEN
+            RAISE EXCEPTION
+                'failed or cancelled tool-loop terminal marker is not last'
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT = 'tool_loop_terminal_result_suffix_exact';
+        END IF;
+
+        IF EXISTS (
+            SELECT 1
+              FROM context_frontier_member AS member
+              JOIN semantic_transcript_entry AS entry
+                ON entry.source_session_id = member.source_session_id
+               AND entry.semantic_entry_id = member.semantic_entry_id
+              LEFT JOIN tool_attempt AS attempt
+                ON attempt.attempt_id = entry.tool_result_attempt_id
+              JOIN tool_request AS request
+                ON request.turn_id = lifecycle.turn_id
+               AND request.session_id = lifecycle.session_id
+               AND (
+                    request.request_id = entry.tool_result_request_id
+                    OR request.request_id = attempt.request_id
+               )
+             WHERE member.owning_session_id = lifecycle.session_id
+               AND member.context_frontier_id =
+                   lifecycle.terminal_frontier_id
+               AND entry.payload_kind IN (
+                    'tool_execution_result',
+                    'tool_denied',
+                    'tool_closed_by_turn_end'
+               )
+        ) THEN
+            SELECT count(*)
+              INTO matching_terminal_round_count
+              FROM tool_round AS round
+             WHERE round.turn_id = lifecycle.turn_id
+               AND round.session_id = lifecycle.session_id
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_request AS request
+                      LEFT JOIN semantic_transcript_entry AS result
+                        ON result.source_session_id = lifecycle.session_id
+                       AND result.payload_kind IN (
+                            'tool_execution_result',
+                            'tool_denied',
+                            'tool_closed_by_turn_end'
+                       )
+                       AND (
+                            result.tool_result_request_id =
+                                request.request_id
+                            OR EXISTS (
+                                SELECT 1
+                                  FROM tool_attempt AS result_attempt
+                                 WHERE result_attempt.attempt_id =
+                                       result.tool_result_attempt_id
+                                   AND result_attempt.request_id =
+                                       request.request_id
+                            )
+                       )
+                      LEFT JOIN context_frontier_member AS member
+                        ON member.owning_session_id =
+                           lifecycle.session_id
+                       AND member.context_frontier_id =
+                           lifecycle.terminal_frontier_id
+                       AND member.member_position = (
+                            terminal_member_count
+                            - round.request_count
+                            + request.request_ordinal
+                       )
+                       AND member.source_session_id =
+                           result.source_session_id
+                       AND member.semantic_entry_id =
+                           result.semantic_entry_id
+                     WHERE request.producing_model_call_id =
+                           round.producing_model_call_id
+                       AND member.semantic_entry_id IS NULL
+               )
+               AND (
+                    round.boundary_kind = 'closed_by_turn_end'
+                    OR (
+                        SELECT member_count
+                          FROM context_frontier
+                         WHERE owning_session_id = lifecycle.session_id
+                           AND context_frontier_id =
+                               round.boundary_frontier_id
+                    ) = terminal_member_count - round.request_count - 1
+               )
+               AND (
+                    round.boundary_kind = 'closed_by_turn_end'
+                    OR NOT EXISTS (
+                        (
+                            SELECT
+                                member_position,
+                                source_session_id,
+                                semantic_entry_id
+                              FROM context_frontier_member
+                             WHERE owning_session_id =
+                                   lifecycle.session_id
+                               AND context_frontier_id =
+                                   round.boundary_frontier_id
+                            EXCEPT
+                            SELECT
+                                member_position,
+                                source_session_id,
+                                semantic_entry_id
+                              FROM context_frontier_member
+                             WHERE owning_session_id =
+                                   lifecycle.session_id
+                               AND context_frontier_id =
+                                   lifecycle.terminal_frontier_id
+                               AND member_position <
+                                   terminal_member_count
+                                   - round.request_count
+                        )
+                    )
+               );
+            IF matching_terminal_round_count <> 1 THEN
+                RAISE EXCEPTION
+                    'failed or cancelled tool-loop turn lacks its exact terminal result suffix'
+                    USING
+                        ERRCODE = '23514',
+                        CONSTRAINT =
+                            'tool_loop_terminal_result_suffix_exact';
+            END IF;
+        END IF;
+    END IF;
+
     IF lifecycle.terminal_disposition_kind IN (
         'completed',
+        'failed',
         'cancelled',
         'reconciliation_required'
     ) THEN
@@ -3346,3 +3566,178 @@ AFTER INSERT OR UPDATE OR DELETE ON tool_attempt
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_tool_loop_final_state();
+
+ALTER TABLE outbox_event
+    DROP CONSTRAINT outbox_event_kind_closed;
+
+ALTER TABLE outbox_event
+    ADD CONSTRAINT outbox_event_kind_closed
+        CHECK (
+            event_kind IN (
+                'session_created',
+                'input_accepted',
+                'turn_activated',
+                'turn_failed',
+                'model_call_transition',
+                'tool_batch_transition',
+                'turn_completed',
+                'turn_refused',
+                'turn_cancelled',
+                'turn_reconciliation_required'
+            )
+        );
+
+CREATE TABLE tool_batch_transition_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL,
+    storage_version smallint NOT NULL,
+    session_id uuid NOT NULL,
+    turn_id uuid NOT NULL,
+    producing_model_call_id uuid NOT NULL,
+    transition_kind text NOT NULL,
+    frontier_id uuid,
+    tool_attempt_id uuid,
+
+    CONSTRAINT tool_batch_transition_outbox_kind_closed
+        CHECK (event_kind = 'tool_batch_transition'),
+    CONSTRAINT tool_batch_transition_outbox_version_supported
+        CHECK (storage_version = 1),
+    CONSTRAINT tool_batch_transition_outbox_state_closed
+        CHECK (
+            transition_kind IN (
+                'proposed',
+                'results_projected',
+                'recovery_required'
+            )
+        ),
+    CONSTRAINT tool_batch_transition_outbox_shape
+        CHECK (
+            (
+                transition_kind IN ('proposed', 'results_projected')
+                AND frontier_id IS NOT NULL
+                AND tool_attempt_id IS NULL
+            )
+            OR (
+                transition_kind = 'recovery_required'
+                AND frontier_id IS NULL
+                AND tool_attempt_id IS NOT NULL
+            )
+        ),
+    CONSTRAINT tool_batch_transition_outbox_header_fk
+        FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event (
+            event_sequence,
+            event_kind,
+            storage_version,
+            session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT tool_batch_transition_outbox_round_fk
+        FOREIGN KEY (producing_model_call_id, turn_id, session_id)
+        REFERENCES tool_round (
+            producing_model_call_id,
+            turn_id,
+            session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT tool_batch_transition_outbox_frontier_fk
+        FOREIGN KEY (session_id, frontier_id)
+        REFERENCES context_frontier (owning_session_id, context_frontier_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT tool_batch_transition_outbox_attempt_fk
+        FOREIGN KEY (tool_attempt_id, turn_id, session_id)
+        REFERENCES tool_attempt (attempt_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE UNIQUE INDEX tool_batch_transition_outbox_frontier_once
+    ON tool_batch_transition_outbox_event (
+        producing_model_call_id,
+        transition_kind
+    )
+    WHERE transition_kind IN ('proposed', 'results_projected');
+
+CREATE UNIQUE INDEX tool_batch_transition_outbox_recovery_once
+    ON tool_batch_transition_outbox_event (tool_attempt_id)
+    WHERE transition_kind = 'recovery_required';
+
+CREATE TRIGGER tool_batch_transition_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON tool_batch_transition_outbox_event
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER tool_batch_transition_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON tool_batch_transition_outbox_event
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_records bigint;
+BEGIN
+    CASE NEW.event_kind
+        WHEN 'session_created' THEN
+            SELECT count(*) INTO matching_records
+              FROM session_created_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'input_accepted' THEN
+            SELECT count(*) INTO matching_records
+              FROM input_accepted_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_activated' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_activated_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_failed' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_failed_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'model_call_transition' THEN
+            SELECT count(*) INTO matching_records
+              FROM model_call_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_batch_transition' THEN
+            SELECT count(*) INTO matching_records
+              FROM tool_batch_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_completed' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_completed_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_refused' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_refused_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_cancelled' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_cancelled_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_reconciliation_required_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        ELSE
+            RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind
+                USING ERRCODE = '23514';
+    END CASE;
+
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION 'outbox event % requires exactly one % typed record',
+            NEW.event_sequence,
+            NEW.event_kind
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;

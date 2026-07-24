@@ -28,6 +28,7 @@ const INPUT_ACCEPTED: &str = "input_accepted";
 const TURN_ACTIVATED: &str = "turn_activated";
 const TURN_FAILED: &str = "turn_failed";
 const MODEL_CALL_TRANSITION: &str = "model_call_transition";
+const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
 const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
@@ -112,6 +113,15 @@ pub enum DispatchedOutboxEventKind {
         /// Exact committed call state.
         state: DispatchedModelCallState,
     },
+    /// A tool batch crossed one durable presentation boundary.
+    ToolBatchTransition {
+        /// Owning turn.
+        turn: TurnId,
+        /// Model call that proposed the batch.
+        producing_call: ModelCallId,
+        /// Exact durable batch state.
+        state: DispatchedToolBatchState,
+    },
     /// A turn committed authoritative assistant content and completed.
     TurnCompleted {
         /// Completed turn.
@@ -149,6 +159,26 @@ pub enum DispatchedOutboxEventKind {
         operation: DispatchedReconciliationOperation,
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
+    },
+}
+
+/// Durable tool-batch boundary carried by one dispatched transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedToolBatchState {
+    /// The proposal frontier committed.
+    Proposed {
+        /// Exact yielded frontier containing assistant tool-use entries.
+        frontier: ContextFrontierId,
+    },
+    /// Proposal-ordered results committed for continuation.
+    ResultsProjected {
+        /// Exact result frontier.
+        frontier: ContextFrontierId,
+    },
+    /// One exact attempt requires an owner recovery decision.
+    RecoveryRequired {
+        /// Ambiguous tool attempt.
+        attempt: ToolAttemptId,
     },
 }
 
@@ -791,6 +821,139 @@ async fn load_event(
                 state,
             }
         }
+        TOOL_BATCH_TRANSITION => {
+            let row: Option<(Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool)> =
+                sqlx::query_as(
+                    "SELECT event.turn_id, event.producing_model_call_id,
+                            event.transition_kind, event.frontier_id,
+                            event.tool_attempt_id,
+                            CASE event.transition_kind
+                                WHEN 'proposed' THEN
+                                    event.frontier_id =
+                                        round.boundary_frontier_id
+                                    AND event.tool_attempt_id IS NULL
+                                WHEN 'results_projected' THEN
+                                    event.frontier_id IS NOT NULL
+                                    AND event.frontier_id <>
+                                        round.boundary_frontier_id
+                                    AND event.tool_attempt_id IS NULL
+                                    AND result_frontier.member_count =
+                                        boundary_frontier.member_count
+                                        + round.request_count
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                          FROM tool_request AS request
+                                          LEFT JOIN semantic_transcript_entry
+                                                    AS result
+                                            ON result.source_session_id =
+                                               event.session_id
+                                           AND result.payload_kind IN (
+                                                'tool_execution_result',
+                                                'tool_denied',
+                                                'tool_closed_by_turn_end'
+                                           )
+                                           AND (
+                                                result.tool_result_request_id =
+                                                    request.request_id
+                                                OR EXISTS (
+                                                    SELECT 1
+                                                      FROM tool_attempt
+                                                           AS result_attempt
+                                                     WHERE
+                                                        result_attempt.attempt_id =
+                                                        result.tool_result_attempt_id
+                                                       AND
+                                                        result_attempt.request_id =
+                                                        request.request_id
+                                                )
+                                           )
+                                          LEFT JOIN context_frontier_member
+                                                    AS member
+                                            ON member.owning_session_id =
+                                               event.session_id
+                                           AND member.context_frontier_id =
+                                               event.frontier_id
+                                           AND member.member_position =
+                                               boundary_frontier.member_count
+                                               + request.request_ordinal + 1
+                                           AND member.source_session_id =
+                                               result.source_session_id
+                                           AND member.semantic_entry_id =
+                                               result.semantic_entry_id
+                                         WHERE
+                                            request.producing_model_call_id =
+                                            event.producing_model_call_id
+                                           AND member.semantic_entry_id IS NULL
+                                    )
+                                WHEN 'recovery_required' THEN
+                                    event.frontier_id IS NULL
+                                    AND recovery_attempt.attempt_id =
+                                        event.tool_attempt_id
+                                    AND recovery_request.producing_model_call_id =
+                                        event.producing_model_call_id
+                                ELSE false
+                            END
+                       FROM tool_batch_transition_outbox_event AS event
+                       JOIN tool_round AS round
+                         ON round.producing_model_call_id =
+                            event.producing_model_call_id
+                        AND round.turn_id = event.turn_id
+                        AND round.session_id = event.session_id
+                       JOIN context_frontier AS boundary_frontier
+                         ON boundary_frontier.owning_session_id =
+                            event.session_id
+                        AND boundary_frontier.context_frontier_id =
+                            round.boundary_frontier_id
+                       LEFT JOIN context_frontier AS result_frontier
+                         ON result_frontier.owning_session_id =
+                            event.session_id
+                        AND result_frontier.context_frontier_id =
+                            event.frontier_id
+                       LEFT JOIN tool_attempt AS recovery_attempt
+                         ON recovery_attempt.attempt_id =
+                            event.tool_attempt_id
+                        AND recovery_attempt.turn_id = event.turn_id
+                        AND recovery_attempt.session_id = event.session_id
+                        AND recovery_attempt.state_kind = 'terminal'
+                        AND recovery_attempt.terminal_disposition_kind =
+                            'ambiguous'
+                       LEFT JOIN tool_request AS recovery_request
+                         ON recovery_request.request_id =
+                            recovery_attempt.request_id
+                      WHERE event.event_sequence = $1
+                        AND event.session_id = $2",
+                )
+                .bind(Decimal::from(expected_sequence))
+                .bind(stored_session)
+                .fetch_optional(&mut **transaction)
+                .await?;
+            let (turn, producing_call, transition, frontier, attempt, valid) =
+                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+            if !valid {
+                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+            }
+            let state = match (transition.as_str(), frontier, attempt) {
+                ("proposed", Some(frontier), None) => DispatchedToolBatchState::Proposed {
+                    frontier: ContextFrontierId::from_uuid(frontier),
+                },
+                ("results_projected", Some(frontier), None) => {
+                    DispatchedToolBatchState::ResultsProjected {
+                        frontier: ContextFrontierId::from_uuid(frontier),
+                    }
+                }
+                ("recovery_required", None, Some(attempt)) => {
+                    DispatchedToolBatchState::RecoveryRequired {
+                        attempt: ToolAttemptId::from_uuid(attempt),
+                    }
+                }
+                _ => return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into()),
+            };
+            DispatchedOutboxEventKind::ToolBatchTransition {
+                turn: TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(producing_call),
+                state,
+            }
+        }
         TURN_COMPLETED => {
             let row: Option<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
@@ -1210,6 +1373,12 @@ pub(crate) enum OutboxEvent {
         call: ModelCallId,
         state: ModelCallOutboxState,
     },
+    ToolBatchTransition {
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        state: ToolBatchOutboxState,
+    },
     TurnCompleted {
         session: SessionId,
         turn: TurnId,
@@ -1248,6 +1417,12 @@ pub(crate) enum ModelCallOutboxState {
     InFlight,
     CancellationRequested,
     Terminal(ModelCallDisposition),
+}
+
+pub(crate) enum ToolBatchOutboxState {
+    Proposed(ContextFrontierId),
+    ResultsProjected(ContextFrontierId),
+    RecoveryRequired(ToolAttemptId),
 }
 
 pub(crate) async fn append(
@@ -1290,6 +1465,12 @@ pub(crate) async fn append(
             call,
             state,
         } => append_model_call_transition(connection, session, turn, call, state).await,
+        OutboxEvent::ToolBatchTransition {
+            session,
+            turn,
+            producing_call,
+            state,
+        } => append_tool_batch_transition(connection, session, turn, producing_call, state).await,
         OutboxEvent::TurnCompleted {
             session,
             turn,
@@ -1353,6 +1534,50 @@ pub(crate) async fn append(
             .await
         }
     }
+}
+
+async fn append_tool_batch_transition(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    state: ToolBatchOutboxState,
+) -> Result<(), sqlx::Error> {
+    let (transition, frontier, attempt) = match state {
+        ToolBatchOutboxState::Proposed(frontier) => ("proposed", Some(frontier), None),
+        ToolBatchOutboxState::ResultsProjected(frontier) => {
+            ("results_projected", Some(frontier), None)
+        }
+        ToolBatchOutboxState::RecoveryRequired(attempt) => {
+            ("recovery_required", None, Some(attempt))
+        }
+    };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_batch_transition_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, producing_model_call_id, transition_kind, frontier_id,
+             tool_attempt_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7, $8
+           FROM header",
+    )
+    .bind(TOOL_BATCH_TRANSITION)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(producing_call.into_uuid())
+    .bind(transition)
+    .bind(frontier.map(ContextFrontierId::into_uuid))
+    .bind(attempt.map(ToolAttemptId::into_uuid))
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn append_session_created(

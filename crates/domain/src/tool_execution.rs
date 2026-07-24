@@ -514,6 +514,46 @@ impl ToolBatch {
         })
     }
 
+    /// Builds the terminal result suffix for a batch blocked by one
+    /// crash-lost physical attempt.
+    ///
+    /// This is the failure counterpart to cancellation projection: completed
+    /// and denied requests retain their ordinary references, while the
+    /// crash-lost request and every not-yet-attempted request close without
+    /// fabricated executor evidence.
+    pub fn prepare_failure_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: crate::ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        let crash_lost_count = self
+            .attempts
+            .values()
+            .filter(|attempt| {
+                matches!(
+                    attempt,
+                    ReconstitutedToolAttempt::Ended(ended)
+                        if matches!(
+                            ended.end(),
+                            ToolAttemptEnd::KnownFailed { error }
+                                if error.kind() == ToolExecutionErrorKind::CrashLost
+                        )
+                )
+            })
+            .count();
+        if crash_lost_count != 1
+            || self.attempts.values().any(|attempt| match attempt {
+                ReconstitutedToolAttempt::Current(_) => true,
+                ReconstitutedToolAttempt::Ended(ended) => ended.end() == &ToolAttemptEnd::Ambiguous,
+            })
+        {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::TurnLevelFailure,
+            });
+        }
+        self.prepare_cancellation_projection(entry_ids, result_frontier)
+    }
+
     /// Builds proposal-ordered results for an interrupt-cancelled executing
     /// batch after every physical attempt has reached a durable end.
     pub fn prepare_cancellation_projection(
@@ -917,6 +957,23 @@ pub struct PreparedToolResultProjection {
 }
 
 impl PreparedToolResultProjection {
+    #[cfg(test)]
+    pub(crate) fn from_validated_parts(
+        source_frontier: crate::ContextFrontierId,
+        turn: TurnId,
+        producing_call: crate::ModelCallId,
+        entries: Vec<SemanticTranscriptEntry>,
+        snapshot: ResolvedContextFrontierSnapshot,
+    ) -> Self {
+        Self {
+            source_frontier,
+            turn,
+            producing_call,
+            entries: entries.into_boxed_slice(),
+            snapshot,
+        }
+    }
+
     /// Returns the exact yielded frontier from which the results were derived.
     pub(crate) const fn source_frontier(&self) -> crate::ContextFrontierId {
         self.source_frontier
@@ -1676,6 +1733,27 @@ mod tests {
                 .expect_err("no later tool may run after crash loss")
                 .failure(),
             ToolBatchExecutionFailure::TurnLevelFailure
+        );
+        let failure_projection = batch
+            .prepare_failure_projection(
+                vec![
+                    semantic_transcript_entry_id(15),
+                    semantic_transcript_entry_id(16),
+                ],
+                context_frontier_id(17),
+            )
+            .expect("the blocked batch has a public failure projection");
+        assert_eq!(
+            failure_projection.entries()[0].payload(),
+            &SemanticTranscriptEntryPayload::ToolClosed {
+                request: tool_request_id(10),
+            }
+        );
+        assert_eq!(
+            failure_projection.entries()[1].payload(),
+            &SemanticTranscriptEntryPayload::ToolClosed {
+                request: tool_request_id(11),
+            }
         );
 
         let later = ToolAttemptReconstitutionInput::new(

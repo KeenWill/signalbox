@@ -40,6 +40,7 @@ use crate::{
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{insert_prepared_call, insert_snapshot},
+    outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
 const STORAGE_VERSION: i16 = 1;
@@ -361,13 +362,15 @@ impl PostgresToolLoopRepository {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> Result<CurrentToolAttempt, ToolLoopRepositoryError> {
+    ) -> Result<Option<CurrentToolAttempt>, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let Some(batch) =
+                load_active_batch_from_connection(&mut transaction, session, turn).await?
+            else {
+                return Ok(None);
+            };
             let prepared = batch
                 .prepare_next_attempt(attempt, effect_class)
                 .map_err(|_| {
@@ -377,7 +380,7 @@ impl PostgresToolLoopRepository {
                 })?
                 .into_attempt();
             insert_prepared_attempt(&mut transaction, &prepared).await?;
-            Ok(prepared)
+            Ok(Some(prepared))
         }
         .await;
         finish_commit(transaction, result).await
@@ -599,7 +602,7 @@ impl PostgresToolLoopRepository {
                             .await?
                             .ok_or(ToolLoopCorruption::Missing("crash-closed tool batch"))?;
                     let projection = closed_batch
-                        .prepare_cancellation_projection(
+                        .prepare_failure_projection(
                             identities.result_entries().to_vec(),
                             identities.result_frontier(),
                         )
@@ -616,7 +619,7 @@ impl PostgresToolLoopRepository {
                         &mut transaction,
                         session,
                         turn,
-                        projection.snapshot(),
+                        &projection,
                         identities.failure().clone(),
                         next_turn,
                     )
@@ -676,6 +679,18 @@ impl PostgresToolLoopRepository {
             insert_snapshot(&mut transaction, projection.snapshot())
                 .await
                 .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+            outbox::append(
+                &mut transaction,
+                OutboxEvent::ToolBatchTransition {
+                    session,
+                    turn,
+                    producing_call,
+                    state: ToolBatchOutboxState::ResultsProjected(
+                        projection.snapshot().frontier().snapshot(),
+                    ),
+                },
+            )
+            .await?;
             insert_prepared_call(&mut transaction, prepared, credential_reference)
                 .await
                 .map_err(map_model_call_error)?;
@@ -760,13 +775,25 @@ impl PostgresToolLoopRepository {
             insert_snapshot(&mut transaction, projection.snapshot())
                 .await
                 .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+            outbox::append(
+                &mut transaction,
+                OutboxEvent::ToolBatchTransition {
+                    session,
+                    turn,
+                    producing_call,
+                    state: ToolBatchOutboxState::ResultsProjected(
+                        projection.snapshot().frontier().snapshot(),
+                    ),
+                },
+            )
+            .await?;
             let outcome = crate::model_execution::prepare_tool_continuation_call(
                 &mut transaction,
                 session,
                 turn,
                 targets,
                 credential_reference,
-                projection.snapshot(),
+                &projection,
                 identities.call(),
                 identities.target_failure().clone(),
                 identities.steering_frontier(),
@@ -835,7 +862,7 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> Result<CurrentToolAttempt, Self::Error> {
+    ) -> Result<Option<CurrentToolAttempt>, Self::Error> {
         PostgresToolLoopRepository::prepare_next_attempt(self, session, turn, attempt, effect_class)
             .await
     }
@@ -1666,7 +1693,30 @@ pub(crate) async fn persist_tool_recovery_wait(
     .execute(&mut *connection)
     .await?
     .rows_affected();
-    require_single(lifecycle_rows, "tool recovery lifecycle")
+    require_single(lifecycle_rows, "tool recovery lifecycle")?;
+    let producing_call: Uuid = sqlx::query_scalar(
+        "SELECT producing_model_call_id
+           FROM tool_request
+          WHERE request_id = $1
+            AND turn_id = $2
+            AND session_id = $3",
+    )
+    .bind(tool_request_id_to_uuid(attempt.request()))
+    .bind(turn_id_to_uuid(attempt.turn()))
+    .bind(session_id_to_uuid(attempt.session()))
+    .fetch_one(&mut *connection)
+    .await?;
+    outbox::append(
+        connection,
+        OutboxEvent::ToolBatchTransition {
+            session: attempt.session(),
+            turn: attempt.turn(),
+            producing_call: signalbox_domain::ModelCallId::from_uuid(producing_call),
+            state: ToolBatchOutboxState::RecoveryRequired(attempt.attempt()),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn persist_batch_decision(
