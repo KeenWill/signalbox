@@ -132,6 +132,17 @@ neighboring record, wall clock, or another field. Sidechain and metadata flags
 are provenance, not exclusion: they do not remove content or make an imported
 frontier unseedable.
 
+Claude Code version 1 maps the four text-valued provenance fields from the exact
+top-level members `uuid` (source record identifier), `parentUuid` (source parent
+record identifier), `sessionId` (source session identifier), and `timestamp`
+(source timestamp). For each, omission maps to `NotAttested`, JSON `null` maps
+to `AttestedAbsent`, and a JSON string maps to `Attested(exact text)`; every
+other JSON type rejects the complete conversion. It maps the sidechain and
+metadata-record flags from the exact top-level members `isSidechain` and
+`isMeta`, with the same omission/null behavior, an attested JSON Boolean value,
+and rejection for every other type. Repeating any of these six consulted members
+rejects the complete conversion.
+
 Imported text retains the exact decoded Unicode scalar sequence, including an
 empty sequence, whitespace, line endings, normalization distinctions, and
 U+0000. Imported structured values use a source-neutral JSON algebra rather than
@@ -234,7 +245,9 @@ record; an immediately preceding CR is also excluded as the other half of a CRLF
 delimiter. A CR anywhere else remains record content. Nonempty bytes after the
 final delimiter form a final unterminated record, while a terminal LF or CRLF
 does not create another record. An empty delimited record rejects the complete
-conversion.
+conversion. Version 1 never strips a UTF-8 byte-order mark: the bytes `EF BB BF`
+at the beginning of any physical record are not JSON whitespace and reject that
+record as invalid JSON.
 
 The parser retains object-member order and duplicate names in the complete
 normalized source object. At every object level, repeating a member name that
@@ -267,14 +280,16 @@ Records then normalize as follows:
    - `tool_use.id`, `.name`, `.input`, and `.caller` supply call identity, tool
      name, structured input, and caller metadata;
    - `tool_result.tool_use_id`, `.is_error`, and `.content` supply call
-     identity, error status, and result content. String content is exact text;
-     array content is an ordered result-block sequence;
+     identity, error status, and result content. Omitted content is
+     `NotAttested`, null content is `AttestedAbsent`, string content is exact
+     text, and array content is an ordered result-block sequence;
    - `thinking.thinking` and `.signature` supply exact thinking and signature;
    - `redacted_thinking.data` supplies exact redacted data;
    - `document.source` supplies the media source; and
-   - `fallback.type` supplies the `SourceMessageBlock` type attestation, while
-     `from`, `to`, and every other member remain in the complete normalized
-     owning record.
+   - the exact block discriminator `"fallback"` maps to `SourceMessageBlock`;
+     its consulted `type` member supplies the source-block type attestation,
+     while `from`, `to`, and every other member remain in the complete
+     normalized owning record. Every other unrecognized discriminator rejects.
 
    A tool-result `text.text` supplies its text attestation, `image.source`
    supplies its media source, and `tool_reference.tool_name` supplies its
@@ -287,13 +302,16 @@ Records then normalize as follows:
 For every consulted text member, omitted, null, and string map respectively to
 `NotAttested`, `AttestedAbsent`, and `Attested(exact text)`; any other JSON type
 fails conversion. Consulted booleans follow the same rule with a Boolean value.
-Consulted structured members admit any non-null source-neutral JSON value.
-Consulted media sources admit omitted, null, or an object whose three consulted
-members follow the text rule; every other shape fails. Each content or result
-block must be an object with exactly one consulted `type` member containing a
-recognized string. As above, repeating any consulted member at its object level
-fails the complete conversion. These rules apply independently, so a missing or
-null `tool_use.id` remains typed absence while a non-string value is invalid.
+`tool_use.input` and `tool_use.caller` admit any non-null source-neutral JSON
+value. `tool_result.content` instead admits only the exact string or array
+shapes specified above; Boolean, number, and object values reject the complete
+conversion. Consulted media sources admit omitted, null, or an object whose
+three consulted members follow the text rule; every other shape fails. Each
+content or result block must be an object with exactly one consulted `type`
+member containing a recognized string. As above, repeating any consulted member
+at its object level fails the complete conversion. These rules apply
+independently, so a missing or null `tool_use.id` remains typed absence while a
+non-string value is invalid.
 
 Version 1 accepts both user/final-response-only records and records containing
 structured tool traffic, signed thinking, image results, tool references,
@@ -366,16 +384,14 @@ second-import idempotency.
 
 ## Open edges
 
-- Codex sessions and older backup formats have no converter yet. Adding one
-  requires a new format variant, converter implementation, synthetic fixtures,
-  and persistence round-trip coverage; it does not reinterpret Claude Code
-  converter version 1.
-- Import discovery, directory traversal, file watching, bulk-import policy,
-  source-size admission, client presentation, and raw-record access surfaces are
-  not implemented.
+- Exact mappings for additional source formats and the unimplemented import
+  operational surfaces remain in the
+  [conversation-import questions](../open-questions.md#conversation-import).
 - Rich model rendering of imported source events, content absence, tools,
-  results, thinking, and media is not implemented; the conservative version-1
-  projection is owned by [model-call-execution](model-call-execution.md).
+  results, thinking, and media remains in the
+  [model-input projection questions](../open-questions.md#model-input-projection);
+  the conservative version-1 projection is owned by
+  [model-call-execution](model-call-execution.md).
 - Imported-conversation archive, retention, and destructive deletion policy
   remain part of the open
   [archive lifecycle](../open-questions.md#archival-and-retention).
