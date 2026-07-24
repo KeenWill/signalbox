@@ -507,6 +507,8 @@ impl ToolBatch {
             })?;
         Ok(PreparedToolResultProjection {
             source_frontier: self.yielded_snapshot.frontier().snapshot(),
+            turn: self.turn,
+            producing_call: self.producing_call,
             entries: entries.into_boxed_slice(),
             snapshot,
         })
@@ -607,6 +609,101 @@ impl ToolBatch {
             })?;
         Ok(PreparedToolResultProjection {
             source_frontier: self.yielded_snapshot.frontier().snapshot(),
+            turn: self.turn,
+            producing_call: self.producing_call,
+            entries: entries.into_boxed_slice(),
+            snapshot,
+        })
+    }
+
+    /// Builds proposal-ordered logical closure for an interrupt-terminalized
+    /// recovery batch while retaining its physical ambiguity separately.
+    pub fn prepare_reconciliation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        terminal_frontier: crate::ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        if !matches!(self.phase, ToolBatchPhase::AwaitingRecovery { .. })
+            || entry_ids.len() != self.requests.len()
+            || self
+                .attempts
+                .values()
+                .any(|attempt| matches!(attempt, ReconstitutedToolAttempt::Current(_)))
+        {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
+        }
+        let mut used = self
+            .yielded_snapshot
+            .ordered_entries()
+            .map(|reference| reference.entry())
+            .collect::<BTreeSet<_>>();
+        if entry_ids.iter().any(|identity| !used.insert(*identity)) {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::EntryIdentityReuse,
+            });
+        }
+        let mut entries = Vec::with_capacity(self.requests.len());
+        for (request, identity) in self.requests.iter().zip(entry_ids) {
+            let payload = match self.approvals.get(&request.id()) {
+                Some(resolution)
+                    if matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }) =>
+                {
+                    SemanticTranscriptEntryPayload::ToolDenied {
+                        request: request.id(),
+                    }
+                }
+                Some(resolution) if resolution.is_approved() => {
+                    match self.attempts.get(&request.id()) {
+                        Some(ReconstitutedToolAttempt::Ended(attempt))
+                            if matches!(attempt.end(), ToolAttemptEnd::Completed { .. })
+                                || matches!(
+                                    attempt.end(),
+                                    ToolAttemptEnd::KnownFailed { error }
+                                        if error.kind() != ToolExecutionErrorKind::CrashLost
+                                ) =>
+                        {
+                            SemanticTranscriptEntryPayload::ToolExecutionResult {
+                                attempt: attempt.attempt(),
+                            }
+                        }
+                        Some(ReconstitutedToolAttempt::Ended(_)) | None => {
+                            SemanticTranscriptEntryPayload::ToolClosed {
+                                request: request.id(),
+                            }
+                        }
+                        Some(ReconstitutedToolAttempt::Current(_)) => unreachable!(
+                            "the live-attempt guard rejects current reconciliation evidence"
+                        ),
+                    }
+                }
+                Some(_) | None => SemanticTranscriptEntryPayload::ToolClosed {
+                    request: request.id(),
+                },
+            };
+            entries.push(SemanticTranscriptEntry::from_validated_parts(
+                identity,
+                self.session,
+                payload,
+            ));
+        }
+        let snapshot = self
+            .yielded_snapshot
+            .derive_appending_candidate(
+                terminal_frontier,
+                entries
+                    .iter()
+                    .map(SemanticTranscriptEntry::reference)
+                    .collect(),
+            )
+            .map_err(|_| ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::FrontierDerivationFailed,
+            })?;
+        Ok(PreparedToolResultProjection {
+            source_frontier: self.yielded_snapshot.frontier().snapshot(),
+            turn: self.turn,
+            producing_call: self.producing_call,
             entries: entries.into_boxed_slice(),
             snapshot,
         })
@@ -813,6 +910,8 @@ impl ToolBatchExecutionError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedToolResultProjection {
     source_frontier: crate::ContextFrontierId,
+    turn: TurnId,
+    producing_call: crate::ModelCallId,
     entries: Box<[SemanticTranscriptEntry]>,
     snapshot: ResolvedContextFrontierSnapshot,
 }
@@ -821,6 +920,14 @@ impl PreparedToolResultProjection {
     /// Returns the exact yielded frontier from which the results were derived.
     pub(crate) const fn source_frontier(&self) -> crate::ContextFrontierId {
         self.source_frontier
+    }
+
+    pub(crate) const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub(crate) const fn producing_call(&self) -> crate::ModelCallId {
+        self.producing_call
     }
 
     /// Returns reference-only result entries in proposal order.
@@ -1671,5 +1778,67 @@ mod tests {
                 request: tool_request_id(11),
             }
         );
+    }
+
+    /// S06 / INV-005 / INV-006 / INV-025: terminal recovery closes every
+    /// logical request in proposal order without rewriting physical ambiguity.
+    #[test]
+    fn s06_inv005_inv006_inv025_reconciliation_projection_closes_ambiguity() {
+        let ambiguous = request(10, 0);
+        let unresolved = request(11, 1);
+        let attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(12),
+            ambiguous.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(13),
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
+        )
+        .reconstitute();
+        let batch = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![ambiguous, unresolved],
+            vec![
+                approval(tool_request_id(10), ToolApprovalDecision::Approve),
+                approval(tool_request_id(11), ToolApprovalDecision::Approve),
+            ],
+            vec![attempt],
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
+                attempt: tool_attempt_id(12),
+            },
+        )
+        .reconstitute()
+        .expect("the exact external-effect ambiguity admits recovery");
+        let projection = batch
+            .prepare_reconciliation_projection(
+                vec![
+                    semantic_transcript_entry_id(14),
+                    semantic_transcript_entry_id(15),
+                ],
+                context_frontier_id(16),
+            )
+            .expect("terminal recovery closes every logical request");
+
+        assert_eq!(
+            projection
+                .entries()
+                .iter()
+                .map(SemanticTranscriptEntry::payload)
+                .collect::<Vec<_>>(),
+            vec![
+                &SemanticTranscriptEntryPayload::ToolClosed {
+                    request: tool_request_id(10),
+                },
+                &SemanticTranscriptEntryPayload::ToolClosed {
+                    request: tool_request_id(11),
+                },
+            ]
+        );
+        assert_eq!(projection.snapshot().entry_count(), 2);
     }
 }

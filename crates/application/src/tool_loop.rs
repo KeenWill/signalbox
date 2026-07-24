@@ -1118,6 +1118,7 @@ where
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
+        let effect_class = definition.effect_class();
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let evidence = self
@@ -1125,7 +1126,7 @@ where
             .execute(invocation)
             .await
             .map_err(ToolExecutionServiceError::Executor)?;
-        let observation = admit_executor_evidence(evidence);
+        let observation = admit_executor_evidence(evidence, effect_class);
         self.commit_executor_observation(observation, dispatch_permit)
             .await
     }
@@ -1216,6 +1217,7 @@ where
 
 fn admit_executor_evidence(
     evidence: CorrelatedToolExecutorEvidence,
+    effect_class: ToolEffectClass,
 ) -> CorrelatedToolAttemptObservation {
     let observation = match evidence.evidence {
         ToolExecutorEvidence::CompletedText(value) => match ToolResultText::try_new(value) {
@@ -1237,6 +1239,11 @@ fn admit_executor_evidence(
         ToolExecutorEvidence::KnownFailed { detail } => ToolAttemptObservation::KnownFailed {
             error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, detail),
         },
+        ToolExecutorEvidence::Ambiguous if effect_class == ToolEffectClass::EffectFree => {
+            ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+            }
+        }
         ToolExecutorEvidence::Ambiguous => ToolAttemptObservation::Ambiguous,
     };
     evidence.correlation.bind(observation)
@@ -1882,6 +1889,49 @@ mod tests {
         let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-024: an effect-free executor cannot strand an impossible ambiguity;
+    /// external-effect evidence retains its recovery-significant distinction.
+    #[test]
+    fn inv024_effect_class_admits_only_external_effect_ambiguity() {
+        for (effect_class, expected) in [
+            (
+                ToolEffectClass::EffectFree,
+                ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                },
+            ),
+            (
+                ToolEffectClass::ExternalEffect,
+                ToolAttemptObservation::Ambiguous,
+            ),
+        ] {
+            let (batch, _) = prepared_batch("{}", effect_class);
+            let current = match batch.attempt(batch.requests()[0].id()) {
+                Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => {
+                    current.clone()
+                }
+                _ => panic!("fixture has one prepared attempt"),
+            };
+            let authorized = current
+                .authorize()
+                .expect("prepared fixture authorizes exactly once");
+            let expected_correlation = authorized.correlation();
+            let invocation = ToolExecutionInvocation::try_new(
+                batch.requests()[0].clone(),
+                definition("known", ToolPermissionDefault::Auto, effect_class),
+                &authorized,
+            )
+            .expect("fixture invocation matches durable authority");
+            let observation = admit_executor_evidence(
+                invocation.bind(ToolExecutorEvidence::Ambiguous),
+                effect_class,
+            );
+
+            assert_eq!(observation.observation(), &expected);
+            assert_eq!(observation.correlation(), &expected_correlation);
+        }
     }
 
     /// INV-011 / INV-024: the definition selected by successful preflight is

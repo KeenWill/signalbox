@@ -2785,6 +2785,7 @@ pub struct ReconciliationRequiredToolTurn {
     tool_attempt: EndedToolAttempt,
     attempt: EndedTurnAttempt,
     disposition: TurnDisposition,
+    tool_result_entries: Box<[SemanticTranscriptEntry]>,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 }
@@ -2810,7 +2811,11 @@ impl ReconciliationRequiredToolTurn {
     pub const fn disposition(&self) -> &TurnDisposition {
         &self.disposition
     }
-    /// Borrows the equal-content terminal frontier.
+    /// Returns proposal-ordered logical results closing the terminal batch.
+    pub fn tool_result_entries(&self) -> &[SemanticTranscriptEntry] {
+        &self.tool_result_entries
+    }
+    /// Borrows the prefix-extending terminal frontier.
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.terminal_snapshot
     }
@@ -3809,7 +3814,7 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     wait: AwaitingToolRecovery,
     tool_attempt: EndedToolAttempt,
     attempt: EndedTurnAttempt,
-    source_snapshot: ResolvedContextFrontierSnapshot,
+    result_projection: PreparedToolResultProjection,
     interrupt: AppliedInterruptCommandResult,
     identities: AmbiguousModelCallTurnIdentities,
 ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError> {
@@ -3850,9 +3855,19 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
         || !ambiguous_operations.contains(crate::IssuedOperationRef::ToolAttempt(wait.attempt()))
         || wait.session() != active_turn.session()
         || wait.turn() != active_turn.turn()
+        || wait.producing_call() != result_projection.producing_call()
         || wait.issuing_attempt() != attempt.id()
         || wait.attempt() != tool_attempt.attempt()
-        || wait.yielded_frontier() != source_snapshot.frontier().snapshot()
+        || result_projection.turn() != active_turn.turn()
+        || wait.yielded_frontier() != result_projection.source_frontier()
+        || result_projection.snapshot().frontier().owning_session() != active_turn.session()
+        || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
+        || !result_projection.entries().iter().any(|entry| {
+            entry.payload()
+                == &SemanticTranscriptEntryPayload::ToolClosed {
+                    request: tool_attempt.request(),
+                }
+        })
         || tool_attempt.session() != active_turn.session()
         || tool_attempt.turn() != active_turn.turn()
         || tool_attempt.issuing_attempt() != attempt.id()
@@ -3863,9 +3878,7 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     }
     let reclassified_pending_steering =
         reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
-    let terminal_snapshot = source_snapshot
-        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
-        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    let (tool_result_entries, terminal_snapshot) = result_projection.into_parts();
     let marker =
         ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
     Ok(ReconciliationRequiredToolTurn {
@@ -3874,6 +3887,7 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
         tool_attempt,
         attempt,
         disposition: TurnDisposition::ReconciliationRequired { marker },
+        tool_result_entries,
         terminal_snapshot,
         reclassified_pending_steering,
     })

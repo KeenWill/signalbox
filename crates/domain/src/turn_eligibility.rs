@@ -23,10 +23,10 @@ use crate::{
     CurrentTurnAttempt, DeliveryRequest, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, Session, SessionId, SessionInputPosition, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnDisposition, TurnId,
-    UnstoppedAttemptDisposition, derive_accepted_input_total_order,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
+    SessionInputPosition, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnDisposition, TurnId, UnstoppedAttemptDisposition, derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -1808,7 +1808,7 @@ impl AcceptedInputSchedulingProjection {
         self,
         wait: crate::AwaitingToolRecovery,
         tool_attempt: crate::EndedToolAttempt,
-        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: crate::PreparedToolResultProjection,
         interrupt: AppliedInterruptCommandResult,
         identities: crate::AmbiguousModelCallTurnIdentities,
     ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
@@ -1823,7 +1823,7 @@ impl AcceptedInputSchedulingProjection {
             wait,
             tool_attempt,
             attempt,
-            source_snapshot,
+            result_projection,
             interrupt,
             identities,
         )
@@ -4175,7 +4175,23 @@ fn reconstitute_inner(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || terminal.ordered_entries().ne(source.ordered_entries())
+                    || !source.is_semantic_prefix_of(&terminal)
+                    || terminal.entry_count() == source.entry_count()
+                    || terminal
+                        .ordered_entries()
+                        .skip(source.entry_count())
+                        .any(|entry| {
+                            !matches!(
+                                semantic_entries
+                                    .get(&entry)
+                                    .map(SemanticTranscriptEntry::payload),
+                                Some(
+                                    SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                                        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                                )
+                            )
+                        })
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -9163,11 +9179,15 @@ mod tests {
                 | None => None,
             })
             .expect("the batch retains its exact ambiguous attempt");
+        let result_entry = semantic_entry(31);
+        let result_projection = batch
+            .prepare_reconciliation_projection(vec![result_entry.id()], frontier(41).id())
+            .expect("the terminal batch closes its logical request");
         let reconciled = projection
             .apply_interrupt_to_tool_recovery(
                 wait,
                 ended_tool,
-                batch.yielded_snapshot().clone(),
+                result_projection,
                 interrupt,
                 crate::AmbiguousModelCallTurnIdentities::new(frontier(41).id()),
             )
@@ -9185,7 +9205,16 @@ mod tests {
                 .terminal_snapshot()
                 .ordered_entries()
                 .collect::<Vec<_>>(),
-            vec![origin_entry.reference(&session)]
+            vec![
+                origin_entry.reference(&session),
+                result_entry.reference(&session)
+            ]
+        );
+        assert_eq!(
+            reconciled.tool_result_entries()[0].payload(),
+            &crate::SemanticTranscriptEntryPayload::ToolClosed {
+                request: tool_request_id(70),
+            }
         );
         assert!(matches!(
             reconciled.disposition(),
