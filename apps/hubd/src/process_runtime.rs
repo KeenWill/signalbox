@@ -45,7 +45,10 @@ use signalbox_process_protocol::{
 };
 use sqlx::PgPool;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
+        BufReader,
+    },
     net::UnixStream,
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
@@ -58,6 +61,7 @@ const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
+const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
@@ -201,9 +205,12 @@ fn inspect_connection_completion(
 ) -> Result<(), ProcessRuntimeError> {
     match completed {
         None | Some(Ok(Ok(()))) => Ok(()),
-        Some(Ok(Err(ProcessConnectionError::Io(error)))) => {
+        Some(Ok(Err(ProcessConnectionError::PeerIo(error)))) => {
             drop(error);
             Ok(())
+        }
+        Some(Ok(Err(ProcessConnectionError::SpoolIo(error)))) => {
+            Err(ProcessRuntimeError::SpoolIo(error))
         }
         Some(Ok(Err(ProcessConnectionError::Encode(FrameEncodeError::OversizedFrame)))) => Ok(()),
         Some(Ok(Err(ProcessConnectionError::Encode(error)))) => {
@@ -228,15 +235,18 @@ async fn serve_connection(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError> {
     let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let mut reader = BufReader::with_capacity(INBOUND_READ_AHEAD_BYTES, reader);
 
     loop {
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
-        let Some(frame_buffer_permit) =
-            acquire_inbound_frame_permit(Arc::clone(&services.inbound_frame_budget), &mut shutdown)
-                .await?
+        let Some(frame_buffer_permit) = acquire_inbound_frame_permit_after_input(
+            &mut reader,
+            Arc::clone(&services.inbound_frame_budget),
+            &mut shutdown,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -291,6 +301,24 @@ async fn serve_connection(
             return Ok(());
         }
     }
+}
+
+async fn acquire_inbound_frame_permit_after_input<Reader>(
+    reader: &mut Reader,
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError>
+where
+    Reader: AsyncBufRead + Unpin,
+{
+    let input_ready = tokio::select! {
+        () = wait_for_shutdown(shutdown) => false,
+        available = reader.fill_buf() => !available?.is_empty(),
+    };
+    if !input_ready {
+        return Ok(None);
+    }
+    acquire_inbound_frame_permit(budget, shutdown).await
 }
 
 async fn acquire_inbound_frame_permit(
@@ -516,7 +544,9 @@ where
         Err(SessionListSpoolError::Read(error)) => {
             return write_process_read_error(writer, request_id, error).await;
         }
-        Err(SessionListSpoolError::Spool(error)) => return Err(error),
+        Err(SessionListSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, request_id, error).await;
+        }
     };
     write_spooled_file(writer, &mut spool.file).await
 }
@@ -527,7 +557,51 @@ struct SessionListSpool {
 
 enum SessionListSpoolError {
     Read(ProcessReadError),
-    Spool(ProcessConnectionError),
+    Spool(SnapshotSpoolError),
+}
+
+#[derive(Debug)]
+enum SnapshotSpoolError {
+    Io(io::Error),
+    Encode(FrameEncodeError),
+    EncodeInvariant,
+}
+
+impl SnapshotSpoolError {
+    fn from_connection(error: ProcessConnectionError) -> Self {
+        match error {
+            ProcessConnectionError::PeerIo(error) | ProcessConnectionError::SpoolIo(error) => {
+                Self::Io(error)
+            }
+            ProcessConnectionError::Encode(error) => Self::Encode(error),
+            ProcessConnectionError::EncodeInvariant
+            | ProcessConnectionError::InboundFrameBudgetClosed
+            | ProcessConnectionError::SnapshotReaderBudgetClosed => Self::EncodeInvariant,
+        }
+    }
+}
+
+async fn write_snapshot_spool_error<Writer>(
+    writer: &mut Writer,
+    request_id: RequestId,
+    error: SnapshotSpoolError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match error {
+        SnapshotSpoolError::Io(error) => {
+            tracing::warn!(error = %error, "process snapshot spooling failed before response");
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
+        SnapshotSpoolError::Encode(error) => Err(ProcessConnectionError::Encode(error)),
+        SnapshotSpoolError::EncodeInvariant => Err(ProcessConnectionError::EncodeInvariant),
+    }
 }
 
 async fn spool_session_summaries(
@@ -539,10 +613,10 @@ async fn spool_session_summaries(
         .await
         .map_err(SessionListSpoolError::Read)?;
     let standard_file = tempfile::tempfile()
-        .map_err(ProcessConnectionError::from)
+        .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     let mut file = tokio::fs::File::from_std(standard_file);
-    write_message(&mut file, request_id, ServerMessage::SessionsStart {})
+    write_spool_message(&mut file, request_id, ServerMessage::SessionsStart {})
         .await
         .map_err(SessionListSpoolError::Spool)?;
     while let Some(summary) = reader
@@ -550,7 +624,7 @@ async fn spool_session_summaries(
         .await
         .map_err(SessionListSpoolError::Read)?
     {
-        write_message(
+        write_spool_message(
             &mut file,
             request_id,
             ServerMessage::SessionSummary {
@@ -564,9 +638,9 @@ async fn spool_session_summaries(
     }
     let session_count = reader
         .summary_count()
-        .ok_or(ProcessConnectionError::EncodeInvariant)
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(SessionListSpoolError::Spool)?;
-    write_message(
+    write_spool_message(
         &mut file,
         request_id,
         ServerMessage::SessionsEnd {
@@ -577,11 +651,11 @@ async fn spool_session_summaries(
     .map_err(SessionListSpoolError::Spool)?;
     file.flush()
         .await
-        .map_err(ProcessConnectionError::from)
+        .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     file.seek(SeekFrom::Start(0))
         .await
-        .map_err(ProcessConnectionError::from)
+        .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     Ok(SessionListSpool { file })
 }
@@ -802,7 +876,7 @@ where
     )
     .await;
     drop(snapshot_permit);
-    let mut spool = match spool_result {
+    let spool = match spool_result {
         Ok(Some(spool)) => spool,
         Ok(None) => {
             return write_error(
@@ -815,9 +889,11 @@ where
         Err(TranscriptSpoolError::Read(error)) => {
             return write_process_read_error(writer, request_id, error).await;
         }
-        Err(TranscriptSpoolError::Spool(error)) => return Err(error),
+        Err(TranscriptSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, request_id, error).await;
+        }
     };
-    write_spooled_transcript(writer, &mut spool).await
+    write_spooled_transcript(writer, spool).await.map(|_| ())
 }
 
 async fn handle_follow_session<Writer>(
@@ -847,7 +923,7 @@ where
     let Some(snapshot_result) = snapshot_result else {
         return Ok(());
     };
-    let mut spool = match snapshot_result {
+    let spool = match snapshot_result {
         Ok(Some(spool)) => spool,
         Ok(None) => {
             return run_until_shutdown(
@@ -869,15 +945,16 @@ where
             .await
             .unwrap_or(Ok(()));
         }
-        Err(TranscriptSpoolError::Spool(error)) => return Err(error),
+        Err(TranscriptSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, request_id, error).await;
+        }
     };
     let Some(snapshot_write) =
-        run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, &mut spool)).await
+        run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, spool)).await
     else {
         return Ok(());
     };
-    snapshot_write?;
-    let mut observed_cursor = spool.cursor;
+    let mut observed_cursor = snapshot_write?;
 
     loop {
         let update = tokio::select! {
@@ -934,7 +1011,7 @@ struct TranscriptSpool {
 
 enum TranscriptSpoolError {
     Read(ProcessReadError),
-    Spool(ProcessConnectionError),
+    Spool(SnapshotSpoolError),
 }
 
 async fn spool_transcript(
@@ -950,12 +1027,12 @@ async fn spool_transcript(
         return Ok(None);
     };
     let standard_file = tempfile::tempfile()
-        .map_err(ProcessConnectionError::from)
+        .map_err(SnapshotSpoolError::Io)
         .map_err(TranscriptSpoolError::Spool)?;
     let mut file = tokio::fs::File::from_std(standard_file);
     let session_id = wire_uuid(reader.session().into_uuid());
     let cursor = CanonicalU64::new(reader.cursor());
-    write_message(
+    write_spool_message(
         &mut file,
         request_id,
         ServerMessage::TranscriptSnapshotStart { session_id, cursor },
@@ -971,20 +1048,22 @@ async fn spool_transcript(
             ProcessTranscriptItem::Turn(turn) => {
                 write_transcript_turn(&mut file, request_id, &turn)
                     .await
+                    .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::Entry(entry) => {
                 write_transcript_entry(&mut file, request_id, &entry)
                     .await
+                    .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
             }
         }
     }
     let summary = reader
         .summary()
-        .ok_or(ProcessConnectionError::EncodeInvariant)
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
         .map_err(TranscriptSpoolError::Spool)?;
-    write_message(
+    write_spool_message(
         &mut file,
         request_id,
         ServerMessage::TranscriptSnapshotEnd {
@@ -998,11 +1077,11 @@ async fn spool_transcript(
     .map_err(TranscriptSpoolError::Spool)?;
     file.flush()
         .await
-        .map_err(ProcessConnectionError::from)
+        .map_err(SnapshotSpoolError::Io)
         .map_err(TranscriptSpoolError::Spool)?;
     file.seek(SeekFrom::Start(0))
         .await
-        .map_err(ProcessConnectionError::from)
+        .map_err(SnapshotSpoolError::Io)
         .map_err(TranscriptSpoolError::Spool)?;
     Ok(Some(TranscriptSpool {
         file,
@@ -1012,12 +1091,13 @@ async fn spool_transcript(
 
 async fn write_spooled_transcript<Writer>(
     writer: &mut Writer,
-    spool: &mut TranscriptSpool,
-) -> Result<(), ProcessConnectionError>
+    mut spool: TranscriptSpool,
+) -> Result<u64, ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    write_spooled_file(writer, &mut spool.file).await
+    write_spooled_file(writer, &mut spool.file).await?;
+    Ok(spool.cursor)
 }
 
 async fn write_spooled_file<Writer>(
@@ -1027,8 +1107,20 @@ async fn write_spooled_file<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    tokio::io::copy(file, writer).await?;
-    Ok(())
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(ProcessConnectionError::SpoolIo)?;
+        if read == 0 {
+            return Ok(());
+        }
+        writer
+            .write_all(&buffer[..read])
+            .await
+            .map_err(ProcessConnectionError::PeerIo)?;
+    }
 }
 
 async fn write_transcript_turn<Writer>(
@@ -1419,6 +1511,21 @@ where
     Ok(())
 }
 
+async fn write_spool_message(
+    writer: &mut tokio::fs::File,
+    request_id: RequestId,
+    message: ServerMessage,
+) -> Result<(), SnapshotSpoolError> {
+    let frame = ServerFrame::try_new(request_id, message)
+        .map_err(FrameEncodeError::Validation)
+        .map_err(SnapshotSpoolError::Encode)?;
+    let encoded = encode_server_line(&frame).map_err(SnapshotSpoolError::Encode)?;
+    writer
+        .write_all(&encoded)
+        .await
+        .map_err(SnapshotSpoolError::Io)
+}
+
 enum IncomingLine {
     Complete(Vec<u8>),
     Oversized(RequestId),
@@ -1788,7 +1895,8 @@ const fn wire_model_call_state(state: DispatchedModelCallState) -> ModelCallStat
 
 #[derive(Debug)]
 enum ProcessConnectionError {
-    Io(io::Error),
+    PeerIo(io::Error),
+    SpoolIo(io::Error),
     Encode(FrameEncodeError),
     EncodeInvariant,
     InboundFrameBudgetClosed,
@@ -1797,7 +1905,7 @@ enum ProcessConnectionError {
 
 impl From<io::Error> for ProcessConnectionError {
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        Self::PeerIo(error)
     }
 }
 
@@ -1810,7 +1918,8 @@ impl From<FrameEncodeError> for ProcessConnectionError {
 impl fmt::Display for ProcessConnectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Io(_) => "the local process connection failed",
+            Self::PeerIo(_) => "the local process peer I/O failed",
+            Self::SpoolIo(_) => "the local process snapshot spool I/O failed",
             Self::Encode(_) => "the local process connection could not encode a frame",
             Self::EncodeInvariant => {
                 "the local process connection could not represent an internal value"
@@ -1828,7 +1937,7 @@ impl fmt::Display for ProcessConnectionError {
 impl Error for ProcessConnectionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::PeerIo(error) | Self::SpoolIo(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
@@ -1842,6 +1951,8 @@ impl Error for ProcessConnectionError {
 pub enum ProcessRuntimeError {
     /// The guarded listener could not accept a connection.
     Accept(io::Error),
+    /// A completed snapshot spool could not be read for transmission.
+    SpoolIo(io::Error),
     /// A server frame could not satisfy the closed wire contract.
     Encode(FrameEncodeError),
     /// Runtime-owned values could not be represented by the closed wire contract.
@@ -1866,6 +1977,7 @@ impl fmt::Display for ProcessRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Accept(_) => "the local process listener failed",
+            Self::SpoolIo(_) => "the local process server could not read a snapshot spool",
             Self::Encode(_) => "the local process server could not encode a frame",
             Self::EncodeInvariant => {
                 "the local process server could not represent an internal value"
@@ -1893,6 +2005,7 @@ impl Error for ProcessRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Accept(error) => Some(error),
+            Self::SpoolIo(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
@@ -1926,12 +2039,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        IncomingLine, MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        ProcessConnectionError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, acquire_inbound_frame_permit,
+        INBOUND_READ_AHEAD_BYTES, IncomingLine, MAX_ACTIVE_CONNECTIONS,
+        MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
+        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SnapshotSpoolError,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_snapshot_reader_permit, admitted_user_content, inspect_connection_completion,
         read_frame_line, run_until_shutdown, snapshot_reader_capacity, wire_model_call_state,
-        wire_turn_state, write_content,
+        wire_turn_state, write_content, write_snapshot_spool_error,
     };
     use signalbox_persistence::{
         outbox::{
@@ -2043,6 +2158,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_reader_does_not_reserve_an_inbound_frame_slot() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            MAX_ACTIVE_CONNECTIONS * INBOUND_READ_AHEAD_BYTES,
+            1024 * 1024
+        );
+        let budget = Arc::new(Semaphore::new(1));
+        let (mut client, server) = duplex(8);
+        let mut reader = BufReader::new(server);
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let acquire = acquire_inbound_frame_permit_after_input(
+            &mut reader,
+            Arc::clone(&budget),
+            &mut shutdown_receiver,
+        );
+        tokio::pin!(acquire);
+
+        assert!(
+            timeout(Duration::from_millis(20), &mut acquire)
+                .await
+                .is_err()
+        );
+        assert_eq!(budget.available_permits(), 1);
+
+        client.write_all(b"{").await?;
+        let permit = timeout(Duration::from_secs(1), &mut acquire)
+            .await??
+            .ok_or_else(|| io::Error::other("ready input must acquire a frame slot"))?;
+        assert_eq!(budget.available_permits(), 0);
+        drop(permit);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn snapshot_reader_budget_reserves_two_pool_connections() -> Result<(), Box<dyn Error>> {
         let max_pool_connections = 10;
         let capacity = snapshot_reader_capacity(max_pool_connections)
@@ -2083,49 +2231,57 @@ mod tests {
     }
 
     #[test]
-    fn submitted_input_bound_keeps_reflected_frames_representable() -> Result<(), Box<dyn Error>> {
-        let content = InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
-        assert!(admitted_user_content(&content).is_ok());
+    fn process_submission_admits_the_exact_content_bound() {
+        let exact = InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
+        assert!(admitted_user_content(&exact).is_ok());
+    }
+
+    #[test]
+    fn process_submission_rejects_content_over_the_bound() {
         assert!(
             admitted_user_content(&InputContent::new(
                 "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1)
             ))
             .is_err()
         );
+    }
 
-        let request_id = RequestId::try_new(u64::MAX)?;
-        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX));
-        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1));
-        let accepted_input_id = CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2));
-        let frames = [
-            ServerFrame::try_new(
-                request_id,
-                ServerMessage::TranscriptTurn {
-                    turn_id,
+    #[test]
+    fn accepted_input_bound_keeps_snapshot_projection_representable() -> Result<(), Box<dyn Error>>
+    {
+        let frame = ServerFrame::try_new(
+            RequestId::try_new(u64::MAX)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX)),
+                acceptance_position: CanonicalU64::new(u64::MAX),
+                state: TurnState::Queued {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
+                    content: InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                },
+            },
+        )?;
+
+        assert!(encode_server_line(&frame)?.len() <= MAX_FRAME_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_input_bound_keeps_update_projection_representable() -> Result<(), Box<dyn Error>> {
+        let frame = ServerFrame::try_new(
+            RequestId::try_new(u64::MAX)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(u64::MAX),
+                session_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX)),
+                event: SessionEvent::InputAccepted {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
+                    turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2)),
                     acceptance_position: CanonicalU64::new(u64::MAX),
-                    state: TurnState::Queued {
-                        accepted_input_id,
-                        content: content.clone(),
-                    },
+                    content: InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
                 },
-            )?,
-            ServerFrame::try_new(
-                request_id,
-                ServerMessage::SessionEvent {
-                    cursor: CanonicalU64::new(u64::MAX),
-                    session_id,
-                    event: SessionEvent::InputAccepted {
-                        accepted_input_id,
-                        turn_id,
-                        acceptance_position: CanonicalU64::new(u64::MAX),
-                        content,
-                    },
-                },
-            )?,
-        ];
-        for frame in frames {
-            assert!(encode_server_line(&frame)?.len() <= MAX_FRAME_BYTES);
-        }
+            },
+        )?;
+
+        assert!(encode_server_line(&frame)?.len() <= MAX_FRAME_BYTES);
         Ok(())
     }
 
@@ -2137,6 +2293,51 @@ mod tests {
             )))))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn peer_io_failure_does_not_fail_the_runtime() {
+        assert!(
+            inspect_connection_completion(Some(Ok(Err(ProcessConnectionError::PeerIo(
+                io::Error::new(io::ErrorKind::BrokenPipe, "fixture peer closed")
+            )))))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn spool_read_failure_is_fatal_runtime_evidence() {
+        let result = inspect_connection_completion(Some(Ok(Err(ProcessConnectionError::SpoolIo(
+            io::Error::other("fixture spool read"),
+        )))));
+
+        assert!(matches!(result, Err(ProcessRuntimeError::SpoolIo(_))));
+    }
+
+    #[tokio::test]
+    async fn pre_response_spool_io_is_reported_as_unavailable() -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(9)?;
+        let (mut writer, mut reader) = duplex(1_024);
+
+        write_snapshot_spool_error(
+            &mut writer,
+            request_id,
+            SnapshotSpoolError::Io(io::Error::other("fixture spool write")),
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        let frame = decode_server_line(&encoded)?;
+        assert!(matches!(
+            frame.message(),
+            ServerMessage::Error {
+                code: ErrorCode::Unavailable,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[tokio::test]

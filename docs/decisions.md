@@ -10,6 +10,43 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
+
+**Context.** Reserving one of eight frame slots before waiting for input lets
+eight idle clients prevent every later connection from sending a request.
+
+**Decision.** Give each of the at most 128 accepted tasks an explicit 8 KiB
+reader buffer, wait until that buffer observes input, and only then reserve a
+frame slot before accumulating the rest of the frame. This admits at most 1 MiB
+of aggregate pre-slot read-ahead in addition to the existing 64 MiB admitted
+frame bound.
+
+**Rejected alternatives.** Charging idle clients makes the eight-slot budget an
+availability gate. Per-connection read deadlines invent timing semantics.
+Unbounded pre-slot reads merely move the memory defect.
+
+**Affects.** Process-runtime connection scheduling and inbound memory bounds;
+wire framing and the eight-frame concurrency limit do not change.
+
+## 2026-07-23 — Classify snapshot-spool I/O by response exposure
+
+**Context.** Temporary-file creation, write, flush, seek, and read failures were
+classified as peer I/O, so the runtime silently discarded server-side resource
+failures as ordinary client disconnects.
+
+**Decision.** Before any response bytes are exposed, translate spool I/O failure
+to sanitized `unavailable`. During transmission, classify sink failure as
+connection-local peer I/O and source-spool read failure as fatal runtime
+evidence. Close a follow snapshot's file immediately after its transmission.
+
+**Rejected alternatives.** Treating every I/O error as a disconnect hides server
+failure. Making every spool failure fatal denies a request a safe pre-exposure
+infrastructure response. Retaining the file through live follow wastes disk and
+a descriptor.
+
+**Affects.** Session-list and transcript spool errors, follow resource lifetime,
+runtime failure classification, and process-protocol tests.
+
 ## 2026-07-23 — Bound process snapshot construction resources
 
 **Context.** A valid deployment has no aggregate session-count or
@@ -34,6 +71,24 @@ same last slot.
 **Affects.** Process session-list and transcript snapshot construction,
 temporary disk use, process-runtime connection services, and application-pool
 capacity.
+
+## 2026-07-23 — Configure process-socket mode through its retained identity
+
+**Context.** Unix socket bind does not accept a filesystem mode. Temporarily
+changing `umask` is process-wide, so a module-local mutex cannot prevent
+unrelated threads from creating files under the temporary mask.
+
+**Decision.** Bind the socket unlistening inside its verified owner-private
+parent, retain the observed inode at `<socket-path>.identity`, set exact `0600`
+mode through that retained name, and revalidate both names and their modes
+before listening. Never change the process-wide creation mask.
+
+**Rejected alternatives.** A mutex coordinates only participating creators.
+Leaving a restrictive mask installed changes unrelated process behavior.
+Listening before permissioning admits clients before validation.
+
+**Affects.** Guarded local process-socket bind, its tests, and the process
+transport specification.
 
 ## 2026-07-23 — Pin compared process-socket identities
 
@@ -76,6 +131,62 @@ amplification.
 
 **Affects.** Process frame decoding, duplicate-member scanning,
 [process-protocol](spec/process-protocol.md), and INV-033 tests.
+
+## 2026-07-23 — Defer native-snapshot review findings to the rewire inventory
+
+**Context.** The native Swift client entered `clients/native/` as an as-is
+snapshot without history, and import review surfaced findings that live in code
+the protocol rewire replaces wholesale — the client, transport, and view-model
+layers plus their associated tooling and scripts. Fixing them piecemeal would
+polish code already scheduled for replacement while scattering ownership of the
+deferral.
+
+**Decision.** Review findings in rewire-replaced code are not fixed piecemeal in
+the snapshot. They are inventoried in the "Known issues (deferred to the
+protocol rewire)" section of `clients/native/README.md`, and the rewire
+milestone takes them up in that order. Until the rewire lands, the snapshot's
+documentation is descriptive inventory, not normative claims; when it lands, the
+native client's documentation joins the normative surface, with spec pages,
+decision entries, and tests for the choices made then. Accepted cost: known
+security-relevant legacy behaviors — the API key carried as a WebSocket URL
+query parameter and plain-HTTP bearer transport — remain in the snapshot until
+the rewire. The snapshot is inert: it speaks the legacy llm-hub protocol and
+cannot talk to `hubd`.
+
+**Rejected alternatives.** Fixing findings in place invests in code the rewire
+deletes and implies the snapshot is a maintained surface. Linking each
+inventoried finding to its own authoritative source would fabricate retroactive
+owners for legacy behavior this entry already governs.
+
+**Affects.** `clients/native/README.md` (known-issues inventory), the rewire
+milestone's work order, review handling for `clients/native/` findings.
+
+## 2026-07-23 — Import the native Swift client as a snapshot under clients/native
+
+**Context.** The owner's private monorepo holds a working SwiftUI client for the
+legacy llm-hub protocol, with deterministic mock-hub flows, capture scripts, and
+golden screenshots. Signalbox needs that client and its agent-visible UI
+iteration loop, but importing monorepo history would import identity and require
+auditing every commit.
+
+**Decision.** Copy the tree at the monorepo's current main state, with the
+stashed screenshot refresh applied, into `clients/native/` as a snapshot without
+git history; the tree was audited clean and scrubbed of private endpoints. Bazel
+build files are excluded — the xcodeproj and shell scripts stand alone, and a
+second build system in a Cargo repo is unjustified until polyglot builds hurt.
+The Tart VM scripts are retained inert: GitHub-hosted macOS runners lack nested
+virtualization, so Tart CI requires self-hosted Apple Silicon or a managed Tart
+service and is deferred with the rest of Swift CI. Screenshot goldens are
+included at roughly 40 MB because the agent-visible UI iteration loop is the
+point of the import. Renaming from LLMHubNative and rewiring to the Signalbox
+process protocol are deferred to the rewire milestone.
+
+**Rejected alternatives.** Cherry-picking history imports identity and requires
+auditing 107 commits. Rewriting with the client as inspiration discards roughly
+55 percent backend-agnostic SwiftUI and the screenshot infrastructure that works
+today.
+
+**Affects.** `clients/native/` (new), `docs/decisions.md`.
 
 ## 2026-07-23 — Expose ambiguous commits as a stable process error
 
