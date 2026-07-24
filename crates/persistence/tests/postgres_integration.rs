@@ -1786,6 +1786,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
@@ -1794,7 +1795,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
                 ),
-                |_| panic!("the fixture has no pending steering"),
+                &mut recovery_ids,
             )
             .await?,
         StartupScanSessionOutcome::RecoveredToolAttempt(outcome)
@@ -1872,13 +1873,14 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     Ok(())
 }
 
-/// S10 / S11 / INV-019 / INV-027: denial never dispatches, schema failure is
-/// durable result evidence, and a lost external-effect attempt parks on exact
-/// recovery authority after restart.
+/// S05 / S10 / S11 / INV-006 / INV-019 / INV-027: denial never dispatches,
+/// schema failure is durable result evidence, external-effect crash loss parks
+/// on exact recovery authority, and effect-free loss closes every request
+/// before the turn fails.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are_durable()
--> Result<(), Box<dyn Error>> {
+async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
 
@@ -2121,6 +2123,7 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
             SubmitInputAppliedResult::PendingSteering(_)
         ))
     ));
+    let mut crash_recovery_ids = FixedStartupScanIds::new([], []);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
@@ -2129,7 +2132,7 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(crash_seed + 26)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(crash_seed + 27)),
                 ),
-                |_| panic!("the crash fixture has no pending steering"),
+                &mut crash_recovery_ids,
             )
             .await?,
         StartupScanSessionOutcome::RecoveredToolAttempt(outcome)
@@ -2231,6 +2234,15 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
         ))
     ));
     let recovered_effect_free_turn = TurnId::from_uuid(Uuid::from_u128(effect_free_seed + 30));
+    let mut effect_free_recovery_ids = FixedStartupScanIds::new(
+        [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+            effect_free_seed + 31,
+        ))],
+        [ContextFrontierId::from_uuid(Uuid::from_u128(
+            effect_free_seed + 32,
+        ))],
+    )
+    .with_reclassified_turns([recovered_effect_free_turn]);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
@@ -2239,10 +2251,7 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(effect_free_seed + 26)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(effect_free_seed + 27)),
                 ),
-                |accepted_input| {
-                    assert_eq!(accepted_input, pending_effect_free_input);
-                    recovered_effect_free_turn
-                },
+                &mut effect_free_recovery_ids,
             )
             .await?,
         StartupScanSessionOutcome::RecoveredToolAttempt(outcome)
@@ -2272,6 +2281,28 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
             "reclassified_as_turn_origin".to_owned(),
             recovered_effect_free_turn.into_uuid(),
         )
+    );
+    let terminal_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT array_agg(entry.payload_kind ORDER BY member.member_position)
+           FROM context_frontier_member AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE member.owning_session_id = $1
+            AND member.context_frontier_id = $2",
+    )
+    .bind(effect_free_fixture.session.into_uuid())
+    .bind(Uuid::from_u128(effect_free_seed + 27))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        terminal_kinds,
+        [
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_closed_by_turn_end",
+            "turn_failed",
+        ]
     );
 
     pool.close().await;
@@ -5298,6 +5329,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
         ))
     ));
 
+    let mut stale_recovery_ids = FixedStartupScanIds::new([], []);
     assert_eq!(
         PostgresStartupScanRepository::new(restarted_pool.clone())
             .recover(
@@ -5306,7 +5338,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6301)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0x6302)),
                 ),
-                |_| panic!("a stale terminal inventory entry needs no successor identity"),
+                &mut stale_recovery_ids,
             )
             .await?,
         StartupScanSessionOutcome::NoActiveTurn
@@ -12143,6 +12175,7 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
             "queued".into(),
         )
     );
+    let mut completed_recovery_ids = FixedStartupScanIds::new([], []);
     assert_eq!(
         PostgresStartupScanRepository::new(restarted_pool.clone())
             .recover(
@@ -12151,7 +12184,7 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xec3)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xfc3)),
                 ),
-                |_| panic!("the completed recovery has no pending steering"),
+                &mut completed_recovery_ids,
             )
             .await?,
         StartupScanSessionOutcome::NoActiveTurn
@@ -12593,6 +12626,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     .await?;
     assert_eq!(remaining_queue, ("queued".to_owned(), 1));
 
+    let mut interrupted_recovery_ids = FixedStartupScanIds::new([], []);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
@@ -12601,7 +12635,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd47)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xe47)),
                 ),
-                |_| panic!("the interrupt successor has no pending steering"),
+                &mut interrupted_recovery_ids,
             )
             .await?,
         StartupScanSessionOutcome::Recovered { .. }

@@ -10,7 +10,8 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, ModelCallCredentialReference,
     OperatorFailureClass, PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
-    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolExecutionTransaction,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction,
 };
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
@@ -542,7 +543,7 @@ impl PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
+        identities: ToolCrashClosureIdentities,
         next_turn: NextTurn,
     ) -> Result<signalbox_domain::ToolAttemptCrashOutcome, ToolLoopRepositoryError>
     where
@@ -551,7 +552,7 @@ impl PostgresToolLoopRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
+            load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
             let current = load_current_attempt(&mut transaction, attempt)
@@ -571,12 +572,30 @@ impl PostgresToolLoopRepository {
                     persist_tool_recovery_wait(&mut transaction, ended, true).await?;
                 }
                 signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(_) => {
+                    let closed_batch =
+                        load_active_batch_from_connection(&mut transaction, session, turn)
+                            .await?
+                            .ok_or(ToolLoopCorruption::Missing("crash-closed tool batch"))?;
+                    let projection = closed_batch
+                        .prepare_cancellation_projection(
+                            identities.result_entries().to_vec(),
+                            identities.result_frontier(),
+                        )
+                        .map_err(|_| {
+                            ToolLoopRepositoryError::InvalidTransition(
+                                "known tool crash could not close its request batch",
+                            )
+                        })?;
+                    persist_result_entries(&mut transaction, &projection).await?;
+                    insert_snapshot(&mut transaction, projection.snapshot())
+                        .await
+                        .map_err(|_| ToolLoopCorruption::Inconsistent("crash closure frontier"))?;
                     crate::model_execution::fail_tool_crash_in_transaction(
                         &mut transaction,
                         session,
                         turn,
-                        batch.yielded_snapshot(),
-                        failure_identities,
+                        projection.snapshot(),
+                        identities.failure().clone(),
                         next_turn,
                     )
                     .await
@@ -846,19 +865,14 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
+        identities: ToolCrashClosureIdentities,
         next_turn: NextTurn,
     ) -> Result<signalbox_domain::ToolAttemptCrashOutcome, Self::Error>
     where
         NextTurn: FnMut(signalbox_domain::AcceptedInputId) -> TurnId + Send,
     {
         PostgresToolLoopRepository::classify_crash_loss_and_close(
-            self,
-            session,
-            turn,
-            attempt,
-            failure_identities,
-            next_turn,
+            self, session, turn, attempt, identities, next_turn,
         )
         .await
     }
