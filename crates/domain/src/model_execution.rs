@@ -3337,17 +3337,21 @@ fn reconstitute(
             | (
                 CurrentTurnAttemptState::Prepared,
                 Some(CurrentModelCallState::Prepared)
-            )
-            | (
-                CurrentTurnAttemptState::Running,
-                Some(CurrentModelCallState::InFlight)
-            )
-            | (
-                CurrentTurnAttemptState::StopRequested {
-                    causes: TurnAttemptStopCauses::CancellationOnly { .. }
-                },
-                Some(CurrentModelCallState::CancellationRequested)
-            )
+            ) if !running_tool_round
+    ) || matches!(
+        (
+            current_attempt.state(),
+            current_call.as_ref().map(CurrentModelCall::state)
+        ),
+        (
+            CurrentTurnAttemptState::Running,
+            Some(CurrentModelCallState::InFlight)
+        ) | (
+            CurrentTurnAttemptState::StopRequested {
+                causes: TurnAttemptStopCauses::CancellationOnly { .. }
+            },
+            Some(CurrentModelCallState::CancellationRequested)
+        )
     ) || matches!(
         (
             current_attempt.state(),

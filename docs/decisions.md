@@ -990,7 +990,9 @@ provider boundaries.
 **Decision.** Add the existing focused `serde_json` dependency to the domain
 crate and use its value parser and compact serializer around an explicit
 `BTreeMap` recursion. Keep serde types private: the public API accepts and
-returns checked strings plus a domain-owned representation tag.
+returns checked strings plus a domain-owned representation tag. The persistence
+process projection reuses the same focused serializer to expose bounded typed
+tool-failure JSON without copying storage records onto the wire.
 
 **Rejected alternatives.** Preserve all JSON text verbatim: semantically equal
 requests would lack one normalized representation. Reject malformed text at the
@@ -998,9 +1000,10 @@ provider bridge: that would lose the durable request and its model-visible typed
 failure. Write a repository-local JSON parser: larger ownership and audit cost
 without a domain benefit.
 
-**Affects.** `crates/domain/Cargo.toml`, normalized tool-argument construction,
-and its lockfile package dependency list; no storage, wire, or framework type
-crosses into the domain API.
+**Affects.** `crates/domain/Cargo.toml`, `crates/persistence/Cargo.toml`,
+normalized tool-argument construction, process transcript projection, and the
+lockfile dependency list; no storage, wire, or framework type crosses into the
+domain API.
 
 ## 2026-07-23 — Complete tool rounds inside one hub-owned turn
 
