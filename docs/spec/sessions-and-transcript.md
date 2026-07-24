@@ -345,9 +345,10 @@ Imported semantic entries have a different commit boundary. Imported-frontier
 session creation appends the complete selected prefix before any native turn
 exists, together with imported ancestry and the exact seed frontier. They never
 require or create accepted-input, turn, attempt, call, or native tool records.
-The first native turn's eligibility transaction extends that immutable seed
-frontier with its ordinary `OriginAcceptedInput`; every later native frontier
-follows the existing predecessor-prefix rules (INV-039).
+The first native turn's eligibility transaction creates a new successor frontier
+whose predecessor is that immutable seed frontier and whose appended member is
+the ordinary `OriginAcceptedInput`; every later native frontier follows the
+existing predecessor-prefix rules (INV-039).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
 before a later call is prepared, the transaction appends one

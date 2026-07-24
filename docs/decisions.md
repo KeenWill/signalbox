@@ -24,7 +24,9 @@ Record the generated frontier in a separate immutable, one-to-one
 `ImportedSessionSeed` owned by the created session. The creation transaction
 stores both facts atomically. Reconstitution checks the seed against the
 session's imported ancestry and exact imported-prefix membership; scheduling
-uses the stored identity and never remints an equal-content frontier.
+uses the stored identity and never remints an equal-content frontier; see
+[sessions-and-transcript](spec/sessions-and-transcript.md) and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
 
 **Rejected alternatives.** Embedding the local frontier identity in ancestry
 would mix source provenance with Signalbox's materialization artifact. Deriving
@@ -48,7 +50,8 @@ over a fixed domain tag, its exact raw hash, and a closed, length-framed
 encoding of its complete source-neutral structured value. The domain computes
 the digest at conversion, persistence stores it independently from the
 normalized-value encoding, and domain reconstitution derives and compares it
-before trusting the normalized projection.
+before trusting the normalized projection; see
+[conversation-import](spec/conversation-import.md).
 
 **Rejected alternatives.** Re-parsing provider JSON in the domain would reverse
 the edge-owned decoder boundary. Adapter-only checking would leave the public
@@ -103,8 +106,11 @@ frontier and leave the imported snapshot unchanged. Imported semantic entries
 remain provenance-distinct from native evidence. Initial rendering emits exact
 imported user/assistant text and conservatively omits imported tool, result,
 thinking, and media entries without removing them from the frontier. Claude Code
-JSONL version 1 admits at most 128 nested array or object containers, bounding
-its recursive source-neutral JSON decoder.
+JSONL version 1 admits a maximum array/object nesting depth of 128. The required
+top-level record object counts as depth 1, depth 128 is admitted, and attempting
+to enter a container at depth 129 rejects the complete source, as specified by
+[conversation-import](spec/conversation-import.md). This bounds its recursive
+source-neutral JSON decoder.
 
 **Rejected alternatives.** Replaying imports as native turns or copying them
 into native accepted-input/model-call variants would fabricate execution
