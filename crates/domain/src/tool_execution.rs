@@ -223,11 +223,25 @@ impl ToolBatch {
     /// batch with one exact ambiguous physical attempt.
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery> {
         match self.phase {
-            ToolBatchPhase::AwaitingRecovery { attempt } => Some(AwaitingToolRecovery {
-                session: self.session,
-                turn: self.turn,
-                attempt,
-            }),
+            ToolBatchPhase::AwaitingRecovery { attempt } => {
+                self.attempts
+                    .values()
+                    .find_map(|candidate| match candidate {
+                        ReconstitutedToolAttempt::Ended(ended)
+                            if ended.attempt() == attempt
+                                && ended.end() == &ToolAttemptEnd::Ambiguous =>
+                        {
+                            Some(AwaitingToolRecovery {
+                                session: self.session,
+                                turn: self.turn,
+                                issuing_attempt: ended.issuing_attempt(),
+                                attempt,
+                            })
+                        }
+                        ReconstitutedToolAttempt::Current(_)
+                        | ReconstitutedToolAttempt::Ended(_) => None,
+                    })
+            }
             ToolBatchPhase::AwaitingApproval { .. } | ToolBatchPhase::Executing { .. } => None,
         }
     }
@@ -361,6 +375,32 @@ impl ToolBatch {
         }) {
             return Err(ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::LiveAttemptPresent,
+            });
+        }
+        if self.attempts.values().any(|attempt| {
+            matches!(
+                attempt,
+                ReconstitutedToolAttempt::Ended(ended)
+                    if matches!(
+                        ended.end(),
+                        ToolAttemptEnd::KnownFailed { error }
+                            if error.kind() == ToolExecutionErrorKind::CrashLost
+                    )
+            )
+        }) {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::TurnLevelFailure,
+            });
+        }
+        if self.attempts.values().any(|candidate| {
+            let candidate_id = match candidate {
+                ReconstitutedToolAttempt::Current(current) => current.attempt(),
+                ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
+            };
+            candidate_id == attempt
+        }) {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptIdentityReuse,
             });
         }
         let next = self.requests.iter().find(|request| {
@@ -500,6 +540,7 @@ impl AwaitingToolApproval {
 pub struct AwaitingToolRecovery {
     session: SessionId,
     turn: TurnId,
+    issuing_attempt: TurnAttemptId,
     attempt: ToolAttemptId,
 }
 
@@ -512,6 +553,11 @@ impl AwaitingToolRecovery {
     /// Returns the owning logical turn.
     pub const fn turn(&self) -> TurnId {
         self.turn
+    }
+
+    /// Returns the turn attempt that authorized the ambiguous tool attempt.
+    pub const fn issuing_attempt(&self) -> TurnAttemptId {
+        self.issuing_attempt
     }
 
     /// Returns the exact ambiguous physical attempt.
@@ -627,6 +673,10 @@ pub enum ToolBatchExecutionFailure {
     LiveAttemptPresent,
     /// Every approved request has terminal attempt evidence.
     ReadyForContinuation,
+    /// A prior crash-lost attempt requires turn-level failure.
+    TurnLevelFailure,
+    /// The proposed physical-attempt identity already belongs to the batch.
+    AttemptIdentityReuse,
     /// Approval evidence did not authorize the selected request.
     ApprovalMismatch,
 }
@@ -764,6 +814,17 @@ fn reconstitute_batch(
     let mut live_attempt_count = 0usize;
     for attempt in &input.attempts {
         let (attempt_id, request, session, turn, issuing_attempt, is_live) = attempt_facts(attempt);
+        if matches!(
+            attempt,
+            ReconstitutedToolAttempt::Ended(ended)
+                if ended.end() == &ToolAttemptEnd::Ambiguous
+                    && ended.effect_class() != ToolEffectClass::ExternalEffect
+        ) {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::AttemptAuthorizationMismatch,
+            ));
+        }
         if !attempt_ids.insert(attempt_id)
             || !request_ids.contains(&request)
             || attempts.insert(request, attempt.clone()).is_some()
@@ -803,16 +864,33 @@ fn reconstitute_batch(
         ));
     }
     let mut missing_approved_attempt = false;
+    let mut terminal_blocker_seen = false;
     for request in &requests {
         match approvals.get(&request.id()) {
             Some(approval) if approval.is_approved() => {
-                if attempts.contains_key(&request.id()) {
+                if let Some(attempt) = attempts.get(&request.id()) {
                     if missing_approved_attempt {
                         return Err(fail(
                             input,
                             ToolBatchReconstitutionFailure::AttemptOrderMismatch,
                         ));
                     }
+                    if terminal_blocker_seen {
+                        return Err(fail(
+                            input,
+                            ToolBatchReconstitutionFailure::AttemptOrderMismatch,
+                        ));
+                    }
+                    terminal_blocker_seen = matches!(
+                        attempt,
+                        ReconstitutedToolAttempt::Ended(ended)
+                            if ended.end() == &ToolAttemptEnd::Ambiguous
+                                || matches!(
+                                    ended.end(),
+                                    ToolAttemptEnd::KnownFailed { error }
+                                        if error.kind() == ToolExecutionErrorKind::CrashLost
+                                )
+                    );
                 } else {
                     missing_approved_attempt = true;
                 }
@@ -834,7 +912,10 @@ fn reconstitute_batch(
     let ambiguous_attempts = attempts
         .values()
         .filter_map(|attempt| match attempt {
-            ReconstitutedToolAttempt::Ended(ended) if ended.end() == &ToolAttemptEnd::Ambiguous => {
+            ReconstitutedToolAttempt::Ended(ended)
+                if ended.end() == &ToolAttemptEnd::Ambiguous
+                    && ended.effect_class() == ToolEffectClass::ExternalEffect =>
+            {
                 Some(ended.attempt())
             }
             ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => None,
@@ -1129,7 +1210,126 @@ mod tests {
 
         assert_eq!(wait.session(), session_id(1));
         assert_eq!(wait.turn(), turn_id(2));
+        assert_eq!(wait.issuing_attempt(), turn_attempt_id(12));
         assert_eq!(wait.attempt(), tool_attempt_id(13));
+    }
+
+    /// S06 / INV-025 / INV-026: impossible effect-free ambiguity cannot
+    /// manufacture recovery-wait authority during checked reconstitution.
+    #[test]
+    fn s06_inv025_inv026_effect_free_ambiguous_history_fails_closed() {
+        let only = request(10, 0);
+        let attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(13),
+            only.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
+        )
+        .reconstitute();
+        let error = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![only.clone()],
+            vec![approval(only.id(), ToolApprovalDecision::Approve)],
+            vec![attempt],
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
+                attempt: tool_attempt_id(13),
+            },
+        )
+        .reconstitute()
+        .expect_err("effect-free ambiguity is not trusted recovery evidence");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::AttemptAuthorizationMismatch
+        );
+    }
+
+    /// S05 / INV-019 / INV-026: crash-lost evidence is a turn-level blocker,
+    /// so no later approved request can be prepared or already attempted.
+    #[test]
+    fn s05_inv019_inv026_crash_loss_stops_serial_batch_execution() {
+        let first = request(10, 0);
+        let second = request(11, 1);
+        let crash_lost = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(13),
+            first.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed {
+                error: crate::ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
+            }),
+        )
+        .reconstitute();
+        let approvals = vec![
+            approval(first.id(), ToolApprovalDecision::Approve),
+            approval(second.id(), ToolApprovalDecision::Approve),
+        ];
+        let batch = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first.clone(), second.clone()],
+            approvals.clone(),
+            vec![crash_lost.clone()],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(12),
+            },
+        )
+        .reconstitute()
+        .expect("crash-loss history remains inspectable for terminalization");
+        assert_eq!(
+            batch
+                .prepare_next_attempt(tool_attempt_id(14), ToolEffectClass::ExternalEffect)
+                .expect_err("no later tool may run after crash loss")
+                .failure(),
+            ToolBatchExecutionFailure::TurnLevelFailure
+        );
+
+        let later = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(14),
+            second.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed {
+                error: crate::ToolExecutionError::new(
+                    ToolExecutionErrorKind::ExecutionFailed,
+                    None,
+                ),
+            }),
+        )
+        .reconstitute();
+        let error = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first, second],
+            approvals,
+            vec![crash_lost, later],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(12),
+            },
+        )
+        .reconstitute()
+        .expect_err("stored execution after crash loss is impossible history");
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::AttemptOrderMismatch
+        );
     }
 
     /// S11 / INV-005 / INV-027: result projection uses only attempt/request

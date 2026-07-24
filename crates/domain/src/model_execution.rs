@@ -2864,6 +2864,7 @@ fn reconstitute(
     let consumed_entries = input
         .frontier_entries
         .iter()
+        .skip(input.starting_snapshot.entry_count())
         .filter(|entry| {
             matches!(
                 entry.payload(),
@@ -2929,6 +2930,17 @@ fn reconstitute(
             ));
         }
     };
+    if let Some(pinned) = pinned_target
+        && input
+            .targets
+            .resolve(*configuration.effective().model())
+            .is_ok_and(|resolution| pinned.target() != resolution.target())
+    {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::CallTargetMismatch,
+        ));
+    }
     let current_call = if let Some(call) = input.calls.first() {
         if call.turn() != turn
             || call.attempt() != current_attempt.id()
@@ -4153,6 +4165,126 @@ mod tests {
             ResolvedProviderTarget::naming(provider_model_identity(8))
         );
         assert!(prepared.steering_snapshot().is_none());
+    }
+
+    /// S11 / INV-014: a call-free continuation pin is checked against the
+    /// immutable target catalog before it can authorize the next provider call.
+    #[test]
+    fn s11_inv014_continuation_rejects_crosswired_turn_pin() {
+        let initial = active_execution();
+        let request = tool_request_id(30);
+        let assistant_tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(31),
+            initial.session,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(32),
+                request,
+            },
+        );
+        let denied = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(33),
+            initial.session,
+            SemanticTranscriptEntryPayload::ToolDenied { request },
+        );
+        let continuation = initial
+            .starting_snapshot
+            .derive_appending_candidate(
+                context_frontier_id(34),
+                vec![assistant_tool_use.reference(), denied.reference()],
+            )
+            .expect("tool entries preserve the starting prefix");
+        let input = ModelCallExecutionReconstitutionInput::new(
+            initial
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(35)),
+                }),
+            initial.targets,
+            initial.starting_snapshot,
+            vec![
+                initial.frontier_entries[0].clone(),
+                assistant_tool_use,
+                denied,
+            ],
+            initial
+                .origin_contents
+                .into_iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(accepted_input, content)
+                })
+                .collect(),
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                initial.turn,
+                ResolvedProviderTarget::naming(provider_model_identity(99)),
+            )),
+            Vec::new(),
+        )
+        .with_continuation_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+            continuation.frontier().owning_session(),
+            continuation.frontier().snapshot(),
+            continuation.ordered_entries().collect(),
+        ));
+
+        let error = input
+            .reconstitute()
+            .expect_err("the frozen selection rejects a cross-wired continuation pin");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::CallTargetMismatch
+        );
+    }
+
+    /// S08 / INV-005 / INV-016: steering correlation considers only the
+    /// current turn's suffix and ignores steering retained in its start.
+    #[test]
+    fn s08_inv005_inv016_reconstitution_ignores_historical_steering() {
+        let execution = active_execution();
+        let historical_input = accepted_input_id(20);
+        let historical = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(21),
+            execution.session,
+            SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: historical_input,
+                source_turn: turn_id(22),
+            },
+        );
+        let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            execution.session,
+            context_frontier_id(23),
+            vec![
+                execution.frontier_entries[0].reference(),
+                historical.reference(),
+            ],
+        )
+        .expect("historical steering is valid starting history");
+        let start = AcceptedInputTurnStart::from_validated_eligibility(
+            crate::AcceptedInputStartingLineage::FirstInSession,
+            snapshot.frontier(),
+        );
+        let mut origin_contents = execution
+            .origin_contents
+            .into_iter()
+            .map(|(accepted_input, content)| {
+                ModelCallOriginContent::from_validated_parts(accepted_input, content)
+            })
+            .collect::<Vec<_>>();
+        origin_contents.push(ModelCallOriginContent::from_validated_parts(
+            historical_input,
+            UserContent::try_text(String::from("historical steering")).expect("valid text"),
+        ));
+        let input = ModelCallExecutionReconstitutionInput::new(
+            execution.active_turn.with_start_for_test(start),
+            execution.targets,
+            snapshot,
+            vec![execution.frontier_entries[0].clone(), historical],
+            origin_contents,
+            None,
+            Vec::new(),
+        );
+
+        input
+            .reconstitute()
+            .expect("historical steering is not current-turn consumed steering");
     }
 
     /// S02 / INV-005 / INV-015 / INV-036: a call that names a distinct

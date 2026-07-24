@@ -2370,6 +2370,7 @@ pub enum ToolAttemptTransitionFailure {
     InvalidState,
     CorrelationMismatch,
     InvalidPreflightError,
+    InvalidObservationError,
     EffectFreeCannotBeAmbiguous,
 }
 pub struct ToolAttemptTransitionError { /* private */ }
@@ -2471,7 +2472,7 @@ pub struct AwaitingToolApproval { /* private */ }
 // accessors: session(), turn(), request()
 pub struct AwaitingToolRecovery { /* private */ }
 // sealed: ToolBatch::awaiting_recovery
-// accessors: session(), turn(), attempt()
+// accessors: session(), turn(), issuing_attempt(), attempt()
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -2487,6 +2488,8 @@ pub enum ToolBatchExecutionFailure {
     NotExecuting,
     LiveAttemptPresent,
     ReadyForContinuation,
+    TurnLevelFailure,
+    AttemptIdentityReuse,
     ApprovalMismatch,
 }
 pub struct ToolBatchExecutionError { /* private */ }

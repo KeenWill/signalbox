@@ -490,7 +490,21 @@ impl CurrentToolAttempt {
         }
         let end = match observation.observation {
             ToolAttemptObservation::Completed { result } => ToolAttemptEnd::Completed { result },
-            ToolAttemptObservation::KnownFailed { error } => ToolAttemptEnd::KnownFailed { error },
+            ToolAttemptObservation::KnownFailed { error }
+                if matches!(
+                    error.kind(),
+                    ToolExecutionErrorKind::ExecutionFailed
+                        | ToolExecutionErrorKind::ResultTooLarge
+                ) =>
+            {
+                ToolAttemptEnd::KnownFailed { error }
+            }
+            ToolAttemptObservation::KnownFailed { .. } => {
+                return Err(ToolAttemptTransitionError {
+                    attempt: self,
+                    failure: ToolAttemptTransitionFailure::InvalidObservationError,
+                });
+            }
             ToolAttemptObservation::Ambiguous
                 if self.effect_class == ToolEffectClass::ExternalEffect =>
             {
@@ -646,6 +660,8 @@ pub enum ToolAttemptTransitionFailure {
     CorrelationMismatch,
     /// A preflight path attempted to record a non-preflight error kind.
     InvalidPreflightError,
+    /// An executor observation claimed a preflight- or restart-only error kind.
+    InvalidObservationError,
     /// Effect-free work cannot produce external-effect ambiguity.
     EffectFreeCannotBeAmbiguous,
 }
@@ -875,6 +891,32 @@ mod tests {
                 result: ToolResultContent::Text(actual),
             } if actual == &text
         ));
+    }
+
+    /// S15 / INV-024: executor observations cannot claim error kinds reserved
+    /// for preflight validation or restart classification.
+    #[test]
+    fn s15_inv024_executor_cannot_claim_preflight_or_crash_errors() {
+        for kind in [
+            ToolExecutionErrorKind::UnknownTool,
+            ToolExecutionErrorKind::InvalidArguments,
+            ToolExecutionErrorKind::CrashLost,
+        ] {
+            let authorized = prepared(ToolEffectClass::ExternalEffect)
+                .authorize()
+                .expect("prepared work can be authorized");
+            let (in_flight, correlation) = authorized.into_parts();
+            let error = in_flight
+                .apply_terminal_observation(correlation.bind(ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(kind, None),
+                }))
+                .expect_err("the executor cannot manufacture reserved evidence");
+
+            assert_eq!(
+                error.failure(),
+                ToolAttemptTransitionFailure::InvalidObservationError
+            );
+        }
     }
 
     /// S05 / INV-024 / INV-026: crash loss of effect-free issued work is a

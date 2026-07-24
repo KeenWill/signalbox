@@ -1100,6 +1100,22 @@ mod tests {
         );
     }
 
+    /// S10 / INV-005: canonicalization preserves JSON numeric values outside
+    /// the native integer and floating-point ranges without rounding.
+    #[test]
+    fn s10_inv005_arguments_preserve_arbitrary_precision_numbers() {
+        let normalized = NormalizedToolArguments::try_from_provider_text(String::from(
+            r#"{"wide":18446744073709551617,"exponent":1e400}"#,
+        ))
+        .expect("valid JSON numbers remain decodable");
+
+        assert_eq!(normalized.kind(), ToolArgumentsKind::Json);
+        assert_eq!(
+            normalized.as_str(),
+            r#"{"exponent":1e+400,"wide":18446744073709551617}"#
+        );
+    }
+
     /// S10 / INV-020: only the owner-command preparation path can construct
     /// owner-sourced approval.
     #[test]

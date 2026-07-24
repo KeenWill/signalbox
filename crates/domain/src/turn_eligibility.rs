@@ -3135,6 +3135,7 @@ fn reconstitute_inner(
                         };
                         if wait.session() != session
                             || wait.turn() != turn
+                            || wait.issuing_attempt() != current_attempt
                             || !terminal_attempt_end_matches(
                                 attempt_end,
                                 session,
@@ -8842,6 +8843,34 @@ mod tests {
         let wait = batch
             .awaiting_recovery()
             .expect("the validated batch exposes opaque wait evidence");
+        let cross_wired_record = active.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::Active {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                phase: ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
+                    active.turn(),
+                    turn_attempt_id(61),
+                    wait,
+                ),
+            },
+        );
+        let error = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![cross_wired_record],
+            vec![active.entry(&session, origin_entry)],
+            vec![starting_frontier.snapshot(&session, &[origin_entry])],
+            Some(active.active_tail(&session)),
+        )
+        .reconstitute()
+        .expect_err("the wait cannot be attached to another turn attempt");
+        assert!(matches!(
+            error.failure(),
+            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                turn,
+                ..
+            } if *turn == active.turn()
+        ));
         let active_record = active.record(
             &session,
             AcceptedInputTurnSchedulingRecordState::Active {
