@@ -35,6 +35,15 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     MIGRATOR.run(pool).await
 }
 
+fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => {
+            matches!(database.code().as_deref(), Some("08007" | "40003"))
+        }
+        _ => true,
+    }
+}
+
 /// Opens the shared production pool with certificate and hostname checks.
 ///
 /// Pool sizing remains at SQLx's baseline until an operational slice selects
@@ -57,9 +66,13 @@ pub fn local_test_connection_options(database_url: &str) -> Result<PgConnectOpti
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use sqlx::postgres::PgSslMode;
 
-    use super::{local_test_connection_options, production_connection_options};
+    use super::{
+        commit_failure_is_ambiguous, local_test_connection_options, production_connection_options,
+    };
 
     const DATABASE_URL: &str = "postgres://signalbox:secret@database.example/signalbox";
 
@@ -75,5 +88,15 @@ mod tests {
         let options = local_test_connection_options(DATABASE_URL).expect("valid database URL");
 
         assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
+    }
+
+    #[test]
+    fn lost_commit_response_is_ambiguous() {
+        let error = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "commit response was lost",
+        ));
+
+        assert!(commit_failure_is_ambiguous(&error));
     }
 }

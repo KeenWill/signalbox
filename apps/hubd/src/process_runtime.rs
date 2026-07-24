@@ -406,7 +406,20 @@ where
             .await
         }
         Err(CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_))) => {
-            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(CreateSessionError::Transaction(CreateSessionRepositoryError::CommitAmbiguous(_))) => {
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
         }
         Err(
             CreateSessionError::Preparation(_)
@@ -603,24 +616,49 @@ where
             .await
         }
         Err(SubmitInputRepositoryError::Database(_)) => {
-            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
         }
-        Err(SubmitInputRepositoryError::ModelExecution(error))
-            if matches!(
-                error.as_ref(),
-                signalbox_persistence::model_execution::ModelCallRepositoryError::Database { .. }
-            ) =>
-        {
-            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+        Err(SubmitInputRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
         }
+        Err(SubmitInputRepositoryError::ModelExecution(error)) => match error.as_ref() {
+            signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
+                commit_ambiguous,
+                ..
+            } => {
+                write_error(
+                    writer,
+                    request_id,
+                    ProtocolError::mutation_unavailable(*commit_ambiguous),
+                )
+                .await
+            }
+            _ => {
+                write_error(
+                    writer,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::Internal),
+                )
+                .await
+            }
+        },
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_),
         )))
         | Err(
             SubmitInputRepositoryError::DifferentCommandKind { .. }
             | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
-            | SubmitInputRepositoryError::Corruption(_)
-            | SubmitInputRepositoryError::ModelExecution(_),
+            | SubmitInputRepositoryError::Corruption(_),
         ) => {
             write_error(
                 writer,
@@ -1362,17 +1400,20 @@ impl ProtocolError {
                     "the follow stream fell behind; reconnect for a fresh snapshot"
                 }
                 ErrorCode::Unavailable => "the requested operation is unavailable",
+                ErrorCode::CommitAmbiguous => {
+                    "the mutation commit is ambiguous; retry the exact command"
+                }
                 ErrorCode::Internal => "the request failed an internal integrity check",
             },
             detail: ErrorDetail::none(),
         }
     }
 
-    const fn mutation_unavailable() -> Self {
-        Self {
-            code: ErrorCode::Unavailable,
-            message: "the mutation outcome may be ambiguous; retry the exact command",
-            detail: ErrorDetail::none(),
+    const fn mutation_unavailable(commit_ambiguous: bool) -> Self {
+        if commit_ambiguous {
+            Self::without_detail(ErrorCode::CommitAmbiguous)
+        } else {
+            Self::without_detail(ErrorCode::Unavailable)
         }
     }
 
@@ -1733,9 +1774,9 @@ mod tests {
         ContextFrontierId, ModelCallId, SemanticTranscriptEntryId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ServerFrame, ServerMessage, SessionEvent, TurnState, decode_server_line,
-        encode_server_line,
+        CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, InputContent,
+        MAX_CONTENT_FRAGMENT_BYTES, ServerFrame, ServerMessage, SessionEvent, TurnState,
+        decode_server_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
@@ -1746,9 +1787,9 @@ mod tests {
 
     use super::{
         IncomingLine, MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        ProcessConnectionError, ProcessUpdateEvent, RequestId, acquire_inbound_frame_permit,
-        admitted_user_content, inspect_connection_completion, read_frame_line, run_until_shutdown,
-        wire_model_call_state, wire_turn_state, write_content,
+        ProcessConnectionError, ProcessUpdateEvent, ProtocolError, RequestId,
+        acquire_inbound_frame_permit, admitted_user_content, inspect_connection_completion,
+        read_frame_line, run_until_shutdown, wire_model_call_state, wire_turn_state, write_content,
     };
     use signalbox_persistence::{
         outbox::{
@@ -1757,6 +1798,18 @@ mod tests {
         process_read::ProcessTurnState,
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
+
+    #[test]
+    fn commit_ambiguity_selects_the_stable_process_error_code() {
+        assert_eq!(
+            ProtocolError::mutation_unavailable(false).code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(
+            ProtocolError::mutation_unavailable(true).code,
+            ErrorCode::CommitAmbiguous
+        );
+    }
 
     #[tokio::test]
     async fn inv033_frame_reader_accepts_the_exact_cap_and_rejects_the_next_byte()
