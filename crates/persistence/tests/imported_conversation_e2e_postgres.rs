@@ -205,6 +205,14 @@ impl ModelCallExecutionIdGenerator for FixedModelExecutionIds {
     fn next_turn_id(&mut self) -> TurnId {
         panic!("the fixture has no pending steering to reclassify")
     }
+
+    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId {
+        panic!("the text-only fixture proposes no tool request")
+    }
+
+    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
+        panic!("the text-only fixture creates no tool continuation")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -425,7 +433,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             if matches!(*outcome, signalbox_domain::ModelCallTerminalOutcome::Completed(_))
     ));
 
-    let (_, _, _, _, _, provider, _, retained) = model_service.into_parts();
+    let (_, _, _, _, _, provider, _, _, retained) = model_service.into_parts();
     assert!(retained.is_none());
     let messages = provider
         .last_prepared_messages()

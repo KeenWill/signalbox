@@ -297,10 +297,10 @@ impl StreamDecoder {
                     return self.violation(format!("stream repeats tool-call identifier {id:?}"));
                 }
                 let start_input = input.get().to_string();
-                let documented_empty_input =
-                    serde_json::from_str::<serde_json::Value>(&start_input).is_ok_and(|value| {
-                        value.as_object().is_some_and(serde_json::Map::is_empty)
-                    });
+                let documented_empty_input = start_input
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .eq(b"{}".iter().copied());
                 if !documented_empty_input {
                     return self.violation(
                         "streamed tool_use block start must carry the documented empty input object",
@@ -479,8 +479,8 @@ impl StreamDecoder {
                         event.index
                     ));
                 }
-                if !serde_json::from_str::<serde_json::Value>(&arguments_json)
-                    .is_ok_and(|value| value.is_object())
+                if !serde_json::value::RawValue::from_string(arguments_json.clone())
+                    .is_ok_and(|raw| crate::wire::raw_json_is_object(&raw))
                 {
                     return self.violation(format!(
                         "tool_use block {} closed with arguments that are not a JSON object",

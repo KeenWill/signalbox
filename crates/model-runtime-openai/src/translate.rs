@@ -232,7 +232,7 @@ fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ToolsAndChoice, PreparationFailure> {
     for tool in &operation.tools {
-        if !tool.input_schema.is_object() {
+        if !raw_json_is_object(&tool.input_schema) {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: format!(
                     "Chat Completions requires function {} to carry a JSON Schema object",
@@ -242,7 +242,7 @@ fn tools_and_choice<C>(
         }
     }
     if let Some(contract) = &operation.output_contract
-        && !contract.schema.is_object()
+        && !raw_json_is_object(&contract.schema)
     {
         return Err(PreparationFailure::UnsupportedOperation {
             detail: format!(
@@ -328,24 +328,20 @@ fn wire_messages(
     let mut pending_text: Option<String> = None;
     let mut pending_tool_calls: Vec<WireRequestToolCall> = Vec::new();
     let mut user_text_seen = false;
+    let mut previous_part_was_text = false;
     for part in &message.parts {
         match part {
             MessagePart::Text(text) => {
-                if !pending_tool_calls.is_empty() {
-                    // One wire message orders content before tool_calls, and
-                    // a split would separate the tool-call message from the
-                    // tool result that must follow it; the ordering is not
-                    // representable on this wire.
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract cannot represent \
-                                 assistant text after a tool call in one message"
-                            .to_string(),
-                    });
-                }
                 match &mut pending_text {
-                    Some(pending) => pending.push_str(text),
+                    Some(pending) => {
+                        if !previous_part_was_text {
+                            pending.push('\n');
+                        }
+                        pending.push_str(text);
+                    }
                     None => pending_text = Some(text.clone()),
                 }
+                previous_part_was_text = true;
                 if role == "user" {
                     user_text_seen = true;
                 }
@@ -361,13 +357,19 @@ fn wire_messages(
                             .to_string(),
                     });
                 }
-                if let Err(error) =
-                    serde_json::from_str::<serde_json::Value>(&proposal.arguments_json)
-                {
+                let arguments =
+                    serde_json::value::RawValue::from_string(proposal.arguments_json.clone())
+                        .map_err(|error| PreparationFailure::UnsupportedOperation {
+                            detail: format!(
+                                "replayed tool call {} carries arguments that are not valid JSON: \
+                                 {error}",
+                                proposal.id.as_str()
+                            ),
+                        })?;
+                if !raw_json_is_object(&arguments) {
                     return Err(PreparationFailure::UnsupportedOperation {
                         detail: format!(
-                            "replayed tool call {} carries arguments that are not valid JSON: \
-                             {error}",
+                            "replayed tool call {} carries arguments that are not a JSON object",
                             proposal.id.as_str()
                         ),
                     });
@@ -379,26 +381,14 @@ fn wire_messages(
                         name: proposal.name.as_str().to_string(),
                         arguments: proposal.arguments_json.clone(),
                     },
-                })
+                });
+                previous_part_was_text = false;
             }
             MessagePart::ToolResult(result) => {
                 if role != "user" {
                     return Err(PreparationFailure::UnsupportedOperation {
                         detail: "the Chat Completions wire contract permits tool results only \
                                  in user history"
-                            .to_string(),
-                    });
-                }
-                if result.is_error {
-                    // The tool message has no native failure flag; encoding
-                    // one would alter the caller's payload, and dropping the
-                    // fact would misstate the conversation. The caller
-                    // states the failure in the result content explicitly
-                    // for this provider.
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract cannot mark a replayed \
-                                 tool result as failed; state the failure in the result \
-                                 content"
                             .to_string(),
                     });
                 }
@@ -415,6 +405,7 @@ fn wire_messages(
                     tool_calls: None,
                     tool_call_id: Some(result.tool_call_id.as_str().to_string()),
                 });
+                previous_part_was_text = false;
             }
             // Chat Completions has no representation for replayed reasoning;
             // dropping caller-stated history silently would misstate the
@@ -432,6 +423,10 @@ fn wire_messages(
     }
     flush(role, &mut pending_text, &mut pending_tool_calls, out);
     Ok(())
+}
+
+fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
+    raw.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
 }
 
 fn flush(
@@ -503,6 +498,47 @@ mod tests {
         let request = build_request(operation).expect("translatable operation builds");
         let value = serde_json::to_value(&request).expect("wire request serializes");
         format!("{value:#}")
+    }
+
+    #[test]
+    fn deep_schema_and_replay_arguments_remain_stack_safe_through_wire_lifetime() {
+        let depth = 512;
+        let nested = format!(
+            "{}\"leaf\"{}",
+            r#"{"nested":"#.repeat(depth),
+            "}".repeat(depth)
+        );
+        let schema = format!(r#"{{"type":"object","deep":{nested}}}"#);
+        let arguments = format!(r#"{{"deep":{nested}}}"#);
+        let mut operation = operation("call-deep-json");
+        operation.tools.push(ToolDefinition::with_raw_schema(
+            "deep",
+            "Deep stack-safety fixture.",
+            serde_json::value::RawValue::from_string(schema)
+                .expect("deep schema is valid raw JSON"),
+        ));
+        operation.messages.push(ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_deep"),
+                name: ToolName::new("deep"),
+                arguments_json: arguments,
+            })],
+        });
+        operation.messages.push(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_deep"),
+                content: "done".to_owned(),
+                is_error: false,
+            })],
+        });
+
+        let request = build_request(&operation).expect("deep raw JSON translates");
+        let encoded = serde_json::to_string(&request).expect("deep raw JSON serializes");
+        assert!(encoded.contains(r#""leaf""#));
+        drop(request);
+        drop(operation);
     }
 
     #[test]
@@ -693,7 +729,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
 
         let request = build_request(&operation).expect("contract-bearing operation builds");
@@ -715,7 +752,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
         operation.tools = vec![ToolDefinition::with_schema(
             "lookup",
@@ -747,7 +785,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
         operation.tools = vec![ToolDefinition::with_schema(
             "verdict",
@@ -785,7 +824,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("a".repeat(65)),
             description: "Invalid overlong name.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
 
         assert!(matches!(
@@ -852,7 +892,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("contract"),
             description: "The contract.".to_string(),
-            schema: serde_json::json!([]),
+            schema: serde_json::value::to_raw_value(&serde_json::json!([]))
+                .expect("fixture schema serializes"),
         });
 
         assert!(matches!(
@@ -876,7 +917,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("contract"),
             description: "The contract.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
 
         assert!(matches!(
@@ -886,24 +928,33 @@ mod tests {
     }
 
     #[test]
-    fn failed_tool_result_replay_is_rejected_not_silently_flattened() {
+    fn failed_tool_result_replay_uses_explicit_error_content() {
         let mut operation = operation("call-8");
-        operation.messages = vec![ConversationMessage {
-            role: ConversationRole::User,
-            parts: vec![MessagePart::ToolResult(ToolResultRecord {
-                tool_call_id: ToolCallId::new("call_a1"),
-                content: "disk full".to_string(),
-                is_error: true,
-            })],
-        }];
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("call_a1"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "{}".to_string(),
+                })],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: r#"{"error":{"kind":"execution_failed"}}"#.to_string(),
+                    is_error: true,
+                })],
+            },
+        ];
 
-        let failure = build_request(&operation)
-            .expect_err("a failed-tool fact this wire contract cannot carry must not vanish");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
+        let request = build_request(&operation)
+            .expect("explicit error content is valid Chat Completions tool history");
+        assert_eq!(
+            request.messages[1].content.as_deref(),
+            Some(r#"{"error":{"kind":"execution_failed"}}"#)
+        );
     }
 
     #[test]
@@ -927,27 +978,77 @@ mod tests {
     }
 
     #[test]
-    fn text_after_a_tool_call_is_rejected_as_unrepresentable() {
+    fn text_after_a_tool_call_stays_in_the_same_assistant_message() {
         let mut operation = operation("call-9");
-        operation.messages = vec![ConversationMessage {
-            role: ConversationRole::Assistant,
-            parts: vec![
-                MessagePart::ToolCall(ToolCallProposal {
-                    id: ToolCallId::new("call_a1"),
-                    name: ToolName::new("lookup"),
-                    arguments_json: "{}".to_string(),
-                }),
-                MessagePart::Text("after the call".to_string()),
-            ],
-        }];
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![
+                    MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call_a1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: "{}".to_string(),
+                    }),
+                    MessagePart::Text("after the call".to_string()),
+                ],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
 
-        let failure = build_request(&operation)
-            .expect_err("splitting would separate the tool call from its required result");
+        let request =
+            build_request(&operation).expect("one grouped assistant message remains replayable");
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some("after the call")
+        );
+        assert_eq!(
+            request.messages[0]
+                .tool_calls
+                .as_ref()
+                .expect("tool call remains attached")
+                .len(),
+            1
+        );
+    }
 
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
+    #[test]
+    fn text_segments_separated_by_a_tool_call_gain_a_legible_boundary() {
+        let mut operation = operation("call-separated-text");
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![
+                    MessagePart::Text("before the call".to_string()),
+                    MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call_a1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: "{}".to_string(),
+                    }),
+                    MessagePart::Text("after the call".to_string()),
+                ],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
+
+        let request = build_request(&operation).expect("grouped tool history remains replayable");
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some("before the call\nafter the call")
+        );
     }
 
     #[test]

@@ -10,6 +10,46 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Retain checked provider JSON as raw text
+
+**Context.** Guarded deserialization admitted deeply nested tool schemas, but an
+owned `serde_json::Value` still made cloning, provider translation, and final
+drop recursively traverse the decoded tree. Durable schemas and replay arguments
+need syntax and object-shape checks, not random access to a native tree.
+
+**Decision.** After bounded domain admission, retain schemas and replay
+arguments as `serde_json::value::RawValue` through both provider request
+translators and wire serialization. Validate the root object shape from the
+already checked raw token. Typed application decoding remains unchanged.
+
+**Rejected alternatives.** A lower nesting limit would narrow the accepted
+schema contract. Keeping `Value` only until provider translation leaves clone
+and drop paths exposed. A second JSON parser would duplicate a focused,
+already-pinned capability.
+
+**Affects.** `signalbox-model-runtime`, `signalbox-model-provider-runtime`, both
+provider adapters, and their deep-lifetime tests.
+
+## 2026-07-24 — Guard provider tool-schema decoding against stack depth
+
+**Context.** Application tool schemas are valid, object-shaped, and bounded, but
+their contract imposes no nesting limit. The provider bridge must decode them
+into runtime values without reintroducing Serde JSON's default depth cutoff or
+traversing untrusted nesting on the native stack.
+
+**Decision.** Enable Serde JSON's unbounded-depth decoder in
+`signalbox-model-provider-runtime` and reuse the already pinned `serde_stacker`
+adapter for guarded deserialization. Keep every decoded value private to the
+provider bridge.
+
+**Rejected alternatives.** Add a provider-only depth limit: it would reject
+schemas the application admits. Treat a checked schema as opaque text: runtime
+adapters require structured JSON. Write a second JSON parser: unnecessary codec
+ownership.
+
+**Affects.** Provider tool-definition projection and the crate's direct
+dependency edges; no resolved package or public API is added.
+
 ## 2026-07-24 — Reuse serde_json for provider-neutral tool-history rendering
 
 **Context.** The model-provider bridge must replay durable tool results as

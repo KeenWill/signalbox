@@ -1688,6 +1688,15 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         interrupt: AppliedInterruptCommandResult,
         terminal_frontier: ContextFrontierId,
     },
+    TerminalToolReconciliationRequired {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        reconciling_attempt: TurnAttemptId,
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        ambiguous_tool: AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 pub struct FailedTurnExecutionReconstitutionInput { /* private */ }
@@ -2503,6 +2512,12 @@ impl ModelCallExecution {
         interrupt: AppliedInterruptCommandResult,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<ModelCallInterruptOutcome, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        result_projection: PreparedToolResultProjection,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn recover_after_restart(
         self,
         failure_identities: FailedModelCallTurnIdentities,
@@ -2654,7 +2669,8 @@ pub struct CancelledToolRoundModelCallTurn { /* private */ }
 pub struct FailedModelCallTurn { /* private */ }
 pub struct CancelledModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
-// cancellation_entry(), terminal_snapshot(), reclassified_pending_steering()
+// tool_result_entries(), cancellation_entry(), terminal_snapshot(),
+// reclassified_pending_steering()
 pub struct StopRequestedModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), interrupt(), observation_correlation()
 pub struct RefusedModelCallTurn { /* private */ }
@@ -2663,7 +2679,7 @@ pub struct ReconciliationRequiredModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
 // terminal_snapshot(), reclassified_pending_steering()
 pub struct ReconciliationRequiredToolTurn { /* private */ }
-// accessors: session(), turn(), attempt(), tool_attempt(), disposition(),
+// accessors: session(), turn(), tool_attempt(), attempt(), disposition(),
 // tool_result_entries(), terminal_snapshot(), reclassified_pending_steering()
 pub struct ReclassifiedPendingSteeringTurn { /* private */ }
 // sealed: successful model-call terminalization with exact pending identities
@@ -3215,6 +3231,11 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -3238,7 +3259,8 @@ pub struct AwaitingToolApproval { /* private */ }
 // accessors: session(), turn(), request()
 pub struct AwaitingToolRecovery { /* private */ }
 // sealed: ToolBatch::awaiting_recovery
-// accessors: session(), turn(), producing_call(), yielded_frontier(), issuing_attempt(), attempt()
+// accessors: session(), turn(), producing_call(), yielded_frontier(),
+// issuing_attempt(), attempt()
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -3790,7 +3812,7 @@ pub enum ModelToolResultContent {
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
-    // accessors: request(), credential_reference(), messages()
+    // accessors: request(), credential_reference(), messages(), tools()
 }
 
 pub enum ModelFrontierRenderingError {
@@ -3954,6 +3976,8 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
     fn next_turn_id(&mut self) -> TurnId;
+    fn next_tool_request_id(&mut self) -> ToolRequestId;
+    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId;
 }
 pub struct UuidV7ModelCallExecutionIdGenerator;
 // Default; impl ModelCallExecutionIdGenerator
@@ -4023,7 +4047,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
     >
 {
-    pub const fn new(
+    pub fn new(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -4032,7 +4056,8 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         provider: Provider,
         gate: Gate,
     ) -> Self;
-    pub const fn from_parts(
+    pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
+    pub fn from_parts(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -4040,6 +4065,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
     ) -> Self;
     pub fn into_parts(
@@ -4052,6 +4078,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
+        Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
@@ -4083,6 +4110,232 @@ impl ScriptedModelCallProvider {
     // last_prepared_messages()
 }
 // impl ModelCallProvider
+```
+
+## application: tool_loop
+
+```rust
+pub struct ToolInputSchema { /* private */ }
+impl ToolInputSchema {
+    pub fn try_new(value: String) -> Result<Self, ToolInputSchemaError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum ToolInputSchemaFailure {
+    NotJson,
+    NotObject,
+    OutsideArgumentBound(ToolArgumentsFailure),
+}
+
+pub struct ToolInputSchemaError { /* private */ }
+impl ToolInputSchemaError {
+    pub fn value(&self) -> &str;
+    pub const fn failure(&self) -> ToolInputSchemaFailure;
+    pub fn into_parts(self) -> (String, ToolInputSchemaFailure);
+}
+
+pub struct ToolDefinition { /* private */ }
+impl ToolDefinition {
+    pub const fn new(
+        name: ToolName,
+        description: String,
+        input_schema: ToolInputSchema,
+        permission_default: ToolPermissionDefault,
+        effect_class: ToolEffectClass,
+    ) -> Self;
+    // accessors: name(), description(), input_schema(), permission_default(), effect_class()
+}
+
+pub trait ToolArgumentValidator: Send + Sync {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail>;
+}
+// implemented for matching Fn(&NormalizedToolArguments) -> Result<(), ToolExecutionErrorDetail>
+
+pub struct CompiledTool { /* private */ }
+impl CompiledTool {
+    pub fn new(
+        definition: ToolDefinition,
+        validator: impl ToolArgumentValidator + 'static,
+    ) -> Self;
+    pub const fn definition(&self) -> &ToolDefinition;
+}
+
+pub struct DuplicateToolDefinition { /* private */ }
+impl DuplicateToolDefinition {
+    pub const fn name(&self) -> &ToolName;
+}
+
+pub struct CompiledToolCatalog { /* private */ }
+impl CompiledToolCatalog {
+    pub fn try_new(
+        tools: impl IntoIterator<Item = CompiledTool>,
+    ) -> Result<Self, DuplicateToolDefinition>;
+}
+// Default; impl ToolCatalog
+
+pub trait ToolCatalog: Send + Sync {
+    fn definitions(&self) -> Box<[ToolDefinition]>;
+    fn definition(&self, name: &ToolName) -> Option<ToolDefinition>;
+    fn validate_arguments(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolCatalogValidationFailure>;
+}
+
+pub struct NoToolCatalog;
+// Copy + Default; impl ToolCatalog
+
+pub enum ToolCatalogValidationFailure {
+    UnknownTool,
+    InvalidArguments {
+        detail: Option<ToolExecutionErrorDetail>,
+    },
+}
+
+pub struct ToolExecutionInvocation { /* private */ }
+// sealed: ToolExecutionService constructs only from checked request,
+// declaration, and AuthorizedToolAttempt correlations.
+impl ToolExecutionInvocation {
+    // accessors: request(), definition(), correlation()
+    pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
+}
+
+pub enum ToolExecutorEvidence {
+    CompletedText(String),
+    KnownFailed {
+        detail: Option<ToolExecutionErrorDetail>,
+    },
+    Ambiguous,
+}
+
+pub struct CorrelatedToolExecutorEvidence { /* private */ }
+// sealed: ToolExecutionInvocation::bind
+impl CorrelatedToolExecutorEvidence {
+    // accessors: correlation(), evidence()
+}
+
+pub trait ToolExecutor {
+    type Error: ClassifyOperatorFailure;
+    fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> impl Future<Output = Result<CorrelatedToolExecutorEvidence, Self::Error>> + Send;
+}
+
+pub trait ToolApprovalIdGenerator {
+    fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId;
+}
+
+pub trait ToolExecutionIdGenerator {
+    fn next_tool_attempt_id(&mut self) -> ToolAttemptId;
+    fn next_tool_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_tool_context_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_tool_model_call_id(&mut self) -> ModelCallId;
+    fn next_tool_turn_id(&mut self) -> TurnId;
+}
+
+pub struct UuidV7ToolLoopIdGenerator;
+// Copy + Default; impl ToolApprovalIdGenerator + ToolExecutionIdGenerator
+
+pub struct DecideToolRequestService<Ids, Transaction> { /* private */ }
+impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Ids, Transaction);
+}
+impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransaction>
+    DecideToolRequestService<Ids, Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        command: DecideToolRequest,
+    ) -> Result<PreparedDecideToolRequest, Transaction::Error>;
+}
+
+pub struct RetainedToolExecutionState { /* private */ }
+
+pub enum ToolExecutionServiceOutcome {
+    NoWork,
+    AwaitingApproval(ToolRequestId),
+    AwaitingRecovery(ToolAttemptId),
+    AttemptCheckpointed(ToolAttemptId),
+    PreflightFailed(Box<EndedToolAttempt>),
+    ObservationCommitted(Box<EndedToolAttempt>),
+    ObservationAlreadyCommitted(ToolAttemptId),
+    CrashClassified(Box<ToolAttemptCrashOutcome>),
+    ContinuationCheckpointed(ModelCallId),
+    ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
+}
+
+pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
+    Load(TransactionError),
+    Prepare(TransactionError),
+    Authorize(TransactionError),
+    AuthorizationReread {
+        authorization_error: TransactionError,
+        reread_error: TransactionError,
+    },
+    AuthorizationReconciliation(TransactionError),
+    PreflightCommit(TransactionError),
+    Executor(ExecutorError),
+    ObservationCommit(TransactionError),
+    ObservationReconciliation(TransactionError),
+    CrashClassification(TransactionError),
+    Continuation(TransactionError),
+    CatalogDrift,
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure (bounded)
+
+pub struct ToolExecutionService<Ids, Transaction, Catalog, Executor> { /* private */ }
+impl<Ids, Transaction, Catalog, Executor>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor>
+{
+    pub const fn new(
+        ids: Ids,
+        transaction: Transaction,
+        catalog: Catalog,
+        executor: Executor,
+        gate: InProcessToolDispatchGate,
+    ) -> Self;
+    pub const fn from_parts(
+        ids: Ids,
+        transaction: Transaction,
+        catalog: Catalog,
+        executor: Executor,
+        gate: InProcessToolDispatchGate,
+        retained_state: Option<RetainedToolExecutionState>,
+    ) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Ids,
+        Transaction,
+        Catalog,
+        Executor,
+        InProcessToolDispatchGate,
+        Option<RetainedToolExecutionState>,
+    );
+    pub const fn retained_state(&self) -> Option<&RetainedToolExecutionState>;
+}
+impl<
+        Ids: ToolExecutionIdGenerator + Send,
+        Transaction: ToolExecutionTransaction,
+        Catalog: ToolCatalog,
+        Executor: ToolExecutor,
+    > ToolExecutionService<Ids, Transaction, Catalog, Executor>
+{
+    pub async fn execute(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    >;
+}
 ```
 
 ## application: replace_session_defaults
@@ -4417,10 +4670,10 @@ pub trait SubmitInputTransaction {
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
-        NextToolCancellation: FnMut(
-                &[ToolRequestId],
-            ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
-            + Send;
+        NextToolCancellation:
+            FnMut(&[ToolRequestId])
+                -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
+                + Send;
 }
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
@@ -4557,7 +4810,7 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> impl Future<Output = Result<CurrentToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<CurrentToolAttempt>, Self::Error>> + Send;
     fn authorize_attempt(
         &mut self,
         session: SessionId,
@@ -4643,6 +4896,7 @@ pub trait ToolExecutionTransaction {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
 | application: model_execution                       | 30 (incl. 7 traits)  |
+| application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 4 (incl. 1 trait)    |
 | application: scheduler                             | 12 (incl. 4 traits)  |
@@ -4651,4 +4905,4 @@ pub trait ToolExecutionTransaction {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **101**              |
+| **signalbox-application total**                    | **124**              |
