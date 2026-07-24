@@ -67,8 +67,8 @@ use signalbox_persistence::{
     },
     outbox::{
         DispatchedModelCallState, DispatchedOutboxEvent, DispatchedOutboxEventKind,
-        DispatchedReconciliationOperation, OutboxCorruption, OutboxDeliveryDecision,
-        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedReconciliationOperation, DispatchedToolBatchState, OutboxCorruption,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
@@ -1444,6 +1444,17 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
         decision,
         "same command identity and payload replay the terminal receipt"
     );
+    let running_tool_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("an approved running tool round remains process-readable");
+    assert_eq!(
+        running_tool_snapshot.turns()[0].state(),
+        &ProcessTurnState::ActiveRunning {
+            current_attempt: continuation_attempt,
+            current_model_call: None,
+        }
+    );
     assert!(matches!(
         tool_repository
             .decide(
@@ -1610,7 +1621,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
         signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
     );
 
-    let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM tool_round WHERE producing_model_call_id = $1),
             (SELECT count(*) FROM tool_request WHERE request_id = $2),
@@ -1642,7 +1653,19 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
                 AND turn_id = $6
                 AND turn_attempt_id = $4
                 AND context_frontier_id = $9
-                AND state_kind = 'prepared')",
+                AND state_kind = 'prepared'),
+            (SELECT count(*) FROM tool_batch_transition_outbox_event
+              WHERE producing_model_call_id = $1
+                AND transition_kind = 'proposed'
+                AND frontier_id = (
+                    SELECT boundary_frontier_id
+                      FROM tool_round
+                     WHERE producing_model_call_id = $1
+                )),
+            (SELECT count(*) FROM tool_batch_transition_outbox_event
+              WHERE producing_model_call_id = $1
+                AND transition_kind = 'results_projected'
+                AND frontier_id = $9)",
     )
     .bind(fixture.call.into_uuid())
     .bind(request.into_uuid())
@@ -1655,7 +1678,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     .bind(continuation_frontier.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 1, 1, 1));
+    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 1, 1, 1, 1, 1));
 
     let duplicate_result_error = sqlx::query(
         "INSERT INTO semantic_transcript_entry
@@ -1715,6 +1738,33 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             .is_none(),
         "the atomic continuation no longer exposes the completed batch"
     );
+    let mut proposed_event = false;
+    let mut results_event = false;
+    drain_outbox(&pool, |event| match event.kind() {
+        DispatchedOutboxEventKind::ToolBatchTransition {
+            turn,
+            producing_call,
+            state:
+                DispatchedToolBatchState::Proposed {
+                    frontier: proposed_frontier,
+                },
+        } if *turn == fixture.turn && *producing_call == fixture.call => {
+            proposed_event = *proposed_frontier == parked.yielded_snapshot().frontier().snapshot();
+        }
+        DispatchedOutboxEventKind::ToolBatchTransition {
+            turn,
+            producing_call,
+            state:
+                DispatchedToolBatchState::ResultsProjected {
+                    frontier: result_frontier,
+                },
+        } if *turn == fixture.turn && *producing_call == fixture.call => {
+            results_event = *result_frontier == continuation_frontier;
+        }
+        _ => {}
+    })
+    .await?;
+    assert!(proposed_event && results_event);
 
     pool.close().await;
     drop(container);
@@ -2021,6 +2071,28 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ProcessTurnState::ActiveAwaitingToolApproval { request }
             if *request == denied_request
     ));
+    let mut forged_blanket = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason,
+             owner_command_id)
+         VALUES ($1, 'approve', 'session_blanket', NULL, NULL)",
+    )
+    .bind(denied_request.into_uuid())
+    .execute(&mut *forged_blanket)
+    .await?;
+    let forged_blanket_error =
+        sqlx::query("SET CONSTRAINTS tool_approval_session_blanket_provenance IMMEDIATE")
+            .execute(&mut *forged_blanket)
+            .await
+            .expect_err("disabled frozen configuration cannot authorize a blanket approval");
+    assert_eq!(
+        forged_blanket_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("tool_approval_session_blanket_requires_frozen_approve_all")
+    );
+    forged_blanket.rollback().await?;
     let malformed_command_error = sqlx::query(
         "INSERT INTO decide_tool_request_command
             (command_id, command_kind, storage_version, request_id,
@@ -2464,6 +2536,44 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
             "turn_failed",
         ]
     );
+    let mut reordered_terminal = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE context_frontier_member
+         DISABLE TRIGGER context_frontier_member_is_append_only",
+    )
+    .execute(&mut *reordered_terminal)
+    .await?;
+    for (entry, position) in [
+        (Uuid::from_u128(effect_free_seed + 31), 99_i64),
+        (Uuid::from_u128(effect_free_seed + 26), 3_i64),
+        (Uuid::from_u128(effect_free_seed + 31), 4_i64),
+    ] {
+        sqlx::query(
+            "UPDATE context_frontier_member
+                SET member_position = $1
+              WHERE owning_session_id = $2
+                AND context_frontier_id = $3
+                AND semantic_entry_id = $4",
+        )
+        .bind(position)
+        .bind(effect_free_fixture.session.into_uuid())
+        .bind(Uuid::from_u128(effect_free_seed + 27))
+        .bind(entry)
+        .execute(&mut *reordered_terminal)
+        .await?;
+    }
+    let reordered_terminal_error = sqlx::query("SELECT assert_tool_loop_turn_final_state($1)")
+        .bind(effect_free_fixture.turn.into_uuid())
+        .execute(&mut *reordered_terminal)
+        .await
+        .expect_err("failure requires proposal-ordered tool results before its marker");
+    assert_eq!(
+        reordered_terminal_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("tool_loop_terminal_result_suffix_exact")
+    );
+    reordered_terminal.rollback().await?;
     let effect_free_snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(effect_free_fixture.session)
         .await?

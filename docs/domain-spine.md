@@ -1744,6 +1744,14 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         correlations: Vec<ToolResultAttemptCorrelation>,
     ) -> Self;
+    pub fn with_tool_denial_correlations(
+        self,
+        correlations: Vec<ToolApprovalResolution>,
+    ) -> Self;
+    pub fn with_uncommitted_tool_result_projection(
+        self,
+        projection: PreparedToolResultProjection,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
 }
 pub struct ToolResultAttemptCorrelation { /* private */ }
@@ -1766,6 +1774,7 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallSnapshotMismatch,
     FrontierEntryMismatch,
     ToolResultCorrelationMismatch,
+    ToolDenialCorrelationMismatch,
     MultipleCalls,
     DuplicateOriginContent,
     MissingOriginContent,
@@ -2512,6 +2521,11 @@ impl ToolBatch {
         continuation_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,

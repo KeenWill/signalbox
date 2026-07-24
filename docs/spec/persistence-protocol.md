@@ -411,12 +411,16 @@ protocol scope). Implemented storage:
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `turn_activated_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
-  `turn_reconciliation_required_outbox_event` — with a deferred trigger
-  requiring exactly one typed record per header. The header and typed record
-  tables are append-only (`reject_immutable_record_change`), and every outbox
-  table rejects `TRUNCATE`.
+  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
+  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
+  `turn_cancelled_outbox_event`, and `turn_reconciliation_required_outbox_event`
+  — with a deferred trigger requiring exactly one typed record per header.
+  Tool-batch transition records carry the producing call and exactly one closed
+  state shape: `proposed` names the yielded assistant/tool-use frontier,
+  `results_projected` names the all-resolved result frontier, and
+  `recovery_required` names the exact ambiguous physical attempt. The header and
+  typed record tables are append-only (`reject_immutable_record_change`), and
+  every outbox table rejects `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -441,7 +445,10 @@ recovery appends `turn_failed` for a failed lost turn and
 `turn_reconciliation_required` when stopped issued work becomes ambiguous;
 terminal reclassification of pending steering appends its correlated
 `input_accepted`. Model-call state transitions append `model_call_transition`,
-completion closure appends `turn_completed`, refusal closure appends
+tool-round creation appends `tool_batch_transition { proposed }`, all-resolved
+result projection appends `tool_batch_transition { results_projected }`, and an
+external-effect ambiguity appends `tool_batch_transition { recovery_required }`.
+Completion closure appends `turn_completed`, refusal closure appends
 `turn_refused`, and known-failure closure appends `turn_failed`;
 interrupt-confirmed cancellation appends `turn_cancelled`, and live stopped
 ambiguity appends `turn_reconciliation_required`; an interrupt against a parked
