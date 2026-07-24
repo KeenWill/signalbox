@@ -37,12 +37,12 @@ Identities fall into three supply classes:
   comparison, never from trusting a caller's clock or version bits (INV-012).
 - **Hub-minted durable-fact identity** — `SessionId`, `AcceptedInputId`,
   `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, `ContextFrontierId`,
-  and `ModelCallId` today; `ProviderTargetEvidenceId`, `ToolRequestId`, and
-  `ToolAttemptId` are assigned here but not yet minted (see Open edges). All
-  production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why: the recorded
-  rationale for UUIDv7 is insertion locality for append-heavy Postgres B-tree
-  keys without changing the 128-bit storage shape; no index-level artifact
-  measures this.
+  `ModelCallId`, `ToolRequestId`, and `ToolAttemptId` today;
+  `ProviderTargetEvidenceId` is assigned here but not yet minted (see Open
+  edges). All production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why:
+  the recorded rationale for UUIDv7 is insertion locality for append-heavy
+  Postgres B-tree keys without changing the 128-bit storage shape; no
+  index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name owner-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -78,17 +78,17 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                             | Mints                                                                                               |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`            | `SessionId`                                                                                         |
-| `UuidV7SubmitInputIdGenerator`        | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                       |
-| `UuidV7StartEligibleTurnIdGenerator`  | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
-| `UuidV7StartupScanIdGenerator`        | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
-| `UuidV7ModelCallExecutionIdGenerator` | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
+| Generator                             | Mints                                                                                                                        |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`            | `SessionId`                                                                                                                  |
+| `UuidV7SubmitInputIdGenerator`        | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                |
+| `UuidV7StartEligibleTurnIdGenerator`  | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                            |
+| `UuidV7StartupScanIdGenerator`        | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                         |
+| `UuidV7ModelCallExecutionIdGenerator` | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                          |
+| `UuidV7ToolLoopIdGenerator`           | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId` |
 
-`ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` exist as domain
-types but have no production minting seam yet; their generators land with their
-owning slices.
+`ProviderTargetEvidenceId` exists as a domain type but has no production minting
+seam yet; its generator lands with its owning slice.
 
 Orchestration generates each fresh candidate immediately before the domain
 transition that creates the fact. Fixed-cardinality candidates are minted before

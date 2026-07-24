@@ -32,11 +32,12 @@ producing call, name, normalized arguments, and ordinal form one immutable
 `ToolRequest` record. The name is 1–64 ASCII letters, digits, underscore, or
 hyphen. `NormalizedToolArguments` has two closed arms. `Json` stores a decoded
 JSON value as compact text with object keys in lexical order; `Undecodable`
-stores the exact provider-supplied UTF-8 text when JSON decoding fails. Both
-arms must fit within 1 MiB before and after normalization. This preserves
-malformed arguments as bounded evidence without pretending they are JSON. An
-undecodable value, or valid JSON that does not decode against the selected
-tool's argument type, becomes a typed execution error later.
+stores the exact bounded UTF-8 text emitted by the provider adapter after that
+adapter applies its preparation-time credential scrub when JSON decoding fails.
+Both arms must fit within 1 MiB before and after normalization. This preserves
+malformed arguments as bounded, identity-safe evidence without pretending they
+are JSON. An undecodable value, or valid JSON that does not decode against the
+selected tool's argument type, becomes a typed execution error later.
 
 The same transaction that classifies the producing call `Completed` appends one
 `AssistantText` or `AssistantToolUse { producing_call, request }` semantic entry
@@ -184,6 +185,15 @@ execution and continuation. For each next approved request:
    INV-021). The row moves monotonically to `Completed`, `KnownFailed`, or
    `Ambiguous` and never reopens.
 
+If the authorization commit acknowledgement is ambiguous, execution does not
+begin from the returned error. While retaining the dispatch gate and exact
+request, the application rereads the attempt under the scheduler lock.
+`Prepared` proves non-consumption and returns the infrastructure failure;
+`InFlight` restores the exact authorization fence and may enter the executor. An
+inconclusive reread retains that authority state for another identical reread,
+so neither retry nor crash classification can be inferred from a lost commit
+response.
+
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
 the authorize → executor → result-commit window. Tool execution holds the gate
 from before authorization until the returned evidence commits; interrupt
@@ -254,12 +264,15 @@ every request in the batch is executed or denied, one continuation transaction:
 3. derives the exact prefix-preserving frontier extension; and
 4. creates the next round's `Prepared` model call against that frontier.
 
-The same continuation turn attempt already entered `Running` when it authorized
-the tool batch. It therefore owns the new `Prepared` call without moving
-backward to `Prepared`; send authorization advances only the call to `InFlight`
-and leaves the attempt `Running`. Reconstitution and the deferred database
-assertion admit that pairing only for a continuation-chain attempt whose exact
-call frontier contains durable tool-result evidence.
+When at least one request entered execution, the continuation turn attempt
+already entered `Running` during tool authorization. It owns the new `Prepared`
+call without moving backward; send authorization advances only the call to
+`InFlight` and leaves the attempt `Running`. A denial-only batch never
+authorized an effect, so its continuation attempt remains `Prepared` while it
+owns the new `Prepared` call. Reconstitution and the deferred database assertion
+admit `(Running, Prepared)` or `(Prepared, Prepared)` only for a
+continuation-chain attempt whose exact call frontier contains the current
+batch's complete durable result evidence.
 
 Those effects commit or roll back together (INV-036). A newly prepared call ends
 the invocation and is reloaded before provider capability preparation,
@@ -302,15 +315,20 @@ plus each result-reference entry back into paired assistant tool-call and user
 tool-result message parts. It derives the provider-visible tool-call correlation
 from `ToolRequestId`, so provider-native identifier types and messages never
 cross the application boundary (INV-002). Every rendered result resolves its
-referenced durable record first; missing or cross-wired content fails closed.
-All text and tool proposals produced by one model call are coalesced into one
-assistant message, and the proposal-ordered results for that batch are coalesced
-into the immediately following user message. OpenAI carries typed failure JSON
-as ordinary tool-message content because its wire shape has no failure flag;
-Anthropic also receives the provider-neutral failure flag. Malformed proposal
-arguments remain exact on the durable request but replay as an object-shaped
-invalid-arguments placeholder, allowing the paired typed error result to reach
-either provider without pretending the placeholder is durable evidence.
+referenced durable record first; missing or cross-wired content fails closed. If
+a definitive provider completion contains a tool name or argument payload that
+cannot enter the bounded domain vocabulary, the provider bridge converts that
+authenticated response to the call's typed `KnownFailed` terminal observation.
+It does not leave the already-issued call `InFlight`, persist the inadmissible
+proposal, or partially commit the response. All text and tool proposals produced
+by one model call are coalesced into one assistant message, and the
+proposal-ordered results for that batch are coalesced into the immediately
+following user message. OpenAI carries typed failure JSON as ordinary
+tool-message content because its wire shape has no failure flag; Anthropic also
+receives the provider-neutral failure flag. Malformed proposal arguments remain
+exact on the durable request but replay as an object-shaped invalid-arguments
+placeholder, allowing the paired typed error result to reach either provider
+without pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 
