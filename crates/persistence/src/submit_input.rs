@@ -48,9 +48,10 @@ use crate::{
     },
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
+        attach_interrupt_reclassification_candidates_for_active,
         attach_recovery_interrupt_reclassification_candidates, persist_stop_requested,
         persist_terminal_outcome, persist_tool_reconciliation_required,
-        require_live_execution_for_restart, require_live_tool_execution,
+        require_live_execution_for_restart,
     },
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -715,31 +716,32 @@ where
                 .map(signalbox_domain::ToolRequest::id)
                 .collect::<Vec<_>>();
             let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-            let projection = batch
-                .prepare_cancellation_projection(result_entries, result_frontier)
-                .map_err(|_| {
-                    SubmitInputCorruption::Inconsistent(
-                        "tool batch cannot materialize interrupt results",
-                    )
-                })?;
-            let execution = require_live_tool_execution(connection, interrupt.session(), &batch)
-                .await
-                .map_err(|_| {
-                    SubmitInputCorruption::Inconsistent(
-                        "tool interrupt lacks live execution authority",
-                    )
-                })?;
-            let identities = attach_interrupt_reclassification_candidates(
+            let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
+                "applied interrupt lacks active scheduling state",
+            ))?;
+            let active_turn =
+                scheduling
+                    .active_turn_execution()
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ))?;
+            let identities = attach_interrupt_reclassification_candidates_for_active(
                 cancellation_identities,
-                &execution,
+                &active_turn,
                 &mut next_reclassified_turn,
             )
             .map_err(|_| {
                 SubmitInputCorruption::Inconsistent("tool interrupt reclassification candidates")
             })?;
             Some(ModelCallInterruptOutcome::Cancelled(
-                execution
-                    .apply_interrupt_to_tool_batch(interrupt, projection, identities)
+                scheduling
+                    .apply_interrupt_to_tool_batch(
+                        batch,
+                        result_entries,
+                        result_frontier,
+                        interrupt,
+                        identities,
+                    )
                     .map_err(|_| {
                         SubmitInputCorruption::Inconsistent(
                             "applied interrupt does not match executing tool batch",
