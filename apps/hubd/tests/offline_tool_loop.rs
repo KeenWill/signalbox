@@ -13,10 +13,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDecisionWake,
-    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
     ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
@@ -97,7 +97,6 @@ struct ToolLoopFixture {
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
     credential_reference: ModelCallCredentialReference,
-    tool_decision_wake: InProcessToolDecisionWake,
     tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
@@ -126,7 +125,6 @@ impl ToolLoopFixture {
 
         let sweep = PostgresEligibilitySweep::new(pool.clone());
         let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let tool_decision_wake = InProcessToolDecisionWake::default();
         let tool_dispatch_gate = InProcessToolDispatchGate::default();
         let mut submit = SubmitInputService::new(
             UuidV7SubmitInputIdGenerator,
@@ -185,7 +183,6 @@ impl ToolLoopFixture {
             targets,
             runtime_models,
             credential_reference: ModelCallCredentialReference::new("scripted-tool-loop-test"),
-            tool_decision_wake,
             tool_dispatch_gate,
         })
     }
@@ -220,12 +217,7 @@ impl ToolLoopFixture {
                 InProcessAttemptDispatchGate::default(),
                 provider,
             )
-            .with_tool_loop(
-                self.tool_decision_wake.clone(),
-                self.tool_dispatch_gate.clone(),
-                catalog,
-                executor,
-            ),
+            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
             runtime,
         )
     }
@@ -253,7 +245,6 @@ impl ToolLoopFixture {
         let mut service = DecideToolRequestService::new(
             UuidV7ToolLoopIdGenerator,
             PostgresToolLoopRepository::new(self.pool.clone()),
-            self.tool_decision_wake.clone(),
         );
         let prepared = service
             .execute(DecideToolRequest::new(
@@ -509,8 +500,8 @@ impl ToolExecutor for RecordingExecutor {
 /// boundary, and completes only after the second model round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_tool_loop_parks_approves_executes_continues_and_completes()
--> Result<(), Box<dyn Error>> {
+async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<(), Box<dyn Error>>
+{
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
@@ -527,7 +518,9 @@ async fn s10_tool_loop_parks_approves_executes_continues_and_completes()
         executor.clone(),
     );
 
-    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
     let requests = fixture.wait_for_requests(1).await?;
     assert_eq!(requests.len(), 1);
     let parked: (String, Option<Uuid>, i64) = sqlx::query_as(
@@ -553,7 +546,7 @@ async fn s10_tool_loop_parks_approves_executes_continues_and_completes()
     fixture
         .decide(requests[0], ToolApprovalDecision::Approve)
         .await?;
-    running.await??;
+    execution.resume_active(fixture.session).await?;
 
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
     assert_eq!(
@@ -604,6 +597,32 @@ async fn s10_tool_loop_parks_approves_executes_continues_and_completes()
             2,
         )
     );
+    let identity_shape: (Uuid, Uuid, Uuid, Uuid, Uuid, i64) = sqlx::query_as(
+        "SELECT request.request_id,
+                attempt.attempt_id,
+                attempt.request_id,
+                attempt.turn_id,
+                attempt.issuing_turn_attempt_id,
+                attempt.dispatch_generation::bigint
+           FROM tool_request AS request
+           JOIN tool_attempt AS attempt
+             ON attempt.request_id = request.request_id
+            AND attempt.turn_id = request.turn_id
+            AND attempt.session_id = request.session_id
+          WHERE request.session_id = $1
+            AND request.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(identity_shape.0, requests[0].into_uuid());
+    assert_ne!(identity_shape.0, identity_shape.1);
+    assert_eq!(identity_shape.2, identity_shape.0);
+    assert_eq!(identity_shape.3, fixture.turn.into_uuid());
+    assert_ne!(identity_shape.4, identity_shape.0);
+    assert_ne!(identity_shape.4, identity_shape.1);
+    assert_eq!(identity_shape.5, 1);
     Ok(())
 }
 
@@ -629,12 +648,14 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
         executor.clone(),
     );
 
-    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
     let request = fixture.wait_for_requests(1).await?[0];
     fixture
         .decide(request, ToolApprovalDecision::Deny { reason: None })
         .await?;
-    running.await??;
+    execution.resume_active(fixture.session).await?;
 
     assert!(executor.events().is_empty());
     assert_eq!(
@@ -698,10 +719,10 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
         executor.clone(),
     );
 
-    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
     let request = fixture.wait_for_requests(1).await?[0];
-    running.abort();
-    let _ = running.await;
     fixture
         .decide(request, ToolApprovalDecision::Deny { reason: None })
         .await?;
@@ -763,12 +784,22 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(terminal_shape, (String::from("cancelled"), 0, 1, 1));
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_denied",
+            "turn_cancelled",
+        ],
+        "the denial result must precede the independently authorized cancellation marker"
+    );
     Ok(())
 }
 
 /// S02 / S10 / INV-005 / INV-006 / INV-019: a restart scan preserves an
-/// approval wait exactly; a fresh composition can later consume the owner's
-/// approval and continue the same logical turn.
+/// approval wait exactly; after the owner decision, the durable sweep and a
+/// fresh composition resume the same logical turn without replaying activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
@@ -784,10 +815,10 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         tool_catalog.clone(),
         executor.clone(),
     );
-    let first_running = tokio::spawn(first_execution.execute(Box::new(fixture.activated.clone())));
+    first_execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
     let request = fixture.wait_for_requests(1).await?[0];
-    first_running.abort();
-    let _ = first_running.await;
 
     let mut scan = StartupScanService::new(
         UuidV7StartupScanIdGenerator,
@@ -820,24 +851,28 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
+    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(!continuation);
+    assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, _restarted_runtime) = fixture.execution(
         [completion_script("continued after restart")],
         tool_catalog,
         executor.clone(),
     );
-    restarted_execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
+    restarted_execution.resume_active(fixture.session).await?;
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
     Ok(())
 }
 
-/// S10 / S11 / INV-019 / INV-020 / INV-021: an auto/confirm batch parks on
+/// S10 / INV-019 / INV-020 / INV-021: an auto/confirm batch parks on
 /// its earliest undecided request and, after approval, executes both requests
 /// serially in proposal order with their distinct provenance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
+async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([
@@ -862,7 +897,9 @@ async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         executor.clone(),
     );
 
-    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
     let requests = fixture.wait_for_requests(2).await?;
     assert_eq!(requests.len(), 2);
     assert!(
@@ -889,7 +926,7 @@ async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
     fixture
         .decide(requests[1], ToolApprovalDecision::Approve)
         .await?;
-    running.await??;
+    execution.resume_active(fixture.session).await?;
 
     assert_eq!(
         executor.events(),
@@ -1019,13 +1056,18 @@ async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retr
     assert!(recovery.is_complete());
     assert_eq!(recovery.recovered_turn_count(), 1);
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
-    let classified: (String, String, String) = sqlx::query_as(
+    let classified: (String, String, String, String) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind, attempt.error_kind,
-                lifecycle.terminal_disposition_kind
+                lifecycle.terminal_disposition_kind,
+                issuing.end_disposition
            FROM tool_attempt AS attempt
            JOIN turn_lifecycle AS lifecycle
              ON lifecycle.session_id = attempt.session_id
             AND lifecycle.turn_id = attempt.turn_id
+           JOIN turn_attempt AS issuing
+             ON issuing.turn_attempt_id = attempt.issuing_turn_attempt_id
+            AND issuing.turn_id = attempt.turn_id
+            AND issuing.session_id = attempt.session_id
           WHERE attempt.session_id = $1
             AND attempt.turn_id = $2",
     )
@@ -1039,6 +1081,7 @@ async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retr
             String::from("known_failed"),
             String::from("crash_lost"),
             String::from("failed"),
+            String::from("lost"),
         )
     );
     assert_eq!(
@@ -1093,14 +1136,19 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
         "the ambiguous turn remains active while its attempt is recovered"
     );
     assert_eq!(crashing.events(), vec![String::from("external_effect")]);
-    let classified: (String, String, Option<Uuid>) = sqlx::query_as(
+    let classified: (String, String, Option<Uuid>, String) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind,
                 lifecycle.active_phase_kind,
-                lifecycle.recovery_tool_attempt_id
+                lifecycle.recovery_tool_attempt_id,
+                issuing.end_disposition
            FROM tool_attempt AS attempt
            JOIN turn_lifecycle AS lifecycle
              ON lifecycle.session_id = attempt.session_id
             AND lifecycle.turn_id = attempt.turn_id
+           JOIN turn_attempt AS issuing
+             ON issuing.turn_attempt_id = attempt.issuing_turn_attempt_id
+            AND issuing.turn_id = attempt.turn_id
+            AND issuing.session_id = attempt.session_id
           WHERE attempt.session_id = $1
             AND attempt.turn_id = $2",
     )
@@ -1121,6 +1169,7 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
             String::from("ambiguous"),
             String::from("awaiting_tool_recovery"),
             Some(attempt),
+            String::from("lost"),
         )
     );
     Ok(())
