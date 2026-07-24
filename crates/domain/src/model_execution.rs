@@ -432,7 +432,7 @@ impl ModelCallExecution {
                 ModelCallPreparationFailure::CallAlreadyExists,
             ));
         }
-        if self.current_attempt.state() != &CurrentTurnAttemptState::Prepared {
+        if !self.attempt_accepts_prepared_call() {
             return Err(ModelCallPreparationError::new(
                 self,
                 ModelCallPreparationFailure::AttemptIsNotPrepared,
@@ -556,7 +556,7 @@ impl ModelCallExecution {
 
     /// Returns a previously committed `Prepared` call for capability setup.
     pub fn resume_prepared_call(&self) -> Result<PreparedModelCallRequest, ModelCallResumeFailure> {
-        if self.current_attempt.state() != &CurrentTurnAttemptState::Prepared {
+        if !self.attempt_accepts_prepared_call() {
             return Err(ModelCallResumeFailure::AttemptIsNotPrepared);
         }
         let Some(call) = &self.current_call else {
@@ -609,9 +609,19 @@ impl ModelCallExecution {
         if call.state() != CurrentModelCallState::Prepared {
             return Err(fail(self, ModelCallAuthorizationFailure::CallIsNotPrepared));
         }
-        let attempt = match self.current_attempt.clone().begin_running() {
-            Ok(attempt) => attempt,
-            Err(_) => {
+        let attempt = match self.current_attempt.state() {
+            CurrentTurnAttemptState::Prepared => {
+                self.current_attempt.clone().begin_running().map_err(|_| {
+                    fail(
+                        self.clone(),
+                        ModelCallAuthorizationFailure::AttemptIsNotPrepared,
+                    )
+                })?
+            }
+            CurrentTurnAttemptState::Running if self.is_running_tool_continuation() => {
+                self.current_attempt.clone()
+            }
+            CurrentTurnAttemptState::Running | CurrentTurnAttemptState::StopRequested { .. } => {
                 return Err(fail(
                     self,
                     ModelCallAuthorizationFailure::AttemptIsNotPrepared,
@@ -693,35 +703,49 @@ impl ModelCallExecution {
         {
             return Err(ModelCallClosureError::InterruptCorrelationMismatch);
         }
+        let unsent_call = matches!(
+            (
+                self.current_attempt.state(),
+                self.current_call.as_ref().map(CurrentModelCall::state),
+            ),
+            (CurrentTurnAttemptState::Prepared, None)
+                | (
+                    CurrentTurnAttemptState::Prepared,
+                    Some(CurrentModelCallState::Prepared)
+                )
+        ) || (self.is_running_tool_continuation()
+            && matches!(
+                self.current_call.as_ref().map(CurrentModelCall::state),
+                None | Some(CurrentModelCallState::Prepared)
+            ));
+        if unsent_call {
+            let reclassified_pending_steering = reclassify_pending_steering(
+                &self.active_turn,
+                &identities.pending_steering_reclassifications,
+            )?;
+            let ended_call = self
+                .current_call
+                .map(|call| call.end_cancelled_unsent(proof))
+                .transpose()
+                .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
+            let cancelled = close_cancelled_turn(
+                ModelCallTurnScope {
+                    session: self.session,
+                    turn: self.turn,
+                },
+                self.current_attempt,
+                ended_call,
+                self.current_snapshot,
+                proof,
+                identities,
+                reclassified_pending_steering,
+            )?;
+            return Ok(ModelCallInterruptOutcome::Cancelled(cancelled));
+        }
         match (
             self.current_attempt.state(),
             self.current_call.as_ref().map(CurrentModelCall::state),
         ) {
-            (CurrentTurnAttemptState::Prepared, None)
-            | (CurrentTurnAttemptState::Prepared, Some(CurrentModelCallState::Prepared)) => {
-                let reclassified_pending_steering = reclassify_pending_steering(
-                    &self.active_turn,
-                    &identities.pending_steering_reclassifications,
-                )?;
-                let ended_call = self
-                    .current_call
-                    .map(|call| call.end_cancelled_unsent(proof))
-                    .transpose()
-                    .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
-                let cancelled = close_cancelled_turn(
-                    ModelCallTurnScope {
-                        session: self.session,
-                        turn: self.turn,
-                    },
-                    self.current_attempt,
-                    ended_call,
-                    self.current_snapshot,
-                    proof,
-                    identities,
-                    reclassified_pending_steering,
-                )?;
-                Ok(ModelCallInterruptOutcome::Cancelled(cancelled))
-            }
             (CurrentTurnAttemptState::Running, Some(CurrentModelCallState::InFlight)) => {
                 let attempt = self
                     .current_attempt
@@ -744,6 +768,16 @@ impl ModelCallExecution {
             }
             _ => Err(ModelCallClosureError::AttemptStateMismatch),
         }
+    }
+
+    fn attempt_accepts_prepared_call(&self) -> bool {
+        self.current_attempt.state() == &CurrentTurnAttemptState::Prepared
+            || self.is_running_tool_continuation()
+    }
+
+    fn is_running_tool_continuation(&self) -> bool {
+        self.current_attempt.state() == &CurrentTurnAttemptState::Running
+            && frontier_contains_tool_result(&self.starting_snapshot, &self.frontier_entries)
     }
 
     /// Applies an interrupt after a tool batch has closed every logical
@@ -3077,6 +3111,10 @@ fn reconstitute(
     } else {
         None
     };
+    let running_tool_round =
+        frontier_contains_tool_round(&input.starting_snapshot, &input.frontier_entries);
+    let running_tool_continuation =
+        frontier_contains_tool_result(&input.starting_snapshot, &input.frontier_entries);
     let lifecycle_valid = matches!(
         (
             current_attempt.state(),
@@ -3097,6 +3135,21 @@ fn reconstitute(
                 },
                 Some(CurrentModelCallState::CancellationRequested)
             )
+    ) || matches!(
+        (
+            current_attempt.state(),
+            current_call.as_ref().map(CurrentModelCall::state)
+        ),
+        (CurrentTurnAttemptState::Running, None) if running_tool_round
+    ) || matches!(
+        (
+            current_attempt.state(),
+            current_call.as_ref().map(CurrentModelCall::state)
+        ),
+        (
+            CurrentTurnAttemptState::Running,
+            Some(CurrentModelCallState::Prepared)
+        ) if running_tool_continuation
     );
     if !lifecycle_valid {
         return Err(fail(
@@ -3119,6 +3172,41 @@ fn reconstitute(
         pinned_target,
         current_call,
     })
+}
+
+fn frontier_contains_tool_result(
+    starting_snapshot: &ResolvedContextFrontierSnapshot,
+    frontier_entries: &[SemanticTranscriptEntry],
+) -> bool {
+    frontier_entries
+        .iter()
+        .skip(starting_snapshot.entry_count())
+        .any(|entry| {
+            matches!(
+                entry.payload(),
+                SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                    | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                    | SemanticTranscriptEntryPayload::ToolClosed { .. }
+            )
+        })
+}
+
+fn frontier_contains_tool_round(
+    starting_snapshot: &ResolvedContextFrontierSnapshot,
+    frontier_entries: &[SemanticTranscriptEntry],
+) -> bool {
+    frontier_entries
+        .iter()
+        .skip(starting_snapshot.entry_count())
+        .any(|entry| {
+            matches!(
+                entry.payload(),
+                SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                    | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                    | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                    | SemanticTranscriptEntryPayload::ToolClosed { .. }
+            )
+        })
 }
 
 fn reclassify_pending_steering(
@@ -4288,7 +4376,9 @@ mod tests {
             initial
                 .active_turn
                 .with_phase_for_test(ActiveTurnPhase::Running {
-                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(35)),
+                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(35))
+                        .begin_running()
+                        .expect("tool dispatch starts the continuation tenure"),
                 }),
             initial.targets,
             initial.starting_snapshot,
@@ -4313,6 +4403,7 @@ mod tests {
             continuation.ordered_entries().collect(),
         ));
         let resumed = input
+            .clone()
             .reconstitute()
             .expect("the complete continuation facts reconstruct");
         let prepared = resumed
@@ -4325,6 +4416,37 @@ mod tests {
             ResolvedProviderTarget::naming(provider_model_identity(8))
         );
         assert!(prepared.steering_snapshot().is_none());
+
+        let mut prepared_input = input;
+        prepared_input.call_snapshot = prepared_input.continuation_snapshot.take();
+        prepared_input.calls = vec![ModelCallReconstitutionInput::new(
+            prepared.call().id(),
+            prepared.turn(),
+            prepared.attempt(),
+            prepared.call().selection(),
+            prepared.call().target(),
+            prepared.call().frontier().snapshot(),
+            ModelCallReconstitutionState::Prepared,
+        )];
+        let reloaded = prepared_input
+            .reconstitute()
+            .expect("a running tool tenure may own its prepared continuation call");
+        assert_eq!(
+            reloaded
+                .resume_prepared_call()
+                .expect("the prepared continuation resumes")
+                .call()
+                .id(),
+            prepared.call().id()
+        );
+        let authorized = reloaded
+            .authorize_send()
+            .expect("send authorization keeps the existing running tenure");
+        assert_eq!(
+            authorized.attempt().state(),
+            &CurrentTurnAttemptState::Running
+        );
+        assert_eq!(authorized.call().state(), CurrentModelCallState::InFlight);
     }
 
     /// S11 / INV-014: a call-free continuation pin is checked against the
