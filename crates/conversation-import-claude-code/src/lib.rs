@@ -258,7 +258,7 @@ fn split_records(source: &[u8]) -> Result<Vec<&[u8]>, ClaudeCodeJsonlConversionE
             Some(offset) => (start.checked_add(offset).ok_or_else(position_error)?, false),
             None => (source.len(), true),
         };
-        let record_end = if end > start && source.get(end - 1) == Some(&b'\r') {
+        let record_end = if !terminal && end > start && source.get(end - 1) == Some(&b'\r') {
             end - 1
         } else {
             end
@@ -911,18 +911,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_blank_lines_role_conflicts_and_duplicate_entry_ids() {
-        let blank = ClaudeCodeJsonlConverter
+    fn s28_inv038_preserves_terminal_lone_carriage_return_as_raw_content() {
+        let source = b"{\"type\":\"system\"}\r";
+        let imported = ClaudeCodeJsonlConverter
+            .convert(conversation(), source, || {
+                ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
+            })
+            .expect("a terminal carriage return is valid JSON whitespace");
+
+        assert_eq!(imported.raw_records()[0].bytes(), source);
+    }
+
+    #[test]
+    fn s28_inv038_rejects_blank_lines() {
+        let error = ClaudeCodeJsonlConverter
             .convert(conversation(), b"{\"type\":\"system\"}\n\n", || {
                 ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
             })
             .expect_err("blank synthetic JSONL line must fail");
         assert_eq!(
-            blank.failure(),
+            error.failure(),
             ClaudeCodeJsonlConversionFailure::BlankLine { line: 2 }
         );
+    }
 
-        let mismatch = ClaudeCodeJsonlConverter
+    #[test]
+    fn s28_inv038_rejects_message_role_conflicts() {
+        let error = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
                 br#"{"type":"user","message":{"role":"assistant","content":"x"}}"#,
@@ -930,11 +945,14 @@ mod tests {
             )
             .expect_err("contradictory synthetic role must fail");
         assert_eq!(
-            mismatch.failure(),
+            error.failure(),
             ClaudeCodeJsonlConversionFailure::MessageRoleMismatch { line: 1 }
         );
+    }
 
-        let duplicate = ClaudeCodeJsonlConverter
+    #[test]
+    fn s28_inv001_inv038_rejects_duplicate_entry_identities() {
+        let error = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
                 br#"{"type":"user","message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}}"#,
@@ -942,7 +960,7 @@ mod tests {
             )
             .expect_err("duplicate synthetic entry identities must fail");
         assert!(matches!(
-            duplicate.failure(),
+            error.failure(),
             ClaudeCodeJsonlConversionFailure::InvalidAggregate(
                 signalbox_domain::ImportedConversationReconstitutionFailure::DuplicateEntry { .. }
             )
