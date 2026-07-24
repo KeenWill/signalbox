@@ -1,10 +1,8 @@
 # Persistence protocol
 
 The baseline persistence protocol was verified through PR #175
-(`agent/stop-requests`); imported-conversation and imported-frontier session
-storage specify the implementing stack rooted at
-`agent/conversation-import-spec`. This page covers the Postgres representation
-in `crates/persistence` (source and migrations), migration discipline, durable
+(`agent/stop-requests`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
 command storage and replay equality, the fail-closed reconstitution boundary,
 the lock protocol, pending-steering durable state, the corruption taxonomy,
 commit-ambiguity handling, and the transactional outbox. Session aggregate
@@ -201,9 +199,12 @@ current state inside the claim transaction, while `CreateSession` — which has 
 current session state to lock — arrives as an already-prepared
 `PreparedCreateSession` value and is inserted after the claim
 (`create_session.rs`). Authoritative rejections claim the identifier and commit
-their typed record exactly as applied results do. Replay resolution —
-reconstruct the recorded command, compare structurally, return the recorded
-result or `ConflictingReuse` — follows the owner page's contract.
+their typed record exactly as applied results do. Owner-specified pre-claim
+admission errors are different: after registry inspection, a missing imported
+conversation or frontier returns without inserting a claim or typed record.
+Replay resolution — reconstruct the recorded command, compare structurally,
+return the recorded result or `ConflictingReuse` — follows the owner page's
+contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.
