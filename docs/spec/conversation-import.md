@@ -35,16 +35,18 @@ SHA-256 over this exact preimage:
 
 1. the ASCII domain tag `signalbox.imported-conversation.source-digest.v1`,
    prefixed by its unsigned 64-bit big-endian byte length;
-2. the ASCII format tag `claude-code-session-jsonl-v1`, prefixed by the same
-   length encoding;
+2. the converter version's ASCII format tag (`claude-code-session-jsonl-v1` or
+   `claude-code-session-jsonl-v2`), prefixed by the same length encoding;
 3. the raw-record count as an unsigned 64-bit big-endian integer; and
 4. for each raw record in physical order, its 32-byte SHA-256 content hash
    prefixed by the unsigned 64-bit big-endian value 32.
 
 The one-record synthetic vector whose exact raw bytes are hexadecimal `7b7d` has
-raw hash `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a` and
-source-content digest
-`b836a3fb00465c2c7ec01cf2c4b2c98845cbc9cdaf28892b910ce225d2079a5c`.
+raw hash `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`. Its
+version-1 source-content digest is
+`b836a3fb00465c2c7ec01cf2c4b2c98845cbc9cdaf28892b910ce225d2079a5c`; its
+version-2 source-content digest is
+`117ac9599571f7ff2839069ae5252236d79ea148fe518baa1f914d629fba00df`.
 
 Reingesting the same format and exact raw record sequence returns the existing
 imported conversation identity; caller-supplied candidate identities from that
@@ -78,12 +80,12 @@ boundary.
 
 Each occurrence also carries the complete source JSON object normalized into the
 source-neutral structured-value algebra. Non-message records produce a typed
-`SourceEvent` entry rather than being dropped or recast as conversation text. A
-source-defined message block without a more specific normalized variant produces
-a typed `SourceMessageBlock`, so its boundary and type remain explicit while the
-complete normalized owning record retains every block field. The normalized
-sequence and every entry's raw-record reference make each conversion decision
-traceable back to exact source bytes.
+`SourceEvent` entry rather than being dropped or recast as conversation text.
+Under Claude Code version 2, a source-defined message block without a more
+specific normalized variant produces a typed `SourceMessageBlock`, so its
+boundary and type remain explicit while the complete normalized owning record
+retains every block field. The normalized sequence and every entry's raw-record
+reference make each conversion decision traceable back to exact source bytes.
 
 Each occurrence additionally stores an `ImportedRawRecordConversionDigest` that
 authenticates its exact raw hash and complete normalized structured value
@@ -132,16 +134,16 @@ neighboring record, wall clock, or another field. Sidechain and metadata flags
 are provenance, not exclusion: they do not remove content or make an imported
 frontier unseedable.
 
-Claude Code version 1 maps the four text-valued provenance fields from the exact
-top-level members `uuid` (source record identifier), `parentUuid` (source parent
-record identifier), `sessionId` (source session identifier), and `timestamp`
-(source timestamp). For each, omission maps to `NotAttested`, JSON `null` maps
-to `AttestedAbsent`, and a JSON string maps to `Attested(exact text)`; every
-other JSON type rejects the complete conversion. It maps the sidechain and
-metadata-record flags from the exact top-level members `isSidechain` and
-`isMeta`, with the same omission/null behavior, an attested JSON Boolean value,
-and rejection for every other type. Repeating any of these six consulted members
-rejects the complete conversion.
+Claude Code versions 1 and 2 map the four text-valued provenance fields from the
+exact top-level members `uuid` (source record identifier), `parentUuid` (source
+parent record identifier), `sessionId` (source session identifier), and
+`timestamp` (source timestamp). For each, omission maps to `NotAttested`, JSON
+`null` maps to `AttestedAbsent`, and a JSON string maps to
+`Attested(exact text)`; every other JSON type rejects the complete conversion.
+They map the sidechain and metadata-record flags from the exact top-level
+members `isSidechain` and `isMeta`, with the same omission/null behavior, an
+attested JSON Boolean value, and rejection for every other type. Repeating any
+of these six consulted members rejects the complete conversion.
 
 Imported text retains the exact decoded Unicode scalar sequence, including an
 empty sequence, whitespace, line endings, normalization distinctions, and
@@ -200,10 +202,10 @@ per normalized entry, including source-event, message-content-absence, tool,
 result, thinking, redacted-thinking, and document boundaries.
 
 The converter retains `parentUuid` as source attestation but does not follow,
-repair, or use it to reorder version-1 frontiers. Duplicate source identifiers,
-missing parents, nonlinear parents, sidechains, and metadata records do not
-change the physical prefix. They also do not prevent a client from later
-selecting any imported frontier.
+repair, or use it to reorder either version's frontiers. Duplicate source
+identifiers, missing parents, nonlinear parents, sidechains, and metadata
+records do not change the physical prefix. They also do not prevent a client
+from later selecting any imported frontier.
 
 Why: a stable prefix boundary is available for every observed entry even when
 source ancestry is incomplete or ambiguous; adjacency is not recast as proof of
@@ -238,25 +240,27 @@ The converter does not read files or choose paths. Its caller supplies bytes, so
 later formats implement the same seam without adding filesystem types to the
 domain or application crates.
 
-## Claude Code session JSONL version 1
+## Claude Code session JSONL versions 1 and 2
 
 `ClaudeCodeJsonlConverter` implements
-`ClaudeCodeSessionJsonl { converter_version: 1 }`. It parses one JSON object per
-nonempty line, raw-preserves every record, and processes records in physical
-file order. Version 1 scans for LF bytes. An LF ends and is excluded from a
-record; an immediately preceding CR is also excluded as the other half of a CRLF
-delimiter. A CR anywhere else remains record content. Nonempty bytes after the
-final delimiter form a final unterminated record, while a terminal LF or CRLF
-does not create another record. An empty delimited record rejects the complete
-conversion. Version 1 never strips a UTF-8 byte-order mark: the bytes `EF BB BF`
-at the beginning of any physical record are not JSON whitespace and reject that
-record as invalid JSON.
+`ClaudeCodeSessionJsonl { converter_version: 2 }`. Version 1 remains the
+unchanged interpretation for already stored version-1 snapshots. Both versions
+parse one JSON object per nonempty line, raw-preserve every record, and process
+records in physical file order. They scan for LF bytes. An LF ends and is
+excluded from a record; an immediately preceding CR is also excluded as the
+other half of a CRLF delimiter. A CR anywhere else remains record content.
+Nonempty bytes after the final delimiter form a final unterminated record, while
+a terminal LF or CRLF does not create another record. An empty delimited record
+rejects the complete conversion. Neither version strips a UTF-8 byte-order mark:
+the bytes `EF BB BF` at the beginning of any physical record are not JSON
+whitespace and reject that record as invalid JSON.
 
 The parser retains object-member order and duplicate names in the complete
 normalized source object. At every object level, repeating a member name that
-version 1 consults to produce a normalized entry or attestation rejects the
-complete conversion. Duplicate names inside otherwise unmodeled structured
-values remain preserved and do not acquire fabricated selection semantics.
+the selected version consults to produce a normalized entry or attestation
+rejects the complete conversion. Duplicate names inside otherwise unmodeled
+structured values remain preserved and do not acquire fabricated selection
+semantics.
 
 Records then normalize as follows:
 
@@ -277,9 +281,9 @@ Records then normalize as follows:
    or null message, omitted or null content, or empty content array produces one
    precisely distinguished `MessageContentAbsent` entry.
 
-4. `text`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`, and
-   `document` blocks map to their corresponding normalized variants using these
-   exact consulted members:
+4. In both versions, `text`, `tool_use`, `tool_result`, `thinking`,
+   `redacted_thinking`, and `document` blocks map to their corresponding
+   normalized variants using these exact consulted members:
 
    - `text.text` supplies the text attestation;
    - `tool_use.id`, `.name`, `.input`, and `.caller` supply call identity, tool
@@ -289,24 +293,33 @@ Records then normalize as follows:
      `NotAttested`, null content is `AttestedAbsent`, string content is exact
      text, and array content is an ordered result-block sequence;
    - `thinking.thinking` and `.signature` supply exact thinking and signature;
-   - `redacted_thinking.data` supplies exact redacted data;
-   - `document.source` supplies the media source; and
-   - any block discriminator without a more specific normalized variant maps to
-     `SourceMessageBlock`; its consulted `type` member supplies the exact,
-     explicitly absent, or unattested source-block type, while every other
-     member remains in the complete normalized owning record.
+   - `redacted_thinking.data` supplies exact redacted data; and
+   - `document.source` supplies the media source.
 
    A tool-result `text.text` supplies its text attestation, `image.source`
    supplies its media source, and `tool_reference.tool_name` supplies its
-   tool-name attestation. Any other result-block discriminator, including an
-   omitted or null discriminator, maps to `SourceResultBlock` with that exact
-   type attestation. Every media source consults exactly `type`, `media_type`,
-   and `data`.
+   tool-name attestation. Every media source consults exactly `type`,
+   `media_type`, and `data`.
 
-5. A malformed content shape still fails the complete conversion rather than
-   being silently dropped or guessed. Unknown source block types do not: each
-   remains one typed generic block backed by its complete normalized record and
-   verbatim raw source record.
+5. Version 1 maps the exact message-block discriminator `fallback` to
+   `SourceMessageBlock`. Any other message-block discriminator without a
+   specific variant, and every omitted or null message-block discriminator,
+   makes the version-1 projection invalid. Its tool-result block vocabulary is
+   likewise limited to `text`, `image`, and `tool_reference`; any other,
+   omitted, or null result-block discriminator makes the projection invalid.
+
+6. Version 2 maps any message-block discriminator without a specific variant,
+   including an omitted or null discriminator, to `SourceMessageBlock`. It maps
+   any result-block discriminator without a specific variant, including an
+   omitted or null discriminator, to `SourceResultBlock`. Each generic variant
+   retains the exact, explicitly absent, or unattested `type`, while the
+   complete normalized owning record and verbatim raw record retain every other
+   source field.
+
+7. A malformed content shape still fails the complete conversion rather than
+   being silently dropped or guessed. Version 2 does not reject a structurally
+   valid source-defined block merely because its discriminator has no more
+   specific normalized variant.
 
 For every consulted text member, omitted, null, and string map respectively to
 `NotAttested`, `AttestedAbsent`, and `Attested(exact text)`; any other JSON type
@@ -317,16 +330,17 @@ shapes specified above; Boolean, number, and object values reject the complete
 conversion. Consulted media sources admit omitted, null, or an object whose
 three consulted members follow the text rule; every other shape fails. Each
 content or result block must be an object with at most one consulted `type`
-member; omission and null become typed generic blocks, an exact string selects a
-specific or generic variant, and any other value shape fails. As above,
-repeating any consulted member at its object level fails the complete
-conversion. These rules apply independently, so a missing or null `tool_use.id`
-remains typed absence while a non-string value is invalid.
+member; an exact string selects a specific or version-dependent generic variant,
+omission and null follow the selected version's rules above, and any other value
+shape fails. As above, repeating any consulted member at its object level fails
+the complete conversion. These rules apply independently, so a missing or null
+`tool_use.id` remains typed absence while a non-string value is invalid.
 
-Version 1 accepts both user/final-response-only records and records containing
-structured tool traffic, signed thinking, image results, tool references,
-document blocks, model-fallback notices, attachments, and administrative source
-events.
+Both versions accept user/final-response-only records and records containing
+their recognized structured tool traffic, signed thinking, image results, tool
+references, document blocks, model-fallback notices, and administrative source
+events. Version 2 additionally retains structurally valid source-defined message
+and result blocks instead of rejecting their complete conversion.
 
 Malformed JSON, a blank line, invalid UTF-8, malformed modeled content, an
 identity collision inside the candidate set, a position overflow, JSON deeper
@@ -336,9 +350,9 @@ objects on one root-to-value path: the required top-level record object has
 depth `1`, entering each child array or object adds `1`, and scalars add
 nothing. Depth `128` is admitted and attempting to enter a container at depth
 `129` rejects the whole source. The same count applies to every complete source
-record and modeled nested value. U+0000, empty strings, unknown source block
-discriminators, and a source containing only non-message records do not: raw and
-normalized storage retain them.
+record and modeled nested value. U+0000, empty strings, and a source containing
+only non-message records do not. In version 2, unknown source block
+discriminators likewise do not: raw and normalized storage retain them.
 
 ## Persistence and reconstitution
 
@@ -388,10 +402,10 @@ header does not exist. Once a header exists, a hash mismatch, missing blob or
 member, gap, duplicate, unknown discriminator/version, contradictory variant
 columns, invalid source value, or domain correlation failure is typed
 corruption. Complete storage records pass through the domain-owned
-reconstitution seam; adapters never default or drop a malformed value. For
-Claude Code version 1, that seam independently re-derives every expected entry
-from each complete normalized record and requires exact agreement in entry
-count, order, content, speaker, and source metadata. It also reapplies the
+reconstitution seam; adapters never default or drop a malformed value. For each
+Claude Code converter version, that seam independently re-derives every expected
+entry using that version's fixed interpretation and requires exact agreement in
+entry count, order, content, speaker, and source metadata. It also reapplies the
 128-container bound to complete records and entry-carried structured values
 (INV-002).
 

@@ -25,12 +25,15 @@ const MAX_STRUCTURED_CONTAINER_DEPTH: usize = 128;
 pub enum ImportedConversationFormat {
     /// Claude Code session JSONL interpreted by converter version 1.
     ClaudeCodeSessionJsonlV1,
+    /// Claude Code session JSONL interpreted by converter version 2.
+    ClaudeCodeSessionJsonlV2,
 }
 
 impl ImportedConversationFormat {
     fn digest_tag(self) -> &'static [u8] {
         match self {
             Self::ClaudeCodeSessionJsonlV1 => b"claude-code-session-jsonl-v1",
+            Self::ClaudeCodeSessionJsonlV2 => b"claude-code-session-jsonl-v2",
         }
     }
 }
@@ -755,7 +758,7 @@ pub enum ImportedTranscriptContent {
     },
     /// One source-defined block inside a user or assistant message.
     SourceMessageBlock {
-        /// Exact source block type.
+        /// Exact, explicit-null, or omitted source block type.
         source_type: ImportedSourceAttestation<ImportedText>,
     },
     /// Exact or absent decoded user or assistant text.
@@ -2036,19 +2039,29 @@ struct ProjectedEntry {
     source: ImportedSourceMetadata,
 }
 
+#[derive(Clone, Copy)]
+enum ClaudeCodeProjectionVersion {
+    One,
+    Two,
+}
+
 fn projected_entries(
     format: ImportedConversationFormat,
     normalized: &ImportedStructuredValue,
 ) -> Result<Vec<ProjectedEntry>, ()> {
     match format {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
-            project_claude_code_record(normalized)
+            project_claude_code_record(normalized, ClaudeCodeProjectionVersion::One)
+        }
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
+            project_claude_code_record(normalized, ClaudeCodeProjectionVersion::Two)
         }
     }
 }
 
 fn project_claude_code_record(
     normalized: &ImportedStructuredValue,
+    version: ClaudeCodeProjectionVersion,
 ) -> Result<Vec<ProjectedEntry>, ()> {
     let ImportedStructuredValue::Object(record) = normalized else {
         return Err(());
@@ -2094,7 +2107,7 @@ fn project_claude_code_record(
             {
                 return Err(());
             }
-            (projected_message_content(message)?, role)
+            (projected_message_content(message, version)?, role)
         }
         Some(_) => return Err(()),
     };
@@ -2127,6 +2140,7 @@ fn projected_message_role(
 
 fn projected_message_content(
     message: &[ImportedStructuredObjectMember],
+    version: ClaudeCodeProjectionVersion,
 ) -> Result<Vec<ImportedTranscriptContent>, ()> {
     match unique_structured_field(message, "content")? {
         None => Ok(vec![ImportedTranscriptContent::MessageContentAbsent(
@@ -2147,13 +2161,50 @@ fn projected_message_content(
         }
         Some(ImportedStructuredValue::Array(blocks)) => blocks
             .iter()
-            .map(projected_content_block)
+            .map(|block| match version {
+                ClaudeCodeProjectionVersion::One => projected_content_block_v1(block),
+                ClaudeCodeProjectionVersion::Two => projected_content_block_v2(block),
+            })
             .collect::<Result<Vec<_>, _>>(),
         Some(_) => Err(()),
     }
 }
 
-fn projected_content_block(
+fn projected_content_block_v1(
+    value: &ImportedStructuredValue,
+) -> Result<ImportedTranscriptContent, ()> {
+    let ImportedStructuredValue::Object(members) = value else {
+        return Err(());
+    };
+    match projected_required_type(members)? {
+        "text" => Ok(ImportedTranscriptContent::Text(projected_text_attestation(
+            members, "text",
+        )?)),
+        "tool_use" => Ok(ImportedTranscriptContent::ToolCall {
+            source_call_id: projected_text_attestation(members, "id")?,
+            name: projected_text_attestation(members, "name")?,
+            input: projected_structured_attestation(members, "input")?,
+            caller: projected_structured_attestation(members, "caller")?,
+        }),
+        "tool_result" => projected_tool_result(members, ClaudeCodeProjectionVersion::One),
+        "thinking" => Ok(ImportedTranscriptContent::Thinking {
+            thinking: projected_text_attestation(members, "thinking")?,
+            signature: projected_text_attestation(members, "signature")?,
+        }),
+        "redacted_thinking" => Ok(ImportedTranscriptContent::RedactedThinking {
+            data: projected_text_attestation(members, "data")?,
+        }),
+        "document" => Ok(ImportedTranscriptContent::Document {
+            source: projected_media_source_attestation(members, "source")?,
+        }),
+        "fallback" => Ok(ImportedTranscriptContent::SourceMessageBlock {
+            source_type: projected_text_attestation(members, "type")?,
+        }),
+        _ => Err(()),
+    }
+}
+
+fn projected_content_block_v2(
     value: &ImportedStructuredValue,
 ) -> Result<ImportedTranscriptContent, ()> {
     let ImportedStructuredValue::Object(members) = value else {
@@ -2173,7 +2224,7 @@ fn projected_content_block(
             })
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_result" => {
-            projected_tool_result(members)
+            projected_tool_result(members, ClaudeCodeProjectionVersion::Two)
         }
         ImportedSourceAttestation::Attested(value) if value.as_str() == "thinking" => {
             Ok(ImportedTranscriptContent::Thinking {
@@ -2201,6 +2252,7 @@ fn projected_content_block(
 
 fn projected_tool_result(
     members: &[ImportedStructuredObjectMember],
+    version: ClaudeCodeProjectionVersion,
 ) -> Result<ImportedTranscriptContent, ()> {
     let content = match unique_structured_field(members, "content")? {
         None => ImportedSourceAttestation::NotAttested,
@@ -2211,7 +2263,10 @@ fn projected_tool_result(
         Some(ImportedStructuredValue::Array(blocks)) => {
             let blocks = blocks
                 .iter()
-                .map(projected_tool_result_block)
+                .map(|block| match version {
+                    ClaudeCodeProjectionVersion::One => projected_tool_result_block_v1(block),
+                    ClaudeCodeProjectionVersion::Two => projected_tool_result_block_v2(block),
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
                 blocks.into_boxed_slice(),
@@ -2226,7 +2281,27 @@ fn projected_tool_result(
     })
 }
 
-fn projected_tool_result_block(
+fn projected_tool_result_block_v1(
+    value: &ImportedStructuredValue,
+) -> Result<ImportedToolResultBlock, ()> {
+    let ImportedStructuredValue::Object(members) = value else {
+        return Err(());
+    };
+    match projected_required_type(members)? {
+        "text" => Ok(ImportedToolResultBlock::Text(projected_text_attestation(
+            members, "text",
+        )?)),
+        "image" => Ok(ImportedToolResultBlock::Image(
+            projected_media_source_attestation(members, "source")?,
+        )),
+        "tool_reference" => Ok(ImportedToolResultBlock::ToolReference {
+            tool_name: projected_text_attestation(members, "tool_name")?,
+        }),
+        _ => Err(()),
+    }
+}
+
+fn projected_tool_result_block_v2(
     value: &ImportedStructuredValue,
 ) -> Result<ImportedToolResultBlock, ()> {
     let ImportedStructuredValue::Object(members) = value else {
@@ -2250,6 +2325,13 @@ fn projected_tool_result_block(
         | ImportedSourceAttestation::NotAttested => {
             Ok(ImportedToolResultBlock::SourceResultBlock { source_type })
         }
+    }
+}
+
+fn projected_required_type(members: &[ImportedStructuredObjectMember]) -> Result<&str, ()> {
+    match unique_structured_field(members, "type")? {
+        Some(ImportedStructuredValue::String(value)) => Ok(value.as_str()),
+        None | Some(_) => Err(()),
     }
 }
 
@@ -2392,7 +2474,8 @@ mod tests {
         ImportedRawSourceRecord, ImportedRawSourceRecordReconstitutionInput,
         ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
         ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
-        ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+        ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+        ImportedTranscriptEntryInput, ImportedTranscriptPosition,
     };
     use crate::{ImportedConversationId, ImportedTranscriptEntryId};
     use uuid::Uuid;
@@ -2827,6 +2910,17 @@ mod tests {
                 201, 205, 175, 40, 137, 43, 145, 12, 226, 37, 210, 7, 154, 92,
             ]
         );
+        assert_eq!(
+            ImportedConversationSourceDigest::derive(
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
+                &records,
+            )
+            .as_bytes(),
+            &[
+                17, 122, 201, 89, 149, 113, 247, 255, 40, 57, 6, 154, 229, 37, 34, 54, 215, 158,
+                161, 72, 254, 81, 139, 170, 31, 145, 77, 98, 159, 186, 0, 223,
+            ]
+        );
     }
 
     #[test]
@@ -3231,6 +3325,131 @@ mod tests {
             .expect_err("every normalized block must have one stored entry")
             .failure(),
             ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    /// S28 / INV-038: converter version 1 retains its original closed block
+    /// interpretation while version 2 admits source-defined message blocks.
+    #[test]
+    fn s28_inv038_converter_versions_do_not_reinterpret_source_blocks() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"assistant","message":{"content":[{"type":"future-kind"}]}}"#.to_vec(),
+            message_record(
+                "assistant",
+                ImportedStructuredValue::Array(
+                    vec![object((
+                        "type",
+                        ImportedStructuredValue::String(text("future-kind")),
+                    ))]
+                    .into_boxed_slice(),
+                ),
+            ),
+        );
+        let generic = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::SourceMessageBlock {
+                source_type: ImportedSourceAttestation::Attested(text("future-kind")),
+            },
+        )
+        .source_speaker(ImportedSpeaker::Assistant)
+        .build();
+
+        let version_two = ImportedConversation::from_converted_records(
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
+            vec![raw.clone()],
+            vec![generic.clone()],
+        )
+        .expect("version two admits a source-defined message block");
+        assert_eq!(
+            version_two.format(),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+        );
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![generic],
+            )
+            .expect_err("version one must retain its original closed interpretation")
+            .failure(),
+            ImportedConversationReconstitutionFailure::RawRecordProjectionInvalid {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    /// S28 / INV-038: the version boundary also preserves the original closed
+    /// tool-result block vocabulary.
+    #[test]
+    fn s28_inv038_converter_versions_do_not_reinterpret_result_blocks() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"future-result"}]}]}}"#.to_vec(),
+            message_record(
+                "user",
+                ImportedStructuredValue::Array(
+                    vec![object_with_members(vec![
+                        (
+                            "type",
+                            ImportedStructuredValue::String(text("tool_result")),
+                        ),
+                        (
+                            "content",
+                            ImportedStructuredValue::Array(
+                                vec![object((
+                                    "type",
+                                    ImportedStructuredValue::String(text("future-result")),
+                                ))]
+                                .into_boxed_slice(),
+                            ),
+                        ),
+                    ])]
+                    .into_boxed_slice(),
+                ),
+            ),
+        );
+        let generic = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::ToolResult {
+                source_call_id: ImportedSourceAttestation::NotAttested,
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                    vec![ImportedToolResultBlock::SourceResultBlock {
+                        source_type: ImportedSourceAttestation::Attested(text("future-result")),
+                    }]
+                    .into_boxed_slice(),
+                )),
+                is_error: ImportedSourceAttestation::NotAttested,
+            },
+        )
+        .source_speaker(ImportedSpeaker::User)
+        .build();
+
+        ImportedConversation::from_converted_records(
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
+            vec![raw.clone()],
+            vec![generic.clone()],
+        )
+        .expect("version two admits a source-defined result block");
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![generic],
+            )
+            .expect_err("version one must retain its original result-block interpretation")
+            .failure(),
+            ImportedConversationReconstitutionFailure::RawRecordProjectionInvalid {
                 position: ImportedRawRecordPosition::first(),
             }
         );
