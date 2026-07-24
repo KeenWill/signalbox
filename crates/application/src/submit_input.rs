@@ -9,9 +9,9 @@
 use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
-    AcceptedInputId, DeliveryRequest, DurableCommandId, SessionId,
-    SubmitInput as DomainSubmitInput, SubmitInputAppliedResult, SubmitInputResult, TurnId,
-    UserContent,
+    AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, DeliveryRequest,
+    DurableCommandId, SemanticTranscriptEntryId, SessionId, SubmitInput as DomainSubmitInput,
+    SubmitInputAppliedResult, SubmitInputResult, TurnId, UserContent,
 };
 
 use crate::{
@@ -129,6 +129,12 @@ pub trait SubmitInputIdGenerator {
 
     /// Generates one candidate future queued-work identity.
     fn next_turn_id(&mut self) -> TurnId;
+
+    /// Generates one candidate cancellation-marker identity.
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+
+    /// Generates one candidate terminal-frontier identity.
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 /// Production UUIDv7 generator for input-handling candidate identities.
@@ -142,6 +148,14 @@ impl SubmitInputIdGenerator for UuidV7SubmitInputIdGenerator {
 
     fn next_turn_id(&mut self) -> TurnId {
         TurnId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
+        ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -172,12 +186,16 @@ pub trait SubmitInputTransaction {
     type Error;
 
     /// Handles one canonical command and its hub-minted identity candidates.
-    fn handle(
+    fn handle<NextTurn>(
         &mut self,
         command: DomainSubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
-    ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 }
 
 /// Coordinates the durable input-submission use case.
@@ -206,7 +224,7 @@ impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, N
 
 impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge>
 where
-    Generator: SubmitInputIdGenerator,
+    Generator: SubmitInputIdGenerator + Send,
     Transaction: SubmitInputTransaction,
     Nudge: EligibilityNudge,
 {
@@ -234,8 +252,22 @@ where
             request.delivery,
         );
         let accepted_input = self.ids.next_accepted_input_id();
+        let cancellation_identities = CancelledModelCallTurnIdentities::new(
+            self.ids.next_semantic_entry_id(),
+            self.ids.next_context_frontier_id(),
+        );
+        let ids = &mut self.ids;
 
-        let outcome = self.transaction.handle(command, accepted_input, turn).await;
+        let outcome = self
+            .transaction
+            .handle(
+                command,
+                accepted_input,
+                turn,
+                cancellation_identities,
+                |_| ids.next_turn_id(),
+            )
+            .await;
         if matches!(
             &outcome,
             Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
@@ -278,11 +310,11 @@ mod tests {
     use uuid::{Uuid, Variant, Version};
 
     use super::{
-        AcceptedInputId, DeliveryRequest, DomainSubmitInput, DurableCommandId, EligibilityNudge,
-        EligibilityNudgeOutcome, InvalidDurableCommandId, SessionId, SubmitInputAppliedResult,
-        SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
-        SubmitInputResult, SubmitInputService, SubmitInputTransaction, TurnId, UserContent,
-        UuidV7SubmitInputIdGenerator,
+        AcceptedInputId, CancelledModelCallTurnIdentities, DeliveryRequest, DomainSubmitInput,
+        DurableCommandId, EligibilityNudge, EligibilityNudgeOutcome, InvalidDurableCommandId,
+        SessionId, SubmitInputAppliedResult, SubmitInputIdGenerator, SubmitInputOutcome,
+        SubmitInputRequest, SubmitInputRequestError, SubmitInputResult, SubmitInputService,
+        SubmitInputTransaction, TurnId, UserContent, UuidV7SubmitInputIdGenerator,
     };
 
     fn command_id(value: u128) -> DurableCommandId {
@@ -441,6 +473,18 @@ mod tests {
                 .pop_front()
                 .expect("test must supply one turn candidate per invocation")
         }
+
+        fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId {
+            signalbox_domain::SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                0x1000 + self.accepted_input_calls as u128,
+            ))
+        }
+
+        fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId {
+            signalbox_domain::ContextFrontierId::from_uuid(Uuid::from_u128(
+                0x2000 + self.accepted_input_calls as u128,
+            ))
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -473,12 +517,17 @@ mod tests {
     impl SubmitInputTransaction for FakeTransaction {
         type Error = FakeTransactionError;
 
-        fn handle(
+        fn handle<NextTurn>(
             &mut self,
             command: DomainSubmitInput,
             accepted_input: AcceptedInputId,
             turn: Option<TurnId>,
-        ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send {
+            _cancellation_identities: CancelledModelCallTurnIdentities,
+            _next_reclassified_turn: NextTurn,
+        ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
+        where
+            NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        {
             self.observed.push((command, accepted_input, turn));
             ready(
                 self.responses

@@ -1,15 +1,15 @@
 # Persistence protocol
 
 This page describes the implemented persistence protocol of the Signalbox hub as
-it exists in `crates/persistence` (source and migrations) at commit `bf39f5f` on
-`main`. It covers the Postgres representation, migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+verified against the implementing stack through PR #175 (`agent/stop-requests`).
+It covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -48,7 +48,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — thirteen files, `202607180001` through
+`crates/persistence/migrations/` — fifteen files, `202607180001` through
 `202607230001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -76,7 +76,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the thirteen migrations):
+Implemented table families (across the fifteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
@@ -100,8 +100,9 @@ Representation rules, all enforced in the schema:
   implemented sets are exactly the admitted slices: turn state
   `queued`/`active`/`terminal`, active phase `running` or
   `awaiting_model_call_recovery`, terminal disposition
-  `failed`/`completed`/`refused`, attempt state `prepared`/`running`/`ended`
-  with end variant `without_stop` and six end dispositions, and model-call state
+  `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`, attempt
+  state `prepared`/`running`/`stop_requested`/`ended` with end variants
+  `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
@@ -126,10 +127,19 @@ Representation rules, all enforced in the schema:
   `turn_terminal_requires_closed_pending_steering` rejects a terminal transition
   while pending steering naming the turn remains
   (`turn_lifecycle_pending_steering_closed`). Migration `202607220001` adds the
-  closure: a guard trigger (`reject_invalid_accepted_input_change`) replaces
-  plain append-only on `accepted_input` and admits exactly one update —
-  `pending_steering` → `reclassified_as_turn_origin` setting a fresh
-  `origin_turn_id` with every other column unchanged.
+  reclassification closure: a guard trigger
+  (`reject_invalid_accepted_input_change`) replaces plain append-only on
+  `accepted_input` and admits only `pending_steering` →
+  `reclassified_as_turn_origin`, setting a fresh `origin_turn_id`. Migration
+  `202607220004` widens that exact guard for `pending_steering` →
+  `consumed_as_steering`, setting the exact `consuming_model_call_id`; both
+  admitted changes otherwise preserve the accepted fact. Consumed steering
+  additionally requires one correlated `steering_accepted_input` semantic entry
+  in that call's frontier, naming the same accepted input and source turn.
+  Reclassified steering instead requires its queued origin and terminal source
+  proof. Those lifecycle checks preserve the immutable next-safe-point command
+  receipt, so equal replay after either transition still returns the original
+  applied pending-steering result (INV-012, INV-016).
 - Cross-table completeness uses deferrable-initially-deferred foreign keys and
   constraint triggers so rows of one atomic fact can be inserted in any order
   inside a transaction while every commit boundary sees the complete shape: each
@@ -252,38 +262,51 @@ complete queue and lifecycle state, `ModelCallExecutionReconstitutionInput` for
 the active turn's pinned provider target and complete call history, and
 `FailedTurnExecutionReconstitutionInput` for a failed terminal turn's exact
 ended attempt and optional `known_failed`/`cancelled` call provenance
-(backfilled and closed by migration `202607220003`). The scheduling load proves
-its own completeness — it counts `queued_input_origin` against `turn_lifecycle`
-and fails on mismatch — rather than trusting whichever rows a filter returned.
-Active-phase and acceptance-tail validation semantics are owned by
+(backfilled and closed by migration `202607220003`). Cancelled and
+reconciliation-required terminal turns additionally supply their exact
+proof-bearing attempt end, applied-interrupt result, and optional cancelled or
+required ambiguous call through the scheduling input described in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). The
+scheduling load proves its own completeness — it counts `queued_input_origin`
+against `turn_lifecycle` and fails on mismatch — rather than trusting whichever
+rows a filter returned. Active-phase, terminal-evidence, and acceptance-tail
+validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
-or dropped on load. Load paths do not panic on durable data; one acknowledged
-`expect` remains on the interrupt-unavailable path in `submit_input.rs`, a
-marked temporary site reachable only if the checked active-projection contract
-is broken. Startup recovery operates only on successfully reconstituted
-projections (INV-034), and a successful reconstitution does not waive the
-guarded compare-and-set when a later transaction commits: every guarded write
-that matches zero rows is either benign staleness (reload and rederive) or,
-where the transaction's own premises made a match mandatory, corruption. Why:
-the dangerous corruption cases are rows that look individually valid while their
-cross-record correlations are not, so authority comes only from complete
-validated projections, never from raw identifiers.
+or dropped on load. Load paths do not panic on durable data; checked interrupt
+application produces the exact cancellation-requested or reconciliation-required
+transition, while a projection that cannot support that transition fails closed
+as typed corruption. Startup recovery operates only on successfully
+reconstituted projections (INV-034), and a successful reconstitution does not
+waive the guarded compare-and-set when a later transaction commits: every
+guarded write that matches zero rows is either benign staleness (reload and
+rederive) or, where the transaction's own premises made a match mandatory,
+corruption. Why: the dangerous corruption cases are rows that look individually
+valid while their cross-record correlations are not, so authority comes only
+from complete validated projections, never from raw identifiers.
 
-Startup recovery terminalizes a lost active turn as failed, with the deferral
-branch now confined to evidence-free turns: when the lost turn holds no model
-call and a pending-steering row names it, the transaction rolls back
-`DeferredPendingSteering` and hubd refuses scheduling (`recovery_blocked`); a
-turn holding a `Prepared` call fails with its pending steering atomically
-reclassified to successor origins, and an in-flight call recovers into the
-`awaiting_model_call_recovery` wait. The schema guard
-(`turn_lifecycle_pending_steering_closed`) enforces the same refusal
-independently at commit. Why: a pending-steering row is an accepted delivery
-obligation; where no reclassification closure applies (an evidence-free lost
-turn), terminalizing its source turn would strand it, so recovery fails closed
-instead.
+Startup recovery terminalizes an evidence-free lost active turn as failed and
+atomically reclassifies its pending steering to successor origins. A turn
+holding a `Prepared` call follows the same logical closure after ending the call
+known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
+wait. A persisted `stop_requested` attempt and `cancellation_requested` call
+reconstruct through their exact applied interrupt, end the abandoned attempt
+`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
+ambiguous call without erasing stop intent. The schema guard
+(`turn_lifecycle_pending_steering_closed`) independently requires every pending
+row to be consumed or reclassified before terminalization. Why: a pending
+steering row is an accepted delivery obligation, so every recovery branch must
+account for it rather than block startup or strand it.
+
+An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
+does not rewrite its terminal ambiguous call. In the accepting transaction, the
+ended attempt remains its original `without_stop/ambiguous|lost` evidence, and
+the active lifecycle terminalizes `reconciliation_required` with an
+equal-content frontier and typed outbox record. The reconciliation marker and
+accepted successor carry the exact interrupt proof. The attempt trigger rejects
+every update to an ended attempt.
 
 ## Corruption taxonomy
 
@@ -355,11 +378,12 @@ protocol scope). Implemented storage:
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `turn_activated_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `turn_completed_outbox_event`, and
-  `turn_refused_outbox_event` — with a deferred trigger requiring exactly one
-  typed record per header. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and all ten outbox tables reject
-  `TRUNCATE`.
+  `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
+  `turn_reconciliation_required_outbox_event` — with a deferred trigger
+  requiring exactly one typed record per header. The header and typed record
+  tables are append-only (`reject_immutable_record_change`), and every outbox
+  table rejects `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -376,15 +400,19 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; an applied turn-origin SubmitInput appends `input_accepted`;
-terminalization that reclassifies pending steering as a successor turn appends
-`input_accepted` for that successor; an applied StartEligibleTurn activation
-appends `turn_activated`; startup recovery's terminalization appends
-`turn_failed` (a pending-steering deferral rolls back and appends nothing).
-Model-call state transitions append `model_call_transition`, completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
-known-failure closure appends `turn_failed`. A guarded transition that changes
-zero rows appends zero events. Why: writing the event in the committing
+`session_created`; an applied SubmitInput that creates a turn origin appends
+`input_accepted`, while `PendingSteering` appends nothing until terminal
+reclassification mints its successor turn and appends that correlated
+`input_accepted`; an applied StartEligibleTurn appends `turn_activated`. Startup
+recovery appends `turn_failed` for a failed lost turn and
+`turn_reconciliation_required` when stopped issued work becomes ambiguous;
+terminal reclassification of pending steering appends its correlated
+`input_accepted`. Model-call state transitions append `model_call_transition`,
+completion closure appends `turn_completed`, refusal closure appends
+`turn_refused`, and known-failure closure appends `turn_failed`;
+interrupt-confirmed cancellation appends `turn_cancelled`, and live stopped
+ambiguity appends `turn_reconciliation_required`. A guarded transition that
+changes zero rows appends zero events. Why: writing the event in the committing
 transaction makes the dual-write failure (state without event, or event without
 state) unrepresentable.
 
@@ -399,13 +427,13 @@ enforces ordered at-least-once behavior. Before offering a record, the
 dispatcher proves that its header does not exceed the allocator cursor and that
 an activation agrees with the durable turn's active current attempt or retained
 terminal attempt; a terminal model-call transition agrees with the authoritative
-call's exact terminal disposition; and failed, completed, and refused records
-agree with the durable turn, terminal frontier, semantic marker where present,
-and terminal model call where present. Historical Prepared and InFlight
-transition records remain dispatchable after their call advances. Exhausted
-delivery still validates the allocator singleton and cursor. Hub task ownership,
-polling, fan-out, and client observation semantics are owned by
-[process-protocol](process-protocol.md).
+call's exact terminal disposition; and failed, completed, refused, cancelled,
+and reconciliation-required records agree with the durable turn, terminal
+frontier, semantic marker where present, and terminal model call where present.
+Historical Prepared and InFlight transition records remain dispatchable after
+their call advances. Exhausted delivery still validates the allocator singleton
+and cursor. Hub task ownership, polling, fan-out, and client observation
+semantics are owned by [process-protocol](process-protocol.md).
 
 ## Open edges
 
@@ -414,19 +442,12 @@ polling, fan-out, and client observation semantics are owned by
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
-- Pending-steering reclassification is implemented at source-turn
-  terminalization (`reclassified_as_turn_origin`); in-turn safe-point
-  consumption remains unimplemented, and evidence-free startup recovery (no
-  model call) still defers (`recovery_blocked`).
-- Frontier lineage checks in migration `202607180004` assume `none` ancestry and
-  `ordinary` priority only; fork ancestry and interrupt priority must replace
-  them by migration.
-- Interrupt application is unavailable: a matched interrupt fails explicitly
-  (`InterruptApplicationUnavailable`) without claiming its identifier.
+- Frontier lineage checks assume `none` ancestry; fork ancestry must replace
+  that assumption.
 - The designed aggregate-map rows for model calls landed (`model_call`, the
   turn-level target pin, the pinned credential reference); provider evidence,
-  authority transfers, cancellation intent, interrupt-proof storage, and tool
-  tables are not yet in the schema.
+  authority transfers, fatal cancellation intent, and tool tables are not yet in
+  the schema.
 - Command-handling error families implement no `ClassifyOperatorFailure`;
   operator classification covers only startup scan, turn activation, the
   eligibility sweep, and the model-call repository.

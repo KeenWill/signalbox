@@ -104,6 +104,12 @@ pub struct NonEmptyIssuedOperationRefs {
 }
 
 impl NonEmptyIssuedOperationRefs {
+    pub(crate) fn singleton(operation: IssuedOperationRef) -> Self {
+        Self {
+            operations: BTreeSet::from([operation]),
+        }
+    }
+
     /// Canonicalizes distinct references and rejects empty or duplicate input.
     pub fn try_from_operations(
         operations: impl IntoIterator<Item = IssuedOperationRef>,
@@ -243,6 +249,18 @@ pub struct ReconciliationMarker {
 }
 
 impl ReconciliationMarker {
+    /// Constructs an interrupt marker after the model-execution aggregate has
+    /// proven the exact issued operation remains ambiguous.
+    pub(crate) fn from_interrupt_ambiguity(
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        interrupt: AppliedInterruptProof,
+    ) -> Self {
+        Self {
+            ambiguous_operations,
+            reason: ReconciliationReason::InterruptRequiresReconciliation { interrupt },
+        }
+    }
+
     /// Constructs the fatal marker from the sealed post-evidence binding.
     pub(crate) fn from_fatal_mismatch_candidate(
         candidate: FatalMismatchReconciliationMarkerCandidate,
@@ -316,6 +334,8 @@ pub enum ActiveTurnPhase {
     AwaitingRecoveryDecision {
         /// The operations still blocking turn-level disposition.
         ambiguous_operations: NonEmptyIssuedOperationRefs,
+        /// The exact interrupt still stopping the turn, when one was applied.
+        applied_interrupt: Option<crate::AppliedInterruptProof>,
     },
 }
 
@@ -542,6 +562,7 @@ mod tests {
         };
         let awaiting_recovery = ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations: ambiguous.clone(),
+            applied_interrupt: None,
         };
 
         assert!(running.retains_progressing_slot());
@@ -558,7 +579,10 @@ mod tests {
         ));
         assert!(matches!(
             &awaiting_recovery,
-            ActiveTurnPhase::AwaitingRecoveryDecision { ambiguous_operations }
+            ActiveTurnPhase::AwaitingRecoveryDecision {
+                ambiguous_operations,
+                ..
+            }
                 if ambiguous_operations == &ambiguous
         ));
     }
