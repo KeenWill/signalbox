@@ -137,6 +137,115 @@ Normalizing whitespace would rewrite evidence instead of validating it.
 **Affects.** Tool execution-error construction, `tool_attempt.error_detail`
 storage, reconstitution, and the tool-loop specification.
 
+## 2026-07-24 — Keep ordinary imported-session loads bounded
+
+**Context.** Imported seed correctness requires full comparison with the
+selected imported prefix, but the shared `load_session` boundary is used by
+routine submission, defaults, startup, scheduling, and model-execution paths.
+Loading an unbounded imported aggregate for every ordinary session read would
+violate the bounded `Session` aggregate and amplify lock-held work.
+
+**Decision.** Ordinary imported-session reconstitution reads a constant-size
+proof: the one-to-one seed record and its frontier header must agree with the
+session, and the header count must equal the selected boundary position. Full
+imported-prefix comparison remains mandatory at creation replay and every
+purpose-specific read that resolves imported semantic context, including
+first-turn scheduling and process transcript projection; see
+[sessions-and-transcript](spec/sessions-and-transcript.md) and
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Full prefix validation in every shared session load
+is unbounded and repeatedly scans immutable history. Creation-only validation
+would let purpose-specific reads trust corrupted seed membership. Omitting the
+seed from ordinary reconstitution would fail to detect a missing or cross-wired
+one-to-one link.
+
+**Affects.** INV-002/INV-039; current-session reconstitution, persistence load
+projection, imported creation replay, first-turn scheduling, process transcript
+reads, and PostgreSQL corruption tests.
+
+## 2026-07-24 — Version imported transcript projection as process protocol two
+
+**Context.** Process protocol version one has closed transcript-entry variants,
+and its clients reject unknown variants. Reusing version one for imported
+entries would make an upgraded hub emit frames that an otherwise compatible
+version-one client cannot decode.
+
+**Decision.** Preserve version one's wire vocabulary and add version two with
+the conservative imported transcript-entry variants. The hub admits both
+versions and responds in the request version. When a frame cannot admit its
+declared version, its server error uses version one as the pre-admission
+fallback. A version-one submit, transcript, or follow request selecting imported
+ancestry returns a version-one `unsupported_version` error naming version two
+before mutation or snapshot construction; native sessions remain available
+through both versions. See [process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Extending version one's closed enums would break old
+clients after they accept the frame version. Dropping version-one support would
+needlessly prevent upgraded hubs from serving native sessions to existing
+clients. Rendering imported entries as native variants would fabricate
+provenance, and silently omitting the complete imported prefix would make the
+snapshot incomplete.
+
+**Affects.** S28; INV-033/INV-038/INV-039; process wire types, hub request
+dispatch, terminal-client decoding, imported transcript reads, follow snapshots,
+and compatibility tests.
+
+## 2026-07-24 — Separate imported ancestry from its materialized seed frontier
+
+**Context.** Imported ancestry identifies the external record and boundary that
+supplied initial semantic context. Session creation also mints one local
+`ContextFrontierId` for the materialized imported prefix. Scheduling must
+recover that exact identity, because equal frontier content does not imply
+frontier identity.
+
+**Decision.** Keep `TranscriptAncestry::ImportedConversation` limited to the
+imported conversation, inclusive entry boundary, and resume/fork relationship.
+Record the generated frontier in a separate immutable, one-to-one
+`ImportedSessionSeed` owned by the created session. The creation transaction
+stores both facts atomically. Creation replay and purpose-specific semantic
+reads reconstitute the seed against the session's imported ancestry and exact
+imported-prefix membership; ordinary session reconstitution uses the bounded
+proof recorded above. Scheduling uses the stored identity and never remints an
+equal-content frontier; see
+[sessions-and-transcript](spec/sessions-and-transcript.md) and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
+
+**Rejected alternatives.** Embedding the local frontier identity in ancestry
+would mix source provenance with Signalbox's materialization artifact. Deriving
+or reminting a frontier from equal membership would lose identity. A generalized
+session-seed abstraction would speculate beyond the imported-session slice.
+
+**Affects.** S28; INV-003/INV-015/INV-039; imported session creation,
+reconstitution, first-turn scheduling, domain/application spines, and
+append-only PostgreSQL representation.
+
+## 2026-07-24 — Authenticate each imported raw-record conversion
+
+**Context.** Exact raw bytes are durable authority, but the stored normalized
+record and its projected entries could otherwise be changed together and still
+pass entry-to-normalized comparison. Reconstitution must detect that
+contradiction without moving the format parser from the recorded edge-owned
+decoder boundary into the domain or persistence adapter.
+
+**Decision.** Every converted raw occurrence carries a SHA-256 conversion digest
+over a fixed domain tag, its exact raw hash, and a closed, length-framed
+encoding of its complete source-neutral structured value. The domain computes
+the digest at conversion, persistence stores it independently from the
+normalized-value encoding, and domain reconstitution derives and compares it
+before trusting the normalized projection; see
+[conversation-import](spec/conversation-import.md).
+
+**Rejected alternatives.** Re-parsing provider JSON in the domain would reverse
+the edge-owned decoder boundary. Adapter-only checking would leave the public
+domain reconstitution path unauthenticated. Hashing the storage codec bytes
+would couple domain integrity to an adapter encoding. Including normalization in
+the source-content digest would change raw-content idempotency.
+
+**Affects.** Imported raw-record domain types and corruption vocabulary, the
+raw-occurrence schema and adapter, domain spine, conversation-import
+specification, and synthetic domain/Postgres corruption tests.
+
 ## 2026-07-24 — Snapshot terminal renderer projections
 
 **Context.** Partial substring assertions let missing identities, malformed
@@ -172,6 +281,56 @@ deadlines would add unrelated timing semantics.
 **Affects.** Process-protocol frame ownership, submitted-input admission, and
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
+
+## 2026-07-23 — Import external conversations as records and seed native sessions
+
+**Context.** External AI transcripts need to become durable Signalbox history
+without claiming that Signalbox accepted their input or authorized, attempted,
+or observed their model and tool effects. Claude Code session JSONL contains
+non-message records, optional metadata, sidechains, text-only vintages,
+structured tool traffic, thinking, and media. Import must be safe to rerun
+without deciding whether, where, or how a future session uses the record.
+
+**Decision.** Adopt the immutable imported-conversation aggregate,
+format-versioned edge-converter seam, exact per-field source attestations,
+content-addressed verbatim raw records, source-neutral maximum-fidelity
+normalization of message content and non-message source events, and later
+session creation from any imported entry boundary as specified by
+[conversation-import](spec/conversation-import.md) and
+[sessions-and-transcript](spec/sessions-and-transcript.md). SHA-256, supplied by
+the narrow `sha2` dependency, keys raw-record deduplication and a
+domain-separated, length-framed source digest makes exact reingestion
+idempotent. Import is pure ingestion: resume-style or fork-style selection is a
+later client-invoked session-creation fact. Both select any addressable imported
+frontier and leave the imported snapshot unchanged. Imported semantic entries
+remain provenance-distinct from native evidence. Initial rendering emits exact
+imported user/assistant text and conservatively omits imported tool, result,
+thinking, and media entries without removing them from the frontier. Claude Code
+JSONL version 1 admits a maximum array/object nesting depth of 128. The required
+top-level record object counts as depth 1, depth 128 is admitted, and attempting
+to enter a container at depth 129 rejects the complete source, as specified by
+[conversation-import](spec/conversation-import.md). This bounds its recursive
+source-neutral JSON decoder.
+
+**Rejected alternatives.** Replaying imports as native turns or copying them
+into native accepted-input/model-call variants would fabricate execution
+evidence. Import-time `import_only`/`adopt_resume`/`adopt_fork` coupling would
+make ingestion choose one future use and one session too early. Normalized-only
+storage would make converter omissions unrecoverable; raw-only storage would
+leave no checked frontier. Flattening absence, repairing parent chains,
+discarding tool/thinking/media payloads, or rendering them as native tool
+traffic would invent or lose facts. Provider JSON in the domain would make every
+later format a schema-wide concern. Non-cryptographic or unframed hashes would
+provide weaker collision and concatenation boundaries. Unbounded recursive JSON
+decoding risks stack exhaustion; adding a stack-growth dependency for this
+edge-format parser is unnecessary at the fixed depth.
+
+**Affects.** S28; INV-001/INV-002/INV-003/INV-005/INV-038/INV-039; conversation
+ingestion and idempotency, raw-record storage, imported frontier selection,
+session ancestry and creation, semantic entries, first native frontier,
+model-input rendering, append-only Postgres storage, the domain/application
+spines, and opt-in content-silent real-transcript validation. Native lifecycle,
+slot locking, execution evidence, retry, and outbox semantics do not change.
 
 ## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
 
