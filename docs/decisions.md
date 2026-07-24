@@ -75,9 +75,11 @@ frontier identity.
 imported conversation, inclusive entry boundary, and resume/fork relationship.
 Record the generated frontier in a separate immutable, one-to-one
 `ImportedSessionSeed` owned by the created session. The creation transaction
-stores both facts atomically. Reconstitution checks the seed against the
-session's imported ancestry and exact imported-prefix membership; scheduling
-uses the stored identity and never remints an equal-content frontier; see
+stores both facts atomically. Creation replay and purpose-specific semantic
+reads reconstitute the seed against the session's imported ancestry and exact
+imported-prefix membership; ordinary session reconstitution uses the bounded
+proof recorded above. Scheduling uses the stored identity and never remints an
+equal-content frontier; see
 [sessions-and-transcript](spec/sessions-and-transcript.md) and
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
 
