@@ -1,18 +1,23 @@
 # Work backlog
 
-The granular, owner-curated expansion of the target model's
-[priority order](../target-model.md#priority-order). Each entry is a pullable
-unit of work for a goal run. Entries state what they touch so parallel launches
-are mechanical: any set of items with disjoint `Owns`/`Collides-with` groups may
-run concurrently. This file is an ordering and parallelism artifact, not a
-design document — designs happen as specification diffs when an item is picked
-up. The owner reorders, adds, and retires entries; agents never reorder.
+The owner-curated menu of pullable work for goal runs, a granular companion to
+the target model's [priority order](../target-model.md#priority-order). Entries
+state what they touch so parallel launches are mechanical: any set of items with
+disjoint `Owns`/`Collides-with` groups may run concurrently. This is a
+parallelism-and-collision map, not a design document — designs happen as
+specification diffs when an item is picked up.
+
+Entry order here is a default-proposed sequence pending the owner's curation; it
+does not override the milestone priority. Milestone priority remains the target
+model's priority order plus explicit owner flags (the tool-loop foundation is
+owner-flagged as the next major milestone regardless of its position below). The
+owner reorders, adds, and retires entries; agents never reorder.
 
 Entry format: status is `ready`, `in-flight`, or `blocked-on: <what>`; size is
-S/M/L/XL. Standing cautions from the predecessor system's recorded regrets: hold
-typed identities at every boundary including future SDKs; ack-driven client
-state only; runner auth designed in from day one; never ship an endpoint or
-state ahead of its semantics.
+S/M/L/XL. Standing engineering cautions for every entry: hold typed identities
+at every boundary including future SDKs; drive client state from acknowledged
+facts, never optimistically; design runner authentication in from day one; never
+ship an endpoint or state ahead of its semantics.
 
 ## Terminal stop and steer verbs [blocked-on: client stack merge] [size: S]
 
@@ -21,7 +26,7 @@ server handlers. Collides-with: the client stack files. Steering and
 proof-bearing stops are landed hub-side with no client verb; this is the
 cheapest capability on the board.
 
-## Frontier scaling fix [blocked-on: stop-requests merge] [size: M]
+## Frontier scaling fix [ready] [size: M]
 
 Owns: persistence read paths, domain frontier materialization. Collides-with:
 turn machinery. The recorded post-model-call obligation: remove the quadratic
@@ -41,11 +46,11 @@ a goal session with owner addenda (maximum-fidelity conversion, raw
 preservation, adoption as a standing client capability rather than an
 import-time mode).
 
-## Provider transport security [ready — prompt in hand] [size: M]
+## Provider transport security [ready] [size: M]
 
 Owns: the runtime adapter crates only. Collides-with: nothing on the board.
-Closes the provider-call-security open question and takes the deliberate reqwest
-upgrade with loopback re-verification.
+Launch prompt already drafted. Closes the provider-call-security open question
+and takes the deliberate reqwest upgrade with loopback re-verification.
 
 ## Subscription-backed provider runtimes (three tracks)
 
@@ -68,13 +73,13 @@ must add the enum/factory. The adapter-author conformance checklist and the
 loopback test pattern from the runtime-adapter study are the reusable body of
 each goal prompt.
 
-### Codex CLI wrap [ready — lead track] [size: S-M]
+### Codex CLI wrap [ready] [size: S-M]
 
-`codex exec --json`; the thread/turn/item event taxonomy is cleanly namespaced
-with an unambiguous turn.completed/turn.failed terminal (the demanding part of
-the evidence model). CLI owns subscription auth — zero credential handling.
-Officially sanctioned automation path; only real risk is event-schema drift
-between CLI versions (pin a version, snapshot-test).
+The lead track of the three. `codex exec --json`; the thread/turn/item event
+taxonomy is cleanly namespaced with an unambiguous turn.completed/turn.failed
+terminal (the demanding part of the evidence model). CLI owns subscription auth
+— zero credential handling. Officially sanctioned automation path; only real
+risk is event-schema drift between CLI versions (pin a version, snapshot-test).
 
 ### Claude Code CLI wrap [ready] [size: S-M]
 
@@ -116,10 +121,10 @@ Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra
 (AwaitingApproval storage and flow), persistence slice, first hub-local tool.
 Collides-with: everything turn-side — runs solo. The gate for the entire tool
-economy (catalog, permissions, confirm/deny, shared tools, delegation). The
-predecessor's approval UX policy (oldest-first queue, approve-fast
-deny-deliberate, error-aware requeue, durable decision audit) is the reference
-for the client half that follows.
+economy (catalog, permissions, confirm/deny, shared tools, delegation). A proven
+approval UX policy (oldest-first queue, approve-fast deny-deliberate,
+error-aware requeue, durable decision audit) is the reference for the client
+half that follows.
 
 ## Session metadata, tags, and visibility [blocked-on: owner design pass] [size: M-L]
 
@@ -146,8 +151,9 @@ surface's backbone.
 Owns: new channel-adapter crate(s), channel-binding satellite, outbox consumer
 registration. Collides-with: dispatcher wiring only. Slack/email/SMS as outbound
 notification surfaces and inbound input paths; a session synchronized with a
-Slack channel. Outbound rides the dispatcher feed; inbound rides SubmitInput
-with actor attribution.
+Slack channel. Likely seams (to be decided in the entry's spec-diff, not here):
+outbound over the dispatcher feed, inbound through SubmitInput with actor
+attribution — the latter pending the actor-admissibility question.
 
 ## Token-level streaming to clients [blocked-on: streaming-checkpoint decision] [size: L]
 
@@ -158,8 +164,8 @@ deferred draft-streaming policy decides what is durable versus transient.
 ## Compaction [blocked-on: frontier-policy decision] [size: L]
 
 Owns: frontier machinery, compaction entries, new spec section. Collides-with:
-turn machinery. The frontier-snapshot substrate is ready; the predecessor
-shipped only a stub endpoint — never expose the state before the semantics.
+turn machinery. The frontier-snapshot substrate is ready. Never expose the state
+before the semantics.
 
 ## Templates [blocked-on: system-prompt configuration category] [size: M]
 
@@ -176,8 +182,7 @@ Collides-with: little. Per-session task rows with status/priority hierarchy.
 
 Owns: artifact store, entry linkage, protocol frames. Collides-with: tool loop
 (artifacts largely arrive from tools). Prompt-context artifacts — "what did the
-model actually see" — were the predecessor's best observability feature and the
-reference target.
+model actually see" — are the observability target worth matching.
 
 ## Runner protocol and placement [blocked-on: runner capability/auth decisions] [size: XL]
 
@@ -199,8 +204,7 @@ seed-from-frontier machinery the import milestone builds, with retargeting.
 
 Owns: network transport beside the local socket, authentication. Collides-with:
 process protocol surfaces. Gates iOS, the web surface, and any off-machine
-client. The predecessor's bolted-on shared-key auth is the recorded
-anti-pattern.
+client. Bolted-on shared-key auth is the anti-pattern to avoid.
 
 ## Web surface [blocked-on: monitor stream; remote transport] [size: L]
 
@@ -225,5 +229,5 @@ classification they rely on.
 ## Client SDK [blocked-on: protocol stabilization] [size: M]
 
 Owns: new SDK crate/package. Collides-with: nothing. Typed identities held at
-the SDK boundary — the predecessor's recorded newtype erosion started exactly
+the SDK boundary — untyped-identity erosion characteristically starts exactly
 there.
