@@ -777,7 +777,7 @@ impl ModelCallExecution {
 
     fn is_running_tool_continuation(&self) -> bool {
         self.current_attempt.state() == &CurrentTurnAttemptState::Running
-            && frontier_contains_tool_result(&self.starting_snapshot, &self.frontier_entries)
+            && frontier_closes_latest_tool_round(&self.starting_snapshot, &self.frontier_entries)
     }
 
     /// Applies an interrupt after a tool batch has closed every logical
@@ -791,6 +791,7 @@ impl ModelCallExecution {
         if self.current_call.is_some()
             || interrupt.session() != self.session
             || result_projection.snapshot().frontier().owning_session() != self.session
+            || result_projection.source_frontier() != self.current_snapshot.frontier().snapshot()
             || !self
                 .current_snapshot
                 .is_semantic_prefix_of(result_projection.snapshot())
@@ -3114,7 +3115,7 @@ fn reconstitute(
     let running_tool_round =
         frontier_contains_tool_round(&input.starting_snapshot, &input.frontier_entries);
     let running_tool_continuation =
-        frontier_contains_tool_result(&input.starting_snapshot, &input.frontier_entries);
+        frontier_closes_latest_tool_round(&input.starting_snapshot, &input.frontier_entries);
     let lifecycle_valid = matches!(
         (
             current_attempt.state(),
@@ -3174,21 +3175,100 @@ fn reconstitute(
     })
 }
 
-fn frontier_contains_tool_result(
+fn frontier_closes_latest_tool_round(
     starting_snapshot: &ResolvedContextFrontierSnapshot,
     frontier_entries: &[SemanticTranscriptEntry],
 ) -> bool {
-    frontier_entries
+    let suffix = &frontier_entries[starting_snapshot.entry_count()..];
+    let Some(last_tool_use) = suffix.iter().rposition(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+        )
+    }) else {
+        return false;
+    };
+    let SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } =
+        suffix[last_tool_use].payload()
+    else {
+        unreachable!("the position was selected from assistant tool-use entries");
+    };
+    let producing_call = *producing_call;
+    let response_start = (0..=last_tool_use)
+        .rev()
+        .take_while(|index| assistant_entry_call(&suffix[*index]) == Some(producing_call))
+        .last()
+        .unwrap_or(last_tool_use);
+    let response_end = (last_tool_use..suffix.len())
+        .take_while(|index| assistant_entry_call(&suffix[*index]) == Some(producing_call))
+        .last()
+        .map_or(last_tool_use + 1, |index| index + 1);
+    let requests = suffix[response_start..response_end]
         .iter()
-        .skip(starting_snapshot.entry_count())
-        .any(|entry| {
-            matches!(
-                entry.payload(),
-                SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
-                    | SemanticTranscriptEntryPayload::ToolDenied { .. }
-                    | SemanticTranscriptEntryPayload::ToolClosed { .. }
-            )
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
+            SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         })
+        .collect::<Vec<_>>();
+    let Some(results_end) = response_end.checked_add(requests.len()) else {
+        return false;
+    };
+    if requests.is_empty() || results_end > suffix.len() {
+        return false;
+    }
+    if suffix[response_end..results_end]
+        .iter()
+        .zip(&requests)
+        .any(|(entry, request)| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolExecutionResult { .. } => false,
+            SemanticTranscriptEntryPayload::ToolDenied {
+                request: result_request,
+            }
+            | SemanticTranscriptEntryPayload::ToolClosed {
+                request: result_request,
+            } => result_request != request,
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => true,
+        })
+    {
+        return false;
+    }
+    suffix[results_end..].iter().all(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+        )
+    })
+}
+
+fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> {
+    match entry.payload() {
+        SemanticTranscriptEntryPayload::AssistantText { producing_call, .. }
+        | SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
+            Some(*producing_call)
+        }
+        SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+        | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+        | SemanticTranscriptEntryPayload::TurnFailed { .. }
+        | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+        | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+        | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
+    }
 }
 
 fn frontier_contains_tool_round(
@@ -3845,8 +3925,10 @@ mod tests {
         ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
         NormalizedToolArguments, PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-        SessionCreationProvenance, SessionReconstitutionInput, ToolName, ToolRequestOrdinal,
-        TranscriptAncestry,
+        SessionCreationProvenance, SessionReconstitutionInput, ToolApprovalDecision,
+        ToolApprovalResolutionReconstitutionInput, ToolBatchPhaseReconstitutionInput,
+        ToolBatchReconstitutionInput, ToolDecisionSource, ToolName, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TranscriptAncestry,
         test_support::{
             accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
             semantic_transcript_entry_id, session_id, tool_request_id, turn_attempt_id, turn_id,
@@ -4149,6 +4231,30 @@ mod tests {
         )
     }
 
+    fn batch_request(id: u128, execution: &ModelCallExecution) -> ToolRequest {
+        ToolRequestReconstitutionInput::new(
+            tool_request_id(id),
+            execution.session(),
+            execution.turn(),
+            model_call_id(40),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("fixture_tool")).expect("the tool name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("the fixture arguments are canonical"),
+        )
+        .into_request()
+    }
+
+    fn denied_approval(request: ToolRequestId) -> ToolApprovalResolution {
+        ToolApprovalResolutionReconstitutionInput::new(
+            request,
+            ToolApprovalDecision::Deny { reason: None },
+            ToolDecisionSource::OwnerCommand,
+        )
+        .reconstitute()
+        .expect("the denial fixture is implemented")
+    }
+
     fn with_pending_steering(
         mut execution: ModelCallExecution,
         pending: AcceptedInputId,
@@ -4447,6 +4553,103 @@ mod tests {
             &CurrentTurnAttemptState::Running
         );
         assert_eq!(authorized.call().state(), CurrentModelCallState::InFlight);
+    }
+
+    /// S11 / INV-005 / INV-014: a prepared continuation belongs to the most
+    /// recent tool round and cannot reuse results from an earlier round.
+    #[test]
+    fn s11_inv005_inv014_continuation_rejects_unresolved_latest_tool_round() {
+        let initial = active_execution();
+        let earlier_request = tool_request_id(30);
+        let latest_request = tool_request_id(40);
+        let earlier_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(31),
+            initial.session,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(32),
+                request: earlier_request,
+            },
+        );
+        let earlier_denial = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(33),
+            initial.session,
+            SemanticTranscriptEntryPayload::ToolDenied {
+                request: earlier_request,
+            },
+        );
+        let latest_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(34),
+            initial.session,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(35),
+                request: latest_request,
+            },
+        );
+        let continuation = initial
+            .starting_snapshot
+            .derive_appending_candidate(
+                context_frontier_id(36),
+                vec![
+                    earlier_use.reference(),
+                    earlier_denial.reference(),
+                    latest_use.reference(),
+                ],
+            )
+            .expect("the malformed continuation still preserves its prefix");
+        let attempt = turn_attempt_id(37);
+        let turn = initial.turn;
+        let selection = *initial.configuration.effective().model();
+        let target = ResolvedProviderTarget::naming(provider_model_identity(8));
+        let input = ModelCallExecutionReconstitutionInput::new(
+            initial
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::prepared(attempt)
+                        .begin_running()
+                        .expect("the tool tenure is running"),
+                }),
+            initial.targets.clone(),
+            initial.starting_snapshot.clone(),
+            vec![
+                initial.frontier_entries[0].clone(),
+                earlier_use,
+                earlier_denial,
+                latest_use,
+            ],
+            initial
+                .origin_contents
+                .iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
+                })
+                .collect(),
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                turn,
+                target.clone(),
+            )),
+            vec![ModelCallReconstitutionInput::new(
+                model_call_id(38),
+                turn,
+                attempt,
+                selection,
+                target,
+                continuation.frontier().snapshot(),
+                ModelCallReconstitutionState::Prepared,
+            )],
+        )
+        .with_call_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+            continuation.frontier().owning_session(),
+            continuation.frontier().snapshot(),
+            continuation.ordered_entries().collect(),
+        ));
+
+        let error = input
+            .reconstitute()
+            .expect_err("an old result cannot close the latest tool round");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::LifecycleMismatch
+        );
     }
 
     /// S11 / INV-014: a call-free continuation pin is checked against the
@@ -5041,6 +5244,52 @@ mod tests {
             SemanticTranscriptEntryPayload::TurnCancelled { turn }
                 if *turn == expected_turn
         ));
+    }
+
+    /// S07 / INV-005 / INV-029: interrupt result projection is bound to the
+    /// exact yielded frontier identity, not merely equal semantic content.
+    #[test]
+    fn s07_inv005_inv029_tool_cancellation_rejects_same_content_foreign_frontier() {
+        let execution = active_execution();
+        let foreign_yield = ResolvedContextFrontierSnapshot::try_from_candidate(
+            execution.session(),
+            context_frontier_id(40),
+            execution.current_snapshot.ordered_entries().collect(),
+        )
+        .expect("same-content foreign frontier is structurally valid");
+        let request = batch_request(41, &execution);
+        let projection = ToolBatchReconstitutionInput::new(
+            execution.session(),
+            execution.turn(),
+            request.producing_call(),
+            foreign_yield,
+            vec![request.clone()],
+            vec![denied_approval(request.id())],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: execution.current_attempt().id(),
+            },
+        )
+        .reconstitute()
+        .expect("the denied fixture batch is complete")
+        .prepare_cancellation_projection(
+            vec![semantic_transcript_entry_id(42)],
+            context_frontier_id(43),
+        )
+        .expect("the foreign batch can prepare its own cancellation projection");
+        let interrupt = applied_interrupt(&execution);
+
+        let error = execution
+            .apply_interrupt_to_tool_batch(
+                interrupt,
+                projection,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(44),
+                    context_frontier_id(45),
+                ),
+            )
+            .expect_err("same semantic content cannot substitute another yielded frontier");
+        assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
     }
 
     /// S07 / INV-006 / INV-029 / INV-037: a prepared but unsent call closes

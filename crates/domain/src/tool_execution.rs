@@ -506,6 +506,7 @@ impl ToolBatch {
                 failure: ToolResultProjectionFailure::FrontierDerivationFailed,
             })?;
         Ok(PreparedToolResultProjection {
+            source_frontier: self.yielded_snapshot.frontier().snapshot(),
             entries: entries.into_boxed_slice(),
             snapshot,
         })
@@ -605,6 +606,7 @@ impl ToolBatch {
                 failure: ToolResultProjectionFailure::FrontierDerivationFailed,
             })?;
         Ok(PreparedToolResultProjection {
+            source_frontier: self.yielded_snapshot.frontier().snapshot(),
             entries: entries.into_boxed_slice(),
             snapshot,
         })
@@ -810,11 +812,17 @@ impl ToolBatchExecutionError {
 /// One proposal-ordered result projection and prefix-preserving snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedToolResultProjection {
+    source_frontier: crate::ContextFrontierId,
     entries: Box<[SemanticTranscriptEntry]>,
     snapshot: ResolvedContextFrontierSnapshot,
 }
 
 impl PreparedToolResultProjection {
+    /// Returns the exact yielded frontier from which the results were derived.
+    pub(crate) const fn source_frontier(&self) -> crate::ContextFrontierId {
+        self.source_frontier
+    }
+
     /// Returns reference-only result entries in proposal order.
     pub fn entries(&self) -> &[SemanticTranscriptEntry] {
         &self.entries
@@ -921,6 +929,16 @@ fn reconstitute_batch(
                 ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
             ));
         }
+    }
+    if requests
+        .iter()
+        .take(approvals.len())
+        .any(|request| !approvals.contains_key(&request.id()))
+    {
+        return Err(fail(
+            input,
+            ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
+        ));
     }
     let mut attempts = BTreeMap::new();
     let mut attempt_ids = BTreeSet::new();
@@ -1211,6 +1229,34 @@ mod tests {
             ActiveTurnPhase::AwaitingApproval { request }
                 if *request == tool_request_id(11)
         ));
+    }
+
+    /// S10 / INV-010: durable approval history is exactly a proposal-order
+    /// prefix and cannot skip the current wait.
+    #[test]
+    fn s10_inv010_reconstitution_rejects_nonprefix_approval_inventory() {
+        let first = request(10, 0);
+        let second = request(11, 1);
+        let input = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first.clone(), second.clone()],
+            vec![approval(second.id(), ToolApprovalDecision::Approve)],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+                request: first.id(),
+            },
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("a later approval cannot bypass the earliest request");
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::ApprovalInventoryMismatch
+        );
     }
 
     /// S10 / INV-010: an owner decision is admissible only at the exact
