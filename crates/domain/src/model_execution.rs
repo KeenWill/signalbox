@@ -4623,10 +4623,7 @@ mod tests {
                     ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
-            Some(PinnedProviderTargetReconstitutionInput::new(
-                turn,
-                target.clone(),
-            )),
+            Some(PinnedProviderTargetReconstitutionInput::new(turn, target)),
             vec![ModelCallReconstitutionInput::new(
                 model_call_id(38),
                 turn,
