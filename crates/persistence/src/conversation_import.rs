@@ -245,6 +245,19 @@ impl ImportedConversationRepository {
             usize_to_u64(encoded.raws.len(), "declared raw-record count")?;
         let declared_entry_count = usize_to_u64(encoded.entries.len(), "declared entry count")?;
         let mut transaction = self.pool.begin().await?;
+        if let Some(existing) = resolve_existing_snapshot(
+            &mut transaction,
+            &conversation,
+            encoded.format,
+            encoded.converter_version,
+            source_digest,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(existing);
+        }
+        insert_raw_blobs(&mut transaction, &encoded.raws).await?;
         let inserted = sqlx::query(
             "INSERT INTO imported_conversation
                 (imported_conversation_id, storage_version, source_format,
@@ -266,31 +279,22 @@ impl ImportedConversationRepository {
             == 1;
 
         if !inserted {
-            let existing_id = load_identity_by_source_digest(
+            let existing = resolve_existing_snapshot(
                 &mut transaction,
+                &conversation,
                 encoded.format,
                 encoded.converter_version,
                 source_digest,
             )
             .await?;
-            let Some(existing_id) = existing_id else {
+            let Some(existing) = existing else {
                 transaction.rollback().await?;
                 return Err(ImportedConversationRepositoryError::IdentityCollision(
                     ImportedConversationIdentityCollision::Conversation,
                 ));
             };
-            let existing = load_from_connection(&mut transaction, existing_id)
-                .await?
-                .ok_or(ImportedConversationCorruption::ExistingSnapshotMismatch)?;
-            if !equivalent_snapshot(&conversation, &existing) {
-                transaction.rollback().await?;
-                return Err(ImportedConversationCorruption::ExistingSnapshotMismatch.into());
-            }
             transaction.rollback().await?;
-            return Ok(ImportedConversationStoreOutcome::AlreadyImported {
-                conversation: existing.id(),
-                source_digest: existing.source_digest(),
-            });
+            return Ok(existing);
         }
 
         if any_entry_identity_exists(&mut transaction, &encoded.entries).await? {
@@ -299,7 +303,7 @@ impl ImportedConversationRepository {
                 ImportedConversationIdentityCollision::TranscriptEntry,
             ));
         }
-        insert_raws(&mut transaction, candidate_id, &encoded.raws).await?;
+        insert_raw_occurrences(&mut transaction, candidate_id, &encoded.raws).await?;
         insert_entries(&mut transaction, candidate_id, &encoded.entries).await?;
         transaction.commit().await?;
         Ok(ImportedConversationStoreOutcome::Inserted {
@@ -431,9 +435,8 @@ async fn any_entry_identity_exists(
     .await
 }
 
-async fn insert_raws(
+async fn insert_raw_blobs(
     connection: &mut PgConnection,
-    conversation: ImportedConversationId,
     raws: &[EncodedRawRecord],
 ) -> Result<(), ImportedConversationRepositoryError> {
     let mut blobs = raws.iter().collect::<Vec<_>>();
@@ -469,7 +472,14 @@ async fn insert_raws(
             return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
         }
     }
+    Ok(())
+}
 
+async fn insert_raw_occurrences(
+    connection: &mut PgConnection,
+    conversation: ImportedConversationId,
+    raws: &[EncodedRawRecord],
+) -> Result<(), ImportedConversationRepositoryError> {
     for (index, raw) in raws.iter().enumerate() {
         let hash = raw.content_hash.as_bytes().as_slice();
         sqlx::query(
@@ -538,6 +548,31 @@ async fn load_identity_by_source_digest(
     .fetch_optional(connection)
     .await
     .map(|identity| identity.map(ImportedConversationId::from_uuid))
+}
+
+async fn resolve_existing_snapshot(
+    connection: &mut PgConnection,
+    candidate: &ImportedConversation,
+    format: &str,
+    converter_version: i16,
+    source_digest: ImportedConversationSourceDigest,
+) -> Result<Option<ImportedConversationStoreOutcome>, ImportedConversationRepositoryError> {
+    let Some(existing_id) =
+        load_identity_by_source_digest(connection, format, converter_version, source_digest)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let existing = load_from_connection(connection, existing_id)
+        .await?
+        .ok_or(ImportedConversationCorruption::ExistingSnapshotMismatch)?;
+    if !equivalent_snapshot(candidate, &existing) {
+        return Err(ImportedConversationCorruption::ExistingSnapshotMismatch.into());
+    }
+    Ok(Some(ImportedConversationStoreOutcome::AlreadyImported {
+        conversation: existing.id(),
+        source_digest: existing.source_digest(),
+    }))
 }
 
 async fn load_from_connection(

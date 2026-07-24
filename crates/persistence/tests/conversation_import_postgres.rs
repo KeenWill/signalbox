@@ -185,6 +185,60 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     Ok(())
 }
 
+/// S28 / INV-002 / INV-038: exact reingestion checks an existing snapshot
+/// before the new-digest blob path and cannot conceal durable raw corruption.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv038_reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = br#"{"type":"summary","value":null}"#;
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x750));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x750, 0x760], [0x751, 0x761]),
+        ClaudeCodeJsonlConverter,
+        repository,
+    );
+    assert_eq!(
+        service.execute(source).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+
+    sqlx::query("ALTER TABLE imported_raw_source_record DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_raw_source_record
+            SET raw_bytes = raw_bytes || $1",
+    )
+    .bind(vec![b' '])
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_raw_source_record ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = service
+        .execute(source)
+        .await
+        .expect_err("reingestion must expose existing raw corruption");
+    assert!(matches!(
+        error,
+        ImportConversationError::Store(ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::Domain(
+                ImportedConversationReconstitutionFailure::RawRecordHashMismatch { .. }
+            )
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S28 / INV-038: imports sharing raw blobs acquire their global content keys
 /// in one stable order even when the source occurrences are reversed.
 #[tokio::test(flavor = "multi_thread")]
