@@ -813,89 +813,93 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION require_imported_seed_for_seed_record()
+CREATE FUNCTION require_imported_ancestry_for_seed_insert()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    checked_ancestry_kind text;
 BEGIN
-    PERFORM assert_imported_session_seed_complete(
-        CASE WHEN TG_OP = 'DELETE' THEN OLD.session_id ELSE NEW.session_id END
-    );
-    RETURN NULL;
+    SELECT ancestry_kind
+      INTO checked_ancestry_kind
+      FROM session
+     WHERE session_id = NEW.session_id;
+
+    IF NOT FOUND OR checked_ancestry_kind <> 'imported_conversation' THEN
+        RAISE EXCEPTION
+            'imported seed requires imported session ancestry'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'imported_session_seed_requires_imported_ancestry';
+    END IF;
+
+    RETURN NEW;
 END;
 $$;
 
-CREATE FUNCTION require_imported_seed_for_semantic_entry()
+-- Seed membership is assembled before the seed link is inserted. Once that
+-- link exists, the imported semantic prefix and the linked frontier membership
+-- are sealed. These constant-time insertion guards preserve that ordering
+-- without queueing one full-prefix deferred scan per member.
+CREATE FUNCTION reject_imported_semantic_entry_after_seed()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    checked_ancestry_kind text;
 BEGIN
-    PERFORM assert_imported_session_seed_complete(
-        CASE
-            WHEN TG_OP = 'DELETE' THEN OLD.source_session_id
-            ELSE NEW.source_session_id
-        END
-    );
-    RETURN NULL;
+    IF NEW.payload_kind <> 'imported_entry' THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT ancestry_kind
+      INTO checked_ancestry_kind
+      FROM session
+     WHERE session_id = NEW.source_session_id;
+
+    IF NOT FOUND OR checked_ancestry_kind <> 'imported_conversation' THEN
+        RAISE EXCEPTION
+            'imported semantic entry requires imported session ancestry'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'imported_semantic_entry_requires_imported_ancestry';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM imported_session_seed
+         WHERE session_id = NEW.source_session_id
+    ) THEN
+        RAISE EXCEPTION
+            'imported session % semantic seed prefix is already sealed',
+            NEW.source_session_id
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'imported_semantic_entry_seed_is_sealed';
+    END IF;
+
+    RETURN NEW;
 END;
 $$;
 
-CREATE FUNCTION require_imported_seed_for_context_frontier()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    PERFORM assert_imported_session_seed_complete(
-        CASE
-            WHEN TG_OP = 'DELETE' THEN OLD.owning_session_id
-            ELSE NEW.owning_session_id
-        END
-    );
-    RETURN NULL;
-END;
-$$;
+CREATE TRIGGER imported_semantic_entry_seed_is_sealed
+AFTER INSERT ON semantic_transcript_entry
+FOR EACH ROW
+EXECUTE FUNCTION reject_imported_semantic_entry_after_seed();
 
-CREATE FUNCTION require_imported_seed_for_frontier_member()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    PERFORM assert_imported_session_seed_complete(
-        CASE
-            WHEN TG_OP = 'DELETE' THEN OLD.owning_session_id
-            ELSE NEW.owning_session_id
-        END
-    );
-    RETURN NULL;
-END;
-$$;
+CREATE TRIGGER context_frontier_member_cannot_be_truncated
+BEFORE TRUNCATE ON context_frontier_member
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_imported_table_truncate();
 
 CREATE CONSTRAINT TRIGGER session_requires_imported_seed
-AFTER INSERT OR UPDATE OR DELETE ON session
+AFTER INSERT ON session
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_imported_seed_for_session();
 
-CREATE CONSTRAINT TRIGGER imported_seed_requires_exact_prefix
-AFTER INSERT OR UPDATE OR DELETE ON imported_session_seed
-DEFERRABLE INITIALLY DEFERRED
+CREATE TRIGGER imported_seed_requires_imported_ancestry
+BEFORE INSERT ON imported_session_seed
 FOR EACH ROW
-EXECUTE FUNCTION require_imported_seed_for_seed_record();
-
-CREATE CONSTRAINT TRIGGER imported_semantic_entry_rechecks_seed
-AFTER INSERT OR UPDATE OR DELETE ON semantic_transcript_entry
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW
-EXECUTE FUNCTION require_imported_seed_for_semantic_entry();
-
-CREATE CONSTRAINT TRIGGER imported_seed_frontier_rechecks_seed
-AFTER INSERT OR UPDATE OR DELETE ON context_frontier
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW
-EXECUTE FUNCTION require_imported_seed_for_context_frontier();
-
-CREATE CONSTRAINT TRIGGER imported_seed_member_rechecks_seed
-AFTER INSERT OR UPDATE OR DELETE ON context_frontier_member
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW
-EXECUTE FUNCTION require_imported_seed_for_frontier_member();
+EXECUTE FUNCTION require_imported_ancestry_for_seed_insert();

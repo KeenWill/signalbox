@@ -699,6 +699,67 @@ impl ImportedSessionSeedReconstitutionInput {
     // accessors: session(), seed_frontier()
 }
 
+pub struct ImportedSessionSeedHeaderReconstitutionInput { /* private */ }
+impl ImportedSessionSeedHeaderReconstitutionInput {
+    pub const fn new(
+        owning_session: SessionId,
+        seed_frontier: ContextFrontierId,
+        declared_member_count: u64,
+    ) -> Self;
+    // accessors: owning_session(), seed_frontier(), declared_member_count()
+}
+
+pub struct BoundedImportedSessionReconstitutionInput { /* private */ }
+impl BoundedImportedSessionReconstitutionInput {
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<Session, BoundedImportedSessionReconstitutionError>;
+    // accessors: requested_session(), stored_session(), provenance(),
+    //   current_defaults_session(), current_defaults_version(),
+    //   defaults_session(), defaults_version(), defaults(), seed_records(),
+    //   seed_headers()
+}
+
+pub enum BoundedImportedSessionReconstitutionFailure {
+    RequestedSessionMismatch,
+    CurrentDefaultsSessionMismatch,
+    DefaultsSessionMismatch,
+    CurrentDefaultsVersionMismatch,
+    AncestryNotImported,
+    MissingSeedRecord,
+    DuplicateSeedRecord,
+    SeedSessionMismatch,
+    MissingSeedHeader,
+    DuplicateSeedHeader,
+    SeedHeaderSessionMismatch,
+    SeedHeaderIdentityMismatch,
+    SeedMemberCountMismatch,
+}
+
+pub struct BoundedImportedSessionReconstitutionError { /* private */ }
+// sealed: Err of BoundedImportedSessionReconstitutionInput::reconstitute
+impl BoundedImportedSessionReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        BoundedImportedSessionReconstitutionInput,
+        BoundedImportedSessionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
 pub enum ImportedSessionSeedReconstitutionFailure {
     AncestryNotImported,
     ImportedConversationMismatch,
@@ -3668,7 +3729,7 @@ impl<
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 29                   |
 | domain: session                                    | 21                   |
-| domain: imported_session                           | 14                   |
+| domain: imported_session                           | 18                   |
 | domain: configuration                              | 19                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
@@ -3686,7 +3747,7 @@ impl<
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| **signalbox-domain total**                         | **259 (+1 free fn)** |
+| **signalbox-domain total**                         | **263 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

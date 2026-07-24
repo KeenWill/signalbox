@@ -445,6 +445,71 @@ async fn inv039_native_creation_command_truncate_remains_rejected() -> Result<()
     Ok(())
 }
 
+/// INV-039: row-level immutability cannot be bypassed by truncating the table
+/// that carries exact seed-frontier membership.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query("TRUNCATE TABLE context_frontier_member")
+        .execute(&pool)
+        .await
+        .expect_err("seed-bearing frontier membership must reject truncate");
+    assert_eq!(
+        error.as_database_error().and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("23514"))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: seed construction is ordered once per session; after the seed link
+/// exists, its imported semantic prefix cannot grow.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    insert_imported_seed_base(&mut transaction).await?;
+    insert_exact_seed_members(&mut transaction).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let semantic_error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             imported_conversation_id, imported_transcript_entry_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000041', 'imported_entry',
+             '10000000-0000-4000-8000-000000000039',
+             '20000000-0000-4000-8000-000000000039')",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("a committed imported semantic prefix is sealed");
+    assert_eq!(
+        semantic_error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_semantic_entry_seed_is_sealed")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S28 / INV-038: exact reingestion resolves the immutable winner, raw blobs
 /// deduplicate by content hash, and restart loading reconstructs every
 /// addressable imported-conversation frontier.
