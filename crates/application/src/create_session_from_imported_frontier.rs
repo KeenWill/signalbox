@@ -415,10 +415,6 @@ mod tests {
                 frontier_calls: 0,
             }
         }
-
-        fn expecting_no_calls() -> Self {
-            Self::new([], [], [])
-        }
     }
 
     impl CreateSessionFromImportedFrontierIdGenerator for FakeIds {
@@ -474,10 +470,6 @@ mod tests {
                 observed: Vec::new(),
                 generated_semantic_entries: Vec::new(),
             }
-        }
-
-        fn expecting_no_calls() -> Self {
-            Self::returning([])
         }
     }
 
@@ -552,8 +544,8 @@ mod tests {
         assert!(!candidate.is_max());
     }
 
-    /// S28 / INV-001 / INV-012: reserved identities fail before construction
-    /// or any application effect.
+    /// S28 / INV-001 / INV-012: reserved identities fail before request
+    /// construction.
     #[test]
     fn s28_inv001_inv012_request_rejects_reserved_command_identifiers() {
         let conversation = imported_conversation();
@@ -568,16 +560,6 @@ mod tests {
             selected,
             InvalidDurableCommandId::Max,
         );
-
-        let service = CreateSessionFromImportedFrontierService::new(
-            FakeIds::expecting_no_calls(),
-            FakeTransaction::expecting_no_calls(),
-        );
-        let (ids, transaction) = service.into_parts();
-        assert_eq!(ids.session_calls, 0);
-        assert_eq!(ids.semantic_entry_calls, 0);
-        assert_eq!(ids.frontier_calls, 0);
-        assert!(transaction.observed.is_empty());
     }
 
     /// S28: the admitted request retains exactly the caller-selected frontier,
@@ -630,7 +612,15 @@ mod tests {
     fn s28_inv038_inv039_orchestrates_one_atomic_checked_seed_creation() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
-        let request = request(command_id(1), selected);
+        let expected_relationship = ImportedSessionRelationship::Resume;
+        let expected_defaults = defaults(20);
+        let request = CreateSessionFromImportedFrontierRequest::try_new(
+            command_id(1),
+            selected,
+            expected_relationship,
+            expected_defaults,
+        )
+        .expect("fixture request is admitted");
         let expected_session = session_id(30);
         let expected_frontier = context_frontier_id(40);
         let expected_entries = vec![semantic_entry_id(50), semantic_entry_id(51)];
@@ -658,8 +648,8 @@ mod tests {
         let (command, session, seed_frontier) = &transaction.observed[0];
         assert_eq!(command.command_id(), command_id(1));
         assert_eq!(command.imported_frontier(), selected);
-        assert_eq!(command.relationship(), ImportedSessionRelationship::Resume);
-        assert_eq!(command.initial_configuration_defaults(), defaults(20));
+        assert_eq!(command.relationship(), expected_relationship);
+        assert_eq!(command.initial_configuration_defaults(), expected_defaults);
         assert_eq!(*session, expected_session);
         assert_eq!(*seed_frontier, expected_frontier);
         assert_eq!(
