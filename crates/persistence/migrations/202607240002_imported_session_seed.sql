@@ -837,10 +837,10 @@ BEGIN
 END;
 $$;
 
--- Seed membership is assembled before the seed link is inserted. Once that
--- link exists, the imported semantic prefix and the linked frontier membership
--- are sealed. These constant-time insertion guards preserve that ordering
--- without queueing one full-prefix deferred scan per member.
+-- Once a seed transaction commits, the imported semantic prefix is sealed.
+-- Rows belonging to the transaction that inserts the seed link remain
+-- order-independent; the one deferred full-prefix check validates their final
+-- shape without queueing one scan per member.
 CREATE FUNCTION reject_imported_semantic_entry_after_seed()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -868,8 +868,9 @@ BEGIN
 
     IF EXISTS (
         SELECT 1
-          FROM imported_session_seed
-         WHERE session_id = NEW.source_session_id
+          FROM imported_session_seed AS seed
+         WHERE seed.session_id = NEW.source_session_id
+           AND seed.xmin <> pg_current_xact_id()::xid
     ) THEN
         RAISE EXCEPTION
             'imported session % semantic seed prefix is already sealed',
