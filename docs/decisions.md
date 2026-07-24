@@ -30,6 +30,29 @@ focused capability.
 **Affects.** Domain tool-argument normalization and its dependency graph only;
 stored argument kinds, canonical encoding, and byte limits do not change.
 
+## 2026-07-24 — Expose durable tool-batch presentation boundaries
+
+**Context.** Tool proposals and all-resolved results become semantic history
+while a turn remains nonterminal, and external-effect ambiguity parks the turn
+without a terminal writer. Model-call and terminal-turn events alone therefore
+cannot identify every exact cursor boundary a connected follower or `send`
+client must observe.
+
+**Decision.** Add one closed `tool_batch_transition` outbox and process event
+family. Its `proposed` state names the yielded assistant/tool-use frontier,
+`results_projected` names the all-resolved result frontier, and
+`recovery_required` names the exact ambiguous attempt. Followers reread only
+semantic material attributable to the named boundary; `send` treats the recovery
+state like model-call recovery.
+
+**Rejected alternatives.** Waiting for terminalization hides live tool history
+and never terminates `send` for a parked ambiguity. Rereading all undisplayed
+content on an unrelated event can expose material committed after that event.
+Transient process-only notification loses the crash-safe cursor contract.
+
+**Affects.** Transactional outbox storage, process protocol events, terminal
+client follow/send behavior, tool result projection, and recovery entry.
+
 ## 2026-07-24 — Bound automatic tool rounds within one turn
 
 **Context.** A model can repeatedly request another tool after receiving the
