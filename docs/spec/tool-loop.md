@@ -389,12 +389,17 @@ The first compiled tool is `current_time`:
 - an injected `CurrentTimeClock` supplies the instant, so offline tests never
   read wall clock; and
 - success is text containing a compact JSON object with `datetime` as an RFC
-  3339 timestamp to whole seconds and `timezone` as the selected canonical name.
+  3339 timestamp to whole seconds and `timezone` as the exact accepted IANA
+  identifier (or the `UTC` default). A recognized zone at an instant whose
+  historical offset contains nonzero seconds closes as a typed execution failure
+  because RFC 3339 cannot represent that offset without changing the instant.
 
 An unknown time zone or wrong argument shape produces `InvalidArguments` error
-evidence. IANA lookup and offset conversion use the focused `jiff` dependency;
-Signalbox owns only the port and result contract, not a time-zone database
-implementation.
+evidence. An injected instant outside the supported civil-time range produces
+known-failure evidence with detail
+`current time is outside the supported range`. IANA lookup and offset conversion
+use the focused `jiff` dependency; Signalbox owns only the port and result
+contract, not a time-zone database implementation.
 
 ## Persistence boundaries
 

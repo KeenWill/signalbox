@@ -18,17 +18,18 @@ use std::{
 
 use signalbox_application::{
     ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnService, StartupScanService, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator,
+    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
+    SchedulerLoopExit, StartEligibleTurnService, StartupScanService,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor, FencedHubDatabase,
-    FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    SystemCurrentTimeClock,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
@@ -378,6 +379,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
+    let (tool_catalog, tool_executor) = CurrentTimeTool::try_new(SystemCurrentTimeClock)
+        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
+        .into_parts();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
         .map_err(|error| {
@@ -456,14 +460,15 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let process_runtime = ProcessRuntime::new(
         listener,
         scheduler_pool.clone(),
         eligibility_nudge,
         model_configuration,
     );
-    let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
                 scheduler_pool.clone(),
                 model_targets,
@@ -471,7 +476,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
-        ));
+        )
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor),
+    );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,

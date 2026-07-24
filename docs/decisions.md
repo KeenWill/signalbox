@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Preserve accepted IANA time-zone identifiers
+
+**Context.** Jiff's IANA lookup accepts aliases, but the lookup result does not
+promise to distinguish a canonical identifier from another recognized spelling.
+Describing the returned library name as canonical would overstate the enforced
+contract.
+
+**Decision.** Validate an explicit `current_time` zone through Jiff, then
+preserve that exact accepted identifier in the result. Continue to emit `UTC`
+when the argument is absent.
+
+**Rejected alternatives.** Canonicalizing aliases requires a separate
+authoritative alias resolver. Returning Jiff's selected spelling would expose an
+unstated library behavior as a contract. Rejecting aliases would narrow accepted
+IANA input without a recorded need.
+
+**Affects.** The hub-local `current_time` executor, its focused tests, and the
+implemented result contract in [tool-loop.md](spec/tool-loop.md).
+
 ## 2026-07-24 — Retain checked provider JSON as raw text
 
 **Context.** Guarded deserialization admitted deeply nested tool schemas, but an
@@ -29,6 +48,68 @@ already-pinned capability.
 
 **Affects.** `signalbox-model-runtime`, `signalbox-model-provider-runtime`, both
 provider adapters, and their deep-lifetime tests.
+
+## 2026-07-24 — Reject current_time offsets outside RFC 3339
+
+**Context.** IANA history includes offsets with nonzero seconds, while RFC 3339
+represents numeric offsets only to whole minutes. Formatting such a zoned civil
+time with a minute-only offset would identify a different instant from the
+injected clock evidence.
+
+**Decision.** Before formatting `current_time`, require the selected zone's
+offset at the injected instant to be divisible by 60 seconds. Return a typed,
+model-visible known failure when it is not. Continue to use IANA history for
+representable offsets and preserve the compact whole-second RFC 3339 success
+shape.
+
+**Rejected alternatives.** Truncating or rounding the offset corrupts the
+instant. Adding offset seconds is not RFC 3339. Silently switching the timestamp
+to UTC would make the selected zone field misleading.
+
+**Affects.** The hub-local `current_time` executor, its focused tests, and the
+implemented result contract in [tool-loop.md](spec/tool-loop.md).
+
+## 2026-07-24 — Reuse serde_json for current_time argument and result JSON
+
+**Context.** The hub-local `current_time` tool must inspect normalized object
+arguments and emit one compact JSON result without exporting a codec type
+through its catalog or executor ports. `serde_json` is already pinned and used
+at adjacent runtime boundaries.
+
+**Decision.** Add the existing focused `serde_json` dependency directly to
+`signalbox-hubd` for `current_time` argument-shape decoding and result
+serialization. Keep every serde value private to the tool adapter.
+
+**Rejected alternatives.** Hand-parse or hand-escape JSON: either duplicates
+security-sensitive codec behavior. Move JSON values into the application port:
+that would leak a framework representation across the boundary. Return an ad-hoc
+text format: it would weaken the declared tool result contract.
+
+**Affects.** `apps/hubd/Cargo.toml`, `apps/hubd/src/current_time.rs`, and the
+lockfile dependency edge; no new resolved package or public serde type is
+introduced.
+
+## 2026-07-24 — Use jiff for IANA time-zone conversion
+
+**Context.** `current_time` must resolve IANA names, apply historical offsets,
+canonicalize zone names, and format whole-second RFC 3339 output. Signalbox
+should not own a time-zone parser or database, and the dependency should remain
+focused on the hub-local tool.
+
+**Decision.** Add `jiff` to `signalbox-hubd` with default features disabled and
+only `std` plus `tzdb-zoneinfo` enabled. It reads the deployment's system
+zoneinfo database at runtime and supplies checked `SystemTime` conversion, IANA
+lookup, canonical names, offsets, and formatting. This focused runtime edge does
+not constrain other crates and does not warrant the large-dependency owner gate.
+
+**Rejected alternatives.** Repository-owned zone parsing duplicates mature,
+security-relevant rules. `chrono-tz` embeds generated zone data and adds build
+weight when deployments already provide zoneinfo. Supporting UTC alone violates
+the implemented IANA-name contract.
+
+**Affects.** `apps/hubd/Cargo.toml`, `apps/hubd/src/current_time.rs`, the
+lockfile, and the `current_time` behavior recorded in the tool-loop
+specification.
 
 ## 2026-07-24 — Guard provider tool-schema decoding against stack depth
 

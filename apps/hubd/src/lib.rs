@@ -24,6 +24,7 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 mod configuration;
+mod current_time;
 mod fenced_database;
 mod local_socket;
 mod process_runtime;
@@ -32,6 +33,10 @@ mod single_hub;
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
+};
+pub use current_time::{
+    CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
+    CurrentTimeToolConstructionError, SystemCurrentTimeClock,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
