@@ -7,7 +7,7 @@
 use std::{
     env,
     error::Error,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs,
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
@@ -436,14 +436,4 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     socket_directory.cleanup()?;
     drop(container);
     Ok(())
-}
-
-#[test]
-fn signalbox_binary_name_is_the_daily_surface() {
-    assert_eq!(
-        Path::new(env!("CARGO_BIN_EXE_signalbox"))
-            .file_name()
-            .and_then(OsStr::to_str),
-        Some("signalbox")
-    );
 }

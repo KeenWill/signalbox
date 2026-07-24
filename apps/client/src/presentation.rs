@@ -573,6 +573,7 @@ fn control_safe(value: &str) -> String {
 mod tests {
     use std::io::{self, Write};
 
+    use expect_test::expect;
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         FailedModelCallDisposition, FailedTerminalModelCall, InputContent, ModelCallState,
@@ -816,7 +817,10 @@ mod tests {
             )),
         });
 
-        assert!(rendered.contains("call_state=cancellation_requested"));
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -830,8 +834,10 @@ mod tests {
             )),
         });
 
-        assert!(rendered.contains("state=failed"));
-        assert!(rendered.contains("call_disposition=cancelled"));
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -842,7 +848,10 @@ mod tests {
             terminal_model_call_id: None,
         });
 
-        assert!(rendered.contains("state=cancelled"));
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=cancelled frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=none
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -853,7 +862,10 @@ mod tests {
             terminal_model_call_id: wire_uuid(4),
         });
 
-        assert!(rendered.contains("state=reconciliation_required"));
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -864,7 +876,10 @@ mod tests {
             state: ModelCallState::CancellationRequested {},
         });
 
-        assert!(rendered.contains("state=cancellation_requested"));
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 model_call_transition turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 state=cancellation_requested
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -875,7 +890,10 @@ mod tests {
             terminal_frontier_id: wire_uuid(4),
         });
 
-        assert!(rendered.contains("turn_cancelled"));
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 turn_cancelled turn=00000000-0000-0000-0000-000000000002 entry=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -886,7 +904,10 @@ mod tests {
             terminal_frontier_id: wire_uuid(4),
         });
 
-        assert!(rendered.contains("turn_reconciliation_required"));
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]

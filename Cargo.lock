@@ -2443,6 +2443,7 @@ name = "signalbox-client"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "expect-test",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-hubd",

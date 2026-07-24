@@ -10,6 +10,23 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Snapshot terminal renderer projections
+
+**Context.** Partial substring assertions let missing identities, malformed
+field layout, or unintended extra terminal output pass. The testing-style guide
+requires expect tests when a rendered value's complete shape is the assertion.
+
+**Decision.** Add the repository's existing `expect-test` 1.5 helper as a
+terminal client dev-dependency and snapshot each complete turn and event
+projection changed in this review wave. Keep behavioral law assertions separate.
+
+**Rejected alternatives.** More substring assertions do not close the omitted
+output surface. Whole-structure snapshots would include irrelevant fixtures;
+these snapshots contain only the deterministic rendered value under test.
+
+**Affects.** Terminal-client test dependencies and renderer tests only; terminal
+output and runtime dependencies do not change.
+
 ## 2026-07-24 — Release decoded process payloads before response backpressure
 
 **Context.** Cloning a decoded request retained both the frame-owned payload and

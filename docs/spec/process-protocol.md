@@ -472,15 +472,20 @@ fails before socket I/O.
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` first reads the
 session summary and uses its defaults version, then prints that expected version
-to standard error before sending the mutation. Thus every value needed to replay
-an ambiguous command is visible before its commit can become ambiguous. For
-recovery, the user supplies the printed command identity; `send` then also
-requires the exact `--defaults-version`, and the two flags are rejected unless
-supplied together. The client never silently substitutes a new command identity
-for an ambiguous attempt. It uses a fresh nonzero request identity per
-connection, renders only known version-one messages, and exits nonzero on
-protocol or application errors other than the follow-specific `resync_required`
-control case, which reconnects for a fresh snapshot.
+to standard error before sending the mutation. Thus every client-generated or
+server-discovered recovery value is visible before its commit can become
+ambiguous. Exact replay also requires the original selection or session argument
+and, for `send`, the exact standard-input content; the client does not echo that
+potentially sensitive input or synthesize a shell command. Its ambiguity
+diagnostic directs the user to retry the original command with those arguments
+and input plus any printed recovery values. For recovery, the user supplies the
+printed command identity; `send` then also requires the exact
+`--defaults-version`, and the two flags are rejected unless supplied together.
+The client never silently substitutes a new command identity for an ambiguous
+attempt. It uses a fresh nonzero request identity per connection, renders only
+known version-one messages, and exits nonzero on protocol or application errors
+other than the follow-specific `resync_required` control case, which reconnects
+for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

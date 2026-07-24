@@ -794,13 +794,17 @@ mod tests {
     }
 
     #[test]
-    fn configured_socket_paths_must_be_absolute() {
+    fn cli_socket_path_must_be_absolute() {
         assert!(matches!(
             socket_path(Some(PathBuf::from("relative.sock")), None),
             Err(ClientError::Input(
                 "the local process socket path must be absolute"
             ))
         ));
+    }
+
+    #[test]
+    fn environment_socket_path_must_be_absolute() {
         assert!(matches!(
             socket_path(None, Some(OsString::from("relative.sock"))),
             Err(ClientError::Input(

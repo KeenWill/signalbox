@@ -75,7 +75,8 @@ impl fmt::Display for ClientError {
                 Ok(())
             }
             Self::AmbiguousMutation => formatter.write_str(
-                "the mutation outcome may be ambiguous; retry the exact printed command",
+                "the mutation outcome may be ambiguous; retry the original command with the same \
+                 arguments and exact input, using any printed recovery values",
             ),
             Self::Input(message) => formatter.write_str(message),
             Self::TurnRecoveryRequired => formatter.write_str(
@@ -181,5 +182,19 @@ impl fmt::Display for RejectionDisplay {
                 last.value()
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use expect_test::expect;
+
+    use super::ClientError;
+
+    #[test]
+    fn ambiguous_mutation_names_the_complete_replay_inputs() {
+        expect![[r#"
+            the mutation outcome may be ambiguous; retry the original command with the same arguments and exact input, using any printed recovery values"#]]
+        .assert_eq(&ClientError::AmbiguousMutation.to_string());
     }
 }
