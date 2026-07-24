@@ -8,12 +8,13 @@ use std::collections::BTreeSet;
 
 use crate::{
     ContextFrontierId, CreateSessionFromImportedFrontier, ImportedConversation,
-    ImportedSessionSeed, InitialSession, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, SemanticTranscriptEntry, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, TranscriptAncestry,
-    VersionedSessionConfigurationDefaults,
+    ImportedConversationId, ImportedSessionRelationship, ImportedSessionSeed,
+    ImportedTranscriptEntryId, ImportedTranscriptPosition, InitialSession,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, TranscriptAncestry, VersionedSessionConfigurationDefaults,
 };
 
 /// The applied result recorded for imported-frontier session creation.
@@ -382,6 +383,56 @@ impl BoundedImportedSessionReconstitutionInput {
             seed_records,
             seed_headers,
         }
+    }
+
+    /// Supplies the bounded projection from independently stored imported
+    /// provenance fields.
+    ///
+    /// This constructor does not load or yield an imported aggregate. The
+    /// storage adapter remains responsible for proving that its frontier tuple
+    /// names one immutable imported-entry row; bounded reconstitution checks
+    /// the correlated seed link and frontier-header count before yielding only
+    /// the current [`Session`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_stored_imported_parts(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        creation_cause: SessionCreationCause,
+        imported_conversation: ImportedConversationId,
+        imported_frontier_entry: ImportedTranscriptEntryId,
+        imported_frontier_position: ImportedTranscriptPosition,
+        imported_relationship: ImportedSessionRelationship,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self {
+        let source_frontier = crate::imported_conversation::imported_frontier_from_validated_parts(
+            imported_conversation,
+            imported_frontier_entry,
+            imported_frontier_position,
+        );
+        Self::new(
+            requested_session,
+            stored_session,
+            SessionCreationProvenance::new(
+                creation_cause,
+                TranscriptAncestry::ImportedConversation {
+                    source_frontier,
+                    relationship: imported_relationship,
+                },
+            ),
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+            seed_records,
+            seed_headers,
+        )
     }
 
     /// Reconstructs one bounded current session after checking its seed proof.
@@ -1540,10 +1591,15 @@ mod tests {
         prepared: &PreparedCreateSessionFromImportedFrontier,
     ) -> BoundedImportedSessionReconstitutionInput {
         let seed = prepared.imported_seed();
-        BoundedImportedSessionReconstitutionInput::new(
+        let imported_frontier = prepared.command().imported_frontier();
+        BoundedImportedSessionReconstitutionInput::from_stored_imported_parts(
             prepared.session().id(),
             prepared.session().id(),
-            prepared.session().provenance(),
+            SessionCreationCause::OwnerInitiated,
+            imported_frontier.conversation(),
+            imported_frontier.through_entry(),
+            imported_frontier.through_position(),
+            prepared.command().relationship(),
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.session().id(),
