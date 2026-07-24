@@ -1,19 +1,19 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as verified
-against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`):
-rendering a context frontier into provider messages, the staged prepare /
-authorize-send / commit-observation effects, assistant content, intra-turn tool
-rounds and final turn completion, provider failure classification into physical
-dispositions, and the retry prohibition. Tool requests, approvals, attempts, and
-continuation are owned by [tool-loop](tool-loop.md). Turn and attempt lifecycle
-law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entries and frontiers in
-[sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
-outbox in [persistence-protocol](persistence-protocol.md); the typed
-model-runtime layer and hub runtime in
-[runtime-substrate](runtime-substrate.md); model configuration and credentials
-in [configuration-and-credentials](configuration-and-credentials.md). Invariant
+against the implementing stack: rendering a context frontier into provider
+messages, the staged prepare / authorize-send / commit-observation effects,
+assistant content, intra-turn tool rounds and final turn completion, provider
+failure classification into physical dispositions, and the retry prohibition.
+Tool requests, approvals, attempts, and continuation are owned by
+[tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
+storage protocol and the outbox in
+[persistence-protocol](persistence-protocol.md); the typed model-runtime layer
+and hub runtime in [runtime-substrate](runtime-substrate.md); model
+configuration and credentials in
+[configuration-and-credentials](configuration-and-credentials.md). Invariant
 tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -114,6 +114,14 @@ projects the exact frontier order into provider-neutral messages:
   input's checked content;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
+- imported `Text` with an attested value renders with its imported user or
+  assistant speaker and exact decoded text, retaining the imported-entry
+  reference rather than a native accepted-input or producing-call identity; a
+  text block with typed value absence is skipped;
+- imported `SourceEvent`, `SourceMessageBlock`, `MessageContentAbsent`,
+  `ToolCall`, `ToolResult`, `Thinking`, `RedactedThinking`, and `Document`
+  entries are skipped by the first conservative renderer while remaining in the
+  exact context frontier;
 - `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
   delimit history and carry no model-visible content;
 - `AssistantToolUse` and its proposal-ordered result entries render as paired
@@ -125,12 +133,23 @@ bridge maps them to provider tool definitions and accepts `ToolCall` completion
 parts only with a matching `ToolUse` finish reason. Provider-native tool types
 remain inside the bridge.
 
-Every message keeps its source-qualified semantic-entry reference. Why:
-inherited entries need not come from a native turn in the current session, so
-role and provenance derive from the entry itself, never from turn grouping. The
-runtime bridge then maps these to provider wire messages; provider types never
-cross the application boundary (INV-002; layering rules in
-[runtime-substrate](runtime-substrate.md)).
+Every message keeps its source-qualified semantic-entry reference and its
+content-authority provenance. Why: inherited entries need not come from a native
+turn in the current session, so role and provenance derive from the entry
+itself, never from turn grouping; imported record is never flattened into native
+execution evidence (INV-038). The runtime bridge then maps these to provider
+wire messages; provider types never cross the application boundary (INV-002;
+layering rules in [runtime-substrate](runtime-substrate.md)).
+
+Why imported non-text is initially skipped: source administrative events and
+content absence are not conversational messages; emitting an imported tool call
+or result through the native tool-message vocabulary would imply Signalbox-owned
+tool identities and execution evidence that do not exist; exposing imported
+thinking would reveal source-private reasoning; and the provider-neutral request
+has no admitted media projection. Skipping affects only model visibility. It
+does not remove, rewrite, summarize, or reorder the semantic entries or their
+addressable imported frontier. A richer projection requires a later foundation
+decision.
 
 ## Staged execution
 
@@ -435,6 +454,15 @@ prints the semantic transcript; it is deliberately not the client protocol.
   continuation attempts and calls in the same logical turn.
 - A refused turn commits no refusal-content semantic entry; the variant remains
   an open edge in [sessions-and-transcript](sessions-and-transcript.md).
+- Imported source-event, absence, and non-text entries remain model-invisible
+  under the conservative projection. Richer rendering remains routed through the
+  open [model-input projection](../open-questions.md#model-input-projection),
+  whose accepted implementation would update this projection and the frontier
+  extension owners in
+  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
+  [sessions-and-transcript](sessions-and-transcript.md);
+  [conversation-import](conversation-import.md) continues to own only normalized
+  imported source content.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.

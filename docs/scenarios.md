@@ -884,6 +884,41 @@ those tests.
   that could produce independently issued provider and tool operations, and
   whether direct interrupt-only reconciliation is ever added.
 
+## S28 — Import a Claude Code conversation and continue natively
+
+- **User intent:** Preserve an external Claude Code conversation as durable
+  Signalbox history, later select any imported entry boundary, and continue in a
+  new resume-style or fork-style session without pretending Signalbox executed
+  the imported work.
+- **Durable commands:** Pure ingestion converts one explicitly selected Claude
+  Code JSONL source through [conversation import](spec/conversation-import.md).
+  At any later time, session creation selects an imported frontier under
+  [sessions and transcript](spec/sessions-and-transcript.md); ordinary native
+  input then uses the existing command path.
+- **State transitions:** Ingestion, later session creation, imported seed
+  projection, and first native execution follow their owning specifications in
+  [conversation import](spec/conversation-import.md),
+  [sessions and transcript](spec/sessions-and-transcript.md),
+  [turn lifecycle](spec/turn-lifecycle-and-scheduling.md), and
+  [model-call execution](spec/model-call-execution.md).
+- **Transient updates:** None are required for import. Scripted-model deltas, if
+  any, follow the ordinary transient/final-content boundary.
+- **Owning component:** The Claude Code edge converter owns JSONL quirks; the
+  imported-conversation store owns content-addressed raw records and idempotent
+  snapshots; session creation owns later frontier/mode selection and seed
+  projection; the existing scheduler and model path own all native execution
+  after the seed boundary.
+- **Failure behavior:** Malformed or unsupported source content rejects the
+  whole conversion. Import, missing-target, replay, and rendering follow the
+  same owning specifications linked above; transactional storage, crash, and
+  outbox behavior follow [persistence protocol](spec/persistence-protocol.md).
+- **Required invariants:** INV-001, INV-002, INV-003, INV-005, INV-007, INV-009,
+  INV-012, INV-014, INV-015, INV-026, INV-032, INV-038, INV-039.
+- **Remaining questions:** Additional source converters, import discovery and
+  bulk policy, rich non-text model rendering, client presentation, and retention
+  are outside this scenario. Real-content validation remains opt-in, local, and
+  content-silent.
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input
