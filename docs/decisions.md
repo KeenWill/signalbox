@@ -106,6 +106,56 @@ model-input rendering, append-only Postgres storage, the domain/application
 spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
 
+## 2026-07-23 — Bound and authenticate every provider exchange
+
+**Context.** The first provider adapters landed with one-send discipline,
+cumulative 8 MiB buffered and streamed response bounds, per-record SSE bounds,
+strict terminal-integrity parsing, and credential sanitization, but the
+provider-call-security questions still left TLS, proxy, timeout, and
+malicious-output posture undecided. Reqwest 0.13 also changes the rustls feature
+and platform-root integration while retaining unsafe-for-Signalbox defaults for
+redirects, protocol-NACK retries, ambient proxies, and an absent timeout.
+
+**Decision.** Take reqwest 0.13 with default features disabled and select its
+providerless rustls platform verifier and byte streaming explicitly. Select
+rustls's ring crypto provider in both adapters, matching the process-wide
+provider already selected by SQLx. Require certificate and hostname verification
+against platform roots, TLS 1.2 or newer, and HTTPS for every non-loopback
+target; admit plain HTTP only to an IP-literal loopback host for deterministic
+tests. Disable ambient proxies, redirects, protocol retries, and idle reuse
+explicitly. Accept CDLA-Permissive-2.0 in the dependency license policy solely
+for `webpki-root-certs`, the platform verifier's bundled fallback root data.
+Retain the already-enforced 8 MiB cumulative buffered and streamed limits and
+the configurable positive SSE record bound. Before typed parsing, newly reject
+provider JSON nested beyond 127 containers, matching serde_json's admitted
+recursion boundary. A buffered parse rejection is response loss, a streamed
+rejection is protocol violation, and an invalid error envelope still falls back
+to its definitive HTTP status. Require a positive whole-exchange timeout from
+connect through body completion, provisionally ten minutes by default. Revisit
+that default through a later ordinary decision after production latency
+observations can justify provider/model-specific budgets without weakening the
+always-bounded contract.
+
+**Rejected alternatives.** Reqwest defaults permit hidden redirect/retry sends,
+ambient proxy routing, and an unbounded exchange. Native TLS or reqwest's
+changeable default backend would make behavior platform-dependent beyond the
+chosen root verifier. Reqwest's AWS-LC-selecting rustls feature would enable two
+crypto providers in the hub's single rustls instance and make implicit provider
+selection panic. TLS 1.3-only would exclude supported provider endpoints without
+a demonstrated need. WebPKI-only roots would ignore owner-managed platform
+trust; rejecting the root-data license would therefore reject the selected
+platform verifier, while a broader license-policy exception would admit
+unrelated dependencies. Arbitrary custom roots or proxy configuration need an
+explicit operational trust decision. A token-derived response bound does not
+constrain errors, whitespace, or protocol overhead. Byte bounds alone limit
+memory but do not give parsing depth an explicit malicious-input contract.
+
+**Affects.** `crates/model-runtime`, both provider-adapter crates, reqwest and
+its resolved dependency graph, provider loopback tests,
+[runtime-substrate](spec/runtime-substrate.md), the timeout edge in
+[model-call-execution](spec/model-call-execution.md), the dependency license
+policy, and priority-order step 4.
+
 ## 2026-07-23 — Agent-process documents separated under docs/agents/
 
 **Context.** `docs/` mixed documents about the system — the living
