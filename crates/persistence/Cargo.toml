@@ -37,6 +37,24 @@ testcontainers-modules = { version = "0.15.0", optional = true, default-features
     "ring",
 ] }
 
+[dev-dependencies]
+signalbox-conversation-import-claude-code = { path = "../conversation-import-claude-code" }
+
+[[test]]
+name = "conversation_import_postgres"
+path = "tests/conversation_import_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "imported_session_postgres"
+path = "tests/imported_session_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "imported_conversation_e2e_postgres"
+path = "tests/imported_conversation_e2e_postgres.rs"
+required-features = ["postgres-integration"]
+
 [[test]]
 name = "postgres_integration"
 path = "tests/postgres_integration.rs"

@@ -5,8 +5,9 @@
 //! docs/spec/persistence-protocol.md are normative. This purpose-specific
 //! projection reconstructs every fact that can change accepted-input
 //! eligibility or slot ownership in the implemented semantic-entry slice. It
-//! supports an ancestry-free session whose durable total order consists of a
-//! terminal prefix, at most one active slot, and a queued suffix.
+//! supports an ancestry-free session or a fully reconstituted imported seed
+//! whose durable total order consists of a terminal prefix, at most one active
+//! slot, and a queued suffix.
 //!
 //! Active records carry one exact checked phase and a validated,
 //! session-scoped acceptance tail. Prepared and running attempts need no
@@ -21,7 +22,8 @@ use crate::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ContextFrontierId,
     CurrentTurnAttempt, DeliveryRequest, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
-    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration, ReconstitutedModelCall,
+    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
@@ -985,6 +987,7 @@ impl AcceptedInputTurnSchedulingRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingReconstitutionInput {
     session: Session,
+    imported_session: Option<ReconstitutedImportedSession>,
     turns: Vec<AcceptedInputTurnSchedulingRecord>,
     semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -1005,6 +1008,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
     ) -> Self {
         Self {
             session,
+            imported_session: None,
             turns,
             semantic_entries,
             snapshots,
@@ -1013,6 +1017,13 @@ impl AcceptedInputSchedulingReconstitutionInput {
             consumed_steering: Vec::new(),
             active_acceptance_tail,
         }
+    }
+
+    /// Supplies the complete independently checked imported seed projection
+    /// required by an imported session.
+    pub fn with_imported_session(mut self, imported_session: ReconstitutedImportedSession) -> Self {
+        self.imported_session = Some(imported_session);
+        self
     }
 
     /// Supplies the independently stored turn-level targets and complete call
@@ -1039,6 +1050,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// Borrows the complete current-session snapshot.
     pub const fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// Borrows the complete imported seed projection, when supplied.
+    pub const fn imported_session(&self) -> Option<&ReconstitutedImportedSession> {
+        self.imported_session.as_ref()
     }
 
     /// Returns every stored turn record supplied as complete.
@@ -1089,8 +1105,20 @@ impl AcceptedInputSchedulingReconstitutionInput {
 /// Why complete stored facts cannot reconstruct the closed scheduling model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AcceptedInputSchedulingReconstitutionFailure {
-    /// This slice cannot resolve a first frontier from session ancestry.
+    /// This slice cannot resolve a first frontier from native session
+    /// ancestry.
     UnsupportedSessionAncestry,
+    /// An imported session omitted its complete checked seed projection.
+    MissingImportedSession,
+    /// A non-imported session supplied an imported seed projection.
+    UnexpectedImportedSession,
+    /// The supplied imported projection is not the exact current session.
+    ImportedSessionMismatch,
+    /// A semantic entry was supplied outside its purpose-specific producer.
+    UnsupportedSemanticEntry {
+        /// The affected entry.
+        entry: SemanticTranscriptEntryId,
+    },
     /// One turn record belongs to a different session.
     TurnSessionMismatch {
         /// The cross-wired turn.
@@ -1674,6 +1702,7 @@ impl AcceptedInputTurnSchedulingProjection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingProjection {
     session: Session,
+    initial_seed_frontier: Option<ContextFrontierId>,
     turns: Box<[AcceptedInputTurnSchedulingProjection]>,
     active_acceptance_tail: Option<SessionAcceptanceTail>,
     semantic_entries: BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
@@ -2443,9 +2472,29 @@ fn terminal_attempt_end_matches(
 fn reconstitute_inner(
     input: &AcceptedInputSchedulingReconstitutionInput,
 ) -> Result<AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure> {
-    if input.session.creation_provenance().ancestry() != TranscriptAncestry::None {
-        return Err(AcceptedInputSchedulingReconstitutionFailure::UnsupportedSessionAncestry);
-    }
+    let imported_session = match (
+        input.session.creation_provenance().ancestry(),
+        input.imported_session.as_ref(),
+    ) {
+        (TranscriptAncestry::None, None) => None,
+        (TranscriptAncestry::None, Some(_)) => {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::UnexpectedImportedSession);
+        }
+        (TranscriptAncestry::ImportedConversation { .. }, None) => {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::MissingImportedSession);
+        }
+        (TranscriptAncestry::ImportedConversation { .. }, Some(imported))
+            if imported.session() == &input.session =>
+        {
+            Some(imported)
+        }
+        (TranscriptAncestry::ImportedConversation { .. }, Some(_)) => {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::ImportedSessionMismatch);
+        }
+        (TranscriptAncestry::SingleSource { .. }, _) => {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::UnsupportedSessionAncestry);
+        }
+    };
 
     let session = input.session.id();
     let mut accepted_input_turns = BTreeMap::new();
@@ -2484,7 +2533,11 @@ fn reconstitute_inner(
         }
     }
 
-    let mut semantic_entries = BTreeMap::new();
+    let mut semantic_entries = imported_session
+        .into_iter()
+        .flat_map(|imported| imported.semantic_entries())
+        .map(|entry| (entry.reference(), entry.clone()))
+        .collect::<BTreeMap<_, _>>();
     let mut origin_by_turn = BTreeMap::new();
     let mut failure_by_turn = BTreeMap::new();
     let mut steering_by_input = BTreeMap::new();
@@ -2515,6 +2568,13 @@ fn reconstitute_inner(
         }
 
         match candidate.payload() {
+            InitialSemanticTranscriptEntryPayload::Imported { .. } => {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::UnsupportedSemanticEntry {
+                        entry: candidate.identity(),
+                    },
+                );
+            }
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
                 let Some(turn) = accepted_input_turns.get(accepted_input).copied() else {
                     return Err(
@@ -2651,7 +2711,17 @@ fn reconstitute_inner(
         }
     }
 
-    let mut snapshots = BTreeMap::new();
+    let initial_seed_frontier =
+        imported_session.map(|imported| imported.seed_snapshot().frontier().snapshot());
+    let mut snapshots = imported_session
+        .into_iter()
+        .map(|imported| {
+            (
+                imported.seed_snapshot().frontier().snapshot(),
+                imported.seed_snapshot().clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     for candidate in &input.snapshots {
         if candidate.owning_session() != session {
             return Err(
@@ -3107,6 +3177,7 @@ fn reconstitute_inner(
     let mut active_tool_recovery_attempt = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
+    referenced_snapshots.extend(initial_seed_frontier);
     let mut attempt_owners = BTreeMap::new();
 
     for (index, turn) in total_order.into_iter().enumerate() {
@@ -3159,6 +3230,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -3487,6 +3559,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -3649,6 +3722,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -3769,6 +3843,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -3890,6 +3965,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -4027,6 +4103,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -4152,6 +4229,7 @@ fn reconstitute_inner(
                     turn,
                     *starting_lineage,
                     *starting_frontier,
+                    initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
                     &snapshots,
@@ -4255,6 +4333,7 @@ fn reconstitute_inner(
 
     Ok(AcceptedInputSchedulingProjection {
         session: input.session.clone(),
+        initial_seed_frontier,
         turns: turns.into_boxed_slice(),
         active_acceptance_tail,
         semantic_entries,
@@ -4743,6 +4822,7 @@ fn validate_start(
     turn: TurnId,
     actual_lineage: AcceptedInputStartingLineage,
     starting_frontier: ContextFrontierId,
+    initial_seed: Option<&ResolvedContextFrontierSnapshot>,
     previous_terminal: Option<&(TurnId, ResolvedContextFrontierSnapshot)>,
     origin_by_turn: &BTreeMap<TurnId, SemanticTranscriptEntryRef>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -4782,6 +4862,13 @@ fn validate_start(
         .ok_or(AcceptedInputSchedulingReconstitutionFailure::MissingOriginEntry { turn })?;
     let mut expected = previous_terminal
         .map(|(_, frontier)| frontier.ordered_entries().collect::<Vec<_>>())
+        .or_else(|| {
+            if index == 0 {
+                initial_seed.map(|seed| seed.ordered_entries().collect())
+            } else {
+                None
+            }
+        })
         .unwrap_or_default();
     expected.push(origin);
     if snapshot.ordered_entries().ne(expected.iter().copied()) {
@@ -5012,17 +5099,38 @@ fn prepare_earliest_queued_activation(
         },
     );
     let (lineage, starting_snapshot) = if index == 0 {
-        let snapshot = match ResolvedContextFrontierSnapshot::try_from_candidate(
-            source_session,
-            identities.starting_frontier,
-            vec![origin_entry.reference()],
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
+        let snapshot = if let Some(seed_frontier) = projection.initial_seed_frontier {
+            let Some(seed) = projection.snapshots.get(&seed_frontier) else {
                 return Err(fail(
                     projection,
                     AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed,
                 ));
+            };
+            match seed.derive_appending_candidate(
+                identities.starting_frontier,
+                vec![origin_entry.reference()],
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return Err(fail(
+                        projection,
+                        AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed,
+                    ));
+                }
+            }
+        } else {
+            match ResolvedContextFrontierSnapshot::try_from_candidate(
+                source_session,
+                identities.starting_frontier,
+                vec![origin_entry.reference()],
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return Err(fail(
+                        projection,
+                        AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed,
+                    ));
+                }
             }
         };
         (AcceptedInputStartingLineage::FirstInSession, snapshot)
@@ -5087,20 +5195,27 @@ mod tests {
 
     use super::*;
     use crate::{
-        AcceptedInputDisposition, AssistantText, AttemptEnd, CurrentTurnAttemptState,
-        FrozenModelSelection, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-        ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
-        PerInputConfigurationChoices, ResolvedProviderTarget, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionReconstitutionInput, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
-        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration, ToolEffectClass,
-        ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        AcceptedInputDisposition, AssistantText, AttemptEnd, CreateSessionFromImportedFrontier,
+        CurrentTurnAttemptState, FrozenModelSelection, ImportedConversation,
+        ImportedConversationFormat, ImportedRawRecordPosition, ImportedRawSourceRecord,
+        ImportedRecordEntryPosition, ImportedSessionReconstitutionInput,
+        ImportedSessionRelationship, ImportedSourceAttestation, ImportedSourceMetadata,
+        ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+        ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+        ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
+        ModelSelectionRequest, NormalizedToolArguments, PerInputConfigurationChoices,
+        ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+        SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
+        ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDecisionSource,
+        ToolDispatchGeneration, ToolEffectClass, ToolName, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput,
         test_support::{
-            accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
-            provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
-            tool_request_id, transcript_frontier, turn_attempt_id, turn_id,
+            accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
+            imported_transcript_entry_id, model_call_id, provider_model_identity,
+            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
+            transcript_frontier, turn_attempt_id, turn_id,
         },
     };
 
@@ -5123,6 +5238,130 @@ mod tests {
         )
         .reconstitute()
         .expect("test session facts are fully correlated")
+    }
+
+    fn imported_position(value: u64) -> ImportedTranscriptPosition {
+        ImportedTranscriptPosition::try_from_u64(value).expect("test position is positive")
+    }
+
+    fn imported_raw_position(value: u64) -> ImportedRawRecordPosition {
+        ImportedRawRecordPosition::try_from_u64(value).expect("test position is positive")
+    }
+
+    fn imported_source_event(
+        conversation: crate::ImportedConversationId,
+        identity: u128,
+        ordinal: u64,
+        source_type: &str,
+    ) -> (ImportedRawSourceRecord, ImportedTranscriptEntryInput) {
+        let source_type = ImportedText::new(source_type.to_owned());
+        let normalized = ImportedStructuredValue::Object(
+            vec![ImportedStructuredObjectMember::new(
+                ImportedText::new("type".to_owned()),
+                ImportedStructuredValue::String(source_type.clone()),
+            )]
+            .into_boxed_slice(),
+        );
+        let raw = ImportedRawSourceRecord::from_converted(
+            format!("synthetic-scheduling-record-{ordinal}").into_bytes(),
+            normalized,
+        );
+        let source = ImportedSourceMetadata::new(
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+        );
+        let entry = ImportedTranscriptEntryInput::new(
+            imported_transcript_entry_id(identity),
+            conversation,
+            imported_position(ordinal),
+            imported_raw_position(ordinal),
+            ImportedRecordEntryPosition::first(),
+            ImportedSourceAttestation::NotAttested,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(source_type),
+            },
+            source,
+        );
+        (raw, entry)
+    }
+
+    fn imported_session() -> ReconstitutedImportedSession {
+        imported_session_for(1)
+    }
+
+    fn imported_session_for(session_value: u128) -> ReconstitutedImportedSession {
+        let conversation_id = imported_conversation_id(80);
+        let (first_raw, first_entry) = imported_source_event(conversation_id, 81, 1, "summary");
+        let (second_raw, second_entry) = imported_source_event(conversation_id, 82, 2, "system");
+        let conversation = ImportedConversation::from_converted_records(
+            conversation_id,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            vec![first_raw, second_raw],
+            vec![first_entry, second_entry],
+        )
+        .expect("synthetic imported scheduling history is checked");
+        let command = CreateSessionFromImportedFrontier::new(
+            command_id(83),
+            conversation
+                .frontiers()
+                .last()
+                .expect("fixture has two imported frontiers"),
+            ImportedSessionRelationship::Resume,
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(1))),
+        );
+        let mut next_entry = 84_u128;
+        let prepared = command
+            .prepare(
+                &conversation,
+                session_id(session_value),
+                context_frontier_id(89),
+                || {
+                    let identity = semantic_transcript_entry_id(next_entry);
+                    next_entry += 1;
+                    identity
+                },
+            )
+            .expect("matching imported history prepares a seed");
+        let seed = prepared.imported_seed();
+        let snapshot = prepared.seed_snapshot();
+        ImportedSessionReconstitutionInput::new(
+            prepared.session().id(),
+            prepared.session().id(),
+            prepared.session().provenance(),
+            prepared.session().id(),
+            SessionConfigurationDefaultsVersion::first(),
+            prepared.session().id(),
+            SessionConfigurationDefaultsVersion::first(),
+            command.initial_configuration_defaults(),
+            conversation,
+            vec![crate::ImportedSessionSeedReconstitutionInput::new(
+                seed.session(),
+                seed.seed_frontier(),
+            )],
+            vec![ResolvedContextFrontierReconstitutionInput::new(
+                snapshot.frontier().owning_session(),
+                snapshot.frontier().snapshot(),
+                snapshot.ordered_entries().collect(),
+            )],
+            prepared
+                .semantic_entries()
+                .iter()
+                .map(|entry| {
+                    SemanticTranscriptEntryReconstitutionInput::new(
+                        entry.identity(),
+                        entry.source_session(),
+                        entry.payload().clone(),
+                    )
+                })
+                .collect(),
+        )
+        .reconstitute()
+        .expect("complete imported scheduling fixture reconstitutes")
     }
 
     fn configuration(session: &Session) -> OriginConfiguration {
@@ -6131,6 +6370,42 @@ mod tests {
                 if current_attempt.id() == activation.initial_attempt()
                     && current_attempt.state() == &crate::CurrentTurnAttemptState::Prepared
         ));
+    }
+
+    /// S28 / INV-015 / INV-039: an imported session's first native activation
+    /// appends its origin to the exact checked seed prefix without changing
+    /// first-in-session lineage.
+    #[test]
+    fn s28_inv015_inv039_first_native_frontier_appends_to_imported_seed() {
+        let imported = imported_session();
+        let session = imported.session().clone();
+        let seed_entries = imported
+            .seed_snapshot()
+            .ordered_entries()
+            .collect::<Vec<_>>();
+        let queued = accepted_origin(1);
+        let activation = activation(1);
+
+        let candidate = queued_input(&session, queued)
+            .with_imported_session(imported)
+            .reconstitute()
+            .expect("the exact imported seed admits queued native work")
+            .prepare_earliest_queued_activation(activation.identities())
+            .expect("the first native turn appends to the imported seed");
+
+        let mut expected = seed_entries;
+        expected.push(activation.origin_entry().reference(&session));
+        assert_eq!(
+            candidate
+                .starting_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            candidate.start().lineage(),
+            AcceptedInputStartingLineage::FirstInSession
+        );
     }
 
     /// S03 / INV-009: restart returns a queued scheduling projection with no
@@ -9268,9 +9543,40 @@ mod tests {
         );
     }
 
-    /// S03 / INV-009: this closed slice cannot resolve a first frontier from
-    /// session ancestry, so an otherwise-valid queued projection for an
-    /// ancestral session fails closed.
+    /// S28 / INV-002 / INV-039: imported ancestry is admitted only together
+    /// with its exact complete independently checked seed projection.
+    #[test]
+    fn s28_inv002_inv039_imported_scheduling_requires_exact_seed_projection() {
+        let imported = imported_session();
+        let session = imported.session().clone();
+        let queued = accepted_origin(1);
+
+        let missing = assert_input_rejects_unchanged(queued_input(&session, queued));
+        assert_eq!(
+            missing,
+            AcceptedInputSchedulingReconstitutionFailure::MissingImportedSession
+        );
+
+        let mismatched = assert_input_rejects_unchanged(
+            queued_input(&session, queued).with_imported_session(imported_session_for(2)),
+        );
+        assert_eq!(
+            mismatched,
+            AcceptedInputSchedulingReconstitutionFailure::ImportedSessionMismatch
+        );
+
+        let unexpected = assert_input_rejects_unchanged(
+            queued_input(&current_session(), queued).with_imported_session(imported),
+        );
+        assert_eq!(
+            unexpected,
+            AcceptedInputSchedulingReconstitutionFailure::UnexpectedImportedSession
+        );
+    }
+
+    /// S03 / INV-009: this closed slice still cannot resolve a first frontier
+    /// from native session ancestry, so an otherwise-valid queued projection
+    /// for a native ancestral session fails closed.
     #[test]
     fn s03_inv009_reconstitution_rejects_ancestral_session() {
         let ancestral = session_id(1);
