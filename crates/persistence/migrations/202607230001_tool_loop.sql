@@ -2796,6 +2796,71 @@ BEGIN
 END;
 $$;
 
+-- A continuation turn attempt has already entered `running` while dispatching
+-- its tool batch. Its next model call is still checkpointed as `prepared`.
+-- Retain the original guard for initial calls and admit the running form only
+-- when the attempt is a continuation and the call frontier carries durable
+-- tool-result evidence.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    old_guard CONSTANT text :=
+        'OR attempt_state IS DISTINCT FROM ''prepared''';
+    new_guard CONSTANT text := $replacement$
+OR (
+                attempt_state IS DISTINCT FROM 'prepared'
+                AND NOT (
+                    attempt_state = 'running'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS continuation_attempt
+                         WHERE continuation_attempt.turn_attempt_id =
+                                   checked_attempt_id
+                           AND continuation_attempt.turn_id = checked_turn_id
+                           AND continuation_attempt.session_id =
+                                   checked_session_id
+                           AND continuation_attempt.continued_from_attempt_id
+                                   IS NOT NULL
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM context_frontier_member AS member
+                          JOIN semantic_transcript_entry AS entry
+                            ON entry.source_session_id =
+                                   member.source_session_id
+                           AND entry.semantic_entry_id =
+                                   member.semantic_entry_id
+                         WHERE member.owning_session_id = checked_session_id
+                           AND member.context_frontier_id =
+                                   checked_frontier_id
+                           AND entry.payload_kind IN (
+                               'tool_execution_result',
+                               'tool_denied',
+                               'tool_closed_by_turn_end'
+                           )
+                    )
+                )
+            )
+$replacement$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_model_call_final_state_without_stop(uuid)'::regprocedure
+    )
+      INTO definition;
+    IF (
+        length(definition) -
+        length(replace(definition, old_guard, ''))
+    ) / length(old_guard) <> 1
+    THEN
+        RAISE EXCEPTION
+            'unexpected prepared model-call final-state guard';
+    END IF;
+    updated_definition := replace(definition, old_guard, new_guard);
+    EXECUTE updated_definition;
+END;
+$migration$;
+
 CREATE CONSTRAINT TRIGGER tool_round_requires_complete_final_state
 AFTER INSERT OR UPDATE OR DELETE ON tool_round
 DEFERRABLE INITIALLY DEFERRED

@@ -3050,7 +3050,7 @@ async fn persist_authorization(
           WHERE turn_attempt_id = $1
             AND turn_id = $2
             AND session_id = $3
-            AND state_kind = 'prepared'
+            AND state_kind IN ('prepared', 'running')
             AND end_variant IS NULL
             AND end_disposition IS NULL",
     )
