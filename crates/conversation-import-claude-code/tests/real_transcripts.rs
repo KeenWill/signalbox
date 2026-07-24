@@ -4,39 +4,48 @@ use std::{
 };
 
 use signalbox_application::ImportedConversationConverter;
-use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_claude_code::{
+    ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
+};
 use signalbox_domain::{ImportedConversationId, ImportedTranscriptEntryId};
 use uuid::Uuid;
+
+#[derive(Debug, Eq, PartialEq)]
+enum RealTranscriptValidationFailure {
+    InputsUnavailable,
+    NoInputs,
+    ReadFailed,
+    ConversionFailed(ClaudeCodeJsonlConversionFailure),
+}
 
 #[test]
 #[ignore = "requires explicit local real-transcript opt-in"]
 fn opt_in_real_transcripts_convert_without_content_output() {
+    assert_eq!(validate_opt_in_real_transcripts(), Ok(()));
+}
+
+fn validate_opt_in_real_transcripts() -> Result<(), RealTranscriptValidationFailure> {
     if env::var("SIGNALBOX_RUN_REAL_CLAUDE_IMPORT").as_deref() != Ok("1") {
-        return;
+        return Ok(());
     }
     let Some(paths) = env::var_os("SIGNALBOX_REAL_CLAUDE_TRANSCRIPTS") else {
-        return;
+        return Ok(());
     };
     let roots = env::split_paths(&paths).collect::<Vec<_>>();
-    assert!(
-        !roots.is_empty(),
-        "real-transcript path list must not be empty"
-    );
+    if roots.is_empty() {
+        return Err(RealTranscriptValidationFailure::NoInputs);
+    }
     let mut paths = Vec::new();
     for root in roots {
-        assert!(
-            collect_transcripts(&root, &mut paths).is_ok(),
-            "real Claude transcript inputs could not be enumerated"
-        );
+        collect_transcripts(&root, &mut paths)
+            .map_err(|()| RealTranscriptValidationFailure::InputsUnavailable)?;
     }
     paths.sort();
-    assert!(
-        !paths.is_empty(),
-        "real Claude transcript inputs contained no files"
-    );
+    if paths.is_empty() {
+        return Err(RealTranscriptValidationFailure::NoInputs);
+    }
     for (file_index, path) in paths.into_iter().enumerate() {
-        let source =
-            fs::read(path).unwrap_or_else(|_| panic!("real Claude transcript could not be read"));
+        let source = fs::read(path).map_err(|_| RealTranscriptValidationFailure::ReadFailed)?;
         let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(
             u128::try_from(file_index)
                 .ok()
@@ -49,11 +58,10 @@ fn opt_in_real_transcripts_convert_without_content_output() {
             entry_index = entry_index.saturating_add(1);
             identity
         });
-        assert!(
-            imported.is_ok(),
-            "real Claude transcript failed content-silent conversion"
-        );
+        imported
+            .map_err(|error| RealTranscriptValidationFailure::ConversionFailed(error.failure()))?;
     }
+    Ok(())
 }
 
 fn collect_transcripts(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), ()> {
