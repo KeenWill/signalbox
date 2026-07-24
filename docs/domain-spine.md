@@ -342,6 +342,12 @@ pub enum ImportedConversationReconstitutionFailure {
     RawRecordNormalizedValueNotObject {
         position: ImportedRawRecordPosition,
     },
+    RawRecordStructuredValueDepthExceeded {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordProjectionInvalid {
+        position: ImportedRawRecordPosition,
+    },
     SourceDigestMismatch {
         expected: ImportedConversationSourceDigest,
         actual: ImportedConversationSourceDigest,
@@ -384,6 +390,15 @@ pub enum ImportedConversationReconstitutionFailure {
         entry: ImportedTranscriptEntryId,
     },
     MessageRoleMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryProjectionMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    RawRecordEntryProjectionMismatch {
+        position: ImportedRawRecordPosition,
+    },
+    EntryStructuredValueDepthExceeded {
         entry: ImportedTranscriptEntryId,
     },
     PositionExhausted,
