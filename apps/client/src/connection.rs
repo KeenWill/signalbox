@@ -32,14 +32,35 @@ impl ProcessClient {
         &mut self,
         request: ClientRequest,
     ) -> Result<Connection, ClientError> {
+        self.open(request, RequestDelivery::ReadOnly).await
+    }
+
+    pub(crate) async fn mutation_request(
+        &mut self,
+        request: ClientRequest,
+    ) -> Result<Connection, ClientError> {
+        self.open(request, RequestDelivery::Mutation).await
+    }
+
+    async fn open(
+        &mut self,
+        request: ClientRequest,
+        delivery: RequestDelivery,
+    ) -> Result<Connection, ClientError> {
         let request_id = RequestId::try_new(self.next_request_id)
             .map_err(|_| ClientError::Protocol("request identity exhausted"))?;
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
             .ok_or(ClientError::Protocol("request identity exhausted"))?;
-        Connection::open(&self.socket, request_id, request).await
+        Connection::open(&self.socket, request_id, request, delivery).await
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestDelivery {
+    ReadOnly,
+    Mutation,
 }
 
 pub(crate) struct Connection {
@@ -53,6 +74,7 @@ impl Connection {
         socket: &Path,
         request_id: RequestId,
         request: ClientRequest,
+        delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
@@ -63,10 +85,18 @@ impl Connection {
         };
         let frame = ClientFrame::try_new(request_id, request)
             .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
+        let encoded = encode_client_line(&frame)?;
         connection
             .writer
-            .write_all(&encode_client_line(&frame)?)
-            .await?;
+            .write_all(&encoded)
+            .await
+            .map_err(|error| {
+                let error = ClientError::Io(error);
+                match delivery {
+                    RequestDelivery::ReadOnly => error,
+                    RequestDelivery::Mutation => error.mutation(),
+                }
+            })?;
         Ok(connection)
     }
 

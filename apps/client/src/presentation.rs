@@ -807,115 +807,86 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_render_cancellation_reconciliation_and_failed_call_evidence() {
-        let mut snapshot = TranscriptSnapshot::from_messages(
-            12,
-            [
-                ServerMessage::TranscriptTurn {
-                    turn_id: wire_uuid(1),
-                    acceptance_position: CanonicalU64::new(1),
-                    state: TurnState::ActiveRunning {
-                        current_attempt_id: wire_uuid(2),
-                        current_model_call: Some(CurrentModelCall::new(
-                            wire_uuid(3),
-                            CurrentModelCallState::CancellationRequested {},
-                        )),
-                    },
-                },
-                ServerMessage::TranscriptTurn {
-                    turn_id: wire_uuid(4),
-                    acceptance_position: CanonicalU64::new(2),
-                    state: TurnState::Failed {
-                        terminal_frontier_id: wire_uuid(5),
-                        terminal_attempt_id: Some(wire_uuid(6)),
-                        terminal_model_call: Some(FailedTerminalModelCall::new(
-                            wire_uuid(7),
-                            FailedModelCallDisposition::Cancelled,
-                        )),
-                    },
-                },
-                ServerMessage::TranscriptTurn {
-                    turn_id: wire_uuid(8),
-                    acceptance_position: CanonicalU64::new(3),
-                    state: TurnState::Cancelled {
-                        terminal_frontier_id: wire_uuid(9),
-                        terminal_attempt_id: wire_uuid(10),
-                        terminal_model_call_id: None,
-                    },
-                },
-                ServerMessage::TranscriptTurn {
-                    turn_id: wire_uuid(11),
-                    acceptance_position: CanonicalU64::new(4),
-                    state: TurnState::ReconciliationRequired {
-                        terminal_frontier_id: wire_uuid(12),
-                        terminal_attempt_id: wire_uuid(13),
-                        terminal_model_call_id: wire_uuid(14),
-                    },
-                },
-            ],
-        )
-        .expect("test snapshot must spool");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        Output::new(&mut stdout, &mut stderr, false)
-            .snapshot(&mut snapshot)
-            .expect("new terminal states must render");
+    fn snapshot_renders_cancellation_requested_call() {
+        let rendered = render_snapshot_turn(TurnState::ActiveRunning {
+            current_attempt_id: wire_uuid(2),
+            current_model_call: Some(CurrentModelCall::new(
+                wire_uuid(3),
+                CurrentModelCallState::CancellationRequested {},
+            )),
+        });
 
-        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         assert!(rendered.contains("call_state=cancellation_requested"));
-        assert!(rendered.contains("state=failed"));
-        assert!(rendered.contains("call_disposition=cancelled"));
-        assert!(rendered.contains("state=cancelled"));
-        assert!(rendered.contains("state=reconciliation_required"));
-        assert!(stderr.is_empty());
     }
 
     #[test]
-    fn follow_events_render_new_cancellation_and_reconciliation_shapes() {
-        let session_id = wire_uuid(1);
-        let turn_id = wire_uuid(2);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut output = Output::new(&mut stdout, &mut stderr, false);
-        output
-            .event(
-                1,
-                session_id,
-                &SessionEvent::ModelCallTransition {
-                    turn_id,
-                    model_call_id: wire_uuid(3),
-                    state: ModelCallState::CancellationRequested {},
-                },
-            )
-            .expect("cancellation request event must render");
-        output
-            .event(
-                2,
-                session_id,
-                &SessionEvent::TurnCancelled {
-                    turn_id,
-                    cancellation_entry_id: wire_uuid(4),
-                    terminal_frontier_id: wire_uuid(5),
-                },
-            )
-            .expect("cancelled event must render");
-        output
-            .event(
-                3,
-                session_id,
-                &SessionEvent::TurnReconciliationRequired {
-                    turn_id,
-                    model_call_id: wire_uuid(6),
-                    terminal_frontier_id: wire_uuid(7),
-                },
-            )
-            .expect("reconciliation event must render");
+    fn snapshot_renders_failed_call_evidence() {
+        let rendered = render_snapshot_turn(TurnState::Failed {
+            terminal_frontier_id: wire_uuid(2),
+            terminal_attempt_id: Some(wire_uuid(3)),
+            terminal_model_call: Some(FailedTerminalModelCall::new(
+                wire_uuid(4),
+                FailedModelCallDisposition::Cancelled,
+            )),
+        });
 
-        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains("state=failed"));
+        assert!(rendered.contains("call_disposition=cancelled"));
+    }
+
+    #[test]
+    fn snapshot_renders_cancelled_turn() {
+        let rendered = render_snapshot_turn(TurnState::Cancelled {
+            terminal_frontier_id: wire_uuid(2),
+            terminal_attempt_id: wire_uuid(3),
+            terminal_model_call_id: None,
+        });
+
+        assert!(rendered.contains("state=cancelled"));
+    }
+
+    #[test]
+    fn snapshot_renders_reconciliation_required_turn() {
+        let rendered = render_snapshot_turn(TurnState::ReconciliationRequired {
+            terminal_frontier_id: wire_uuid(2),
+            terminal_attempt_id: wire_uuid(3),
+            terminal_model_call_id: wire_uuid(4),
+        });
+
+        assert!(rendered.contains("state=reconciliation_required"));
+    }
+
+    #[test]
+    fn follow_event_renders_cancellation_requested_call() {
+        let rendered = render_event(SessionEvent::ModelCallTransition {
+            turn_id: wire_uuid(2),
+            model_call_id: wire_uuid(3),
+            state: ModelCallState::CancellationRequested {},
+        });
+
         assert!(rendered.contains("state=cancellation_requested"));
+    }
+
+    #[test]
+    fn follow_event_renders_cancelled_turn() {
+        let rendered = render_event(SessionEvent::TurnCancelled {
+            turn_id: wire_uuid(2),
+            cancellation_entry_id: wire_uuid(3),
+            terminal_frontier_id: wire_uuid(4),
+        });
+
         assert!(rendered.contains("turn_cancelled"));
+    }
+
+    #[test]
+    fn follow_event_renders_reconciliation_required_turn() {
+        let rendered = render_event(SessionEvent::TurnReconciliationRequired {
+            turn_id: wire_uuid(2),
+            model_call_id: wire_uuid(3),
+            terminal_frontier_id: wire_uuid(4),
+        });
+
         assert!(rendered.contains("turn_reconciliation_required"));
-        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -980,6 +951,37 @@ mod tests {
             self.flushes += 1;
             Ok(())
         }
+    }
+
+    #[track_caller]
+    fn render_snapshot_turn(state: TurnState) -> String {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [ServerMessage::TranscriptTurn {
+                turn_id: wire_uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                state,
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("snapshot turn must render");
+        assert!(stderr.is_empty());
+        String::from_utf8(stdout).expect("rendered output is UTF-8")
+    }
+
+    #[track_caller]
+    fn render_event(event: SessionEvent) -> String {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .event(1, wire_uuid(1), &event)
+            .expect("event must render");
+        assert!(stderr.is_empty());
+        String::from_utf8(stdout).expect("rendered output is UTF-8")
     }
 
     fn wire_uuid(value: u128) -> CanonicalUuid {

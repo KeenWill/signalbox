@@ -170,12 +170,11 @@ async fn create(
         )?;
     }
     let mut connection = client
-        .request(ClientRequest::CreateSession {
+        .mutation_request(ClientRequest::CreateSession {
             command_id,
             initial_model_selection: selection,
         })
-        .await
-        .map_err(ClientError::mutation)?;
+        .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::SessionCreated { session_id } => {
             output.session_created(session_id)?;
@@ -289,14 +288,13 @@ async fn submit_input(
     defaults_version: CanonicalU64,
 ) -> Result<CanonicalUuid, ClientError> {
     let mut connection = client
-        .request(ClientRequest::SubmitInput {
+        .mutation_request(ClientRequest::SubmitInput {
             command_id,
             session_id,
             content,
             expected_defaults_version: defaults_version,
         })
-        .await
-        .map_err(ClientError::mutation)?;
+        .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::InputSubmitted {
             session_id: submitted_session,
@@ -679,8 +677,8 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ServerFrame, ServerMessage, SessionEvent, TurnState, decode_client_line,
-        encode_server_line,
+        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -690,11 +688,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, ProcessClient, SnapshotSelection, TurnTerminal,
+        MAX_INPUT_CONTENT_BYTES, ProcessClient, SnapshotSelection, TurnTerminal, create,
         model_call_recovery_transition, read_input, run, socket_path, submit_input,
         terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
     };
-    use crate::error::ClientError;
+    use crate::{error::ClientError, presentation::Output};
 
     #[test]
     fn empty_send_input_is_rejected() {
@@ -736,50 +734,61 @@ mod tests {
     }
 
     #[test]
-    fn send_classifies_cancelled_and_reconciliation_terminal_truth() {
-        let cancelled = TurnState::Cancelled {
+    fn send_classifies_cancelled_snapshot_truth() {
+        let state = TurnState::Cancelled {
             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
             terminal_model_call_id: None,
         };
-        let reconciliation = TurnState::ReconciliationRequired {
-            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-            terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
-        };
 
         assert_eq!(
-            terminal_snapshot_state(Some(&cancelled))
+            terminal_snapshot_state(Some(&state))
                 .expect("cancelled state is terminal protocol truth"),
             Some(TurnTerminal::Cancelled)
         );
+    }
+
+    #[test]
+    fn send_classifies_reconciliation_required_snapshot_truth() {
+        let state = TurnState::ReconciliationRequired {
+            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+        };
+
         assert_eq!(
-            terminal_snapshot_state(Some(&reconciliation))
+            terminal_snapshot_state(Some(&state))
                 .expect("reconciliation state is terminal protocol truth"),
             Some(TurnTerminal::ReconciliationRequired)
         );
     }
 
     #[test]
-    fn send_classifies_cancelled_and_reconciliation_events_for_its_turn() {
+    fn send_classifies_cancelled_event_for_its_turn() {
         let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
-        let cancelled = SessionEvent::TurnCancelled {
+        let event = SessionEvent::TurnCancelled {
             turn_id: selected_turn,
             cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
         };
-        let reconciliation = SessionEvent::TurnReconciliationRequired {
+
+        assert_eq!(
+            terminal_event_state(&event, selected_turn),
+            Some(TurnTerminal::Cancelled)
+        );
+    }
+
+    #[test]
+    fn send_classifies_reconciliation_required_event_for_its_turn() {
+        let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let event = SessionEvent::TurnReconciliationRequired {
             turn_id: selected_turn,
-            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
         };
 
         assert_eq!(
-            terminal_event_state(&cancelled, selected_turn),
-            Some(TurnTerminal::Cancelled)
-        );
-        assert_eq!(
-            terminal_event_state(&reconciliation, selected_turn),
+            terminal_event_state(&event, selected_turn),
             Some(TurnTerminal::ReconciliationRequired)
         );
     }
@@ -831,8 +840,9 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_rereads_its_marker_but_reconciliation_has_no_semantic_material() {
+    fn cancellation_event_selects_its_exact_marker_for_reread() {
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+
         assert!(matches!(
             terminal_snapshot_selection(&SessionEvent::TurnCancelled {
                 turn_id,
@@ -844,11 +854,17 @@ mod tests {
                 terminal_entry_id,
             }) if selected == turn_id && terminal_entry_id == CanonicalUuid::from_uuid(Uuid::from_u128(2))
         ));
+    }
+
+    #[test]
+    fn reconciliation_event_selects_no_semantic_material_for_reread() {
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+
         assert!(
             terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
                 turn_id,
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
             })
             .is_none()
         );
@@ -877,6 +893,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_connection_failure_is_definitely_uncommitted() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut client = ProcessClient::new(directory.path().join("missing.sock"));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        let result = create(
+            &mut client,
+            &mut output,
+            ModelSelection::Direct {
+                selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            },
+            Some(CommandId::try_from_uuid(Uuid::from_u128(2))?),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ClientError::Io(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_connection_failure_is_definitely_uncommitted() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut client = ProcessClient::new(directory.path().join("missing.sock"));
+
+        let result = submit_input(
+            &mut client,
+            CommandId::try_from_uuid(Uuid::from_u128(1))?,
+            CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            InputContent::new(String::from("queued content")),
+            CanonicalU64::new(1),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ClientError::Io(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
@@ -890,17 +946,13 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            if !matches!(
+            assert!(matches!(
                 request.request(),
                 ClientRequest::SubmitInput {
                     session_id: requested_session,
                     ..
                 } if *requested_session == session_id
-            ) {
-                return Err(io::Error::other(
-                    "client did not submit the selected session",
-                ));
-            }
+            ));
             let response = ServerFrame::try_new(
                 request.request_id(),
                 ServerMessage::InputSubmitted {
@@ -919,11 +971,7 @@ mod tests {
             let read = timeout(Duration::from_secs(1), reader.read(&mut byte))
                 .await
                 .map_err(io::Error::other)??;
-            if read != 0 {
-                return Err(io::Error::other(
-                    "submit connection remained open after its response",
-                ));
-            }
+            assert_eq!(read, 0);
             Ok::<(), io::Error>(())
         });
 

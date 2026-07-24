@@ -492,14 +492,38 @@ mod tests {
     use super::FixedDiskSet;
 
     #[test]
-    fn disk_identity_set_preserves_exact_uniqueness() {
+    fn disk_identity_set_grows_at_its_load_boundary() {
         let mut set = FixedDiskSet::<2>::new().expect("anonymous test file must open");
-        for value in 0_u16..100 {
-            assert!(
-                set.insert(value.to_be_bytes())
-                    .expect("growing insert must succeed")
-            );
-        }
+        assert_inserted(&mut set, [0, 0]);
+        assert_inserted(&mut set, [0, 1]);
+        assert_inserted(&mut set, [0, 2]);
+        assert_inserted(&mut set, [0, 3]);
+        assert_inserted(&mut set, [0, 4]);
+        assert_inserted(&mut set, [0, 5]);
+        assert_inserted(&mut set, [0, 6]);
+        assert_inserted(&mut set, [0, 7]);
+        assert_inserted(&mut set, [0, 8]);
+        assert_inserted(&mut set, [0, 9]);
+        assert_inserted(&mut set, [0, 10]);
+        assert_eq!(set.capacity, 16);
+
+        assert_inserted(&mut set, [0, 11]);
+
+        assert_eq!(set.capacity, 32);
+        assert_eq!(set.len, 12);
+    }
+
+    #[test]
+    fn disk_identity_set_rejects_an_exact_duplicate() {
+        let mut set = FixedDiskSet::<2>::new().expect("anonymous test file must open");
+        assert_inserted(&mut set, [0, 2]);
+
         assert!(!set.insert([0, 2]).expect("duplicate lookup must succeed"));
+        assert_eq!(set.len, 1);
+    }
+
+    #[track_caller]
+    fn assert_inserted(set: &mut FixedDiskSet<2>, key: [u8; 2]) {
+        assert!(set.insert(key).expect("disk identity insert must succeed"));
     }
 }
