@@ -328,13 +328,20 @@ fn wire_messages(
     let mut pending_text: Option<String> = None;
     let mut pending_tool_calls: Vec<WireRequestToolCall> = Vec::new();
     let mut user_text_seen = false;
+    let mut previous_part_was_text = false;
     for part in &message.parts {
         match part {
             MessagePart::Text(text) => {
                 match &mut pending_text {
-                    Some(pending) => pending.push_str(text),
+                    Some(pending) => {
+                        if !previous_part_was_text {
+                            pending.push('\n');
+                        }
+                        pending.push_str(text);
+                    }
                     None => pending_text = Some(text.clone()),
                 }
+                previous_part_was_text = true;
                 if role == "user" {
                     user_text_seen = true;
                 }
@@ -368,7 +375,8 @@ fn wire_messages(
                         name: proposal.name.as_str().to_string(),
                         arguments: proposal.arguments_json.clone(),
                     },
-                })
+                });
+                previous_part_was_text = false;
             }
             MessagePart::ToolResult(result) => {
                 if role != "user" {
@@ -391,6 +399,7 @@ fn wire_messages(
                     tool_calls: None,
                     tool_call_id: Some(result.tool_call_id.as_str().to_string()),
                 });
+                previous_part_was_text = false;
             }
             // Chat Completions has no representation for replayed reasoning;
             // dropping caller-stated history silently would misstate the
@@ -949,6 +958,39 @@ mod tests {
                 .expect("tool call remains attached")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn text_segments_separated_by_a_tool_call_gain_a_legible_boundary() {
+        let mut operation = operation("call-separated-text");
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![
+                    MessagePart::Text("before the call".to_string()),
+                    MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call_a1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: "{}".to_string(),
+                    }),
+                    MessagePart::Text("after the call".to_string()),
+                ],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
+
+        let request = build_request(&operation).expect("grouped tool history remains replayable");
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some("before the call\nafter the call")
         );
     }
 

@@ -23,7 +23,8 @@ use crate::{
     },
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        persist_terminal_outcome, require_live_execution_for_restart,
+        fail_tool_crash_in_transaction, persist_terminal_outcome,
+        require_live_execution_for_restart,
     },
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -391,11 +392,6 @@ where
                     Some(ReconstitutedToolAttempt::Ended(_)) | None => None,
                 })
     {
-        if let Some(accepted_input) = pending_steering {
-            return Ok(TransactionDecision::Rollback(
-                StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
-            ));
-        }
         let outcome = current.classify_crash_loss();
         let ended = match &outcome {
             ToolAttemptCrashOutcome::KnownFailed(ended)
@@ -414,10 +410,19 @@ where
                 ));
             }
             ToolAttemptCrashOutcome::KnownFailed(_) => {
-                let prepared = scheduling
-                    .prepare_active_turn_lost_failure(identities)
-                    .map_err(map_active_turn_failure)?;
-                insert_prepared_failure(connection, prepared).await?;
+                fail_tool_crash_in_transaction(
+                    connection,
+                    requested_session,
+                    active_turn.turn(),
+                    batch.yielded_snapshot(),
+                    FailedModelCallTurnIdentities::new(
+                        identities.failure_entry(),
+                        identities.terminal_frontier(),
+                    ),
+                    &mut next_reclassified_turn,
+                )
+                .await
+                .map_err(map_model_call_error)?;
                 return Ok(TransactionDecision::Commit(
                     StartupScanSessionOutcome::RecoveredToolAttempt(Box::new(outcome)),
                 ));
@@ -709,31 +714,6 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
-        }
-    }
-}
-
-fn map_active_turn_failure(
-    error: signalbox_domain::AcceptedInputTurnFailureError,
-) -> StartupScanRepositoryError {
-    match error.failure() {
-        AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
-            StartupScanRepositoryError::IdentityCollision(
-                StartupScanIdentityCollision::FailureEntry,
-            )
-        }
-        AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists => {
-            StartupScanRepositoryError::IdentityCollision(
-                StartupScanIdentityCollision::TerminalFrontier,
-            )
-        }
-        AcceptedInputTurnFailureFailure::NoActiveTurn
-        | AcceptedInputTurnFailureFailure::PendingSteering { .. }
-        | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
-        | AcceptedInputTurnFailureFailure::ActiveStartMissing
-        | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
-        | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
-            StartupScanCorruption::Inconsistent("tool-attempt restart failure").into()
         }
     }
 }

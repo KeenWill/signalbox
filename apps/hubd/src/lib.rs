@@ -9,7 +9,7 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionError,
+    InProcessToolDecisionWake, InProcessToolDispatchGate, ModelCallExecutionError,
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallProvider, OperatorFailureClass,
     ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
@@ -17,12 +17,11 @@ use signalbox_application::{
     ToolExecutionServiceOutcome, ToolExecutor, UuidV7ModelCallExecutionIdGenerator,
     UuidV7ToolLoopIdGenerator,
 };
-use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, ModelTargetCatalog, SessionId};
+use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
-use sqlx::PgPool;
 use tokio::sync::watch;
 
 mod configuration;
@@ -496,30 +495,6 @@ pub struct PostgresProviderModelExecution<Provider> {
     provider: Provider,
 }
 
-/// PostgreSQL tool repository carrying the model-call configuration required
-/// to commit a completed batch and its continuation atomically.
-#[derive(Clone, Debug)]
-pub struct PostgresContinuationToolLoopRepository {
-    inner: PostgresToolLoopRepository,
-}
-
-impl PostgresContinuationToolLoopRepository {
-    /// Configures the continuation target catalog and credential reference.
-    pub fn new(
-        pool: PgPool,
-        targets: ModelTargetCatalog,
-        credential_reference: ModelCallCredentialReference,
-    ) -> Self {
-        Self {
-            inner: PostgresToolLoopRepository::with_model_calls(
-                pool,
-                targets,
-                credential_reference,
-            ),
-        }
-    }
-}
-
 impl<Provider> PostgresProviderModelExecution<Provider> {
     /// Supplies shared persistence, the per-attempt gate, and provider port.
     pub const fn new(
@@ -538,15 +513,17 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
     /// composition without changing the provider-facing application boundary.
     pub fn with_tool_loop<Catalog, Executor>(
         self,
-        tool_repository: PostgresContinuationToolLoopRepository,
+        tool_decision_wake: InProcessToolDecisionWake,
         tool_dispatch_gate: InProcessToolDispatchGate,
         catalog: Catalog,
         executor: Executor,
     ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
+        let tool_repository = self.repository.tool_loop_repository();
         PostgresProviderToolLoopExecution {
             model_repository: self.repository,
-            tool_repository: tool_repository.inner,
+            tool_repository,
             model_gate: self.gate,
+            tool_decision_wake,
             tool_gate: tool_dispatch_gate,
             provider: self.provider,
             catalog,
@@ -615,6 +592,7 @@ pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     model_repository: PostgresModelCallRepository,
     tool_repository: PostgresToolLoopRepository,
     model_gate: InProcessAttemptDispatchGate,
+    tool_decision_wake: InProcessToolDecisionWake,
     tool_gate: InProcessToolDispatchGate,
     provider: Provider,
     catalog: Catalog,
@@ -640,6 +618,7 @@ where
         let model_repository = self.model_repository.clone();
         let tool_repository = self.tool_repository.clone();
         let model_gate = self.model_gate.clone();
+        let tool_decision_wake = self.tool_decision_wake.clone();
         let tool_gate = self.tool_gate.clone();
         let provider = self.provider.clone();
         let catalog = self.catalog.clone();
@@ -663,8 +642,8 @@ where
                 tool_repository,
                 catalog,
                 executor,
-            )
-            .with_dispatch_gate(tool_gate);
+                tool_gate,
+            );
             let mut run_tools = true;
             let mut return_if_tools_absent = false;
 
@@ -703,8 +682,10 @@ where
                             }
                             run_tools = false;
                         }
-                        ToolExecutionServiceOutcome::AwaitingApproval(_)
-                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        ToolExecutionServiceOutcome::AwaitingApproval(request) => {
+                            tool_decision_wake.wait(request).await;
+                        }
+                        ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
                             return Ok(());
                         }

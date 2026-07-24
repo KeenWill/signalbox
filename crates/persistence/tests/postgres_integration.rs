@@ -28,7 +28,7 @@ use signalbox_application::{
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputRequestError, SubmitInputService,
+    SubmitInputRequestError, SubmitInputService, ToolAttemptAuthorizationStatus,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
@@ -1392,7 +1392,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     ));
 
     let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
-    let prepared = tool_repository
+    let prepared_attempt = tool_repository
         .prepare_next_attempt(
             fixture.session,
             fixture.turn,
@@ -1400,23 +1400,40 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             ToolEffectClass::EffectFree,
         )
         .await?;
-    assert_eq!(prepared.state(), CurrentToolAttemptState::Prepared);
+    assert_eq!(prepared_attempt.state(), CurrentToolAttemptState::Prepared);
     assert!(matches!(
         tool_repository
             .reread_ambiguous_authorization(fixture.session, fixture.turn, tool_attempt)
-            .await,
-        Err(ToolLoopRepositoryError::InvalidTransition(
-            "ambiguous authorization did not commit in flight"
-        ))
+            .await?,
+        ToolAttemptAuthorizationStatus::Prepared(ref attempt)
+            if attempt.attempt() == tool_attempt
     ));
     let authorized_attempt = tool_repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
-    assert_eq!(
+    assert!(matches!(
         tool_repository
             .reread_ambiguous_authorization(fixture.session, fixture.turn, tool_attempt)
             .await?,
-        authorized_attempt
+        ToolAttemptAuthorizationStatus::InFlight(ref reread)
+            if reread == &authorized_attempt
+    ));
+    let impossible_preflight_error = sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'unknown_tool'
+          WHERE attempt_id = $1",
+    )
+    .bind(tool_attempt.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("in-flight work cannot acquire preflight-only terminal evidence");
+    assert_eq!(
+        impossible_preflight_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
     );
     let ended = tool_repository
         .commit_observation(
@@ -1431,6 +1448,46 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
         )
         .await?;
     assert!(matches!(ended.end(), ToolAttemptEnd::Completed { .. }));
+
+    let unrelated_session = Uuid::from_u128(seed + 80);
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(seed + 81, seed + 80, direct(seed + 82)))
+        .await?;
+    for (entry, payload_kind, request_reference, attempt_reference) in [
+        (
+            Uuid::from_u128(seed + 83),
+            "tool_closed_by_turn_end",
+            Some(request.into_uuid()),
+            None,
+        ),
+        (
+            Uuid::from_u128(seed + 84),
+            "tool_execution_result",
+            None,
+            Some(tool_attempt.into_uuid()),
+        ),
+    ] {
+        let cross_session_result_error = sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 tool_result_request_id, tool_result_attempt_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(unrelated_session)
+        .bind(entry)
+        .bind(payload_kind)
+        .bind(request_reference)
+        .bind(attempt_reference)
+        .execute(&pool)
+        .await
+        .expect_err("tool-result references must belong to the entry's source session");
+        assert_eq!(
+            cross_session_result_error
+                .as_database_error()
+                .and_then(|error| error.code()),
+            Some("23503".into())
+        );
+    }
 
     let resolved = restarted_repository
         .load_active_batch(fixture.session, fixture.turn)
@@ -2044,6 +2101,26 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
     repository
         .authorize_attempt(crash_fixture.session, crash_fixture.turn, crash_attempt)
         .await?;
+    let pending_ambiguous_input = AcceptedInputId::from_uuid(Uuid::from_u128(crash_seed + 29));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                input_with_delivery(
+                    crash_seed + 28,
+                    crash_seed + 1,
+                    "steer while external work is in flight",
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: crash_fixture.turn,
+                    },
+                ),
+                pending_ambiguous_input,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
@@ -2066,6 +2143,15 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
         restarted.awaiting_recovery(),
         Some(waiting) if waiting.attempt() == crash_attempt
     ));
+    let pending_ambiguous_disposition: String = sqlx::query_scalar(
+        "SELECT disposition_kind
+           FROM accepted_input
+          WHERE accepted_input_id = $1",
+    )
+    .bind(pending_ambiguous_input.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pending_ambiguous_disposition, "pending_steering");
 
     let durable_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -2123,6 +2209,28 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
             effect_free_attempt,
         )
         .await?;
+    let pending_effect_free_input =
+        AcceptedInputId::from_uuid(Uuid::from_u128(effect_free_seed + 29));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                input_with_delivery(
+                    effect_free_seed + 28,
+                    effect_free_seed + 1,
+                    "steer after effect-free dispatch",
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: effect_free_fixture.turn,
+                    },
+                ),
+                pending_effect_free_input,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    let recovered_effect_free_turn = TurnId::from_uuid(Uuid::from_u128(effect_free_seed + 30));
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
@@ -2131,20 +2239,28 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(effect_free_seed + 26)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(effect_free_seed + 27)),
                 ),
-                |_| panic!("the crash fixture has no pending steering"),
+                |accepted_input| {
+                    assert_eq!(accepted_input, pending_effect_free_input);
+                    recovered_effect_free_turn
+                },
             )
             .await?,
         StartupScanSessionOutcome::RecoveredToolAttempt(outcome)
             if matches!(*outcome, ToolAttemptCrashOutcome::KnownFailed(_))
     ));
-    let effect_free_shape: (String, String, String) = sqlx::query_as(
+    let effect_free_shape: (String, String, String, String, Uuid) = sqlx::query_as(
         "SELECT
             (SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1),
             (SELECT terminal_disposition_kind FROM turn_lifecycle WHERE turn_id = $1),
-            (SELECT error_kind FROM tool_attempt WHERE attempt_id = $2)",
+            (SELECT error_kind FROM tool_attempt WHERE attempt_id = $2),
+            (SELECT disposition_kind FROM accepted_input
+              WHERE accepted_input_id = $3),
+            (SELECT origin_turn_id FROM accepted_input
+              WHERE accepted_input_id = $3)",
     )
     .bind(effect_free_fixture.turn.into_uuid())
     .bind(effect_free_attempt.into_uuid())
+    .bind(pending_effect_free_input.into_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(
@@ -2152,7 +2268,9 @@ async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are
         (
             "terminal".to_owned(),
             "failed".to_owned(),
-            "crash_lost".to_owned()
+            "crash_lost".to_owned(),
+            "reclassified_as_turn_origin".to_owned(),
+            recovered_effect_free_turn.into_uuid(),
         )
     );
 
@@ -4045,6 +4163,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         FixedSubmitInputIds::new([accepted_input], [turn]),
         SubmitInputRepository::new(pool.clone()),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
@@ -5632,6 +5751,7 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
         FixedSubmitInputIds::new([accepted_input], [turn]),
         SubmitInputRepository::new(pool.clone()),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
@@ -8153,6 +8273,7 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
         ),
         SubmitInputRepository::new(pool.clone()),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
 
     let first = service.execute(request.clone()).await?;
@@ -8221,6 +8342,7 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
         ),
         restarted.clone(),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let loaded = restarted
         .load(command.command_id())
@@ -10220,6 +10342,7 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
         ),
         repository.clone(),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let after_request = SubmitInputRequest::try_new(
         after.command_id(),
@@ -10398,6 +10521,7 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
         ),
         SubmitInputRepository::new(pool.clone()),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let start = start_input(
         0x4a2,
@@ -10605,6 +10729,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
         ),
         SubmitInputRepository::new(pool.clone()),
         AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let first_start = start_input(
         0x4c2,

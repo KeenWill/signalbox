@@ -524,14 +524,18 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
 }
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
-    match request.arguments().kind() {
-        ToolArgumentsKind::Json => request.arguments().as_str().to_owned(),
-        ToolArgumentsKind::Undecodable => {
-            // Exact malformed bytes remain authoritative on the durable
-            // request. Provider history needs an object-shaped placeholder so
-            // the paired InvalidArguments result can be delivered.
-            String::from(r#"{"signalbox_invalid_arguments":true}"#)
-        }
+    if request.arguments().kind() == ToolArgumentsKind::Json
+        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            request.arguments().as_str(),
+        )
+        .is_ok()
+    {
+        request.arguments().as_str().to_owned()
+    } else {
+        // Exact bytes remain durable authority. Replayed function arguments
+        // must be an object even when the provider originally supplied a
+        // scalar, array, or undecodable value.
+        String::from(r#"{"signalbox_invalid_arguments":true}"#)
     }
 }
 
@@ -799,6 +803,7 @@ mod tests {
     fn s10_inv002_inv005_tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
         let malformed = request(21, "{\"timezone\":");
+        let scalar = request(22, "7");
         let messages = [
             signalbox_application::ModelConversationMessage::Assistant {
                 source: source(30),
@@ -820,16 +825,33 @@ mod tests {
                 producing_call: call(),
                 content: AssistantText::try_new(String::from("after")).expect("fixture text"),
             },
-            signalbox_application::ModelConversationMessage::ToolResult {
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
                 source: source(34),
+                producing_call: call(),
+                request: scalar.clone(),
+            },
+            signalbox_application::ModelConversationMessage::Assistant {
+                source: source(35),
+                producing_call: call(),
+                content: AssistantText::try_new(String::from("after")).expect("fixture text"),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(36),
                 request: first.id(),
                 content: signalbox_application::ModelToolResultContent::ExecutionError(
                     ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
                 ),
             },
             signalbox_application::ModelConversationMessage::ToolResult {
-                source: source(35),
+                source: source(37),
                 request: malformed.id(),
+                content: signalbox_application::ModelToolResultContent::ExecutionError(
+                    ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
+                ),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(38),
+                request: scalar.id(),
                 content: signalbox_application::ModelToolResultContent::ExecutionError(
                     ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
                 ),
@@ -842,20 +864,23 @@ mod tests {
             rendered[0].role,
             signalbox_model_runtime::ConversationRole::Assistant
         );
-        assert_eq!(rendered[0].parts.len(), 4);
-        let signalbox_model_runtime::MessagePart::ToolCall(replayed) = &rendered[0].parts[2] else {
-            panic!("second proposal remains in the assistant group");
-        };
-        assert_eq!(
-            replayed.arguments_json,
-            r#"{"signalbox_invalid_arguments":true}"#
-        );
+        assert_eq!(rendered[0].parts.len(), 6);
+        for part in [&rendered[0].parts[2], &rendered[0].parts[4]] {
+            let signalbox_model_runtime::MessagePart::ToolCall(replayed) = part else {
+                panic!("invalid proposal remains in the assistant group");
+            };
+            assert_eq!(
+                replayed.arguments_json,
+                r#"{"signalbox_invalid_arguments":true}"#
+            );
+        }
         assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
+        assert_eq!(scalar.arguments().as_str(), "7");
         assert_eq!(
             rendered[1].role,
             signalbox_model_runtime::ConversationRole::User
         );
-        assert_eq!(rendered[1].parts.len(), 2);
+        assert_eq!(rendered[1].parts.len(), 3);
     }
 
     /// INV-026: the application-owned dispatch permit is released exactly
