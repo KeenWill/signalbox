@@ -74,7 +74,7 @@ pub(crate) struct WireFunctionTool {
 pub(crate) struct WireFunctionDefinition {
     pub name: String,
     pub description: String,
-    pub parameters: serde_json::Value,
+    pub parameters: Box<serde_json::value::RawValue>,
 }
 
 // --- Response ---
