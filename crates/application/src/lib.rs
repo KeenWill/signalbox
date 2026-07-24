@@ -3,6 +3,7 @@
 //! This crate coordinates domain decisions and external effects while
 //! depending inward on `signalbox-domain`.
 
+mod conversation_import;
 mod create_session;
 mod load_session;
 mod model_execution;
@@ -13,6 +14,11 @@ mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
 
+pub use conversation_import::{
+    ImportConversationError, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationConverter, ImportedConversationIdGenerator, ImportedConversationStore,
+    ImportedConversationStoreOutcome, UuidV7ImportedConversationIdGenerator,
+};
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     CreateSessionTransaction, InvalidDurableCommandId, SessionIdGenerator,
