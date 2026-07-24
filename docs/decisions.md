@@ -10,6 +10,32 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Make the model-call credential reference total
+
+**Context.** A schema audit found that the nullability of
+`model_call.credential_reference` guarded phantom history. The 2026-07-22 entry
+below kept the column nullable to preserve forward migration of rows predating
+it, but no deployed database exists (the hub-fencing decision already relies on
+no schema predating the stack), and the store writes the reference on every
+`Prepared` insert, so the NULL state is unreachable and the load path's
+NULL-as-corruption arm is dead code.
+
+**Decision.** Make the column total with a forward-only migration
+(`202607240004_credential_reference_total.sql`): `SET NOT NULL` plus a non-empty
+`CHECK`. Remove the dead NULL-handling arm from the persistence load path; a
+missing row remains corruption, and a present row always carries its reference.
+This supersedes the forward-only-nullable rationale of the 2026-07-22
+credential-reference entry.
+
+**Rejected alternatives.** Keeping the nullable column preserves compatibility
+with a history that does not exist and keeps unreachable corruption handling
+alive. Waiting for a future baseline squash defers the fix without benefit;
+pre-production schema discipline states the correct shape now.
+
+**Affects.** The migration set, the persistence model-call store and its INV-014
+nullability test, [persistence-protocol](spec/persistence-protocol.md), and
+[configuration-and-credentials](spec/configuration-and-credentials.md).
+
 ## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
 
 **Context.** The finished-pull-request rules required push-time reviewer
