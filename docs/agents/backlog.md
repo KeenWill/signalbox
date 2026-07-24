@@ -47,16 +47,57 @@ Owns: the runtime adapter crates only. Collides-with: nothing on the board.
 Closes the provider-call-security open question and takes the deliberate reqwest
 upgrade with loopback re-verification.
 
-## Subscription-backed provider runtimes [blocked-on: owner design pass] [size: L]
+## Subscription-backed provider runtimes (three tracks)
 
-Owns: new runtime adapter crate(s) behind the substrate boundary. Collides-with:
-runtime crates only — parallel-safe against everything else. Alternate
-model-runtime backends wrapping the owner's Codex and Claude subscriptions
-(local subprocess adapters rather than HTTPS), so sessions can spend
-subscription capacity in addition to API billing. Design questions: mapping
-subprocess output to typed terminal evidence, cancellation, failure
-classification. Prior art: the owner's own unmerged native-provider subprocess
-handlers in his private monorepo (the same branch as the importer prior art).
+New `ModelRuntime` adapters that spend subscription capacity instead of API
+billing. Each is a self-contained crate colliding with runtime crates only —
+parallel-safe against everything else and against each other. The runtime trait
+is rated stable (two-method signature byte-stable since early on; evidence
+vocabulary grows additively), so adapters written now are unlikely to reshape.
+Prior art for all three: the owner's own native-provider subprocess handlers on
+the private-mono importer branch — its exact CLI argv, JSON-event parsing, and
+process-supervision lessons transfer; its lossy turn-shaped semantics must be
+tightened to Signalbox's evidence-shaped contract (a subprocess is one physical
+request the adapter cannot prove is retry-free internally — an explicitly
+accepted cost; exit-0-without-a-terminal-marker is BoundaryLoss, not success).
+
+The FIRST of these to wire also introduces the provider-dispatch mechanism hubd
+lacks today (selection is currently two hardcoded "anthropic" points); an
+adapter-only PR does not touch hubd, but the first second-provider wiring PR
+must add the enum/factory. The adapter-author conformance checklist and the
+loopback test pattern from the runtime-adapter study are the reusable body of
+each goal prompt.
+
+### Codex CLI wrap [ready — lead track] [size: S-M]
+
+`codex exec --json`; the thread/turn/item event taxonomy is cleanly namespaced
+with an unambiguous turn.completed/turn.failed terminal (the demanding part of
+the evidence model). CLI owns subscription auth — zero credential handling.
+Officially sanctioned automation path; only real risk is event-schema drift
+between CLI versions (pin a version, snapshot-test).
+
+### Claude Code CLI wrap [ready] [size: S-M]
+
+`claude -p --output-format stream-json --verbose` (+
+`--include-partial-messages` for deltas). Clean result terminal message; CLI
+owns subscription auth. Fragility: the full stream-json event set is
+undocumented and version-fragile — snapshot-test. Do not use `--bare` for
+subscription runs (it forces an API key).
+
+### Codex-subscription Rust reimplementation [blocked-on: owner ToS-cost decision] [size: L-XL]
+
+Reimplements the open-source Codex CLI's direct subscription transport
+(chatgpt.com backend Responses endpoint, OAuth/PKCE token lifecycle, SSE
+Responses events) in Rust — no subprocess. Wire types + SSE are mechanical (M,
+done twice already); the token-refresh lifecycle, credential store, anti-abuse
+identity headers, and error taxonomy are the L-XL part. HIGH fragility
+(undocumented internal endpoint that can change silently) and a real
+ToS/account-standing risk: it calls an internal endpoint impersonating the
+official client identity, and subscription terms generally restrict programmatic
+access — personal-use-on-own-account can still draw rate-limits or flags.
+Deferred deliberately: a wrapped CLI de-risks the same wire behavior first; take
+this only if subprocess overhead proves unacceptable, and record the accepted
+cost before starting. Codex source is Apache-2.0 (attribution/patent terms).
 
 ## Native client rewire, macOS first [blocked-on: client stack + snapshot import merges] [size: L]
 
