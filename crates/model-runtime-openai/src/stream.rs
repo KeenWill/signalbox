@@ -18,8 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
-    ProviderReportedModel, RefusalEvidence, SseRecord, StreamInterruption, TerminalEvidence,
-    TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence, SseRecord,
+    StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    validate_provider_json_nesting,
 };
 
 use crate::response::{convert_usage, map_finish};
@@ -42,6 +43,7 @@ struct ToolBuilder {
     saw_function_type: bool,
     saw_arguments: bool,
     arguments: String,
+    argument_nesting: ProviderJsonNestingValidator,
 }
 
 /// Incremental decoder for one chat-completion stream.
@@ -87,6 +89,9 @@ impl StreamDecoder {
     ) -> StreamStep {
         if record.data == "[DONE]" {
             return self.apply_done();
+        }
+        if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
+            return self.violation(format!("stream chunk exceeds the JSON bound: {error}"));
         }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
@@ -289,6 +294,14 @@ impl StreamDecoder {
                         if let Some(fragment) = function.arguments {
                             let builder = self.tool_builders.entry(call_index).or_default();
                             builder.saw_arguments = true;
+                            if let Err(error) = builder
+                                .argument_nesting
+                                .validate_fragment(fragment.as_bytes())
+                            {
+                                return self.violation(format!(
+                                    "tool call at index {call_index} arguments exceed the JSON bound: {error}"
+                                ));
+                            }
                             builder.arguments.push_str(&fragment);
                             if !fragment.is_empty() {
                                 let text_parts = u32::from(!self.content_text.is_empty());
@@ -474,6 +487,11 @@ impl StreamDecoder {
                     "tool call at index {index} terminated without reporting arguments"
                 )));
             }
+            if let Err(error) = validate_provider_json_nesting(builder.arguments.as_bytes()) {
+                return Some(self.violation(format!(
+                    "tool call at index {index} arguments exceed the JSON bound: {error}"
+                )));
+            }
             let proposal = ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(name),
@@ -544,9 +562,9 @@ impl StreamDecoder {
 mod tests {
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, ProviderErrorKind, ProviderReportedModel, ProviderRequestId, SseFraming,
-        SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-        ToolName,
+        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderReportedModel,
+        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
+        ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -758,6 +776,53 @@ mod tests {
     }
 
     #[test]
+    fn overdeep_fragmented_tool_arguments_are_a_protocol_violation() {
+        let at_limit = "[".repeat(PROVIDER_JSON_NESTING_LIMIT);
+        let at_limit = serde_json::to_string(&at_limit).expect("fixture JSON string serializes");
+        let first_arguments = format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"model\":\"model-exact-1\",\"choices\":[{{\"index\":0,\"delta\":{{\
+             \"role\":\"assistant\",\"tool_calls\":[{{\"index\":0,\"id\":\"call_1\",\
+             \"type\":\"function\",\"function\":{{\"name\":\"lookup\",\
+             \"arguments\":{at_limit}}}}}]}}}}]}}\n\n"
+        );
+        let prohibited_fragment = "[";
+        let beyond_limit = serde_json::to_string(&serde_json::json!({
+            "object": "chat.completion.chunk",
+            "id": "chatcmpl_1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": prohibited_fragment}
+                    }]
+                }
+            }]
+        }))
+        .expect("fixture JSON serializes");
+        let beyond_limit = format!("data: {beyond_limit}\n\n");
+        let (terminal, observations) =
+            drive(&[first_arguments.as_bytes(), beyond_limit.as_bytes()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("overdeep accumulated tool arguments must fail immediately");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("deep streamed arguments must surface as protocol loss");
+        };
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected), "{detail}");
+        assert!(!observations.iter().any(|observation| {
+            observation.fact
+                == ObservationFact::ToolArgumentsDelta {
+                    index: 0,
+                    fragment: prohibited_fragment.to_string(),
+                }
+        }));
+    }
+
+    #[test]
     fn ambiguous_length_finish_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
@@ -960,6 +1025,29 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn overdeep_stream_json_is_a_protocol_violation() {
+        let nested = format!(
+            "{}null{}",
+            "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+            "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+        );
+        let chunk = format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"model\":\"model-exact-1\",\"choices\":[],\"future\":{nested}}}\n\n"
+        );
+        let (terminal, _) = drive(&[chunk.as_bytes()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("overdeep stream material must not reach typed parsing");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("deep SSE JSON must surface as a stream protocol violation");
+        };
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected));
     }
 
     #[test]
