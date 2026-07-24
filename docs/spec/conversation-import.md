@@ -1,20 +1,18 @@
 # Conversation import
 
-This page specifies the conversation-import stack rooted at the foundation
-proposal `agent/conversation-import-spec`. It owns immutable imported
-conversation snapshots, raw source-record preservation, source-neutral
-normalization, addressable imported frontiers, the format-versioned converter
-seam, the first Claude Code JSONL converter, and the append-only Postgres import
-store. Later session creation from one imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+This page specifies immutable imported conversation snapshots, raw source-record
+preservation, source-neutral normalization, addressable imported frontiers, the
+format-versioned converter seam, the first Claude Code JSONL converter, and the
+append-only Postgres import store. Later session creation from one imported
+frontier is owned by [sessions-and-transcript](sessions-and-transcript.md);
+native turn activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
 ## Record and ingestion boundary
 
 An imported conversation is durable record, never execution. It has one
-hub-minted `ImportedConversationId`, one closed source format and converter
+hub-minted `ImportedConversationId`, one closed-source format and converter
 version, one source-content digest, an immutable nonempty sequence of raw source
 record occurrences, and an immutable nonempty sequence of normalized
 `ImportedTranscriptEntry` values (INV-001, INV-038). Every raw record produces
@@ -198,12 +196,10 @@ file order:
 5. An unknown content shape, content-block type, or tool-result block type fails
    the complete conversion rather than being silently dropped or guessed.
 
-This vocabulary is informed by an opt-in structural survey across local Claude
-Code transcript vintages: some files carry only user/final-response text, while
-others contain structured tool traffic, signed thinking, image results, tool
-references, document blocks, model-fallback notices, attachments, and
-administrative source events. No surveyed transcript content or path is copied
-into the repository.
+Version 1 accepts both user/final-response-only records and records containing
+structured tool traffic, signed thinking, image results, tool references,
+document blocks, model-fallback notices, attachments, and administrative source
+events.
 
 Malformed JSON, a blank line, invalid UTF-8, unsupported content, an identity
 collision inside the candidate set, a position overflow, JSON deeper than 128
@@ -243,14 +239,19 @@ header does not exist. Once a header exists, a hash mismatch, missing blob or
 member, gap, duplicate, unknown discriminator/version, contradictory variant
 columns, invalid source value, or domain correlation failure is typed
 corruption. Complete storage records pass through the domain-owned
-reconstitution seam; adapters never default or drop a malformed value (INV-002).
+reconstitution seam; adapters never default or drop a malformed value. For
+Claude Code version 1, that seam independently re-derives every expected entry
+from each complete normalized record and requires exact agreement in entry
+count, order, content, speaker, and source metadata. It also reapplies the
+128-container bound to complete records and entry-carried structured values
+(INV-002).
 
 ## Test data and local validation
 
 Committed tests and fixtures are entirely synthetic. An ignored opt-in
-integration test may sample real local transcripts only when both an explicit
-enable variable and a transcript-directory variable are set. It reports only
-aggregate counts and typed failure classes: it never prints paths, source
+integration test may consume caller-provided local files only when both an
+explicit enable variable and a source-directory variable are set. It reports
+only aggregate counts and typed failure classes: it never prints paths, source
 identifiers, raw bytes, text, tool arguments/results, thinking, media data, or
 JSON parser excerpts. Its checks include complete conversion, raw hash
 round-trip, addressable frontier count, Postgres reconstitution, and

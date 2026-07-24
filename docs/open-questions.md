@@ -26,14 +26,14 @@ identifiers refer to [scenarios.md](scenarios.md).
   content and provider/client rendering. The steering payload and stop marker
   are fixed by the
   [steering and stop decision](decisions.md#2026-07-23--atomic-steering-consumption-and-proof-bearing-stop-requests).
-  Imported-content provenance, imported-frontier creation, and conservative
-  rendering are owned separately by
+  Imported semantic history is owned separately by
   [conversation-import](spec/conversation-import.md). Blocks only those later
   native semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable native transcript-frontier boundaries.** Which terminal native
   semantic boundaries a client may select as a `TranscriptFrontier` remains
-  open; imported conversations independently admit every imported entry
-  boundary. Blocks native fork selection. (S17)
+  open; imported-frontier selection is already owned by
+  [conversation-import](spec/conversation-import.md#imported-frontier-points).
+  Blocks native fork selection. (S17)
 
 ## Accepted-input content
 
@@ -48,18 +48,13 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 - **Projection and summarization beyond the implemented role mappings.** The
   [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
-  and [conversation-import](spec/conversation-import.md) fix the admitted native
-  and imported text-entry role mappings, conservative omission of imported
-  source-event, absence, and non-text entries, and exact frontier order. Rich
-  imported tool/result/media projection, semantic compaction, other selective
-  omission, summarization, rebasing, and context-window policy remain routed
-  through the accepted frontier extension gate and semantic-entry open-question
-  routing — owned by
+  and [conversation-import](spec/conversation-import.md) own the implemented
+  projections. Rich imported tool/result/media projection, semantic compaction,
+  selective omission, summarization, rebasing, and context-window policy remain
+  routed through the accepted frontier extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
-  [sessions-and-transcript](spec/sessions-and-transcript.md) — including their
-  foundation-decision requirements. Blocks those extensions, not the admitted
-  native/imported text or conservative imported non-text behavior. (S02, S17,
-  S28)
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
+  extensions. (S02, S17, S28)
 
 ## Delegation
 
