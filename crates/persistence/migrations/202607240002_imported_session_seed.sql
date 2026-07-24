@@ -813,7 +813,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION require_imported_ancestry_for_seed_insert()
+CREATE FUNCTION require_imported_ancestry_for_seed()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -833,7 +833,7 @@ BEGIN
                 CONSTRAINT = 'imported_session_seed_requires_imported_ancestry';
     END IF;
 
-    RETURN NEW;
+    RETURN NULL;
 END;
 $$;
 
@@ -933,7 +933,8 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_imported_seed_for_session();
 
-CREATE TRIGGER imported_seed_requires_imported_ancestry
-BEFORE INSERT ON imported_session_seed
+CREATE CONSTRAINT TRIGGER imported_seed_requires_imported_ancestry
+AFTER INSERT ON imported_session_seed
+DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
-EXECUTE FUNCTION require_imported_ancestry_for_seed_insert();
+EXECUTE FUNCTION require_imported_ancestry_for_seed();
