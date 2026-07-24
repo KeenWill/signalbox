@@ -2943,6 +2943,16 @@ pub enum ModelConversationMessage {
         producing_call: ModelCallId,
         content: AssistantText,
     },
+    ImportedUser {
+        source: SemanticTranscriptEntryRef,
+        imported_entry: ImportedTranscriptEntryId,
+        content: ImportedText,
+    },
+    ImportedAssistant {
+        source: SemanticTranscriptEntryRef,
+        imported_entry: ImportedTranscriptEntryId,
+        content: ImportedText,
+    },
 }
 
 pub struct PreparedModelOperation { /* private */ }
