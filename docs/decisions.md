@@ -19,16 +19,19 @@ stack during decoding, encoding, or destruction.
 
 **Decision.** Add the focused `serde_stacker` adapter, enable Serde JSON's
 unbounded-depth parser, and guard both deserialization and serialization.
-Destroy the decoded value iteratively after canonical encoding. The existing
-one-megabyte admission bound remains the resource limit.
+Destroy the decoded value iteratively after canonical encoding. Admit the
+`Apache-2.0 WITH LLVM-exception` license of its pinned build-only
+`ar_archive_writer` transitive dependency through a crate-specific supply-chain
+exception. The existing one-megabyte admission bound remains the resource limit.
 
 **Rejected alternatives.** Treating nesting-limit errors as malformed violates
 the implemented valid-JSON classification. A new depth limit would add
 unsupported product semantics. An owned JSON parser would duplicate a mature
 focused capability.
 
-**Affects.** Domain tool-argument normalization and its dependency graph only;
-stored argument kinds, canonical encoding, and byte limits do not change.
+**Affects.** Domain tool-argument normalization, its dependency graph, and the
+crate-specific exception in `deny.toml`; stored argument kinds, canonical
+encoding, and byte limits do not change.
 
 ## 2026-07-24 — Expose durable tool-batch presentation boundaries
 

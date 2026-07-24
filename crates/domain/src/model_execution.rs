@@ -3953,6 +3953,56 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     })
 }
 
+pub(crate) fn apply_interrupt_to_executing_tool_batch(
+    active_turn: ActivatedAcceptedInputTurn,
+    batch: crate::ToolBatch,
+    result_entries: Vec<SemanticTranscriptEntryId>,
+    result_frontier: ContextFrontierId,
+    interrupt: AppliedInterruptCommandResult,
+    identities: CancelledModelCallTurnIdentities,
+) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    let ActiveTurnPhase::Running { current_attempt } = active_turn.phase() else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    let crate::ToolBatchPhase::Executing { turn_attempt } = batch.phase() else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if batch.session() != active_turn.session()
+        || batch.turn() != active_turn.turn()
+        || turn_attempt != current_attempt.id()
+        || interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let result_projection = batch
+        .prepare_cancellation_projection(result_entries, result_frontier)
+        .map_err(|_| ModelCallClosureError::InterruptCorrelationMismatch)?;
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let (tool_result_entries, result_snapshot) = result_projection.into_parts();
+    let mut cancelled = close_cancelled_turn(
+        ModelCallTurnScope {
+            session: active_turn.session(),
+            turn: active_turn.turn(),
+        },
+        current_attempt.clone(),
+        None,
+        result_snapshot,
+        proof,
+        identities,
+        reclassified_pending_steering,
+    )?;
+    cancelled.tool_result_entries = tool_result_entries;
+    Ok(cancelled)
+}
+
 fn complete_turn(
     scope: ModelCallTurnScope,
     call: EndedModelCall,
