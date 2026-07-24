@@ -42,6 +42,13 @@ pub enum SemanticTranscriptEntryPayload {
         /// The immutable accepted-input identity.
         accepted_input: AcceptedInputId,
     },
+    /// Accepted next-safe-point input consumed by its exact source turn.
+    SteeringAcceptedInput {
+        /// The immutable accepted-input identity.
+        accepted_input: AcceptedInputId,
+        /// The exact active turn the input was accepted to steer.
+        source_turn: TurnId,
+    },
     /// An explicit marker for an exact failed turn.
     TurnFailed {
         /// The turn that terminalized as failed.
@@ -66,6 +73,11 @@ pub enum SemanticTranscriptEntryPayload {
     /// The explicit final marker for a completed turn.
     TurnCompleted {
         /// The turn that terminalized as completed.
+        turn: TurnId,
+    },
+    /// The explicit final marker for an interrupt-cancelled turn.
+    TurnCancelled {
+        /// The turn that terminalized as cancelled.
         turn: TurnId,
     },
 }
@@ -201,8 +213,9 @@ mod tests {
         )
     }
 
-    /// INV-001 / INV-005: the initial semantic projection remains a closed
-    /// typed reference to its distinct accepted-input, turn, or tool subject.
+    /// INV-001 / INV-005 / INV-036: the semantic projection remains a closed
+    /// typed reference to its distinct accepted-input, source-turn, terminal
+    /// turn, or tool subject.
     #[test]
     fn initial_payload_variants_preserve_exact_typed_subjects() {
         let accepted_input = accepted_input_id(2);
@@ -213,6 +226,12 @@ mod tests {
             accepted_input,
         });
         let failed = semantic_entry(InitialSemanticTranscriptEntryPayload::TurnFailed { turn });
+        let steering = semantic_entry(
+            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input,
+                source_turn: turn,
+            },
+        );
         let tool_use = semantic_entry(InitialSemanticTranscriptEntryPayload::AssistantToolUse {
             producing_call,
             request,
@@ -227,6 +246,13 @@ mod tests {
         assert!(matches!(
             failed.payload(),
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn: actual } if *actual == turn
+        ));
+        assert!(matches!(
+            steering.payload(),
+            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: actual_input,
+                source_turn,
+            } if *actual_input == accepted_input && *source_turn == turn
         ));
         assert!(matches!(
             tool_use.payload(),

@@ -570,6 +570,8 @@ pub enum CurrentModelCallState {
     Prepared {},
     /// Call crossed the send boundary.
     InFlight {},
+    /// Cancellation was durably requested for the issued call.
+    CancellationRequested {},
 }
 
 /// Current model call attached to one running turn.
@@ -600,8 +602,50 @@ impl CurrentModelCall {
     }
 }
 
+/// Terminal model-call dispositions admitted by a failed transcript turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailedModelCallDisposition {
+    /// The provider interaction failed with definitive evidence.
+    KnownFailed,
+    /// The provider call was cancelled without terminalizing the turn as
+    /// cancelled.
+    Cancelled,
+}
+
+/// Optional terminal call evidence carried by a failed transcript turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailedTerminalModelCall {
+    model_call_id: CanonicalUuid,
+    disposition: FailedModelCallDisposition,
+}
+
+impl FailedTerminalModelCall {
+    /// Constructs one exact failed-turn terminal-call projection.
+    pub const fn new(
+        model_call_id: CanonicalUuid,
+        disposition: FailedModelCallDisposition,
+    ) -> Self {
+        Self {
+            model_call_id,
+            disposition,
+        }
+    }
+
+    /// Returns the terminal model-call identity.
+    pub const fn model_call_id(&self) -> CanonicalUuid {
+        self.model_call_id
+    }
+
+    /// Returns the exact terminal call disposition.
+    pub const fn disposition(&self) -> FailedModelCallDisposition {
+        self.disposition
+    }
+}
+
 /// Authoritative turn state carried by a transcript snapshot.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnState {
     /// Accepted work has not activated.
@@ -630,6 +674,11 @@ pub enum TurnState {
     Failed {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
+        /// Terminal physical attempt, or null for an evidence-free recovery
+        /// failure.
+        terminal_attempt_id: Option<CanonicalUuid>,
+        /// Terminal call evidence, or null when no call existed.
+        terminal_model_call: Option<FailedTerminalModelCall>,
     },
     /// The turn terminalized as completed.
     Completed {
@@ -649,6 +698,168 @@ pub enum TurnState {
         /// Outcome-authoritative call.
         terminal_model_call_id: CanonicalUuid,
     },
+    /// The turn terminalized after confirmed cancellation.
+    Cancelled {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Authoritative terminal attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Terminal call, or null when cancellation preceded preparation.
+        terminal_model_call_id: Option<CanonicalUuid>,
+    },
+    /// The turn terminalized requiring external reconciliation.
+    ReconciliationRequired {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Authoritative terminal attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Ambiguous terminal call.
+        terminal_model_call_id: CanonicalUuid,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum RawTurnState {
+    Queued {
+        accepted_input_id: CanonicalUuid,
+        content: InputContent,
+    },
+    ActiveRunning {
+        current_attempt_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        current_model_call: Option<CurrentModelCall>,
+    },
+    ActiveAwaitingModelCallRecovery {
+        ended_attempt_id: CanonicalUuid,
+        recovery_model_call_id: CanonicalUuid,
+    },
+    Failed {
+        terminal_frontier_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        terminal_attempt_id: Option<CanonicalUuid>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        terminal_model_call: Option<FailedTerminalModelCall>,
+    },
+    Completed {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        terminal_model_call_id: CanonicalUuid,
+    },
+    Refused {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        terminal_model_call_id: CanonicalUuid,
+    },
+    Cancelled {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        terminal_model_call_id: Option<CanonicalUuid>,
+    },
+    ReconciliationRequired {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        terminal_model_call_id: CanonicalUuid,
+    },
+}
+
+impl<'de> Deserialize<'de> for TurnState {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let state = match RawTurnState::deserialize(deserializer)? {
+            RawTurnState::Queued {
+                accepted_input_id,
+                content,
+            } => Self::Queued {
+                accepted_input_id,
+                content,
+            },
+            RawTurnState::ActiveRunning {
+                current_attempt_id,
+                current_model_call,
+            } => Self::ActiveRunning {
+                current_attempt_id,
+                current_model_call,
+            },
+            RawTurnState::ActiveAwaitingModelCallRecovery {
+                ended_attempt_id,
+                recovery_model_call_id,
+            } => Self::ActiveAwaitingModelCallRecovery {
+                ended_attempt_id,
+                recovery_model_call_id,
+            },
+            RawTurnState::Failed {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call,
+            } => {
+                if terminal_model_call.is_some() && terminal_attempt_id.is_none() {
+                    return Err(serde::de::Error::custom(
+                        "failed terminal call requires a terminal attempt",
+                    ));
+                }
+                Self::Failed {
+                    terminal_frontier_id,
+                    terminal_attempt_id,
+                    terminal_model_call,
+                }
+            }
+            RawTurnState::Completed {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            } => Self::Completed {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            },
+            RawTurnState::Refused {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            } => Self::Refused {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            },
+            RawTurnState::Cancelled {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            } => Self::Cancelled {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            },
+            RawTurnState::ReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            } => Self::ReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            },
+        };
+        Ok(state)
+    }
+}
+
+impl TurnState {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::Failed {
+            terminal_attempt_id: None,
+            terminal_model_call: Some(_),
+            ..
+        } = self
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
+        Ok(())
+    }
 }
 
 /// Non-text semantic transcript entry.
@@ -663,6 +874,11 @@ pub enum TranscriptEntry {
     /// Explicit failed-turn marker.
     TurnFailed {
         /// Failed turn.
+        turn_id: CanonicalUuid,
+    },
+    /// Explicit cancelled-turn marker.
+    TurnCancelled {
+        /// Cancelled turn.
         turn_id: CanonicalUuid,
     },
 }
@@ -711,6 +927,8 @@ pub enum ModelCallState {
     Prepared {},
     /// Call crossed the send boundary.
     InFlight {},
+    /// Cancellation was durably requested for the issued call.
+    CancellationRequested {},
     /// Call reached a terminal disposition.
     Terminal {
         /// Exact terminal disposition.
@@ -776,6 +994,24 @@ pub enum SessionEvent {
         /// Refused turn.
         turn_id: CanonicalUuid,
         /// Outcome-authoritative call.
+        model_call_id: CanonicalUuid,
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+    },
+    /// Turn was cancelled.
+    TurnCancelled {
+        /// Cancelled turn.
+        turn_id: CanonicalUuid,
+        /// Semantic cancellation marker.
+        cancellation_entry_id: CanonicalUuid,
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+    },
+    /// Turn stopped with an ambiguous call requiring reconciliation.
+    TurnReconciliationRequired {
+        /// Reconciliation-required turn.
+        turn_id: CanonicalUuid,
+        /// Ambiguous terminal call.
         model_call_id: CanonicalUuid,
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
@@ -947,6 +1183,9 @@ impl ServerFrame {
         if self.version != PROTOCOL_VERSION {
             return Err(FrameValidationError::UnsupportedVersion);
         }
+        if let ServerMessage::TranscriptTurn { state, .. } = &self.message {
+            state.validate()?;
+        }
         match &self.message {
             ServerMessage::Error { code, detail, .. } => {
                 if !self.request_id.is_correlated()
@@ -1007,6 +1246,8 @@ pub enum FrameValidationError {
     UncorrelatedApplicationError,
     /// Rejection detail did not match the error code.
     ErrorDetailShape,
+    /// A transcript turn carried an impossible correlated state shape.
+    TurnStateShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -1017,6 +1258,7 @@ impl fmt::Display for FrameValidationError {
             Self::UncorrelatedSuccess => "successful server message is uncorrelated",
             Self::UncorrelatedApplicationError => "application server error is uncorrelated",
             Self::ErrorDetailShape => "server error detail does not match its code",
+            Self::TurnStateShape => "transcript turn state is inconsistent",
         })
     }
 }
@@ -1335,11 +1577,12 @@ pub fn recover_bounded_client_request_id(content: &[u8]) -> RequestId {
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail, FrameDecodeErrorKind,
-        FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ModelCallDisposition,
-        ModelCallState, ModelSelection, PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame,
-        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
+        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
+        FrameEncodeError, FrameValidationError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
+        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, RejectionDetail,
+        RequestId, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
+        TurnState, decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -1545,6 +1788,57 @@ mod tests {
     }
 
     #[test]
+    fn inv033_terminal_turn_optional_evidence_is_closed_and_correlated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_cancelled","turn_id":"00000000-0000-0000-0000-000000000002","cancellation_entry_id":"00000000-0000-0000-0000-000000000003","terminal_frontier_id":"00000000-0000-0000-0000-000000000004","extra":true}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","state":{"type":"cancellation_requested","extra":true}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
+        );
+
+        let invalid = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(2),
+                    terminal_attempt_id: None,
+                    terminal_model_call: Some(FailedTerminalModelCall::new(
+                        uuid(3),
+                        FailedModelCallDisposition::KnownFailed,
+                    )),
+                },
+            },
+        )
+        .expect_err("an in-memory failed call without its attempt must be rejected");
+        assert_eq!(invalid, FrameValidationError::TurnStateShape);
+        Ok(())
+    }
+
+    #[test]
     fn inv033_canonical_decimal_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"01","request":{"type":"list_sessions"}}"#,
@@ -1660,6 +1954,21 @@ mod tests {
         assert!(
             ServerFrame::try_new(RequestId::uncorrelated(), ServerMessage::SessionsStart {},)
                 .is_err()
+        );
+        assert!(
+            ServerFrame::try_new(
+                RequestId::uncorrelated(),
+                ServerMessage::TranscriptTurn {
+                    turn_id: uuid(1),
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::Failed {
+                        terminal_frontier_id: uuid(2),
+                        terminal_attempt_id: None,
+                        terminal_model_call: None,
+                    },
+                },
+            )
+            .is_err()
         );
         assert!(
             serde_json::from_str::<ClientFrame>(
@@ -1984,12 +2293,125 @@ mod tests {
             },
         )?;
         assert_server_message_round_trip(
+            request(20)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: Some(CurrentModelCall::new(
+                        uuid(8),
+                        CurrentModelCallState::CancellationRequested {},
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(21)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: None,
+                    terminal_model_call: None,
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(22)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: Some(uuid(7)),
+                    terminal_model_call: None,
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(23)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: Some(uuid(7)),
+                    terminal_model_call: Some(FailedTerminalModelCall::new(
+                        uuid(8),
+                        FailedModelCallDisposition::KnownFailed,
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(24)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: Some(uuid(7)),
+                    terminal_model_call: Some(FailedTerminalModelCall::new(
+                        uuid(8),
+                        FailedModelCallDisposition::Cancelled,
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(25)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Cancelled {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: uuid(7),
+                    terminal_model_call_id: None,
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(26)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Cancelled {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: uuid(7),
+                    terminal_model_call_id: Some(uuid(8)),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(27)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ReconciliationRequired {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: uuid(7),
+                    terminal_model_call_id: uuid(8),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
             request(8)?,
             ServerMessage::TranscriptEntry {
                 entry_index: CanonicalU64::new(0),
                 source_session_id: uuid(1),
                 entry_id: uuid(9),
                 entry: TranscriptEntry::TurnCompleted { turn_id: uuid(3) },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(28)?,
+            ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: uuid(1),
+                entry_id: uuid(9),
+                entry: TranscriptEntry::TurnCancelled { turn_id: uuid(3) },
             },
         )?;
         assert_server_message_round_trip(
@@ -2037,6 +2459,18 @@ mod tests {
             },
         )?;
         assert_server_message_round_trip(
+            request(29)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(6),
+                session_id: uuid(1),
+                event: SessionEvent::ModelCallTransition {
+                    turn_id: uuid(3),
+                    model_call_id: uuid(8),
+                    state: ModelCallState::CancellationRequested {},
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
             request(18)?,
             ServerMessage::SessionEvent {
                 cursor: CanonicalU64::new(2),
@@ -2057,6 +2491,30 @@ mod tests {
                 event: SessionEvent::TurnActivated {
                     turn_id: uuid(3),
                     current_attempt_id: uuid(7),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(30)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(4),
+                session_id: uuid(1),
+                event: SessionEvent::TurnCancelled {
+                    turn_id: uuid(3),
+                    cancellation_entry_id: uuid(9),
+                    terminal_frontier_id: uuid(6),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(31)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(5),
+                session_id: uuid(1),
+                event: SessionEvent::TurnReconciliationRequired {
+                    turn_id: uuid(3),
+                    model_call_id: uuid(8),
+                    terminal_frontier_id: uuid(6),
                 },
             },
         )?;

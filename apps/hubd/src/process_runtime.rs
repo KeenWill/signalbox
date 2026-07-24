@@ -8,10 +8,11 @@ use signalbox_application::{
     SubmitInputTransaction, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias,
-    ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
+    AcceptedInputId, CancelledModelCallTurnIdentities, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
+    PerInputConfigurationChoices, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
@@ -21,18 +22,19 @@ use signalbox_persistence::{
         OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
-        ProcessCurrentModelCallState, ProcessModelSelection, ProcessReadError,
-        ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptSnapshot, ProcessTurnState,
+        ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
+        ProcessReadError, ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptSnapshot,
+        ProcessTurnState,
     },
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CurrentModelCall, CurrentModelCallState, ErrorCode,
-    ErrorDetail, FrameDecodeErrorKind, FrameEncodeError, InputContent, MAX_FRAME_BYTES,
-    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, RejectionDetail,
-    RequestId, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-    TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_request_id,
+    ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
+    FrameEncodeError, InputContent, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
+    ModelSelection as WireModelSelection, RejectionDetail, RequestId, ServerFrame, ServerMessage,
+    SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
+    decode_client_line, encode_server_line, recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -465,17 +467,27 @@ struct ConfiguredSubmitInputTransaction<'configuration> {
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle(
+    async fn handle<NextTurn>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
-    ) -> Result<SubmitInputOutcome, Self::Error> {
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<SubmitInputOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let outcome = self
             .repository
-            .handle_with_alias_resolver(command, accepted_input, turn, |alias| {
-                self.model_configuration.resolve_alias(alias)
-            })
+            .handle_with_candidates_and_alias_resolver(
+                command,
+                accepted_input,
+                turn,
+                cancellation_identities,
+                next_reclassified_turn,
+                |alias| self.model_configuration.resolve_alias(alias),
+            )
             .await?;
 
         Ok(match outcome {
@@ -586,6 +598,14 @@ where
         Err(SubmitInputRepositoryError::Database(_)) => {
             write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
         }
+        Err(SubmitInputRepositoryError::ModelExecution(error))
+            if matches!(
+                error.as_ref(),
+                signalbox_persistence::model_execution::ModelCallRepositoryError::Database { .. }
+            ) =>
+        {
+            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+        }
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_),
         )))
@@ -593,7 +613,7 @@ where
             SubmitInputRepositoryError::DifferentCommandKind { .. }
             | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
             | SubmitInputRepositoryError::Corruption(_)
-            | SubmitInputRepositoryError::InterruptApplicationUnavailable { .. },
+            | SubmitInputRepositoryError::ModelExecution(_),
         ) => {
             write_error(
                 writer,
@@ -884,6 +904,26 @@ where
             )
             .await
         }
+        ProcessTranscriptEntry::TurnCancelled {
+            entry_index,
+            source_session,
+            entry,
+            turn,
+        } => {
+            write_message(
+                writer,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::TurnCancelled {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -958,7 +998,9 @@ fn map_rejection(
             }
         }
         SubmitInputRejectedResult::NoActiveTurn { .. }
-        | SubmitInputRejectedResult::ActiveTurnMismatch { .. } => {
+        | SubmitInputRejectedResult::ActiveTurnMismatch { .. }
+        | SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. }
+        | SubmitInputRejectedResult::InterruptAlreadyApplied { .. } => {
             return Err(ProcessConnectionError::EncodeInvariant);
         }
     })
@@ -1010,6 +1052,9 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                         ProcessCurrentModelCallState::InFlight => {
                             CurrentModelCallState::InFlight {}
                         }
+                        ProcessCurrentModelCallState::CancellationRequested => {
+                            CurrentModelCallState::CancellationRequested {}
+                        }
                     },
                 )
             }),
@@ -1021,8 +1066,26 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_model_call_id: wire_uuid(recovery_call.into_uuid()),
         },
-        ProcessTurnState::Failed { terminal_frontier } => TurnState::Failed {
+        ProcessTurnState::Failed {
+            terminal_frontier,
+            terminal_attempt,
+            terminal_model_call,
+        } => TurnState::Failed {
             terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            terminal_attempt_id: terminal_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
+            terminal_model_call: terminal_model_call.map(|call| {
+                FailedTerminalModelCall::new(
+                    wire_uuid(call.call().into_uuid()),
+                    match call.disposition() {
+                        ProcessFailedModelCallDisposition::KnownFailed => {
+                            FailedModelCallDisposition::KnownFailed
+                        }
+                        ProcessFailedModelCallDisposition::Cancelled => {
+                            FailedModelCallDisposition::Cancelled
+                        }
+                    },
+                )
+            }),
         },
         ProcessTurnState::Completed {
             terminal_frontier,
@@ -1038,6 +1101,24 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             terminal_attempt,
             terminal_call,
         } => TurnState::Refused {
+            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+            terminal_model_call_id: wire_uuid(terminal_call.into_uuid()),
+        },
+        ProcessTurnState::Cancelled {
+            terminal_frontier,
+            terminal_attempt,
+            terminal_call,
+        } => TurnState::Cancelled {
+            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+            terminal_model_call_id: terminal_call.map(|call| wire_uuid(call.into_uuid())),
+        },
+        ProcessTurnState::ReconciliationRequired {
+            terminal_frontier,
+            terminal_attempt,
+            terminal_call,
+        } => TurnState::ReconciliationRequired {
             terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
             terminal_model_call_id: wire_uuid(terminal_call.into_uuid()),
@@ -1271,6 +1352,16 @@ enum ProcessUpdateEvent {
         call: signalbox_domain::ModelCallId,
         terminal_frontier: signalbox_domain::ContextFrontierId,
     },
+    TurnCancelled {
+        turn: signalbox_domain::TurnId,
+        cancellation_entry: signalbox_domain::SemanticTranscriptEntryId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
+    },
+    TurnReconciliationRequired {
+        turn: signalbox_domain::TurnId,
+        call: signalbox_domain::ModelCallId,
+        terminal_frontier: signalbox_domain::ContextFrontierId,
+    },
 }
 
 impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
@@ -1327,6 +1418,24 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 call,
                 terminal_frontier,
             } => Self::TurnRefused {
+                turn: *turn,
+                call: *call,
+                terminal_frontier: *terminal_frontier,
+            },
+            DispatchedOutboxEventKind::TurnCancelled {
+                turn,
+                cancellation_entry,
+                terminal_frontier,
+            } => Self::TurnCancelled {
+                turn: *turn,
+                cancellation_entry: *cancellation_entry,
+                terminal_frontier: *terminal_frontier,
+            },
+            DispatchedOutboxEventKind::TurnReconciliationRequired {
+                turn,
+                call,
+                terminal_frontier,
+            } => Self::TurnReconciliationRequired {
                 turn: *turn,
                 call: *call,
                 terminal_frontier: *terminal_frontier,
@@ -1391,6 +1500,24 @@ impl ProcessUpdateEvent {
                 model_call_id: wire_uuid(call.into_uuid()),
                 terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             },
+            Self::TurnCancelled {
+                turn,
+                cancellation_entry,
+                terminal_frontier,
+            } => SessionEvent::TurnCancelled {
+                turn_id: wire_uuid(turn.into_uuid()),
+                cancellation_entry_id: wire_uuid(cancellation_entry.into_uuid()),
+                terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            },
+            Self::TurnReconciliationRequired {
+                turn,
+                call,
+                terminal_frontier,
+            } => SessionEvent::TurnReconciliationRequired {
+                turn_id: wire_uuid(turn.into_uuid()),
+                model_call_id: wire_uuid(call.into_uuid()),
+                terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            },
         }
     }
 }
@@ -1399,6 +1526,7 @@ const fn wire_model_call_state(state: DispatchedModelCallState) -> ModelCallStat
     match state {
         DispatchedModelCallState::Prepared => ModelCallState::Prepared {},
         DispatchedModelCallState::InFlight => ModelCallState::InFlight {},
+        DispatchedModelCallState::CancellationRequested => ModelCallState::CancellationRequested {},
         DispatchedModelCallState::Terminal(disposition) => ModelCallState::Terminal {
             disposition: match disposition {
                 DispatchedModelCallDisposition::Completed => ModelCallDisposition::Completed,
@@ -1517,6 +1645,9 @@ impl Error for ProcessRuntimeError {
 mod tests {
     use std::{error::Error, io, sync::Arc};
 
+    use signalbox_domain::{
+        ContextFrontierId, ModelCallId, SemanticTranscriptEntryId, TurnAttemptId, TurnId,
+    };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
         ServerFrame, ServerMessage, SessionEvent, TurnState, decode_server_line,
@@ -1531,11 +1662,16 @@ mod tests {
 
     use super::{
         IncomingLine, MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        ProcessConnectionError, RequestId, acquire_inbound_frame_permit, admitted_user_content,
-        inspect_connection_completion, read_frame_line, run_until_shutdown, wire_model_call_state,
-        write_content,
+        ProcessConnectionError, ProcessUpdateEvent, RequestId, acquire_inbound_frame_permit,
+        admitted_user_content, inspect_connection_completion, read_frame_line, run_until_shutdown,
+        wire_model_call_state, wire_turn_state, write_content,
     };
-    use signalbox_persistence::outbox::{DispatchedModelCallDisposition, DispatchedModelCallState};
+    use signalbox_persistence::{
+        outbox::{
+            DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
+        },
+        process_read::ProcessTurnState,
+    };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
     #[tokio::test]
@@ -1765,6 +1901,10 @@ mod tests {
 
     #[test]
     fn every_persistence_terminal_call_disposition_has_a_wire_projection() {
+        assert_eq!(
+            wire_model_call_state(DispatchedModelCallState::CancellationRequested),
+            ModelCallState::CancellationRequested {}
+        );
         let cases = [
             (
                 DispatchedModelCallDisposition::Completed,
@@ -1795,5 +1935,67 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn cancellation_and_reconciliation_project_to_exact_wire_shapes() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(1));
+        let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(2));
+        let call = ModelCallId::from_uuid(Uuid::from_u128(3));
+        let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(4));
+        let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(5));
+
+        assert_eq!(
+            wire_turn_state(&ProcessTurnState::Cancelled {
+                terminal_frontier: frontier,
+                terminal_attempt: attempt,
+                terminal_call: Some(call),
+            }),
+            TurnState::Cancelled {
+                terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
+                terminal_attempt_id: CanonicalUuid::from_uuid(attempt.into_uuid()),
+                terminal_model_call_id: Some(CanonicalUuid::from_uuid(call.into_uuid())),
+            }
+        );
+        assert_eq!(
+            wire_turn_state(&ProcessTurnState::ReconciliationRequired {
+                terminal_frontier: frontier,
+                terminal_attempt: attempt,
+                terminal_call: call,
+            }),
+            TurnState::ReconciliationRequired {
+                terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
+                terminal_attempt_id: CanonicalUuid::from_uuid(attempt.into_uuid()),
+                terminal_model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+            }
+        );
+
+        let cancelled = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnCancelled {
+            turn,
+            cancellation_entry: entry,
+            terminal_frontier: frontier,
+        });
+        assert_eq!(
+            cancelled.wire(),
+            SessionEvent::TurnCancelled {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                cancellation_entry_id: CanonicalUuid::from_uuid(entry.into_uuid()),
+                terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
+            }
+        );
+        let reconciliation =
+            ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
+                turn,
+                call,
+                terminal_frontier: frontier,
+            });
+        assert_eq!(
+            reconciliation.wire(),
+            SessionEvent::TurnReconciliationRequired {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
+            }
+        );
     }
 }
