@@ -443,7 +443,7 @@ those tests.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   result acknowledgement, compatibility, and subscriber observation remain
-  [open](open-questions.md#runner-result-protocol): the retired protocol designs
+  [open](open-questions.md#scheduling-and-runners): the retired protocol designs
   carry no current authority, and future protocol work is designed fresh as a
   specification diff; the committing-side update mechanism is decided in
   [persistence-protocol](spec/persistence-protocol.md).
