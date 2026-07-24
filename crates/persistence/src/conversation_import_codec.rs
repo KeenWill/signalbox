@@ -595,6 +595,15 @@ mod tests {
         )
     }
 
+    #[track_caller]
+    fn assert_content_round_trips(content: ImportedTranscriptContent) {
+        let encoded = encode_content(&content).expect("fixture content must encode");
+        assert_eq!(
+            decode_content(&encoded).expect("fixture content must decode"),
+            content
+        );
+    }
+
     #[test]
     fn inv002_structured_encoding_preserves_complete_domain_algebra() {
         let value = ImportedStructuredValue::Object(
@@ -636,54 +645,45 @@ mod tests {
             )]
             .into_boxed_slice(),
         );
-        let contents = vec![
-            ImportedTranscriptContent::SourceEvent {
-                source_type: attested_text("summary"),
-            },
-            ImportedTranscriptContent::Text(ImportedSourceAttestation::AttestedAbsent),
-            ImportedTranscriptContent::ToolCall {
-                source_call_id: attested_text("call"),
-                name: ImportedSourceAttestation::NotAttested,
-                input: ImportedSourceAttestation::Attested(structured.clone()),
-                caller: ImportedSourceAttestation::AttestedAbsent,
-            },
-            ImportedTranscriptContent::ToolResult {
-                source_call_id: attested_text("call"),
-                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
-                    vec![
-                        ImportedToolResultBlock::Text(attested_text("")),
-                        ImportedToolResultBlock::Image(
-                            ImportedSourceAttestation::Attested(media()),
-                        ),
-                        ImportedToolResultBlock::ToolReference {
-                            tool_name: ImportedSourceAttestation::AttestedAbsent,
-                        },
-                    ]
-                    .into_boxed_slice(),
-                )),
-                is_error: ImportedSourceAttestation::Attested(false),
-            },
-            ImportedTranscriptContent::Thinking {
-                thinking: attested_text("thought"),
-                signature: attested_text("signature"),
-            },
-            ImportedTranscriptContent::RedactedThinking {
-                data: attested_text("sealed"),
-            },
-            ImportedTranscriptContent::Document {
-                source: ImportedSourceAttestation::Attested(media()),
-            },
-            ImportedTranscriptContent::MessageContentAbsent(
-                ImportedMessageContentAbsence::EmptyBlockArray,
-            ),
-        ];
-        for content in contents {
-            let encoded = encode_content(&content).expect("fixture content must encode");
-            assert_eq!(
-                decode_content(&encoded).expect("fixture content must decode"),
-                content
-            );
-        }
+        assert_content_round_trips(ImportedTranscriptContent::SourceEvent {
+            source_type: attested_text("summary"),
+        });
+        assert_content_round_trips(ImportedTranscriptContent::Text(
+            ImportedSourceAttestation::AttestedAbsent,
+        ));
+        assert_content_round_trips(ImportedTranscriptContent::ToolCall {
+            source_call_id: attested_text("call"),
+            name: ImportedSourceAttestation::NotAttested,
+            input: ImportedSourceAttestation::Attested(structured),
+            caller: ImportedSourceAttestation::AttestedAbsent,
+        });
+        assert_content_round_trips(ImportedTranscriptContent::ToolResult {
+            source_call_id: attested_text("call"),
+            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                vec![
+                    ImportedToolResultBlock::Text(attested_text("")),
+                    ImportedToolResultBlock::Image(ImportedSourceAttestation::Attested(media())),
+                    ImportedToolResultBlock::ToolReference {
+                        tool_name: ImportedSourceAttestation::AttestedAbsent,
+                    },
+                ]
+                .into_boxed_slice(),
+            )),
+            is_error: ImportedSourceAttestation::Attested(false),
+        });
+        assert_content_round_trips(ImportedTranscriptContent::Thinking {
+            thinking: attested_text("thought"),
+            signature: attested_text("signature"),
+        });
+        assert_content_round_trips(ImportedTranscriptContent::RedactedThinking {
+            data: attested_text("sealed"),
+        });
+        assert_content_round_trips(ImportedTranscriptContent::Document {
+            source: ImportedSourceAttestation::Attested(media()),
+        });
+        assert_content_round_trips(ImportedTranscriptContent::MessageContentAbsent(
+            ImportedMessageContentAbsence::EmptyBlockArray,
+        ));
     }
 
     #[test]
