@@ -2359,6 +2359,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-conversation-import-claude-code"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-domain"
 version = "0.0.0"
 dependencies = [
