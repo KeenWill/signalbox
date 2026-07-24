@@ -1159,17 +1159,16 @@ fn reconstitute_batch(
     if let Some(first_undecided) = requests
         .iter()
         .position(|request| !approvals.contains_key(&request.id()))
-    {
-        if requests.iter().skip(first_undecided + 1).any(|request| {
+        && requests.iter().skip(first_undecided + 1).any(|request| {
             approvals.get(&request.id()).is_some_and(|approval| {
                 approval.source() == crate::ToolDecisionSource::OwnerCommand
             })
-        }) {
-            return Err(fail(
-                input,
-                ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
-            ));
-        }
+        })
+    {
+        return Err(fail(
+            input,
+            ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
+        ));
     }
     let expected_issuing_attempt = match input.phase {
         ToolBatchPhaseReconstitutionInput::Executing { turn_attempt } => Some(turn_attempt),
