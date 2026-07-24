@@ -791,14 +791,26 @@ where
                     .ok_or(SubmitInputCorruption::Inconsistent(
                         "ambiguous tool attempt evidence",
                     ))?;
-                let source_snapshot = batch.yielded_snapshot().clone();
+                let request_ids = batch
+                    .requests()
+                    .iter()
+                    .map(signalbox_domain::ToolRequest::id)
+                    .collect::<Vec<_>>();
+                let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
+                let result_projection = batch
+                    .prepare_reconciliation_projection(result_entries, result_frontier)
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "tool recovery batch cannot materialize terminal results",
+                        )
+                    })?;
                 let active_turn = scheduling.active_turn_execution().ok_or(
                     SubmitInputCorruption::Inconsistent(
                         "applied interrupt lacks active turn execution",
                     ),
                 )?;
                 let identities = attach_recovery_interrupt_reclassification_candidates(
-                    cancellation_identities,
+                    signalbox_domain::AmbiguousModelCallTurnIdentities::new(result_frontier),
                     &active_turn,
                     &mut next_reclassified_turn,
                 )?;
@@ -807,9 +819,9 @@ where
                         .apply_interrupt_to_tool_recovery(
                             wait,
                             tool_attempt,
-                            source_snapshot,
+                            result_projection,
                             interrupt,
-                            identities.into_ambiguous(),
+                            identities,
                         )
                         .map_err(|_| {
                             SubmitInputCorruption::Inconsistent(
@@ -827,16 +839,13 @@ where
                     ),
                 )?;
                 let identities = attach_recovery_interrupt_reclassification_candidates(
-                    cancellation_identities,
+                    cancellation_identities.into_ambiguous(),
                     &active_turn,
                     &mut next_reclassified_turn,
                 )?;
                 Some(ModelCallInterruptOutcome::ReconciliationRequired(
                     scheduling
-                        .apply_interrupt_to_model_call_recovery(
-                            interrupt,
-                            identities.into_ambiguous(),
-                        )
+                        .apply_interrupt_to_model_call_recovery(interrupt, identities)
                         .map_err(|_| {
                             SubmitInputCorruption::Inconsistent(
                                 "applied interrupt does not match model-call recovery wait",

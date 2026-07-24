@@ -132,13 +132,23 @@ impl NormalizedToolArguments {
 
         let mut deserializer = serde_json::Deserializer::from_str(&value);
         deserializer.disable_recursion_limit();
-        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
-        let Ok(decoded) = serde_json::Value::deserialize(deserializer) else {
+        let decoded = {
+            let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+            serde_json::Value::deserialize(deserializer)
+        };
+        let Ok(decoded) = decoded else {
             return Ok(Self {
                 kind: ToolArgumentsKind::Undecodable,
                 value,
             });
         };
+        if deserializer.end().is_err() {
+            drop_json_value_iteratively(decoded);
+            return Ok(Self {
+                kind: ToolArgumentsKind::Undecodable,
+                value,
+            });
+        }
         let mut canonical = Vec::with_capacity(value.len());
         let mut serializer = serde_json::Serializer::new(&mut canonical);
         let serializer = serde_stacker::Serializer::new(&mut serializer);
@@ -516,13 +526,13 @@ pub enum ToolDecisionSource {
 pub struct ToolDenialReason(String);
 
 impl ToolDenialReason {
-    /// Checks length, surrounding whitespace, and control characters.
+    /// Checks length, surrounding POSIX whitespace, and control characters.
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError> {
         let failure = if value.is_empty() {
             Some(ToolDenialReasonFailure::Empty)
         } else if value.len() > MAX_TOOL_DENIAL_REASON_BYTES {
             Some(ToolDenialReasonFailure::TooLong { bytes: value.len() })
-        } else if value.trim() != value {
+        } else if has_surrounding_posix_whitespace(&value) {
             Some(ToolDenialReasonFailure::SurroundingWhitespace)
         } else {
             value
@@ -557,7 +567,7 @@ pub enum ToolDenialReasonFailure {
         /// The observed UTF-8 byte count.
         bytes: usize,
     },
-    /// Leading or trailing Unicode whitespace was present.
+    /// Leading or trailing POSIX whitespace was present.
     SurroundingWhitespace,
     /// At least one Unicode control scalar was present.
     ContainsControl,
@@ -568,6 +578,17 @@ pub enum ToolDenialReasonFailure {
 pub struct ToolDenialReasonError {
     value: String,
     failure: ToolDenialReasonFailure,
+}
+
+fn has_surrounding_posix_whitespace(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        || value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
 }
 
 impl ToolDenialReasonError {
@@ -1093,6 +1114,18 @@ mod tests {
         assert_eq!(malformed.as_str(), malformed_text);
     }
 
+    /// S10 / INV-005: a complete JSON prefix followed by any non-whitespace
+    /// provider text remains exact undecodable evidence.
+    #[test]
+    fn s10_inv005_arguments_reject_trailing_non_whitespace() {
+        let provider_text = String::from(r#"{"timezone":"UTC"} trailing"#);
+        let normalized = NormalizedToolArguments::try_from_provider_text(provider_text.clone())
+            .expect("bounded non-JSON text remains admissible evidence");
+
+        assert_eq!(normalized.kind(), ToolArgumentsKind::Undecodable);
+        assert_eq!(normalized.as_str(), provider_text);
+    }
+
     /// S10 / INV-005: reconstitution rejects a competing noncanonical JSON
     /// representation.
     #[test]
@@ -1158,6 +1191,24 @@ mod tests {
             ToolDecisionSource::OwnerCommand
         );
         assert!(applied.resolution().is_approved());
+    }
+
+    /// S10: denial admission follows the persisted POSIX-whitespace contract
+    /// without silently broadening it to every Unicode space scalar.
+    #[test]
+    fn s10_denial_reason_rejects_posix_edges_and_preserves_nonbreaking_space() {
+        for value in [" denied", "denied\n", "\tdenied", "denied\u{000c}"] {
+            assert_eq!(
+                ToolDenialReason::try_new(String::from(value))
+                    .expect_err("POSIX edge whitespace is rejected")
+                    .failure(),
+                ToolDenialReasonFailure::SurroundingWhitespace
+            );
+        }
+
+        let admitted = ToolDenialReason::try_new(String::from("\u{00a0}denied\u{00a0}"))
+            .expect("nonbreaking space is not POSIX whitespace");
+        assert_eq!(admitted.as_str(), "\u{00a0}denied\u{00a0}");
     }
 
     /// INV-012: durable-command comparison equality excludes only command

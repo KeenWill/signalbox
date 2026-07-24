@@ -278,7 +278,10 @@ end (INV-034):
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or
   effect-free work closes known-failed and fails the turn, while in-flight
-  external-effect work closes ambiguous and parks on that exact attempt.
+  external-effect work closes ambiguous and parks on that exact attempt; and
+- a running tool batch whose requests are all already resolved and which has no
+  current attempt is returned as resumable work, so a scheduler pass projects
+  its results and prepares the next call without relying on a lost local wake.
 
 In the two failing branches only: one `TurnFailed` semantic entry is appended.
 The evidence-free branch extends the starting frontier; the prepared-call branch
