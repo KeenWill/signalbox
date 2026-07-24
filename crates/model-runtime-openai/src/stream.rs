@@ -786,6 +786,7 @@ mod tests {
              \"type\":\"function\",\"function\":{{\"name\":\"lookup\",\
              \"arguments\":{at_limit}}}}}]}}}}]}}\n\n"
         );
+        let prohibited_fragment = "[";
         let beyond_limit = serde_json::to_string(&serde_json::json!({
             "object": "chat.completion.chunk",
             "id": "chatcmpl_1",
@@ -794,7 +795,7 @@ mod tests {
                 "delta": {
                     "tool_calls": [{
                         "index": 0,
-                        "function": {"arguments": "["}
+                        "function": {"arguments": prohibited_fragment}
                     }]
                 }
             }]
@@ -816,7 +817,7 @@ mod tests {
             observation.fact
                 == ObservationFact::ToolArgumentsDelta {
                     index: 0,
-                    fragment: "[".to_string(),
+                    fragment: prohibited_fragment.to_string(),
                 }
         }));
     }
