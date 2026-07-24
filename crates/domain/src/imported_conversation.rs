@@ -1337,23 +1337,23 @@ fn validate_entries(
     let mut expected_raw_position = ImportedRawRecordPosition::first();
     let mut expected_within_position = ImportedRecordEntryPosition::first();
     let mut identities = BTreeSet::new();
-    let expected_entries = input
-        .raw_records
-        .iter()
-        .map(|record| {
-            projected_entries(input.format, record.normalized()).map_err(|()| {
-                ImportedConversationReconstitutionFailure::RawRecordProjectionInvalid {
-                    position: record.position,
-                }
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut actual_entries_by_raw = vec![0_usize; input.raw_records.len()];
     let last_raw_position = input
         .raw_records
         .last()
         .map(ImportedRawSourceRecordReconstitutionInput::position)
         .ok_or(ImportedConversationReconstitutionFailure::EmptyRawRecords)?;
+    let first_raw = input
+        .raw_records
+        .first()
+        .ok_or(ImportedConversationReconstitutionFailure::EmptyRawRecords)?;
+    let mut projected_raw_position = first_raw.position;
+    let mut expected_entries =
+        projected_entries(input.format, first_raw.normalized()).map_err(|()| {
+            ImportedConversationReconstitutionFailure::RawRecordProjectionInvalid {
+                position: first_raw.position,
+            }
+        })?;
+    let mut projected_entry_index = 0_usize;
     for (index, entry) in input.entries.iter().enumerate() {
         if entry.conversation != input.stored_conversation {
             return Err(
@@ -1418,18 +1418,36 @@ fn validate_entries(
         }
         validate_speaker(input, entry)?;
         validate_entry_depth(entry)?;
-        let raw_index = usize::try_from(entry.raw_record_position.as_u64() - 1)
-            .map_err(|_| ImportedConversationReconstitutionFailure::PositionExhausted)?;
-        let within_index = usize::try_from(entry.record_entry_position.as_u64() - 1)
-            .map_err(|_| ImportedConversationReconstitutionFailure::PositionExhausted)?;
-        let expected_entry = expected_entries
-            .get(raw_index)
-            .and_then(|entries| entries.get(within_index))
-            .ok_or(
-                ImportedConversationReconstitutionFailure::EntryProjectionMismatch {
+        if entry.raw_record_position != projected_raw_position {
+            if projected_entry_index != expected_entries.len() {
+                return Err(
+                    ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
+                        position: projected_raw_position,
+                    },
+                );
+            }
+            let raw_index = usize::try_from(entry.raw_record_position.as_u64() - 1)
+                .map_err(|_| ImportedConversationReconstitutionFailure::PositionExhausted)?;
+            let record = input.raw_records.get(raw_index).ok_or(
+                ImportedConversationReconstitutionFailure::EntryRawRecordNotFound {
                     entry: entry.identity,
+                    position: entry.raw_record_position,
                 },
             )?;
+            expected_entries =
+                projected_entries(input.format, record.normalized()).map_err(|()| {
+                    ImportedConversationReconstitutionFailure::RawRecordProjectionInvalid {
+                        position: record.position,
+                    }
+                })?;
+            projected_raw_position = record.position;
+            projected_entry_index = 0;
+        }
+        let expected_entry = expected_entries.get(projected_entry_index).ok_or(
+            ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
+                position: projected_raw_position,
+            },
+        )?;
         if expected_entry.source_speaker != entry.source_speaker
             || expected_entry.content != entry.content
             || expected_entry.source != entry.source
@@ -1440,10 +1458,7 @@ fn validate_entries(
                 },
             );
         }
-        let actual_count = actual_entries_by_raw
-            .get_mut(raw_index)
-            .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
-        *actual_count = actual_count
+        projected_entry_index = projected_entry_index
             .checked_add(1)
             .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
 
@@ -1468,24 +1483,12 @@ fn validate_entries(
             },
         );
     }
-    for (index, (expected, actual)) in expected_entries
-        .iter()
-        .zip(actual_entries_by_raw)
-        .enumerate()
-    {
-        if expected.len() != actual {
-            return Err(
-                ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
-                    position: ImportedRawRecordPosition::try_from_u64(
-                        u64::try_from(index)
-                            .ok()
-                            .and_then(|value| value.checked_add(1))
-                            .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?,
-                    )
-                    .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?,
-                },
-            );
-        }
+    if projected_entry_index != expected_entries.len() {
+        return Err(
+            ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
+                position: projected_raw_position,
+            },
+        );
     }
     Ok(())
 }
@@ -2155,7 +2158,16 @@ mod tests {
         let raw_records = vec![
             ImportedRawSourceRecord::from_converted(
                 br#"{"type":"system","content":"before\u0000after"}"#.to_vec(),
-                object(("type", ImportedStructuredValue::String(text("system")))),
+                object_with_members(vec![
+                    (
+                        "type",
+                        ImportedStructuredValue::String(text("system")),
+                    ),
+                    (
+                        "content",
+                        ImportedStructuredValue::String(text("before\0after")),
+                    ),
+                ]),
             ),
             ImportedRawSourceRecord::from_converted(
                 br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":""},{"type":"tool_use","input":{"n":1}}]}}"#.to_vec(),
@@ -2271,6 +2283,16 @@ mod tests {
             imported.raw_records()[0].bytes(),
             br#"{"type":"system","content":"before\u0000after"}"#
         );
+        assert_eq!(
+            imported.raw_records()[0].normalized(),
+            &object_with_members(vec![
+                ("type", ImportedStructuredValue::String(text("system")),),
+                (
+                    "content",
+                    ImportedStructuredValue::String(text("before\0after")),
+                ),
+            ])
+        );
         assert_eq!(imported.entries().len(), 3);
         assert_eq!(
             imported.entries()[1].content(),
@@ -2304,8 +2326,18 @@ mod tests {
         let repeated = converted();
         assert_eq!(imported.source_digest(), repeated.source_digest());
         assert_eq!(
-            imported.raw_records()[0].content_hash(),
-            ImportedRawRecordHash::digest(imported.raw_records()[0].bytes())
+            imported.source_digest().as_bytes(),
+            &[
+                95, 23, 27, 252, 223, 229, 27, 59, 33, 138, 163, 63, 158, 93, 136, 47, 168, 233,
+                124, 3, 8, 217, 172, 182, 134, 109, 156, 227, 239, 156, 211, 83,
+            ]
+        );
+        assert_eq!(
+            imported.raw_records()[0].content_hash().as_bytes(),
+            &[
+                156, 92, 147, 29, 37, 37, 87, 241, 17, 127, 198, 247, 207, 9, 36, 41, 69, 166, 106,
+                200, 31, 178, 220, 222, 133, 195, 110, 121, 222, 236, 56, 114,
+            ]
         );
 
         let mut records = imported
@@ -2327,10 +2359,6 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            imported.source_digest(),
-            ImportedConversationSourceDigest::derive(imported.format(), &records)
-        );
         records.reverse();
         assert_ne!(
             imported.source_digest(),

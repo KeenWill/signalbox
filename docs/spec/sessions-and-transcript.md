@@ -111,9 +111,12 @@ Import never chooses this relationship or a frontier. At any later time, and
 more than once, a client may invoke this session-creation command against any
 entry boundary of any imported conversation.
 
-The application supplies fresh candidates for the session, imported-provenance
-semantic entries, and seed context frontier, then calls one atomic transaction
-port. The transaction first follows the owner-global claim protocol in
+The application uses `UuidV7CreateSessionFromImportedFrontierIdGenerator` for
+the session, imported-provenance semantic entries, and seed context frontier. It
+supplies the fixed session and frontier candidates and an application-owned
+semantic-entry generator closure to one atomic transaction port; the closure is
+invoked under the repository lock only after the selected prefix determines its
+cardinality. The transaction first follows the owner-global claim protocol in
 [identity-and-commands](identity-and-commands.md). A claimed identifier resolves
 to its recorded equal replay or conflicting reuse before any imported-target
 lookup. Only for an unclaimed identifier does the transaction load the complete

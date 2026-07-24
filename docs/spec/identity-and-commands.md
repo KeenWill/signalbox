@@ -80,14 +80,15 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                               | Mints                                                                                               |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`              | `SessionId`                                                                                         |
-| `UuidV7ImportedConversationIdGenerator` | `ImportedConversationId`, `ImportedTranscriptEntryId`                                               |
-| `UuidV7SubmitInputIdGenerator`          | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                       |
-| `UuidV7StartEligibleTurnIdGenerator`    | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
-| `UuidV7StartupScanIdGenerator`          | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
-| `UuidV7ModelCallExecutionIdGenerator`   | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
+| Generator                                            | Mints                                                                                               |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                         |
+| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                               |
+| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                       |
+| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                       |
+| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
+| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
+| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
 
 `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` exist as domain
 types but have no production minting seam yet; their generators land with their
@@ -106,6 +107,14 @@ adapter invokes each closure under the lock and immediately supplies the typed
 value to the domain transition. Persistence never owns or synthesizes an
 identity, and no Postgres column has an identity-generating default (verified
 across all migrations).
+
+Imported-frontier session creation draws its fixed session and seed-frontier
+candidates before the transaction. It passes the same orchestration slice's
+application-owned semantic-entry generator closure into the transaction; after
+the adapter resolves the selected imported prefix under its lock, it invokes the
+closure once per imported entry and immediately supplies each candidate to the
+checked seed transition. No pre-transaction inventory read determines that
+cardinality.
 
 Why: the domain transition still receives a typed identity while the domain
 remains generation-free and deterministic, without pre-lock inventory reads. A
