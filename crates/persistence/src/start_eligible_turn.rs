@@ -523,6 +523,9 @@ async fn insert_prepared_activation(
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
+        SubmitInputRepositoryError::CommitAmbiguous(error) => {
+            StartEligibleTurnRepositoryError::from_database(error, true)
+        }
         SubmitInputRepositoryError::Corruption(error) => {
             StartEligibleTurnCorruption::Scheduling(error).into()
         }

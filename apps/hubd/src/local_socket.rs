@@ -7,16 +7,17 @@ use std::{
     io,
     os::unix::{
         ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        fs::{FileTypeExt, MetadataExt},
     },
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use rustix::{
     fs::{FlockOperation, Mode, OFlags, fchmod, fcntl_getfl, fcntl_setfl, flock, open},
     io::{FdFlags, fcntl_setfd},
     net::{AddressFamily, SocketAddrUnix, SocketType, bind, connect, getsockname, listen, socket},
-    process::geteuid,
+    process::{geteuid, umask},
 };
 use tokio::net::{UnixListener, UnixStream, unix::SocketAddr as UnixSocketAddr};
 
@@ -26,6 +27,22 @@ const OWNER_PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PERMISSION_MASK: u32 = 0o7777;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const STICKY_BIT: u32 = 0o1000;
+
+static SOCKET_CREATION_MASK: Mutex<()> = Mutex::new(());
+
+struct SocketCreationMask(Mode);
+
+impl SocketCreationMask {
+    fn owner_only() -> Self {
+        Self(umask(Mode::XUSR | Mode::RWXG | Mode::RWXO))
+    }
+}
+
+impl Drop for SocketCreationMask {
+    fn drop(&mut self) {
+        umask(self.0);
+    }
+}
 
 /// A process listener whose filesystem entry was verified before listening.
 #[derive(Debug)]
@@ -49,13 +66,24 @@ impl LocalProcessListener {
             .map_err(|error| LocalSocketError::ConfigureSocket(rustix_error(error)))?;
         let address = SocketAddrUnix::new(&path)
             .map_err(|error| LocalSocketError::CreateAddress(rustix_error(error)))?;
-        bind(&socket, &address).map_err(|error| LocalSocketError::Bind(rustix_error(error)))?;
+        {
+            // Unix bind does not accept a mode. Create the entry as 0600 so no
+            // later pathname-following chmod can touch a raced replacement.
+            let _socket_creation_lock = SOCKET_CREATION_MASK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _creation_mask = SocketCreationMask::owner_only();
+            bind(&socket, &address).map_err(|error| LocalSocketError::Bind(rustix_error(error)))?;
+        }
 
         let effective_user = geteuid().as_raw();
         let first_metadata =
             fs::symlink_metadata(&path).map_err(LocalSocketError::ReadBoundIdentity)?;
         let identity = SocketIdentity::capture(&first_metadata, effective_user)
             .ok_or(LocalSocketError::BoundIdentityMismatch)?;
+        if first_metadata.mode() & PERMISSION_MASK != OWNER_ONLY_MODE {
+            return Err(LocalSocketError::BoundIdentityMismatch);
+        }
         let cleanup = FailedBindCleanup::new(&path, identity);
 
         let local_address = getsockname(&socket)
@@ -66,8 +94,6 @@ impl LocalProcessListener {
             return Err(LocalSocketError::BoundAddressMismatch);
         }
 
-        fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY_MODE))
-            .map_err(LocalSocketError::SetPermissions)?;
         let second_metadata =
             fs::symlink_metadata(&path).map_err(LocalSocketError::VerifyBoundIdentity)?;
         if !identity.matches(&second_metadata, effective_user)
@@ -399,8 +425,6 @@ pub enum LocalSocketError {
     ReadBoundIdentity(io::Error),
     /// The new path entry did not retain the required identity or access.
     BoundIdentityMismatch,
-    /// Owner-only permissions could not be applied.
-    SetPermissions(io::Error),
     /// The permissioned path entry could not be revalidated.
     VerifyBoundIdentity(io::Error),
     /// The verified socket could not begin listening.
@@ -473,7 +497,6 @@ impl fmt::Display for LocalSocketError {
                 "the bound local process socket identity could not be verified"
             }
             Self::BoundIdentityMismatch => "the bound local process socket identity did not match",
-            Self::SetPermissions(_) => "the local process socket permissions could not be set",
             Self::Listen(_) => "the local process socket could not begin listening",
             Self::RegisterListener(_) => "the local process socket could not join the runtime",
             Self::ReadCleanupIdentity(_) | Self::CleanupIdentityMismatch => {
@@ -504,7 +527,6 @@ impl Error for LocalSocketError {
             | Self::Bind(error)
             | Self::ReadLocalAddress(error)
             | Self::ReadBoundIdentity(error)
-            | Self::SetPermissions(error)
             | Self::VerifyBoundIdentity(error)
             | Self::Listen(error)
             | Self::RegisterListener(error)
@@ -715,22 +737,28 @@ mod tests {
         Ok(())
     }
 
+    #[track_caller]
+    fn assert_parent_mode_rejected(mode: u32) -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(mode))?;
+        let path = directory.socket_path();
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(
+            result,
+            Err(LocalSocketError::ParentPermissionsMismatch)
+        ));
+        assert!(!path.exists());
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn nonexact_parent_permissions_fail_before_path_creation() -> Result<(), Box<dyn Error>> {
-        let directory = TestDirectory::create()?;
-        for mode in [0o755, 0o300, 0o1700] {
-            fs::set_permissions(directory.path(), fs::Permissions::from_mode(mode))?;
-            let path = directory.socket_path();
-
-            let result = LocalProcessListener::bind(&path);
-
-            assert!(matches!(
-                result,
-                Err(LocalSocketError::ParentPermissionsMismatch)
-            ));
-            assert!(!path.exists());
-        }
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        assert_parent_mode_rejected(0o755)?;
+        assert_parent_mode_rejected(0o300)?;
+        assert_parent_mode_rejected(0o1700)?;
         Ok(())
     }
 

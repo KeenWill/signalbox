@@ -12,7 +12,7 @@ added only alongside the decision that motivates it, and a decision introducing
 a new lifecycle edge adds or amends its scenario fixture in the same change.
 Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
-[testing-style.md](testing-style.md), and the
+[testing-style.md](agents/testing-style.md), and the
 [invariant catalog](invariants.md)'s enforcement column accumulates the links to
 those tests.
 
@@ -442,11 +442,10 @@ those tests.
   result, cancellation, or reconciliation state.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
-  and result acknowledgement protocol. The compatibility window and subscriber
-  observation semantics remain
-  [open](open-questions.md#protocols-and-persistence): the retired protocol
-  designs carry no current authority, and future protocol work is designed fresh
-  as a specification diff; the committing-side update mechanism is decided in
+  result acknowledgement, compatibility, and subscriber observation remain
+  [open](open-questions.md#runner-result-protocol): the retired protocol designs
+  carry no current authority, and future protocol work is designed fresh as a
+  specification diff; the committing-side update mechanism is decided in
   [persistence-protocol](spec/persistence-protocol.md).
 
 ## S13 — Use an ambient-user runner

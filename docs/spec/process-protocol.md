@@ -49,16 +49,18 @@ lifetime path lock, the hub handles the final path as follows:
 
 The path lock makes the final revalidation and removal indivisible with respect
 to another conforming hub. The bind itself must still create a new socket and
-never replace another entry. The hub creates an unlistening Unix stream socket,
-binds it, verifies that the socket's local address is the resolved path, and
-captures the new path entry's socket type, effective-user ownership, device, and
-inode with `lstat`. It then sets owner-only `0600` permissions and verifies with
-a second `lstat` that the same socket entry remains, retains that ownership, and
-has exactly that mode before calling `listen`; no connection can be queued
-before that sequence completes. Any address, identity, ownership, or permission
-mismatch fails startup and removes no raced entry. Graceful shutdown removes the
-path only after a final `lstat` proves it is still the socket device and inode
-captured by this hub, then releases the path lock.
+never replace another entry. The hub creates an unlistening Unix stream socket
+and binds it under a serialized, restored process creation mask so the path
+entry is born with exact owner-only `0600` permissions; it performs no later
+pathname-following permission change. It then verifies that the socket's local
+address is the resolved path, captures the new path entry's socket type,
+effective-user ownership, device, inode, and mode with `lstat`, and verifies
+with a second `lstat` that the same socket entry remains before calling
+`listen`; no connection can be queued before that sequence completes. Any
+address, identity, ownership, or permission mismatch fails startup and removes
+no raced entry. Graceful shutdown removes the path only after a final `lstat`
+proves it is still the socket device and inode captured by this hub, then
+releases the path lock.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
@@ -174,11 +176,14 @@ A session summary contains `session_id`, `defaults_version`, and
 `model_selection`. A successful `list_sessions` response is `sessions_start`,
 one `session_summary` per result in session-identity order, then
 `sessions_end { session_count }`. The summaries are read in one read-only
-repeatable-read transaction, and the sequence becomes authoritative only after
-the end message and count validate. This avoids an aggregate frame-size limit.
-Identifiers are canonical UUID strings. Request identities, ordinal versions,
-indices, counts, and outbox cursors are canonical decimal strings, preserving
-their full unsigned 64-bit range without JSON-number precision loss.
+repeatable-read transaction and spooled from one decoded row at a time before
+client output. A slow client therefore retains temporary disk rather than the
+complete session catalog in request heap or an open database transaction. The
+sequence becomes authoritative only after the end message and count validate.
+This avoids an aggregate frame-size limit. Identifiers are canonical UUID
+strings. Request identities, ordinal versions, indices, counts, and outbox
+cursors are canonical decimal strings, preserving their full unsigned 64-bit
+range without JSON-number precision loss.
 
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. For the version-one treatment, its
@@ -192,17 +197,23 @@ the first handling.
 
 The error-code set in version one is:
 
-| Code                  | Meaning                                                                  |
-| --------------------- | ------------------------------------------------------------------------ |
-| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                  |
-| `unsupported_version` | The frame version is not one.                                            |
-| `invalid_request`     | A boundary value cannot construct the requested application input.       |
-| `not_found`           | The selected session does not exist.                                     |
-| `conflicting_reuse`   | A durable command identity already names different intent.               |
-| `rejected`            | The canonical command was durably rejected by current typed state.       |
-| `resync_required`     | A follow connection fell behind the bounded process-local event fan-out. |
-| `unavailable`         | Infrastructure prevented completion; commit ambiguity is not hidden.     |
-| `internal`            | Fail-closed corruption or a hub defect stopped the request.              |
+| Code                  | Meaning                                                            |
+| --------------------- | ------------------------------------------------------------------ |
+| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.            |
+| `unsupported_version` | The frame version is not one.                                      |
+| `invalid_request`     | A boundary value cannot construct the requested application input. |
+| `not_found`           | The selected session does not exist.                               |
+| `conflicting_reuse`   | A durable command identity already names different intent.         |
+| `rejected`            | The canonical command was durably rejected by current typed state. |
+| `resync_required`     | A follower fell behind the bounded process-local event fan-out.    |
+| `unavailable`         | Infrastructure failed; no requested mutation may have committed.   |
+| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.  |
+| `internal`            | Fail-closed corruption or a hub defect stopped the request.        |
+
+For `create_session` and `submit_input`, a lost commit response maps to
+`commit_ambiguous`; the client retries the exact command identity and payload to
+discover the recorded outcome. A definitely pre-commit infrastructure failure
+maps to `unavailable`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
@@ -228,6 +239,22 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`;
 3. the entry messages below in frontier-member order; and
 4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
+
+The hub builds that complete sequence in a secure unnamed temporary file before
+writing its first snapshot frame to the connection. Persistence validates the
+execution lineage in PostgreSQL and yields one turn or frontier member at a time
+from the same read-only repeatable-read transaction; hubd encodes each item
+directly to the spool, commits the transaction after the final item, rewinds,
+and streams the completed file. A slow client therefore holds neither a
+PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
+is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
+temporary disk usage follows the complete encoded transcript size. Projection or
+spool failure exposes no partial snapshot sequence.
+
+Session-list, transcript-read, and follow-snapshot construction share bounded
+admission that reserves application-pool capacity for non-snapshot work. The
+exact reservation is owned by the
+[snapshot-resource decision](../decisions.md#2026-07-23--bound-process-snapshot-construction-resources).
 
 Each `transcript_turn` has `turn_id` and one closed `state` object:
 
@@ -257,11 +284,13 @@ Each non-text frontier member is one `transcript_entry` with `entry_index`,
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
 `transcript_content` messages carrying the same `entry_index`, a zero-based
-`fragment_index`, `final_fragment`, and `content_fragment`. The content is split
-only at UTF-8 scalar boundaries into fragments of at most 1 MiB of UTF-8; even
-empty content has one final empty fragment. The 1 MiB content bound leaves room
-below the 8 MiB frame limit even when every byte requires worst-case JSON
-escaping.
+`fragment_index`, `final_fragment`, and `content_fragment`. Fragment indices
+start at zero and are contiguous: each fragment index is exactly its predecessor
+plus one. Exactly the last fragment carries `final_fragment = true`; every
+earlier fragment carries `false`. The content is split only at UTF-8 scalar
+boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
+final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
+limit even when every byte requires worst-case JSON escaping.
 
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
@@ -279,6 +308,11 @@ a protocol version maps them.
 
 ## Durable update dispatch
 
+`DATABASE_URL` must name a direct or otherwise session-affine PostgreSQL
+endpoint. Transaction- and statement-pooled proxy modes are unsupported because
+the guard and generation fences below use locks owned by one PostgreSQL server
+session.
+
 Before migration or recovery, `signalbox-hubd` acquires
 `pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
 connection and retains that connection—and therefore the session-level
@@ -295,13 +329,16 @@ transactionally advances the row before constructing its fenced pool. That
 exclusive request waits for all prior pooled sessions and prevents the old
 process from opening another usable connection: an older generation that tries
 again after a failed intermediate successor can acquire only its old shared
-lock, then fails the current-generation check. The first migration creates and
-initializes the row for a database that cannot have a prior fenced hub; later
-startups fence before running any newer migration. This fence migration belongs
-to Signalbox's initial deployment: the owner confirms that no deployed database
-or hub predates it, so there is no legacy unfenced writer to drain during the
-first installation. Importing or upgrading a pre-fence database is unsupported.
-Exhaustion or corruption fails startup rather than wrapping.
+lock, then fails the current-generation check. Pool construction requires a
+non-cloneable capability borrowing the still-live fence session; the copyable
+generation value is observational and cannot construct work after guard release.
+The first migration creates and initializes the row for a database that cannot
+have a prior fenced hub; later startups fence before running any newer
+migration. This fence migration belongs to Signalbox's initial deployment: the
+owner confirms that no deployed database or hub predates it, so there is no
+legacy unfenced writer to drain during the first installation. Importing or
+upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
+startup rather than wrapping.
 
 Together these guards enforce one active hub process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a

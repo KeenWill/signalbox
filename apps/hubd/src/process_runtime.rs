@@ -1,6 +1,13 @@
 //! Local process-protocol serving and durable outbox fan-out.
 
-use std::{error::Error, fmt, future::Future, io, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    io::{self, SeekFrom},
+    sync::Arc,
+    time::Duration,
+};
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -23,8 +30,8 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
-        ProcessReadError, ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptSnapshot,
-        ProcessTurnState,
+        ProcessReadError, ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptItem,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
@@ -38,7 +45,7 @@ use signalbox_process_protocol::{
 };
 use sqlx::PgPool;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::UnixStream,
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
@@ -52,14 +59,16 @@ const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
+const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
 #[derive(Clone, Debug)]
 struct ConnectionServices {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
-    model_configuration: HubModelConfiguration,
+    model_configuration: Arc<HubModelConfiguration>,
     updates: broadcast::Sender<ProcessUpdate>,
     inbound_frame_budget: Arc<Semaphore>,
+    snapshot_reader_budget: Arc<Semaphore>,
 }
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
@@ -150,12 +159,15 @@ async fn serve_connections(
     updates: broadcast::Sender<ProcessUpdate>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
+    let snapshot_reader_capacity = snapshot_reader_capacity(pool.options().get_max_connections())
+        .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
     let services = ConnectionServices {
         pool,
         eligibility_nudge,
-        model_configuration,
+        model_configuration: Arc::new(model_configuration),
         updates,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
+        snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
     };
     let mut connections = JoinSet::new();
     loop {
@@ -202,6 +214,9 @@ fn inspect_connection_completion(
         }
         Some(Ok(Err(ProcessConnectionError::InboundFrameBudgetClosed))) => {
             Err(ProcessRuntimeError::InboundFrameBudgetClosed)
+        }
+        Some(Ok(Err(ProcessConnectionError::SnapshotReaderBudgetClosed))) => {
+            Err(ProcessRuntimeError::SnapshotReaderBudgetClosed)
         }
         Some(Err(error)) => Err(ProcessRuntimeError::ConnectionTask(error)),
     }
@@ -290,12 +305,33 @@ async fn acquire_inbound_frame_permit(
     }
 }
 
+async fn acquire_snapshot_reader_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed),
+    }
+}
+
+fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
+    let available =
+        max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
+    if available == 0 {
+        return None;
+    }
+    usize::try_from(available).ok()
+}
+
 async fn handle_request<Writer>(
     writer: &mut Writer,
     request_id: RequestId,
     request: ClientRequest,
     services: &ConnectionServices,
-    shutdown: watch::Receiver<bool>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -315,7 +351,15 @@ where
             .await
         }
         ClientRequest::ListSessions {} => {
-            handle_list_sessions(writer, request_id, &services.pool).await
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_list_sessions(writer, request_id, &services.pool, snapshot_permit).await
         }
         ClientRequest::SubmitInput {
             command_id,
@@ -332,14 +376,37 @@ where
                 expected_defaults_version,
                 &services.pool,
                 &services.eligibility_nudge,
-                &services.model_configuration,
+                services.model_configuration.as_ref(),
             )
             .await
         }
         ClientRequest::ReadTranscript { session_id } => {
-            handle_read_transcript(writer, request_id, session_id, &services.pool).await
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_read_transcript(
+                writer,
+                request_id,
+                session_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::FollowSession { session_id } => {
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
             handle_follow_session(
                 writer,
                 request_id,
@@ -347,6 +414,7 @@ where
                 &services.pool,
                 &services.updates,
                 shutdown,
+                snapshot_permit,
             )
             .await
         }
@@ -399,7 +467,20 @@ where
             .await
         }
         Err(CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_))) => {
-            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(CreateSessionError::Transaction(CreateSessionRepositoryError::CommitAmbiguous(_))) => {
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
         }
         Err(
             CreateSessionError::Preparation(_)
@@ -422,21 +503,55 @@ async fn handle_list_sessions<Writer>(
     writer: &mut Writer,
     request_id: RequestId,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let summaries = match ProcessReadRepository::new(pool.clone())
-        .list_sessions()
-        .await
-    {
-        Ok(summaries) => summaries,
-        Err(error) => return write_process_read_error(writer, request_id, error).await,
+    let spool_result =
+        spool_session_summaries(ProcessReadRepository::new(pool.clone()), request_id).await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(SessionListSpoolError::Read(error)) => {
+            return write_process_read_error(writer, request_id, error).await;
+        }
+        Err(SessionListSpoolError::Spool(error)) => return Err(error),
     };
-    write_message(writer, request_id, ServerMessage::SessionsStart {}).await?;
-    for summary in &summaries {
+    write_spooled_file(writer, &mut spool.file).await
+}
+
+struct SessionListSpool {
+    file: tokio::fs::File,
+}
+
+enum SessionListSpoolError {
+    Read(ProcessReadError),
+    Spool(ProcessConnectionError),
+}
+
+async fn spool_session_summaries(
+    repository: ProcessReadRepository,
+    request_id: RequestId,
+) -> Result<SessionListSpool, SessionListSpoolError> {
+    let mut reader = repository
+        .open_session_summaries()
+        .await
+        .map_err(SessionListSpoolError::Read)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(ProcessConnectionError::from)
+        .map_err(SessionListSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_message(&mut file, request_id, ServerMessage::SessionsStart {})
+        .await
+        .map_err(SessionListSpoolError::Spool)?;
+    while let Some(summary) = reader
+        .next_summary()
+        .await
+        .map_err(SessionListSpoolError::Read)?
+    {
         write_message(
-            writer,
+            &mut file,
             request_id,
             ServerMessage::SessionSummary {
                 session_id: wire_uuid(summary.session().into_uuid()),
@@ -444,18 +559,31 @@ where
                 model_selection: wire_model_selection(summary.model_selection()),
             },
         )
-        .await?;
+        .await
+        .map_err(SessionListSpoolError::Spool)?;
     }
-    let session_count =
-        u64::try_from(summaries.len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let session_count = reader
+        .summary_count()
+        .ok_or(ProcessConnectionError::EncodeInvariant)
+        .map_err(SessionListSpoolError::Spool)?;
     write_message(
-        writer,
+        &mut file,
         request_id,
         ServerMessage::SessionsEnd {
             session_count: CanonicalU64::new(session_count),
         },
     )
     .await
+    .map_err(SessionListSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(ProcessConnectionError::from)
+        .map_err(SessionListSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(ProcessConnectionError::from)
+        .map_err(SessionListSpoolError::Spool)?;
+    Ok(SessionListSpool { file })
 }
 
 #[derive(Debug)]
@@ -596,24 +724,49 @@ where
             .await
         }
         Err(SubmitInputRepositoryError::Database(_)) => {
-            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
         }
-        Err(SubmitInputRepositoryError::ModelExecution(error))
-            if matches!(
-                error.as_ref(),
-                signalbox_persistence::model_execution::ModelCallRepositoryError::Database { .. }
-            ) =>
-        {
-            write_error(writer, request_id, ProtocolError::mutation_unavailable()).await
+        Err(SubmitInputRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
         }
+        Err(SubmitInputRepositoryError::ModelExecution(error)) => match error.as_ref() {
+            signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
+                commit_ambiguous,
+                ..
+            } => {
+                write_error(
+                    writer,
+                    request_id,
+                    ProtocolError::mutation_unavailable(*commit_ambiguous),
+                )
+                .await
+            }
+            _ => {
+                write_error(
+                    writer,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::Internal),
+                )
+                .await
+            }
+        },
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_),
         )))
         | Err(
             SubmitInputRepositoryError::DifferentCommandKind { .. }
             | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
-            | SubmitInputRepositoryError::Corruption(_)
-            | SubmitInputRepositoryError::ModelExecution(_),
+            | SubmitInputRepositoryError::Corruption(_),
         ) => {
             write_error(
                 writer,
@@ -637,15 +790,20 @@ async fn handle_read_transcript<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let snapshot = match ProcessReadRepository::new(pool.clone())
-        .read_transcript(SessionId::from_uuid(session_id.into_uuid()))
-        .await
-    {
-        Ok(Some(snapshot)) => snapshot,
+    let spool_result = spool_transcript(
+        ProcessReadRepository::new(pool.clone()),
+        SessionId::from_uuid(session_id.into_uuid()),
+        request_id,
+    )
+    .await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(Some(spool)) => spool,
         Ok(None) => {
             return write_error(
                 writer,
@@ -654,9 +812,12 @@ where
             )
             .await;
         }
-        Err(error) => return write_process_read_error(writer, request_id, error).await,
+        Err(TranscriptSpoolError::Read(error)) => {
+            return write_process_read_error(writer, request_id, error).await;
+        }
+        Err(TranscriptSpoolError::Spool(error)) => return Err(error),
     };
-    write_snapshot(writer, request_id, &snapshot).await
+    write_spooled_transcript(writer, &mut spool).await
 }
 
 async fn handle_follow_session<Writer>(
@@ -666,6 +827,7 @@ async fn handle_follow_session<Writer>(
     pool: &PgPool,
     updates: &broadcast::Sender<ProcessUpdate>,
     mut shutdown: watch::Receiver<bool>,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -674,14 +836,19 @@ where
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
     let snapshot_result = run_until_shutdown(
         &mut shutdown,
-        ProcessReadRepository::new(pool.clone()).read_transcript(selected_session),
+        spool_transcript(
+            ProcessReadRepository::new(pool.clone()),
+            selected_session,
+            request_id,
+        ),
     )
     .await;
+    drop(snapshot_permit);
     let Some(snapshot_result) = snapshot_result else {
         return Ok(());
     };
-    let snapshot = match snapshot_result {
-        Ok(Some(snapshot)) => snapshot,
+    let mut spool = match snapshot_result {
+        Ok(Some(spool)) => spool,
         Ok(None) => {
             return run_until_shutdown(
                 &mut shutdown,
@@ -694,7 +861,7 @@ where
             .await
             .unwrap_or(Ok(()));
         }
-        Err(error) => {
+        Err(TranscriptSpoolError::Read(error)) => {
             return run_until_shutdown(
                 &mut shutdown,
                 write_process_read_error(writer, request_id, error),
@@ -702,14 +869,15 @@ where
             .await
             .unwrap_or(Ok(()));
         }
+        Err(TranscriptSpoolError::Spool(error)) => return Err(error),
     };
     let Some(snapshot_write) =
-        run_until_shutdown(&mut shutdown, write_snapshot(writer, request_id, &snapshot)).await
+        run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, &mut spool)).await
     else {
         return Ok(());
     };
     snapshot_write?;
-    let mut observed_cursor = snapshot.cursor();
+    let mut observed_cursor = spool.cursor;
 
     loop {
         let update = tokio::select! {
@@ -759,49 +927,125 @@ where
     }
 }
 
-async fn write_snapshot<Writer>(
-    writer: &mut Writer,
+struct TranscriptSpool {
+    file: tokio::fs::File,
+    cursor: u64,
+}
+
+enum TranscriptSpoolError {
+    Read(ProcessReadError),
+    Spool(ProcessConnectionError),
+}
+
+async fn spool_transcript(
+    repository: ProcessReadRepository,
+    session: SessionId,
     request_id: RequestId,
-    snapshot: &ProcessTranscriptSnapshot,
-) -> Result<(), ProcessConnectionError>
-where
-    Writer: AsyncWrite + Unpin,
-{
-    let session_id = wire_uuid(snapshot.session().into_uuid());
-    let cursor = CanonicalU64::new(snapshot.cursor());
+) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
+    let Some(mut reader) = repository
+        .open_transcript(session)
+        .await
+        .map_err(TranscriptSpoolError::Read)?
+    else {
+        return Ok(None);
+    };
+    let standard_file = tempfile::tempfile()
+        .map_err(ProcessConnectionError::from)
+        .map_err(TranscriptSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    let session_id = wire_uuid(reader.session().into_uuid());
+    let cursor = CanonicalU64::new(reader.cursor());
     write_message(
-        writer,
+        &mut file,
         request_id,
         ServerMessage::TranscriptSnapshotStart { session_id, cursor },
     )
-    .await?;
-    for turn in snapshot.turns() {
-        write_message(
-            writer,
-            request_id,
-            ServerMessage::TranscriptTurn {
-                turn_id: wire_uuid(turn.turn().into_uuid()),
-                acceptance_position: CanonicalU64::new(turn.acceptance_position()),
-                state: wire_turn_state(turn.state()),
-            },
-        )
-        .await?;
+    .await
+    .map_err(TranscriptSpoolError::Spool)?;
+    while let Some(item) = reader
+        .next_item()
+        .await
+        .map_err(TranscriptSpoolError::Read)?
+    {
+        match item {
+            ProcessTranscriptItem::Turn(turn) => {
+                write_transcript_turn(&mut file, request_id, &turn)
+                    .await
+                    .map_err(TranscriptSpoolError::Spool)?;
+            }
+            ProcessTranscriptItem::Entry(entry) => {
+                write_transcript_entry(&mut file, request_id, &entry)
+                    .await
+                    .map_err(TranscriptSpoolError::Spool)?;
+            }
+        }
     }
-    for entry in snapshot.entries() {
-        write_transcript_entry(writer, request_id, entry).await?;
-    }
-    let turn_count = u64::try_from(snapshot.turns().len())
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-    let entry_count = u64::try_from(snapshot.entries().len())
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let summary = reader
+        .summary()
+        .ok_or(ProcessConnectionError::EncodeInvariant)
+        .map_err(TranscriptSpoolError::Spool)?;
     write_message(
-        writer,
+        &mut file,
         request_id,
         ServerMessage::TranscriptSnapshotEnd {
             session_id,
             cursor,
-            turn_count: CanonicalU64::new(turn_count),
-            entry_count: CanonicalU64::new(entry_count),
+            turn_count: CanonicalU64::new(summary.turn_count()),
+            entry_count: CanonicalU64::new(summary.entry_count()),
+        },
+    )
+    .await
+    .map_err(TranscriptSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(ProcessConnectionError::from)
+        .map_err(TranscriptSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(ProcessConnectionError::from)
+        .map_err(TranscriptSpoolError::Spool)?;
+    Ok(Some(TranscriptSpool {
+        file,
+        cursor: summary.cursor(),
+    }))
+}
+
+async fn write_spooled_transcript<Writer>(
+    writer: &mut Writer,
+    spool: &mut TranscriptSpool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_spooled_file(writer, &mut spool.file).await
+}
+
+async fn write_spooled_file<Writer>(
+    writer: &mut Writer,
+    file: &mut tokio::fs::File,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    tokio::io::copy(file, writer).await?;
+    Ok(())
+}
+
+async fn write_transcript_turn<Writer>(
+    writer: &mut Writer,
+    request_id: RequestId,
+    turn: &ProcessTranscriptTurn,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_message(
+        writer,
+        request_id,
+        ServerMessage::TranscriptTurn {
+            turn_id: wire_uuid(turn.turn().into_uuid()),
+            acceptance_position: CanonicalU64::new(turn.acceptance_position()),
+            state: wire_turn_state(turn.state()),
         },
     )
     .await
@@ -1278,17 +1522,20 @@ impl ProtocolError {
                     "the follow stream fell behind; reconnect for a fresh snapshot"
                 }
                 ErrorCode::Unavailable => "the requested operation is unavailable",
+                ErrorCode::CommitAmbiguous => {
+                    "the mutation commit is ambiguous; retry the exact command"
+                }
                 ErrorCode::Internal => "the request failed an internal integrity check",
             },
             detail: ErrorDetail::none(),
         }
     }
 
-    const fn mutation_unavailable() -> Self {
-        Self {
-            code: ErrorCode::Unavailable,
-            message: "the mutation outcome may be ambiguous; retry the exact command",
-            detail: ErrorDetail::none(),
+    const fn mutation_unavailable(commit_ambiguous: bool) -> Self {
+        if commit_ambiguous {
+            Self::without_detail(ErrorCode::CommitAmbiguous)
+        } else {
+            Self::without_detail(ErrorCode::Unavailable)
         }
     }
 
@@ -1545,6 +1792,7 @@ enum ProcessConnectionError {
     Encode(FrameEncodeError),
     EncodeInvariant,
     InboundFrameBudgetClosed,
+    SnapshotReaderBudgetClosed,
 }
 
 impl From<io::Error> for ProcessConnectionError {
@@ -1570,6 +1818,9 @@ impl fmt::Display for ProcessConnectionError {
             Self::InboundFrameBudgetClosed => {
                 "the local process connection lost its inbound frame budget"
             }
+            Self::SnapshotReaderBudgetClosed => {
+                "the local process connection lost its snapshot reader budget"
+            }
         })
     }
 }
@@ -1579,7 +1830,9 @@ impl Error for ProcessConnectionError {
         match self {
             Self::Io(error) => Some(error),
             Self::Encode(error) => Some(error),
-            Self::EncodeInvariant | Self::InboundFrameBudgetClosed => None,
+            Self::EncodeInvariant
+            | Self::InboundFrameBudgetClosed
+            | Self::SnapshotReaderBudgetClosed => None,
         }
     }
 }
@@ -1595,6 +1848,10 @@ pub enum ProcessRuntimeError {
     EncodeInvariant,
     /// The runtime-owned aggregate inbound frame budget closed unexpectedly.
     InboundFrameBudgetClosed,
+    /// The runtime-owned snapshot-reader budget closed unexpectedly.
+    SnapshotReaderBudgetClosed,
+    /// The application pool cannot reserve capacity outside snapshot reads.
+    InsufficientPoolCapacity,
     /// A connection task panicked or was cancelled unexpectedly.
     ConnectionTask(JoinError),
     /// The durable outbox dispatcher failed.
@@ -1616,6 +1873,12 @@ impl fmt::Display for ProcessRuntimeError {
             Self::InboundFrameBudgetClosed => {
                 "the local process server lost its inbound frame budget"
             }
+            Self::SnapshotReaderBudgetClosed => {
+                "the local process server lost its snapshot reader budget"
+            }
+            Self::InsufficientPoolCapacity => {
+                "the local process server cannot reserve database pool capacity"
+            }
             Self::ConnectionTask(_) => "a local process connection task failed",
             Self::Dispatch(_) => "the durable process-update dispatcher failed",
             Self::UnexpectedDispatcherRetry => {
@@ -1636,6 +1899,8 @@ impl Error for ProcessRuntimeError {
             Self::CleanupSocket(error) => Some(error),
             Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
+            | Self::SnapshotReaderBudgetClosed
+            | Self::InsufficientPoolCapacity
             | Self::UnexpectedDispatcherRetry => None,
         }
     }
@@ -1649,9 +1914,9 @@ mod tests {
         ContextFrontierId, ModelCallId, SemanticTranscriptEntryId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ServerFrame, ServerMessage, SessionEvent, TurnState, decode_server_line,
-        encode_server_line,
+        CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, InputContent,
+        MAX_CONTENT_FRAGMENT_BYTES, ServerFrame, ServerMessage, SessionEvent, TurnState,
+        decode_server_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
@@ -1662,9 +1927,11 @@ mod tests {
 
     use super::{
         IncomingLine, MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        ProcessConnectionError, ProcessUpdateEvent, RequestId, acquire_inbound_frame_permit,
-        admitted_user_content, inspect_connection_completion, read_frame_line, run_until_shutdown,
-        wire_model_call_state, wire_turn_state, write_content,
+        ProcessConnectionError, ProcessUpdateEvent, ProtocolError,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, acquire_inbound_frame_permit,
+        acquire_snapshot_reader_permit, admitted_user_content, inspect_connection_completion,
+        read_frame_line, run_until_shutdown, snapshot_reader_capacity, wire_model_call_state,
+        wire_turn_state, write_content,
     };
     use signalbox_persistence::{
         outbox::{
@@ -1673,6 +1940,18 @@ mod tests {
         process_read::ProcessTurnState,
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
+
+    #[test]
+    fn commit_ambiguity_selects_the_stable_process_error_code() {
+        assert_eq!(
+            ProtocolError::mutation_unavailable(false).code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(
+            ProtocolError::mutation_unavailable(true).code,
+            ErrorCode::CommitAmbiguous
+        );
+    }
 
     #[tokio::test]
     async fn inv033_frame_reader_accepts_the_exact_cap_and_rejects_the_next_byte()
@@ -1759,6 +2038,46 @@ mod tests {
                 .await?
                 .is_none(),
             "a connection waiting for the full budget must stop on shutdown"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshot_reader_budget_reserves_two_pool_connections() -> Result<(), Box<dyn Error>> {
+        let max_pool_connections = 10;
+        let capacity = snapshot_reader_capacity(max_pool_connections)
+            .ok_or_else(|| io::Error::other("the production pool must admit snapshot readers"))?;
+        assert_eq!(
+            capacity,
+            usize::try_from(max_pool_connections - RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?
+        );
+        assert!(snapshot_reader_capacity(2).is_none());
+
+        let budget = Arc::new(Semaphore::new(capacity));
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let mut permits = Vec::new();
+        for _ in 0..capacity {
+            permits.push(
+                acquire_snapshot_reader_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
+                    .await?
+                    .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?,
+            );
+        }
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                acquire_snapshot_reader_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+            )
+            .await
+            .is_err(),
+            "the next snapshot reader must leave two pool slots free"
+        );
+
+        shutdown.send(true)?;
+        assert!(
+            acquire_snapshot_reader_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
+                .await?
+                .is_none()
         );
         Ok(())
     }
@@ -1905,36 +2224,46 @@ mod tests {
             wire_model_call_state(DispatchedModelCallState::CancellationRequested),
             ModelCallState::CancellationRequested {}
         );
-        let cases = [
-            (
+        assert_eq!(
+            wire_model_call_state(DispatchedModelCallState::Terminal(
                 DispatchedModelCallDisposition::Completed,
-                ModelCallDisposition::Completed,
-            ),
-            (
+            )),
+            ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Completed
+            }
+        );
+        assert_eq!(
+            wire_model_call_state(DispatchedModelCallState::Terminal(
                 DispatchedModelCallDisposition::KnownFailed,
-                ModelCallDisposition::KnownFailed,
-            ),
-            (
+            )),
+            ModelCallState::Terminal {
+                disposition: ModelCallDisposition::KnownFailed
+            }
+        );
+        assert_eq!(
+            wire_model_call_state(DispatchedModelCallState::Terminal(
                 DispatchedModelCallDisposition::Refused,
-                ModelCallDisposition::Refused,
-            ),
-            (
+            )),
+            ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Refused
+            }
+        );
+        assert_eq!(
+            wire_model_call_state(DispatchedModelCallState::Terminal(
                 DispatchedModelCallDisposition::Cancelled,
-                ModelCallDisposition::Cancelled,
-            ),
-            (
+            )),
+            ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Cancelled
+            }
+        );
+        assert_eq!(
+            wire_model_call_state(DispatchedModelCallState::Terminal(
                 DispatchedModelCallDisposition::Ambiguous,
-                ModelCallDisposition::Ambiguous,
-            ),
-        ];
-        for (source, expected) in cases {
-            assert_eq!(
-                wire_model_call_state(DispatchedModelCallState::Terminal(source)),
-                ModelCallState::Terminal {
-                    disposition: expected
-                }
-            );
-        }
+            )),
+            ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Ambiguous
+            }
+        );
     }
 
     #[test]

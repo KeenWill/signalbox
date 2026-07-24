@@ -445,8 +445,10 @@ async fn load_event(
                 transaction,
                 "SELECT event_sequence
                    FROM session_created_outbox_event
-                  WHERE event_sequence = $1",
+                  WHERE event_sequence = $1
+                    AND session_id = $2",
                 expected_sequence,
+                stored_session,
             )
             .await?;
             DispatchedOutboxEventKind::SessionCreated
@@ -469,9 +471,37 @@ async fn load_event(
                     AND command.result_accepted_input_id = event.accepted_input_id
                     AND command.content_kind = 'text'
                     AND command.content_text = accepted.content_text
-                  WHERE event.event_sequence = $1",
+                   JOIN queued_input_origin AS queued
+                     ON queued.accepted_input_id = event.accepted_input_id
+                    AND queued.turn_id = event.turn_id
+                    AND queued.session_id = event.session_id
+                    AND queued.acceptance_position = event.acceptance_position
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.origin_accepted_input_id = event.accepted_input_id
+                    AND turn.acceptance_position = event.acceptance_position
+                   LEFT JOIN turn_lifecycle AS source
+                     ON source.turn_id = accepted.expected_active_turn_id
+                    AND source.session_id = event.session_id
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2
+                    AND (
+                        (
+                            accepted.disposition_kind = 'origin_of'
+                            AND command.result_turn_id = event.turn_id
+                        )
+                        OR (
+                            accepted.disposition_kind =
+                                'reclassified_as_turn_origin'
+                            AND command.result_turn_id IS NULL
+                            AND accepted.expected_active_turn_id IS NOT NULL
+                            AND source.state_kind = 'terminal'
+                        )
+                    )",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
             .ok_or(OutboxCorruption::MissingTypedRecord)?;
@@ -503,9 +533,11 @@ async fn load_event(
                             AND turn.terminal_attempt_id = event.current_attempt_id
                         )
                     )
-                  WHERE event.event_sequence = $1",
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, current_attempt, lifecycle_correlated) =
@@ -534,9 +566,141 @@ async fn load_event(
                     AND failure.semantic_entry_id = event.failure_entry_id
                     AND failure.payload_kind = 'turn_failed'
                     AND failure.failed_turn_id = event.turn_id
-                  WHERE event.event_sequence = $1",
+                   JOIN context_frontier AS frontier
+                     ON frontier.owning_session_id = event.session_id
+                    AND frontier.context_frontier_id =
+                        event.terminal_frontier_id
+                   JOIN context_frontier_member AS terminal_member
+                     ON terminal_member.owning_session_id =
+                        frontier.owning_session_id
+                    AND terminal_member.context_frontier_id =
+                        frontier.context_frontier_id
+                    AND terminal_member.member_position = frontier.member_count
+                    AND terminal_member.source_session_id = event.session_id
+                    AND terminal_member.semantic_entry_id =
+                        event.failure_entry_id
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2
+                    AND (
+                        (
+                            turn.terminal_attempt_id IS NULL
+                            AND turn.terminal_model_call_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt AS any_attempt
+                                 WHERE any_attempt.turn_id = event.turn_id
+                                   AND any_attempt.session_id = event.session_id
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM model_call AS any_call
+                                 WHERE any_call.turn_id = event.turn_id
+                                   AND any_call.session_id = event.session_id
+                            )
+                        )
+                        OR (
+                            turn.terminal_attempt_id IS NOT NULL
+                            AND (
+                                SELECT count(*)
+                                  FROM turn_attempt AS counted_attempt
+                                 WHERE counted_attempt.turn_id = event.turn_id
+                                   AND counted_attempt.session_id =
+                                       event.session_id
+                            ) = 1
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt AS terminal_attempt
+                                 WHERE terminal_attempt.turn_attempt_id =
+                                       turn.terminal_attempt_id
+                                   AND terminal_attempt.turn_id = event.turn_id
+                                   AND terminal_attempt.session_id =
+                                       event.session_id
+                                   AND terminal_attempt.state_kind = 'ended'
+                                   AND (
+                                        (
+                                            terminal_attempt.end_variant =
+                                                'without_stop'
+                                            AND terminal_attempt.end_disposition
+                                                IN ('known_failure', 'lost')
+                                        )
+                                        OR (
+                                            terminal_attempt.end_variant =
+                                                'after_cancellation'
+                                            AND terminal_attempt.end_disposition
+                                                = 'known_failure'
+                                            AND terminal_attempt.interrupt_command_id
+                                                IS NOT NULL
+                                            AND terminal_attempt.interrupt_predecessor_turn_id
+                                                = event.turn_id
+                                        )
+                                   )
+                            )
+                            AND (
+                                (
+                                    turn.terminal_model_call_id IS NULL
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                          FROM model_call AS any_call
+                                         WHERE any_call.turn_id = event.turn_id
+                                           AND any_call.session_id =
+                                               event.session_id
+                                    )
+                                )
+                                OR (
+                                    turn.terminal_model_call_id IS NOT NULL
+                                    AND (
+                                        SELECT count(*)
+                                          FROM model_call AS counted_call
+                                         WHERE counted_call.turn_id =
+                                               event.turn_id
+                                           AND counted_call.session_id =
+                                               event.session_id
+                                    ) = 1
+                                    AND EXISTS (
+                                        SELECT 1
+                                          FROM model_call AS terminal_call
+                                          JOIN turn_attempt AS terminal_attempt
+                                            ON terminal_attempt.turn_attempt_id =
+                                               terminal_call.turn_attempt_id
+                                           AND terminal_attempt.turn_id =
+                                               terminal_call.turn_id
+                                           AND terminal_attempt.session_id =
+                                               terminal_call.session_id
+                                         WHERE terminal_call.model_call_id =
+                                               turn.terminal_model_call_id
+                                           AND terminal_call.turn_attempt_id =
+                                               turn.terminal_attempt_id
+                                           AND terminal_call.turn_id =
+                                               event.turn_id
+                                           AND terminal_call.session_id =
+                                               event.session_id
+                                           AND terminal_call.state_kind =
+                                               'terminal'
+                                           AND (
+                                                (
+                                                    terminal_attempt.end_variant
+                                                        = 'without_stop'
+                                                    AND terminal_call.terminal_disposition_kind
+                                                        IN (
+                                                            'known_failed',
+                                                            'cancelled'
+                                                        )
+                                                )
+                                                OR (
+                                                    terminal_attempt.end_variant
+                                                        = 'after_cancellation'
+                                                    AND terminal_call.terminal_disposition_kind
+                                                        = 'known_failed'
+                                                )
+                                           )
+                                    )
+                                )
+                            )
+                        )
+                    )",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, failure_entry, terminal_frontier) =
@@ -556,13 +720,15 @@ async fn load_event(
                         call.terminal_disposition_kind
                             AS authoritative_terminal_disposition_kind
                    FROM model_call_transition_outbox_event AS event
-                   LEFT JOIN model_call AS call
+                   JOIN model_call AS call
                      ON call.model_call_id = event.model_call_id
                     AND call.turn_id = event.turn_id
                     AND call.session_id = event.session_id
-                  WHERE event.event_sequence = $1",
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?
             .ok_or(OutboxCorruption::MissingTypedRecord)?;
@@ -610,9 +776,24 @@ async fn load_event(
                     AND completion.semantic_entry_id = event.completion_entry_id
                     AND completion.payload_kind = 'turn_completed'
                     AND completion.completed_turn_id = event.turn_id
-                  WHERE event.event_sequence = $1",
+                   JOIN context_frontier AS frontier
+                     ON frontier.owning_session_id = event.session_id
+                    AND frontier.context_frontier_id =
+                        event.terminal_frontier_id
+                   JOIN context_frontier_member AS terminal_member
+                     ON terminal_member.owning_session_id =
+                        frontier.owning_session_id
+                    AND terminal_member.context_frontier_id =
+                        frontier.context_frontier_id
+                    AND terminal_member.member_position = frontier.member_count
+                    AND terminal_member.source_session_id = event.session_id
+                    AND terminal_member.semantic_entry_id =
+                        event.completion_entry_id
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, completion_entry, terminal_frontier) =
@@ -643,9 +824,11 @@ async fn load_event(
                     AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'refused'
-                  WHERE event.event_sequence = $1",
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, terminal_frontier) =
@@ -672,9 +855,68 @@ async fn load_event(
                     AND cancellation.semantic_entry_id = event.cancellation_entry_id
                     AND cancellation.payload_kind = 'turn_cancelled'
                     AND cancellation.cancelled_turn_id = event.turn_id
-                  WHERE event.event_sequence = $1",
+                   JOIN context_frontier AS frontier
+                     ON frontier.owning_session_id = event.session_id
+                    AND frontier.context_frontier_id =
+                        event.terminal_frontier_id
+                   JOIN context_frontier_member AS terminal_member
+                     ON terminal_member.owning_session_id =
+                        frontier.owning_session_id
+                    AND terminal_member.context_frontier_id =
+                        frontier.context_frontier_id
+                    AND terminal_member.member_position = frontier.member_count
+                    AND terminal_member.source_session_id = event.session_id
+                    AND terminal_member.semantic_entry_id =
+                        event.cancellation_entry_id
+                   JOIN turn_attempt AS terminal_attempt
+                     ON terminal_attempt.turn_attempt_id =
+                        turn.terminal_attempt_id
+                    AND terminal_attempt.turn_id = event.turn_id
+                    AND terminal_attempt.session_id = event.session_id
+                    AND terminal_attempt.state_kind = 'ended'
+                    AND terminal_attempt.end_variant = 'after_cancellation'
+                    AND terminal_attempt.end_disposition = 'cancelled'
+                    AND terminal_attempt.interrupt_command_id IS NOT NULL
+                    AND terminal_attempt.interrupt_predecessor_turn_id =
+                        event.turn_id
+                   LEFT JOIN model_call AS terminal_call
+                     ON terminal_call.model_call_id =
+                        turn.terminal_model_call_id
+                    AND terminal_call.turn_attempt_id =
+                        turn.terminal_attempt_id
+                    AND terminal_call.turn_id = event.turn_id
+                    AND terminal_call.session_id = event.session_id
+                    AND terminal_call.state_kind = 'terminal'
+                    AND terminal_call.terminal_disposition_kind = 'cancelled'
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2
+                    AND (
+                        (
+                            turn.terminal_model_call_id IS NULL
+                            AND terminal_call.model_call_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM model_call AS any_call
+                                 WHERE any_call.turn_id = event.turn_id
+                                   AND any_call.session_id = event.session_id
+                            )
+                        )
+                        OR (
+                            turn.terminal_model_call_id IS NOT NULL
+                            AND terminal_call.model_call_id =
+                                turn.terminal_model_call_id
+                            AND (
+                                SELECT count(*)
+                                  FROM model_call AS counted_call
+                                 WHERE counted_call.turn_id = event.turn_id
+                                   AND counted_call.session_id =
+                                       event.session_id
+                            ) = 1
+                        )
+                    )",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, cancellation_entry, terminal_frontier) =
@@ -704,9 +946,11 @@ async fn load_event(
                     AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'ambiguous'
-                  WHERE event.event_sequence = $1",
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
             )
             .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, terminal_frontier) =
@@ -734,9 +978,11 @@ async fn require_typed_record(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     statement: &'static str,
     sequence: u64,
+    session: Uuid,
 ) -> Result<(), OutboxDispatchError> {
     let found: Option<Decimal> = sqlx::query_scalar(statement)
         .bind(Decimal::from(sequence))
+        .bind(session)
         .fetch_optional(&mut **transaction)
         .await?;
     if found.is_none() {
