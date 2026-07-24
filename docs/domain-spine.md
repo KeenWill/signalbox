@@ -1077,6 +1077,28 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         wait: AwaitingToolApproval,
     ) -> Self;
+    pub const fn awaiting_tool_recovery(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: AwaitingToolRecovery,
+    ) -> Self;
+    pub const fn awaiting_tool_recovery_after_restart(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: AwaitingToolRecovery,
+    ) -> Self;
+    pub const fn awaiting_tool_recovery_after_cancellation(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn awaiting_tool_recovery_after_cancellation_restart(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
     pub const fn awaiting_model_call_recovery(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
@@ -2419,6 +2441,7 @@ pub enum ToolBatchPhase {
 pub struct ToolBatch { /* private */ }
 impl ToolBatch {
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
+    pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
     pub fn prepare_owner_decision(
         self,
         command: DecideToolRequest,
@@ -2440,6 +2463,9 @@ impl ToolBatch {
 pub struct AwaitingToolApproval { /* private */ }
 // sealed: ToolBatch::awaiting_approval
 // accessors: session(), turn(), request()
+pub struct AwaitingToolRecovery { /* private */ }
+// sealed: ToolBatch::awaiting_recovery
+// accessors: session(), turn(), attempt()
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -3431,12 +3457,12 @@ impl<
 | domain: semantic_entry                | 4                    |
 | domain: tool                          | 37                   |
 | domain: tool_attempt                  | 23                   |
-| domain: tool_execution                | 16                   |
+| domain: tool_execution                | 17                   |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **293 (+1 free fn)** |
+| **signalbox-domain total**            | **294 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

@@ -341,6 +341,10 @@ enum StoredActiveTurnPhase {
     AwaitingApproval {
         wait: crate::AwaitingToolApproval,
     },
+    AwaitingToolRecovery {
+        wait: crate::AwaitingToolRecovery,
+        attempt_end: TerminalAttemptEndReconstitutionInput,
+    },
     AwaitingModelCallRecovery {
         call: crate::ModelCallId,
         attempt_end: TerminalAttemptEndReconstitutionInput,
@@ -386,6 +390,82 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: None,
             state: StoredActiveTurnPhase::AwaitingApproval { wait },
+        }
+    }
+
+    /// Supplies an evidence-bearing same-process ambiguous tool wait.
+    pub const fn awaiting_tool_recovery(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: crate::AwaitingToolRecovery,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: Some(ended_attempt),
+            state: StoredActiveTurnPhase::AwaitingToolRecovery {
+                wait,
+                attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::Ambiguous,
+                ),
+            },
+        }
+    }
+
+    /// Supplies an evidence-bearing crash-lost ambiguous tool wait.
+    pub const fn awaiting_tool_recovery_after_restart(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: crate::AwaitingToolRecovery,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: Some(ended_attempt),
+            state: StoredActiveTurnPhase::AwaitingToolRecovery {
+                wait,
+                attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::Lost,
+                ),
+            },
+        }
+    }
+
+    /// Supplies a same-process ambiguous tool wait after cancellation.
+    pub const fn awaiting_tool_recovery_after_cancellation(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: crate::AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: Some(ended_attempt),
+            state: StoredActiveTurnPhase::AwaitingToolRecovery {
+                wait,
+                attempt_end: TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::Ambiguous,
+                    interrupt,
+                ),
+            },
+        }
+    }
+
+    /// Supplies a crash-lost ambiguous tool wait after cancellation.
+    pub const fn awaiting_tool_recovery_after_cancellation_restart(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: crate::AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: Some(ended_attempt),
+            state: StoredActiveTurnPhase::AwaitingToolRecovery {
+                wait,
+                attempt_end: TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::Lost,
+                    interrupt,
+                ),
+            },
         }
     }
 
@@ -495,6 +575,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 .and_then(|attempt| attempt.request_cancellation(interrupt.proof()))
                 .ok()?,
             StoredActiveTurnPhase::AwaitingApproval { .. }
+            | StoredActiveTurnPhase::AwaitingToolRecovery { .. }
             | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. } => return None,
         };
         Some(ActiveTurnPhase::Running { current_attempt })
@@ -2714,6 +2795,10 @@ fn reconstitute_inner(
                                     _,
                                 ) => false,
                                 (
+                                    StoredActiveTurnPhase::AwaitingToolRecovery { .. },
+                                    _,
+                                ) => false,
+                                (
                                     StoredActiveTurnPhase::AwaitingModelCallRecovery {
                                         call, ..
                                     },
@@ -3005,6 +3090,84 @@ fn reconstitute_inner(
                                 accepted_input: record.accepted_input.id(),
                             },
                         )?
+                    }
+                    StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end } => {
+                        let Some(current_attempt) = phase.current_attempt else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        };
+                        if wait.session() != session
+                            || wait.turn() != turn
+                            || !terminal_attempt_end_matches(
+                                attempt_end,
+                                session,
+                                turn,
+                                &records_by_turn,
+                                &[
+                                    UnstoppedAttemptDisposition::Ambiguous,
+                                    UnstoppedAttemptDisposition::Lost,
+                                ],
+                                &[
+                                    CancellationStopDisposition::Ambiguous,
+                                    CancellationStopDisposition::Lost,
+                                ],
+                            )
+                        {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        }
+                        let Ok(running_attempt) =
+                            CurrentTurnAttempt::prepared(current_attempt).begin_running()
+                        else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        };
+                        let canonical_end = match attempt_end.end() {
+                            AttemptEnd::WithoutStop { disposition } => {
+                                running_attempt.end_without_stop(*disposition)
+                            }
+                            AttemptEnd::AfterCancellation { cause, disposition } => running_attempt
+                                .request_cancellation(*cause)
+                                .and_then(|attempt| {
+                                    attempt.end_after_cancellation(*cause, *disposition)
+                                }),
+                            AttemptEnd::AfterFatalMismatch { .. } => {
+                                return Err(
+                                    AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                        turn,
+                                        accepted_input: record.accepted_input.id(),
+                                    },
+                                );
+                            }
+                        };
+                        if canonical_end.is_err() {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        }
+                        ActiveTurnPhase::AwaitingRecoveryDecision {
+                            ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
+                                crate::IssuedOperationRef::ToolAttempt(wait.attempt()),
+                            ),
+                            applied_interrupt: attempt_end
+                                .interrupt()
+                                .map(|interrupt| interrupt.proof()),
+                        }
                     }
                     StoredActiveTurnPhase::StopRequested { call, interrupt } => {
                         let Some(current_attempt) = phase.current_attempt else {
@@ -3930,6 +4093,9 @@ fn reconstitute_active_acceptance_tail(
             StoredActiveTurnPhase::AwaitingModelCallRecovery { attempt_end, .. } => {
                 attempt_end.interrupt()
             }
+            StoredActiveTurnPhase::AwaitingToolRecovery { attempt_end, .. } => {
+                attempt_end.interrupt()
+            }
             StoredActiveTurnPhase::Prepared
             | StoredActiveTurnPhase::Running
             | StoredActiveTurnPhase::AwaitingApproval { .. } => None,
@@ -4705,13 +4871,18 @@ mod tests {
     use crate::{
         AcceptedInputDisposition, AssistantText, AttemptEnd, CurrentTurnAttemptState,
         FrozenModelSelection, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-        ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
-        ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
+        ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+        PerInputConfigurationChoices, ResolvedProviderTarget, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionReconstitutionInput, ToolApprovalDecision,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
+        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
+        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration, ToolEffectClass,
+        ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
-            provider_model_identity, semantic_transcript_entry_id, session_id, transcript_frontier,
-            turn_attempt_id, turn_id,
+            provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
+            tool_request_id, transcript_frontier, turn_attempt_id, turn_id,
         },
     };
 
@@ -8472,6 +8643,104 @@ mod tests {
                 ambiguous_operations,
                 ..
             }) if ambiguous_operations.contains(crate::IssuedOperationRef::ModelCall(ambiguous_call))
+        ));
+    }
+
+    /// S06 / INV-025 / INV-026: an opaque wait from a completely validated
+    /// ambiguous tool batch reconstructs the exact typed recovery subject.
+    #[test]
+    fn s06_inv025_inv026_ambiguous_tool_reconstructs_recovery_wait() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let starting_frontier = frontier(40);
+        let producing_call = model_call_id(50);
+        let issuing_attempt = turn_attempt_id(60);
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(70),
+            session.id(),
+            active.turn(),
+            producing_call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("external_tool")).expect("fixture name is canonical"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .into_request();
+        let approval = ToolApprovalResolutionReconstitutionInput::new(
+            request.id(),
+            ToolApprovalDecision::Approve,
+            ToolDecisionSource::OwnerCommand,
+        )
+        .reconstitute()
+        .expect("owner approval is implemented");
+        let tool_attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(80),
+            request.id(),
+            session.id(),
+            active.turn(),
+            issuing_attempt,
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
+        )
+        .reconstitute();
+        let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            starting_frontier.id(),
+            vec![origin_entry.reference(&session)],
+        )
+        .expect("the yielded snapshot is valid");
+        let batch = ToolBatchReconstitutionInput::new(
+            session.id(),
+            active.turn(),
+            producing_call,
+            yielded,
+            vec![request],
+            vec![approval],
+            vec![tool_attempt],
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
+                attempt: tool_attempt_id(80),
+            },
+        )
+        .reconstitute()
+        .expect("the complete tool batch is exactly ambiguous");
+        let wait = batch
+            .awaiting_recovery()
+            .expect("the validated batch exposes opaque wait evidence");
+        let active_record = active.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::Active {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                phase: ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
+                    active.turn(),
+                    issuing_attempt,
+                    wait,
+                ),
+            },
+        );
+        let projection = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![active_record],
+            vec![active.entry(&session, origin_entry)],
+            vec![starting_frontier.snapshot(&session, &[origin_entry])],
+            Some(active.active_tail(&session)),
+        )
+        .reconstitute()
+        .expect("the opaque tool wait and ended turn attempt are correlated");
+        let waiting = projection
+            .active_turn()
+            .expect("the recovery wait retains the progressing slot");
+
+        assert!(matches!(
+            waiting.active_phase(),
+            Some(ActiveTurnPhase::AwaitingRecoveryDecision {
+                ambiguous_operations,
+                ..
+            }) if ambiguous_operations.contains(
+                crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80))
+            )
         ));
     }
 

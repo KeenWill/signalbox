@@ -219,6 +219,19 @@ impl ToolBatch {
         }
     }
 
+    /// Produces opaque recovery-wait evidence only from a complete matching
+    /// batch with one exact ambiguous physical attempt.
+    pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery> {
+        match self.phase {
+            ToolBatchPhase::AwaitingRecovery { attempt } => Some(AwaitingToolRecovery {
+                session: self.session,
+                turn: self.turn,
+                attempt,
+            }),
+            ToolBatchPhase::AwaitingApproval { .. } | ToolBatchPhase::Executing { .. } => None,
+        }
+    }
+
     /// Applies or authoritatively rejects one owner decision against complete
     /// proposal-order state.
     pub fn prepare_owner_decision(
@@ -479,6 +492,31 @@ impl AwaitingToolApproval {
     /// Returns the exact earliest undecided request.
     pub const fn request(&self) -> ToolRequestId {
         self.request
+    }
+}
+
+/// Opaque evidence for one exact tool-attempt recovery wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AwaitingToolRecovery {
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+}
+
+impl AwaitingToolRecovery {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the owning logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the exact ambiguous physical attempt.
+    pub const fn attempt(&self) -> ToolAttemptId {
+        self.attempt
     }
 }
 
@@ -1053,6 +1091,45 @@ mod tests {
             prepared.attempt().state(),
             CurrentToolAttemptState::Prepared
         );
+    }
+
+    /// S06 / INV-025 / INV-026: only a completely reconstituted ambiguous
+    /// batch can expose the exact tool recovery-wait subject.
+    #[test]
+    fn s06_inv025_inv026_ambiguous_batch_exposes_opaque_recovery_wait() {
+        let only = request(10, 0);
+        let attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(13),
+            only.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
+        )
+        .reconstitute();
+        let batch = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![only.clone()],
+            vec![approval(only.id(), ToolApprovalDecision::Approve)],
+            vec![attempt],
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
+                attempt: tool_attempt_id(13),
+            },
+        )
+        .reconstitute()
+        .expect("the exact ambiguous attempt admits recovery");
+        let wait = batch
+            .awaiting_recovery()
+            .expect("a validated recovery batch exposes its opaque wait");
+
+        assert_eq!(wait.session(), session_id(1));
+        assert_eq!(wait.turn(), turn_id(2));
+        assert_eq!(wait.attempt(), tool_attempt_id(13));
     }
 
     /// S11 / INV-005 / INV-027: result projection uses only attempt/request

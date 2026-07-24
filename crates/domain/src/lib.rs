@@ -135,7 +135,7 @@ pub use tool_attempt::{
     ToolExecutionErrorKind,
 };
 pub use tool_execution::{
-    AwaitingToolApproval, PreparedToolAttempt, PreparedToolBatchDecision,
+    AwaitingToolApproval, AwaitingToolRecovery, PreparedToolAttempt, PreparedToolBatchDecision,
     PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError, ToolBatchDecisionFailure,
     ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionError,
