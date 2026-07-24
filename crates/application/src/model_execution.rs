@@ -6,12 +6,14 @@
 //! terminal observation distinct.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
     fmt,
     future::Future,
     sync::{Arc, Weak},
 };
+
+const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
@@ -1282,6 +1284,7 @@ where
         let (prepared, credential_reference, dangerous_tool_auto_approval, tool_entries) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
+        let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
         let advertised_tools = self.catalog.definitions();
         let operation = PreparedModelOperation::render(
@@ -1291,6 +1294,9 @@ where
             &tool_entries,
         )
         .map_err(ModelCallExecutionError::Render)?;
+        if automatic_tool_round_limit_reached(turn, operation.messages()) {
+            return self.commit_capability_known_failure(session, call).await;
+        }
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
             .provider
@@ -1621,6 +1627,22 @@ where
     }
 }
 
+fn automatic_tool_round_limit_reached(turn: TurnId, messages: &[ModelConversationMessage]) -> bool {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ModelConversationMessage::AssistantToolUse {
+                producing_call,
+                request,
+                ..
+            } if request.turn() == turn => Some(*producing_call),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .len()
+        >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN
+}
+
 /// One deterministic scripted-provider action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScriptedModelCallStep {
@@ -1908,6 +1930,39 @@ mod tests {
                 .expect("fixture arguments are valid"),
         )
         .into_request()
+    }
+
+    fn model_tool_use_message(
+        request_identity: u128,
+        turn_identity: u128,
+        call_identity: u128,
+        ordinal: u32,
+    ) -> ModelConversationMessage {
+        let session = identity(1, SessionId::from_uuid);
+        let turn = identity(turn_identity, TurnId::from_uuid);
+        let producing_call = identity(call_identity, ModelCallId::from_uuid);
+        let request = ToolRequestReconstitutionInput::new(
+            identity(request_identity, ToolRequestId::from_uuid),
+            session,
+            turn,
+            producing_call,
+            ToolRequestOrdinal::from_u32(ordinal),
+            ToolName::try_new(String::from("known")).expect("fixture tool name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid"),
+        )
+        .into_request();
+        ModelConversationMessage::AssistantToolUse {
+            source: SemanticTranscriptEntryRef::from_source(
+                session,
+                identity(
+                    request_identity + 10_000,
+                    SemanticTranscriptEntryId::from_uuid,
+                ),
+            ),
+            producing_call,
+            request,
+        }
     }
 
     fn prepared_fixture() -> (PreparedModelCallRequest, AuthorizedModelCall) {
@@ -2544,6 +2599,32 @@ mod tests {
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
         assert_eq!(content.text().as_str(), "exact user request");
+    }
+
+    /// The recorded turn-wide availability bound counts validated producing
+    /// calls, not requests or inherited tool history.
+    #[test]
+    fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
+        let current_turn = identity(2, TurnId::from_uuid);
+        let mut messages = (0..31_u128)
+            .map(|round| model_tool_use_message(1_000 + round, 2, 2_000 + round, 0))
+            .collect::<Vec<_>>();
+        assert!(!automatic_tool_round_limit_reached(current_turn, &messages));
+
+        messages.push(model_tool_use_message(1_031, 2, 2_031, 0));
+        assert!(automatic_tool_round_limit_reached(current_turn, &messages));
+
+        let one_multi_request_round = (0..32_u32)
+            .map(|ordinal| model_tool_use_message(3_000 + u128::from(ordinal), 2, 4_000, ordinal))
+            .chain(
+                (0..32_u128)
+                    .map(|round| model_tool_use_message(5_000 + round, 99, 6_000 + round, 0)),
+            )
+            .collect::<Vec<_>>();
+        assert!(
+            !automatic_tool_round_limit_reached(current_turn, &one_multi_request_round),
+            "one current-turn batch and inherited history consume one round"
+        );
     }
 
     /// S10 / INV-001 / INV-020: one identity is minted per ordered response
