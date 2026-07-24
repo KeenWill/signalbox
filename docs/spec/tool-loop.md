@@ -402,9 +402,8 @@ payloads of both defaults-bearing command kinds, new `CreateSession` and
 `ReplaceSessionDefaults` records use kind-scoped storage version 2; their
 version-1 records reconstitute with `DangerousToolAutoApproval::Disabled`.
 `SubmitInput` remains version 1, and the new decision command begins at version
-
-1. Registry inspection validates the supported version set for the selected kind
-   rather than applying one global version constant.
+1; registry inspection validates the supported version set for the selected kind
+rather than applying one global version constant.
 
 ## Open edges
 
