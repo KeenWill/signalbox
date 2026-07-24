@@ -15,7 +15,8 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ImportConversationOutcome, ImportConversationService, ImportedConversationIdGenerator,
+    ImportConversationError, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -95,13 +96,13 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
     Ok((container, pool, database_url))
 }
 
-/// S28 / INV-038 / INV-039: exact reingestion resolves the immutable winner,
-/// raw blobs deduplicate by content hash, and restart loading reconstructs every
-/// addressable imported frontier.
+/// S28 / INV-038: exact reingestion resolves the immutable winner, raw blobs
+/// deduplicate by content hash, and restart loading reconstructs every
+/// addressable imported-conversation frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv038_inv039_import_round_trip_is_idempotent_and_restart_safe()
--> Result<(), Box<dyn Error>> {
+async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, database_url) = migrated_postgres().await?;
     let source = concat!(
         "{\"type\":\"summary\",\"value\":null}\r\n",
@@ -241,6 +242,70 @@ async fn s28_inv038_concurrent_reversed_raws_use_stable_blob_order() -> Result<(
     Ok(())
 }
 
+/// S28 / INV-001 / INV-038: overlapping imported-entry identity keys are
+/// acquired in one stable order even when transcript positions reverse them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv001_inv038_concurrent_reversed_entry_ids_return_typed_collision()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let forward_source = concat!(
+        "{\"type\":\"summary\",\"value\":\"forward-first\"}\n",
+        "{\"type\":\"summary\",\"value\":\"forward-second\"}"
+    );
+    let reverse_source = concat!(
+        "{\"type\":\"summary\",\"value\":\"reverse-first\"}\n",
+        "{\"type\":\"summary\",\"value\":\"reverse-second\"}"
+    );
+    let mut forward = ImportConversationService::new(
+        FixedIds::new(&[0xb00], [0xc00, 0xc01]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    let mut reverse = ImportConversationService::new(
+        FixedIds::new(&[0xb10], [0xc01, 0xc00]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+
+    let (forward_result, reverse_result) = tokio::join!(
+        forward.execute(forward_source.as_bytes()),
+        reverse.execute(reverse_source.as_bytes())
+    );
+    let forward_inserted = matches!(
+        &forward_result,
+        Ok(ImportConversationOutcome::Inserted { .. })
+    );
+    let reverse_inserted = matches!(
+        &reverse_result,
+        Ok(ImportConversationOutcome::Inserted { .. })
+    );
+    let forward_collision = matches!(
+        &forward_result,
+        Err(ImportConversationError::Store(
+            ImportedConversationRepositoryError::IdentityCollision(
+                ImportedConversationIdentityCollision::TranscriptEntry
+            )
+        ))
+    );
+    let reverse_collision = matches!(
+        &reverse_result,
+        Err(ImportConversationError::Store(
+            ImportedConversationRepositoryError::IdentityCollision(
+                ImportedConversationIdentityCollision::TranscriptEntry
+            )
+        ))
+    );
+    assert!(
+        (forward_inserted && reverse_collision) || (reverse_inserted && forward_collision),
+        "one transaction must insert and the other must return a typed collision"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-001: the late unique-constraint path reached after a concurrent
 /// precheck race retains the repository's typed imported-entry collision.
 #[tokio::test]
@@ -354,6 +419,32 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// INV-038: physical raw records are nonempty at the schema boundary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+         VALUES ($1, $2)",
+    )
+    .bind(vec![0_u8; 32])
+    .bind(Vec::<u8>::new())
+    .execute(&pool)
+    .await
+    .expect_err("empty raw source records must violate the schema");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_raw_source_record_bytes_nonempty")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-002 / INV-038: adapter and domain reconstruction fail closed when
 /// durable declared counts are corrupted behind append-only guards.
 #[tokio::test]
@@ -396,6 +487,60 @@ async fn inv002_inv038_corrupt_import_fails_typed_load() -> Result<(), Box<dyn E
         ImportedConversationRepositoryError::Corruption(ImportedConversationCorruption::Domain(
             ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch { .. }
         ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-038: each raw occurrence's declared normalized-entry count is
+/// checked against the complete reconstructed membership.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv038_corrupt_raw_entry_count_fails_typed_load() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x550));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x550], [0x551]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    service
+        .execute(br#"{"type":"summary","value":null}"#)
+        .await?;
+
+    sqlx::query("ALTER TABLE imported_conversation_raw_record DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation_raw_record
+            SET declared_entry_count = $1
+          WHERE imported_conversation_id = $2
+            AND raw_record_position = 1",
+    )
+    .bind(Decimal::from(2_u64))
+    .bind(winner.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation_raw_record ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = repository
+        .load(winner)
+        .await
+        .expect_err("corrupt raw-record entry count must not load");
+    assert!(matches!(
+        error,
+        ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::RawRecordDeclaredEntryCountMismatch {
+                declared: 2,
+                actual: 1,
+                ..
+            }
+        )
     ));
 
     pool.close().await;

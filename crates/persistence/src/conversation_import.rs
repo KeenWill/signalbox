@@ -1,6 +1,6 @@
 //! Append-only PostgreSQL storage for imported conversation snapshots.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ImportedConversationStore, ImportedConversationStoreOutcome};
@@ -39,6 +39,13 @@ pub enum ImportedConversationEncodingCorruption {
     TrailingBytes,
     /// The adapter encoding version is not supported.
     UnsupportedVersion(u8),
+    /// A versioned value belongs to another top-level payload kind.
+    UnexpectedPayloadKind {
+        /// Payload kind required by this column.
+        expected: u8,
+        /// Payload kind found in the stored bytes.
+        actual: u8,
+    },
     /// A closed algebra discriminator is not supported.
     UnsupportedTag {
         /// Algebra value whose tag was decoded.
@@ -93,6 +100,15 @@ pub enum ImportedConversationCorruption {
     },
     /// A content hash resolved to different exact raw bytes.
     RawRecordHashCollision,
+    /// A raw occurrence's declared normalized-entry count is not exact.
+    RawRecordDeclaredEntryCountMismatch {
+        /// Corrupt raw-record occurrence.
+        position: ImportedRawRecordPosition,
+        /// Stored occurrence count.
+        declared: u64,
+        /// Reconstructed member count.
+        actual: u64,
+    },
     /// One source digest resolved to a structurally different snapshot.
     ExistingSnapshotMismatch,
     /// Complete durable fields failed domain-owned correlation.
@@ -124,6 +140,14 @@ impl fmt::Display for ImportedConversationCorruption {
             Self::RawRecordHashCollision => {
                 formatter.write_str("imported raw-record hash resolved to different bytes")
             }
+            Self::RawRecordDeclaredEntryCountMismatch {
+                position,
+                declared,
+                actual,
+            } => write!(
+                formatter,
+                "imported raw record {position:?} declares {declared} entries but reconstructs {actual}"
+            ),
             Self::ExistingSnapshotMismatch => {
                 formatter.write_str("imported source digest resolved to a different snapshot")
             }
@@ -470,6 +494,8 @@ async fn insert_entries(
     conversation: ImportedConversationId,
     entries: &[EncodedEntry],
 ) -> Result<(), ImportedConversationRepositoryError> {
+    let mut entries = entries.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|entry| entry.identity);
     for entry in entries {
         sqlx::query(
             "INSERT INTO imported_transcript_entry
@@ -558,7 +584,8 @@ async fn decode_complete(
 
     let raw_rows = sqlx::query(
         "SELECT occurrence.raw_record_position, occurrence.content_hash,
-                occurrence.normalized_value_encoding, blob.raw_bytes
+                occurrence.normalized_value_encoding,
+                occurrence.declared_entry_count, blob.raw_bytes
            FROM imported_conversation_raw_record AS occurrence
            LEFT JOIN imported_raw_source_record AS blob
              ON blob.content_hash = occurrence.content_hash
@@ -569,8 +596,13 @@ async fn decode_complete(
     .fetch_all(&mut *connection)
     .await?;
     let mut raws = Vec::with_capacity(raw_rows.len());
+    let mut declared_entries_by_raw = BTreeMap::new();
     for row in raw_rows {
         let position = decode_raw_position(row.try_get("raw_record_position")?)?;
+        let declared_entry_count =
+            positive_u64(row.try_get("declared_entry_count")?).map_err(|reason| {
+                invalid_ordinal_with_reason("raw-record declared entry count", reason)
+            })?;
         let hash = digest_from_bytes(
             row.try_get("content_hash")?,
             "raw-record hash",
@@ -584,6 +616,7 @@ async fn decode_complete(
         raws.push(ImportedRawSourceRecordReconstitutionInput::new(
             position, hash, bytes, normalized,
         ));
+        declared_entries_by_raw.insert(position, declared_entry_count);
     }
 
     let entry_rows = sqlx::query(
@@ -599,11 +632,16 @@ async fn decode_complete(
     .fetch_all(&mut *connection)
     .await?;
     let mut entries = Vec::with_capacity(entry_rows.len());
+    let mut actual_entries_by_raw = BTreeMap::<ImportedRawRecordPosition, u64>::new();
     for row in entry_rows {
         let position = decode_entry_position(row.try_get("imported_entry_position")?)?;
         let identity =
             ImportedTranscriptEntryId::from_uuid(row.try_get("imported_transcript_entry_id")?);
         let raw_position = decode_raw_position(row.try_get("raw_record_position")?)?;
+        let actual_count = actual_entries_by_raw.entry(raw_position).or_default();
+        *actual_count = actual_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_ordinal("raw-record actual entry count"))?;
         let within_position = decode_within_position(row.try_get("record_entry_position")?)?;
         let source_speaker =
             decode_source_speaker(row.try_get::<String, _>("source_speaker_kind")?.as_str())?;
@@ -623,6 +661,19 @@ async fn decode_complete(
             content,
             source,
         ));
+    }
+    for (position, declared) in declared_entries_by_raw {
+        let actual = actual_entries_by_raw.get(&position).copied().unwrap_or(0);
+        if actual != declared {
+            return Err(
+                ImportedConversationCorruption::RawRecordDeclaredEntryCountMismatch {
+                    position,
+                    declared,
+                    actual,
+                }
+                .into(),
+            );
+        }
     }
 
     ImportedConversationReconstitutionInput::new(
@@ -822,6 +873,9 @@ impl From<CodecFailure> for ImportedConversationEncodingCorruption {
             CodecFailure::UnexpectedEnd => Self::UnexpectedEnd,
             CodecFailure::TrailingBytes => Self::TrailingBytes,
             CodecFailure::UnsupportedVersion(value) => Self::UnsupportedVersion(value),
+            CodecFailure::UnexpectedPayloadKind { expected, actual } => {
+                Self::UnexpectedPayloadKind { expected, actual }
+            }
             CodecFailure::UnsupportedTag { kind, value } => Self::UnsupportedTag { kind, value },
             CodecFailure::InvalidUtf8(kind) => Self::InvalidUtf8(kind),
             CodecFailure::InvalidJsonNumber => Self::InvalidJsonNumber,
