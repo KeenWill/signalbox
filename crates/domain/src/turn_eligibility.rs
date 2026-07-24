@@ -1831,6 +1831,38 @@ impl AcceptedInputSchedulingProjection {
         )
     }
 
+    /// Closes one executing tool batch under a newly applied interrupt.
+    ///
+    /// The checked scheduling projection supplies the current turn attempt;
+    /// the batch supplies the exact yielded frontier and complete physical
+    /// attempt inventory. Result identities are consumed only after both
+    /// projections agree.
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        batch: crate::ToolBatch,
+        result_entries: Vec<crate::SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        if self.resolved_snapshot(batch.yielded_snapshot().frontier().snapshot())
+            != Some(batch.yielded_snapshot())
+        {
+            return Err(crate::ModelCallClosureError::InterruptCorrelationMismatch);
+        }
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_interrupt_to_executing_tool_batch(
+            active_turn,
+            batch,
+            result_entries,
+            result_frontier,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Closes the active tool-attempt recovery wait under one newly applied
     /// interrupt while preserving its exact ambiguity.
     pub fn apply_interrupt_to_tool_recovery(

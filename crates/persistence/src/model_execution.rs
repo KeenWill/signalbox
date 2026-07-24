@@ -2181,6 +2181,16 @@ pub(crate) fn attach_interrupt_reclassification_candidates(
     )
 }
 
+pub(crate) fn attach_interrupt_reclassification_candidates_for_active(
+    identities: signalbox_domain::CancelledModelCallTurnIdentities,
+    active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
+    Ok(identities.with_pending_steering_reclassifications(
+        pending_reclassification_candidates_for_active(active_turn, next_turn)?,
+    ))
+}
+
 pub(crate) fn attach_recovery_interrupt_reclassification_candidates(
     identities: signalbox_domain::AmbiguousModelCallTurnIdentities,
     active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
@@ -2351,26 +2361,6 @@ pub(crate) async fn require_live_execution_for_restart(
     requested_session: SessionId,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
     require_live_execution_with_targets(connection, requested_session, None, None, None).await
-}
-
-pub(crate) async fn require_live_tool_execution(
-    connection: &mut PgConnection,
-    requested_session: SessionId,
-    batch: &signalbox_domain::ToolBatch,
-) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    let continuation_snapshot = ResolvedContextFrontierReconstitutionInput::new(
-        requested_session,
-        batch.yielded_snapshot().frontier().snapshot(),
-        batch.yielded_snapshot().ordered_entries().collect(),
-    );
-    require_live_execution_with_targets(
-        connection,
-        requested_session,
-        None,
-        Some(continuation_snapshot),
-        None,
-    )
-    .await
 }
 
 async fn require_live_execution_with_targets(

@@ -3985,6 +3985,56 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     })
 }
 
+pub(crate) fn apply_interrupt_to_executing_tool_batch(
+    active_turn: ActivatedAcceptedInputTurn,
+    batch: crate::ToolBatch,
+    result_entries: Vec<SemanticTranscriptEntryId>,
+    result_frontier: ContextFrontierId,
+    interrupt: AppliedInterruptCommandResult,
+    identities: CancelledModelCallTurnIdentities,
+) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    let ActiveTurnPhase::Running { current_attempt } = active_turn.phase() else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    let crate::ToolBatchPhase::Executing { turn_attempt } = batch.phase() else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if batch.session() != active_turn.session()
+        || batch.turn() != active_turn.turn()
+        || turn_attempt != current_attempt.id()
+        || interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let result_projection = batch
+        .prepare_cancellation_projection(result_entries, result_frontier)
+        .map_err(|_| ModelCallClosureError::InterruptCorrelationMismatch)?;
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let (tool_result_entries, result_snapshot) = result_projection.into_parts();
+    let mut cancelled = close_cancelled_turn(
+        ModelCallTurnScope {
+            session: active_turn.session(),
+            turn: active_turn.turn(),
+        },
+        current_attempt.clone(),
+        None,
+        result_snapshot,
+        proof,
+        identities,
+        reclassified_pending_steering,
+    )?;
+    cancelled.tool_result_entries = tool_result_entries;
+    Ok(cancelled)
+}
+
 fn complete_turn(
     scope: ModelCallTurnScope,
     call: EndedModelCall,
@@ -4187,8 +4237,10 @@ mod tests {
         NormalizedToolArguments, PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
         SessionCreationProvenance, SessionReconstitutionInput, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDecisionSource, ToolName, ToolRequestOrdinal,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
+        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
+        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration, ToolEffectClass,
+        ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestOrdinal,
         ToolRequestReconstitutionInput, TranscriptAncestry,
         test_support::{
             accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
@@ -5765,6 +5817,87 @@ mod tests {
             cancelled.cancellation_entry().payload(),
             SemanticTranscriptEntryPayload::TurnCancelled { turn }
                 if *turn == expected_turn
+        ));
+    }
+
+    /// S07 / INV-006 / INV-011 / INV-037: an interrupt closes a checkpointed
+    /// but unsent tool attempt without inventing send authorization.
+    #[test]
+    fn s07_inv006_inv011_inv037_interrupt_closes_prepared_tool_attempt() {
+        let execution = active_execution();
+        let request = batch_request(41, &execution);
+        let tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(42),
+            execution.session(),
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: request.producing_call(),
+                request: request.id(),
+            },
+        );
+        let yielded = execution
+            .current_snapshot
+            .derive_appending_candidate(context_frontier_id(43), vec![tool_use.reference()])
+            .expect("the tool proposal extends the current frontier");
+        let approval = ToolApprovalResolutionReconstitutionInput::new(
+            request.id(),
+            ToolApprovalDecision::Approve,
+            ToolDecisionSource::OwnerCommand,
+        )
+        .reconstitute()
+        .expect("the owner approval is valid");
+        let crash_lost = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(44),
+            request.id(),
+            execution.session(),
+            execution.turn(),
+            execution.current_attempt().id(),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
+            }),
+        )
+        .reconstitute();
+        let batch = ToolBatchReconstitutionInput::new(
+            execution.session(),
+            execution.turn(),
+            request.producing_call(),
+            yielded,
+            vec![request.clone()],
+            vec![approval],
+            vec![crash_lost],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: execution.current_attempt().id(),
+            },
+        )
+        .reconstitute()
+        .expect("the crash-lost prepared attempt remains terminalizable");
+        let interrupt = applied_interrupt(&execution);
+        let cancelled = apply_interrupt_to_executing_tool_batch(
+            execution.active_turn,
+            batch,
+            vec![semantic_transcript_entry_id(45)],
+            context_frontier_id(46),
+            interrupt,
+            CancelledModelCallTurnIdentities::new(
+                semantic_transcript_entry_id(47),
+                context_frontier_id(48),
+            ),
+        )
+        .expect("the prepared tool checkpoint closes directly");
+
+        assert!(matches!(
+            cancelled.attempt().end(),
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::Cancelled,
+            } if *cause == interrupt.proof()
+        ));
+        assert_eq!(cancelled.tool_result_entries().len(), 1);
+        assert!(matches!(
+            cancelled.tool_result_entries()[0].payload(),
+            SemanticTranscriptEntryPayload::ToolClosed { request: closed }
+                if *closed == request.id()
         ));
     }
 
