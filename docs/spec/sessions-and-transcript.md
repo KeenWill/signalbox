@@ -174,13 +174,14 @@ Why (one transaction): a visible seeded session must never name a missing
 imported aggregate, nonmember boundary, partial semantic projection, or
 incomplete initial frontier.
 
-Checked session reconstitution requires imported ancestry and its
-`ImportedSessionSeed` together, validates that the linked frontier is owned by
-the same session, and compares its complete ordered members with the selected
-imported prefix. A missing, duplicate, cross-session, mismatched-boundary, or
+Creation replay and every purpose-specific read that resolves imported semantic
+context require imported ancestry and its `ImportedSessionSeed` together,
+validate that the linked frontier is owned by the same session, and compare its
+complete ordered members with the selected imported prefix. A missing,
+duplicate, cross-session, mismatched-boundary, or
 equal-content-but-different-identity seed is typed corruption. First-turn
-scheduling reads this stored identity; it never reconstructs authority by
-minting another frontier.
+scheduling and transcript projection use this checked loader and the stored
+identity; neither reconstructs authority by minting another frontier.
 
 ## Session defaults and replacement
 
@@ -256,13 +257,15 @@ loading never returns a receipt and command replay never returns a `Session`.
 
 `load_session(SessionId)` performs one statement-consistent read joining the
 session row, its one current-defaults pointer, and exactly the version that
-pointer names (`crates/persistence/src/session.rs`). For imported ancestry, that
-same read also projects the imported conversation, the one-to-one seed record,
-the seed frontier and ordered members, and their referenced semantic entries;
-the adapter passes that complete projection through
-`ImportedSessionReconstitutionInput::reconstitute`. The pointer is
-authoritative; a load never infers current defaults from version one, the
-greatest stored version, a caller-supplied version, or a cache.
+pointer names (`crates/persistence/src/session.rs`). For imported ancestry, the
+same bounded read joins the one-to-one seed record and its frontier header as a
+constant-size proof: seed and frontier ownership and identity must agree with
+the session, and the stored member count must equal the selected imported
+boundary position. It does not materialize the imported conversation, frontier
+members, or semantic entries. Full prefix comparison belongs to creation replay
+and purpose-specific semantic-context resolution. The pointer is authoritative;
+a load never infers current defaults from version one, the greatest stored
+version, a caller-supplied version, or a cache.
 
 Why (pointer authority): append-only version existence does not mean
 installation; only the pointer records the accepted current choice.
@@ -270,12 +273,11 @@ installation; only the pointer records the accepted current choice.
 `None` is returned only when no session row exists in the read snapshot. Once
 the row exists, a missing pointer, missing selected version, ownership mismatch,
 pointer/record version disagreement, unknown discriminator, invalid ordinal, or
-an incomplete or inconsistent imported seed projection fails closed as typed
-corruption: the adapter's decode checks feed the ancestry-appropriate
-domain-owned `SessionReconstitutionInput::reconstitute` or
-`ImportedSessionReconstitutionInput::reconstitute` seam, each of which accepts
-only complete agreeing domain values (INV-002, INV-039). Reconstitution never
-yields `None`, a default, or a partial session.
+an absent or inconsistent bounded imported-seed proof fails closed as typed
+corruption: the adapter's decode checks feed the domain-owned
+`SessionReconstitutionInput::reconstitute` seam, which accepts only complete
+agreeing domain values (INV-002, INV-039). Reconstitution never yields `None`, a
+default, or a partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
