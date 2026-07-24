@@ -109,7 +109,7 @@ The closed normalized content vocabulary is:
   tool-reference result blocks whose own fields also retain attestations;
 - `Thinking`, retaining independently attested exact thinking and signature;
 - `RedactedThinking`, retaining the source's independently attested redacted
-  data; and
+  data;
 - `Document`, retaining independently attested media source kind, media type,
   and exact data; and
 - `MessageContentAbsent`, distinguishing an omitted or explicit-null message,
