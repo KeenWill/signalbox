@@ -225,7 +225,7 @@ adds unnecessary steady database traffic before measurements justify it.
 transcript content, and a transactional outbox, but no supported client process
 boundary or outbox consumer. The retired ADR-0019 protocol was never implemented
 or distilled and carries no authority. The owner predecided the version-one
-transport, framing, and trust posture in the 2026-07-23 session.
+transport, framing, and trust posture on 2026-07-23.
 
 **Decision.** Version one is a Unix domain stream socket at the required
 `SIGNALBOX_SOCKET_PATH`, with owner-only permissions, versioned JSON-lines, and
