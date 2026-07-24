@@ -360,7 +360,7 @@ mod tests {
     }
 
     /// A validated request whose one knob is the command-identity seed
-    /// (`docs/testing-style.md`, rule 4); it targets the canonical session
+    /// (`docs/agents/testing-style.md`, rule 4); it targets the canonical session
     /// with canonical "hello" content and the version-one
     /// start-when-no-active-turn delivery.
     fn request(command: u128) -> SubmitInputRequest {
