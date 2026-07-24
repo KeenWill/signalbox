@@ -6,12 +6,13 @@
 mod command_registry;
 mod conversation_import_codec;
 mod lock_inventory;
-mod outbox;
 
 pub mod conversation_import;
 pub mod create_session;
 pub mod mapping;
 pub mod model_execution;
+pub mod outbox;
+pub mod process_read;
 pub mod replace_session_defaults;
 pub mod scheduler;
 pub mod session;

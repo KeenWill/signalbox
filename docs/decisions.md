@@ -131,6 +131,29 @@ model-input rendering, append-only Postgres storage, the domain/application
 spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
 
+## 2026-07-23 — Bound process-frame JSON container depth
+
+**Context.** The 8 MiB frame limit bounds input bytes, but duplicate-member
+validation retains one key set per open object. A deeply nested frame can
+therefore amplify live allocation before version classification even while
+remaining under the byte cap.
+
+**Decision.** Admit at most 127 simultaneously open JSON objects and arrays,
+including the top-level frame object, and classify deeper input as
+`malformed_frame` before version classification. Duplicate-member validation
+still covers every object within the admitted depth. The value matches the
+existing provider-JSON container boundary and Serde's practical recursion
+boundary.
+
+**Rejected alternatives.** Relying on the byte cap alone permits
+disproportionate scanner memory. Skipping duplicate checks for unsupported
+versions contradicts the closed process grammar. A shallower arbitrary limit
+lacks evidence, while an unbounded or heap-spilling parser preserves the
+amplification.
+
+**Affects.** Process frame decoding, duplicate-member scanning,
+[process-protocol](spec/process-protocol.md), and INV-033 tests.
+
 ## 2026-07-23 — Defer native-snapshot review findings to the rewire inventory
 
 **Context.** The native Swift client entered `clients/native/` as an as-is
@@ -261,6 +284,28 @@ platform-specific exception would make the same protocol path carry different
 trust guarantees.
 
 **Affects.** Local process-socket deployment, validation, and startup tests.
+
+## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
+
+**Context.** The version-one process boundary needs closed tagged JSON shapes,
+canonical full-range decimal strings, canonical UUID strings, and explicit
+version rejection without leaking domain or storage types. Serde, serde_json,
+and uuid are already pinned elsewhere in the workspace.
+
+**Decision.** The focused `signalbox-process-protocol` crate directly uses those
+three existing dependencies. Serde derives the closed tagged shapes;
+serde_json's `raw_value` feature preserves the version spelling long enough to
+reject an arbitrary integer as unsupported before decoding its payload; and uuid
+parses values behind custom lowercase-hyphenated and command-sentinel checks.
+The crate owns framing and wire validation only.
+
+**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
+UTF-8, and number handling. Raw string identifiers would defer canonical checks
+to every adapter. A schema generator or protocol framework would add a larger
+toolchain and compatibility policy than exact version one needs.
+
+**Affects.** `crates/process-protocol`, the workspace member inventory, and its
+lockfile package entry; no domain or application public type changes.
 
 ## 2026-07-23 — Trust only root or the hub user in socket ancestry
 

@@ -4,7 +4,7 @@
 //! adapters implement [`ImportedConversationStore`]. The application supplies
 //! hub identities and performs one complete resolve-or-insert operation.
 
-use std::{collections::BTreeSet, error::Error, fmt, future::Future};
+use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -149,11 +149,8 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// The format carried by the converted aggregate.
         converted: ImportedConversationFormat,
     },
-    /// The converter returned an entry identity not issued by the hub callback.
-    ConverterEntryIdentityNotIssued {
-        /// Unissued identity carried by the converted aggregate.
-        entry: ImportedTranscriptEntryId,
-    },
+    /// Emitted entry identities did not exactly match callback issuance order.
+    ConverterEntryIdentitySequenceMismatch,
     /// The store reported a digest other than the converted exact source.
     StoreSourceDigestMismatch {
         /// The converted aggregate digest.
@@ -195,9 +192,8 @@ where
                 formatter,
                 "conversation converter format mismatch: declared {declared:?}, converted {converted:?}"
             ),
-            Self::ConverterEntryIdentityNotIssued { entry } => write!(
-                formatter,
-                "conversation converter returned an unissued entry identity: {entry:?}"
+            Self::ConverterEntryIdentitySequenceMismatch => formatter.write_str(
+                "conversation converter entry identities did not match callback issuance",
             ),
             Self::StoreSourceDigestMismatch { expected, actual } => write!(
                 formatter,
@@ -266,11 +262,11 @@ where
         } = self;
         let candidate = ids.next_conversation_id();
         let declared = converter.format();
-        let mut issued_entries = BTreeSet::new();
+        let mut issued_entries = Vec::new();
         let converted = converter
             .convert(candidate, source, || {
                 let entry = ids.next_entry_id();
-                issued_entries.insert(entry);
+                issued_entries.push(entry);
                 entry
             })
             .map_err(ImportConversationError::Conversion)?;
@@ -286,15 +282,13 @@ where
                 converted: converted.format(),
             });
         }
-        if let Some(unissued) = converted
+        if converted
             .entries()
             .iter()
             .map(|entry| entry.identity())
-            .find(|entry| !issued_entries.contains(entry))
+            .ne(issued_entries.iter().copied())
         {
-            return Err(ImportConversationError::ConverterEntryIdentityNotIssued {
-                entry: unissued,
-            });
+            return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
         }
         let expected_digest = converted.source_digest();
         let stored = store
@@ -506,6 +500,7 @@ mod tests {
     struct FakeConverter {
         returned_owner: Option<ImportedConversationId>,
         returned_entries: Option<[ImportedTranscriptEntryId; 2]>,
+        request_extra_entry: bool,
         reject: bool,
         observed: Vec<(ImportedConversationId, Vec<u8>)>,
     }
@@ -531,6 +526,9 @@ mod tests {
                 return Err(FakeConversionError::Rejected);
             }
             let issued_entries = [next_entry_id(), next_entry_id()];
+            if self.request_extra_entry {
+                let _unused = next_entry_id();
+            }
             Ok(converted(
                 self.returned_owner.unwrap_or(owner),
                 self.returned_entries.unwrap_or(issued_entries),
@@ -581,6 +579,7 @@ mod tests {
             FakeConverter {
                 returned_owner: None,
                 returned_entries: None,
+                request_extra_entry: false,
                 reject: false,
                 observed: Vec::new(),
             },
@@ -738,11 +737,55 @@ mod tests {
 
         assert_eq!(
             service.execute(b"cross-wired").await,
-            Err(ImportConversationError::ConverterEntryIdentityNotIssued {
-                entry: unissued_entry,
-            })
+            Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch)
         );
         let (_, _, store) = service.into_parts();
+        assert!(store.observed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn s28_inv001_converter_reordered_entry_identities_never_reach_store() {
+        let candidate = conversation(1);
+        let issued_entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            issued_entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, issued_entries),
+            }),
+        );
+        service.converter.returned_entries = Some([issued_entries[1], issued_entries[0]]);
+
+        assert_eq!(
+            service.execute(b"reordered").await,
+            Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch)
+        );
+        let (_, _, store) = service.into_parts();
+        assert!(store.observed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn s28_inv001_converter_extra_identity_request_never_reaches_store() {
+        let candidate = conversation(1);
+        let issued_entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            issued_entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, issued_entries),
+            }),
+        );
+        service.ids.entries.push_back(entry(4));
+        service.converter.request_extra_entry = true;
+
+        assert_eq!(
+            service.execute(b"extra request").await,
+            Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch)
+        );
+        let (ids, _, store) = service.into_parts();
+        assert_eq!(ids.entry_calls, 3);
         assert!(store.observed.is_empty());
     }
 
