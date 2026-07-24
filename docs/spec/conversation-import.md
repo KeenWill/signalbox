@@ -259,7 +259,9 @@ Records then normalize as follows:
 
 1. A top-level record whose `type` is neither `user` nor `assistant` produces
    one `SourceEvent` containing its type attestation and complete normalized
-   object.
+   object. Its source-speaker attestation is `NotAttested`: an omitted, null, or
+   other source `type` is retained only as the independent record-type
+   attestation and never reinterpreted as a speaker assertion.
 
 2. For a user or assistant record, the top-level type supplies its attested
    speaker. The `message` envelope and its `role` are retained independently as
