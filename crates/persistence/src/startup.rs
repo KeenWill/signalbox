@@ -39,6 +39,8 @@ use crate::{
 /// Which fresh startup-recovery identity collided durably.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupScanIdentityCollision {
+    /// A proposed tool-closure semantic-entry identity already exists.
+    ToolClosureEntry,
     /// The proposed `TurnFailed` entry identity already exists.
     FailureEntry,
     /// The proposed terminal context-frontier identity already exists.
@@ -50,6 +52,7 @@ pub enum StartupScanIdentityCollision {
 impl fmt::Display for StartupScanIdentityCollision {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let identity = match self {
+            Self::ToolClosureEntry => "tool-closure semantic-entry",
             Self::FailureEntry => "failure semantic-entry",
             Self::TerminalFrontier => "terminal context-frontier",
             Self::ReclassifiedTurn => "reclassified successor-turn",
@@ -430,7 +433,7 @@ where
                 .map_err(map_tool_loop_error)?
                 .ok_or(StartupScanCorruption::Missing("crash-closed tool batch"))?;
                 let projection = closed_batch
-                    .prepare_cancellation_projection(
+                    .prepare_failure_projection(
                         closure.result_entries().to_vec(),
                         closure.result_frontier(),
                     )
@@ -447,7 +450,7 @@ where
                     connection,
                     requested_session,
                     active_turn.turn(),
-                    projection.snapshot(),
+                    &projection,
                     closure.failure().clone(),
                     |accepted_input| ids.next_reclassified_turn_id(accepted_input),
                 )
@@ -751,8 +754,12 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
 fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryError {
     match error {
         ToolLoopRepositoryError::Database { source, .. } => source.into(),
-        ToolLoopRepositoryError::IdentityCollision
-        | ToolLoopRepositoryError::Corruption(_)
+        ToolLoopRepositoryError::IdentityCollision => {
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ToolClosureEntry,
+            )
+        }
+        ToolLoopRepositoryError::Corruption(_)
         | ToolLoopRepositoryError::DifferentCommandKind
         | ToolLoopRepositoryError::InvalidTransition(_) => {
             StartupScanCorruption::Inconsistent("tool-attempt restart state").into()
@@ -837,8 +844,9 @@ mod tests {
 
     use super::{
         StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-        commit_failure_is_ambiguous, record_reclassified_turn_candidate,
+        commit_failure_is_ambiguous, map_tool_loop_error, record_reclassified_turn_candidate,
     };
+    use crate::tool_loop::ToolLoopRepositoryError;
 
     /// INV-034: a generated source-turn identity is a retryable collision, not
     /// durable corruption.
@@ -870,6 +878,16 @@ mod tests {
             Err(StartupScanRepositoryError::IdentityCollision(
                 StartupScanIdentityCollision::ReclassifiedTurn
             ))
+        ));
+    }
+
+    #[test]
+    fn tool_closure_identity_collision_remains_retryable_at_startup_boundary() {
+        assert!(matches!(
+            map_tool_loop_error(ToolLoopRepositoryError::IdentityCollision),
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ToolClosureEntry
+            )
         ));
     }
 
