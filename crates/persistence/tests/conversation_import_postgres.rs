@@ -801,7 +801,7 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
         return Ok(());
     }
     let Some(root) = env::var_os("SIGNALBOX_REAL_CLAUDE_TRANSCRIPTS") else {
-        return Ok(());
+        return Err("real transcript inputs were not configured".into());
     };
     let mut paths = Vec::new();
     for root in env::split_paths(&root) {
@@ -851,12 +851,15 @@ async fn validate_real_transcript(
         ImportConversationOutcome::Inserted { conversation }
         | ImportConversationOutcome::AlreadyImported { conversation } => conversation,
     };
-    assert_eq!(
-        service.execute(source).await?,
-        ImportConversationOutcome::AlreadyImported {
-            conversation: winner
+    match service.execute(source).await? {
+        ImportConversationOutcome::AlreadyImported { conversation } if conversation == winner => {}
+        ImportConversationOutcome::AlreadyImported { .. } => {
+            return Err("real transcript reimport resolved a different identity".into());
         }
-    );
+        ImportConversationOutcome::Inserted { .. } => {
+            return Err("real transcript reimport was not idempotent".into());
+        }
+    }
     let (_, _, repository) = service.into_parts();
     let stored = repository
         .load(winner)
