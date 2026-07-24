@@ -4,11 +4,12 @@ use std::{collections::BTreeSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StartupScanRepository, StartupScanSessionOutcome,
+    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator, StartupScanRepository,
+    StartupScanSessionOutcome, ToolCrashClosureIdentities,
 };
 use signalbox_domain::{
-    AcceptedInputId, AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
-    AttemptEnd, CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
+    CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
     PendingSteeringReclassificationIdentity, PreparedAcceptedInputTurnFailure,
     ReconstitutedToolAttempt,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
@@ -23,7 +24,7 @@ use crate::{
     },
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        fail_tool_crash_in_transaction, persist_terminal_outcome,
+        fail_tool_crash_in_transaction, insert_snapshot, persist_terminal_outcome,
         require_live_execution_for_restart,
     },
     outbox,
@@ -31,7 +32,7 @@ use crate::{
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
     tool_loop::{
         ToolLoopRepositoryError, load_active_batch_from_connection, persist_ended_attempt,
-        persist_tool_recovery_wait,
+        persist_result_entries, persist_tool_recovery_wait,
     },
 };
 
@@ -234,23 +235,17 @@ impl PostgresStartupScanRepository {
     }
 
     /// Locks one session and atomically terminalizes its prior-process attempt.
-    pub async fn recover<NextTurn>(
+    pub async fn recover<Generator>(
         &self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-        next_reclassified_turn: NextTurn,
+        ids: &mut Generator,
     ) -> Result<StartupScanSessionOutcome, StartupScanRepositoryError>
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        Generator: StartupScanIdGenerator + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let decision = recover_in_transaction(
-            &mut transaction,
-            session,
-            identities,
-            next_reclassified_turn,
-        )
-        .await;
+        let decision = recover_in_transaction(&mut transaction, session, identities, ids).await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -281,28 +276,27 @@ impl StartupScanRepository for PostgresStartupScanRepository {
         PostgresStartupScanRepository::active_sessions(self).await
     }
 
-    async fn recover<NextTurn>(
+    async fn recover<Generator>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-        next_reclassified_turn: NextTurn,
+        ids: &mut Generator,
     ) -> Result<StartupScanSessionOutcome, Self::Error>
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        Generator: StartupScanIdGenerator + Send,
     {
-        PostgresStartupScanRepository::recover(self, session, identities, next_reclassified_turn)
-            .await
+        PostgresStartupScanRepository::recover(self, session, identities, ids).await
     }
 }
 
-async fn recover_in_transaction<NextTurn>(
+async fn recover_in_transaction<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
-    next_reclassified_turn: NextTurn,
+    ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
 where
-    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    Generator: StartupScanIdGenerator + Send,
 {
     // This is the same scheduler-row lock ordering used by every lifecycle
     // writer. Reconstitution and all guarded writes happen while it is held.
@@ -321,22 +315,22 @@ where
         identities,
         session_exists,
         scheduler_session,
-        next_reclassified_turn,
+        ids,
     )
     .await
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
-async fn recover_locked_session<NextTurn>(
+async fn recover_locked_session<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
     session_exists: bool,
     scheduler_session: Option<Uuid>,
-    mut next_reclassified_turn: NextTurn,
+    ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
 where
-    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    Generator: StartupScanIdGenerator + Send,
 {
     if scheduler_session.is_none() {
         if session_exists {
@@ -410,16 +404,45 @@ where
                 ));
             }
             ToolAttemptCrashOutcome::KnownFailed(_) => {
-                fail_tool_crash_in_transaction(
-                    connection,
-                    requested_session,
-                    active_turn.turn(),
-                    batch.yielded_snapshot(),
+                let closure = ToolCrashClosureIdentities::new(
+                    (0..batch.requests().len())
+                        .map(|_| ids.next_tool_closure_entry_id())
+                        .collect(),
+                    ids.next_tool_closure_frontier_id(),
                     FailedModelCallTurnIdentities::new(
                         identities.failure_entry(),
                         identities.terminal_frontier(),
                     ),
-                    &mut next_reclassified_turn,
+                );
+                let closed_batch = load_active_batch_from_connection(
+                    connection,
+                    requested_session,
+                    active_turn.turn(),
+                )
+                .await
+                .map_err(map_tool_loop_error)?
+                .ok_or(StartupScanCorruption::Missing("crash-closed tool batch"))?;
+                let projection = closed_batch
+                    .prepare_cancellation_projection(
+                        closure.result_entries().to_vec(),
+                        closure.result_frontier(),
+                    )
+                    .map_err(|_| {
+                        StartupScanCorruption::Inconsistent("known tool crash closure projection")
+                    })?;
+                persist_result_entries(connection, &projection)
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                insert_snapshot(connection, projection.snapshot())
+                    .await
+                    .map_err(map_model_call_error)?;
+                fail_tool_crash_in_transaction(
+                    connection,
+                    requested_session,
+                    active_turn.turn(),
+                    projection.snapshot(),
+                    closure.failure().clone(),
+                    |accepted_input| ids.next_reclassified_turn_id(accepted_input),
                 )
                 .await
                 .map_err(map_model_call_error)?;
@@ -446,7 +469,7 @@ where
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {
                 let accepted_input = pending.accepted_input();
-                let proposed_turn = next_reclassified_turn(accepted_input);
+                let proposed_turn = ids.next_reclassified_turn_id(accepted_input);
                 record_reclassified_turn_candidate(
                     model_execution.turn(),
                     proposed_turn,
@@ -486,7 +509,7 @@ where
         let mut reclassifications = Vec::new();
         for pending in model_execution.active_turn().pending_steering() {
             let accepted_input = pending.accepted_input();
-            let proposed_turn = next_reclassified_turn(accepted_input);
+            let proposed_turn = ids.next_reclassified_turn_id(accepted_input);
             record_reclassified_turn_candidate(
                 model_execution.turn(),
                 proposed_turn,

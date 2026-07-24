@@ -207,7 +207,8 @@ those tests.
   generation; classify the disconnect.
 - **State transitions:** Prepared or effect-free in-flight tool attempt →
   terminal/known-failed after crash loss; the abandoned turn attempt ends lost
-  and the turn fails.
+  and the turn fails after proposal-ordered `ToolClosed` materialization for
+  every request without an ordinary result.
 - **Transient updates:** Runner heartbeat, command progress, and partial stdout
   may disappear.
 - **Owning component:** Hub owns policy and recovery; runner owns physical
@@ -231,24 +232,19 @@ those tests.
   `...Ambiguous` branch. If the hub crashes before classification, startup makes
   the tool attempt terminal/ambiguous while ending the abandoned turn attempt in
   the matching `...Lost` branch. The physical tool outcome remains `Ambiguous`
-  in both cases. Only when neither an applied interrupt nor fatal mismatch
-  prohibits continuation does the turn retain its slot in
-  `AwaitingRecoveryDecision` carrying that tool-attempt reference until explicit
-  owner action or resolving evidence continues the turn or gives it
-  `ReconciliationRequired` with an applied stop-choice proof and that exact wait
-  set. An applied interrupt or fatal mismatch instead preserves the ambiguity
-  while terminalizing with the exact set and matching typed reason.
+  in both cases. When neither an applied interrupt nor fatal mismatch prohibits
+  continuation, the turn retains its slot in `AwaitingRecoveryDecision` carrying
+  that tool-attempt reference. The implemented applied-interrupt path preserves
+  the ambiguity while terminalizing as `ReconciliationRequired` with the exact
+  attempt and proof.
 - **Transient updates:** Last progress text may be shown only as
   non-authoritative evidence.
 - **Owning component:** Hub classifies and blocks automatic retry; the selected
   runner may later provide evidence; the owner resolves uncertainty.
 - **Failure behavior:** No blind retry and no claim that interrupt or disconnect
-  undid the effect. With several ambiguous operations, separately recorded
-  evidence refines the wait to the exact nonempty remainder without rewriting
-  the terminal tool or turn attempt; only resolving evidence for all references
-  or an exact-set owner decision can leave it. Any authorization to continue
-  preserves ambiguous records, adds an accepted-risk marker visible to successor
-  context, and follows the later tool-effect policy.
+  undid the effect. Version one has no writer for resolving evidence or
+  accepted-risk continuation; the parked wait retains its slot until an applied
+  interrupt terminalizes it.
 - **Required invariants:** INV-009, INV-019, INV-021, INV-025, INV-026, INV-029,
   INV-034.
 - **Remaining questions:** Reconciliation workflow, idempotency-key support,
@@ -275,8 +271,10 @@ those tests.
   attempt and slot. An approval wait remains parked until its canonical decision
   command resolves the approval obligation; deny-and-end records the denial
   first, then applies the interrupt after decision progression opens execution.
-  Recovery wait → reconciliation-required with that proof and the wait's exact
-  operation set. Every direct terminal path atomically records the
+  The two commands are not one atomic selection; after execution opens, the
+  ordinary dispatch-gate race determines whether remaining work or the interrupt
+  commits first. Recovery wait → reconciliation-required with that proof and the
+  wait's exact operation set. Every direct terminal path atomically records the
   interrupt-created immediate successor and reclassifies pending steering before
   releasing the slot. If fatal mismatch already requested stop, the first
   interrupt populates its interrupt field without reauthorizing work; either
@@ -425,7 +423,8 @@ those tests.
   and resolves every earlier approval-order obligation, then composes the
   existing applied-interrupt stop path after decision progression opens
   execution; it does not invent a second cancellation authority or treat an
-  interrupt as an approval decision.
+  interrupt as an approval decision. The composition does not promise that an
+  interrupt submitted after execution opens prevents already-eligible work.
 - **Required invariants:** INV-009, INV-012, INV-019, INV-020, INV-027.
 - **Remaining questions:** Whether future reconsideration creates a new request.
   Baseline continuation in a new turn attempt is decided by
