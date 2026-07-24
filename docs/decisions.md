@@ -64,6 +64,30 @@ snapshot incomplete.
 dispatch, terminal-client decoding, imported transcript reads, follow snapshots,
 and compatibility tests.
 
+## 2026-07-24 — Preserve JSON structure with an edge-owned bounded decoder
+
+**Context.** The Claude Code converter must retain ordered and repeated object
+members plus exact valid number spellings. Deserializing through
+`serde_json::Value` would select one repeated member and move the source away
+from the domain's preservation algebra. JSON string escape and surrogate
+decoding, however, is subtle and already implemented by a focused dependency
+used elsewhere in the workspace.
+
+**Decision.** The Claude Code edge crate owns the small, 128-container-bounded
+JSON structural decoder needed to construct the source-neutral imported value
+algebra directly. It delegates only isolated JSON string-token decoding to the
+existing `serde_json` dependency. Provider types and `serde_json` values do not
+cross the converter boundary.
+
+**Rejected alternatives.** General deserialization into a map-bearing value
+would erase repeated members. Reimplementing Unicode escape decoding would add
+delicate code without improving the contract. A new order-preserving JSON
+dependency would add another representation and dependency for a bounded edge
+task Signalbox can express directly.
+
+**Affects.** The Claude Code version 1 converter implementation and its
+synthetic structure-preservation and depth-bound tests.
+
 ## 2026-07-24 — Separate imported ancestry from its materialized seed frontier
 
 **Context.** Imported ancestry identifies the external record and boundary that

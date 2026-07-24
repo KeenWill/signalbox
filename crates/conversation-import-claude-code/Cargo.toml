@@ -1,0 +1,19 @@
+[package]
+name = "signalbox-conversation-import-claude-code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1.0.140"
+signalbox-application = { path = "../application" }
+signalbox-domain = { path = "../domain" }
+
+[dev-dependencies]
+uuid = { version = "1.24.0", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
