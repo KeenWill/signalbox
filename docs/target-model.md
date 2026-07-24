@@ -20,7 +20,7 @@ semantics are linked, never restated, and only target-only concepts are owned by
 this document.
 
 Milestone selection rules for autonomous runs live in
-[goal-mode.md](goal-mode.md); this document owns only the
+[goal-mode.md](agents/goal-mode.md); this document owns only the
 [priority order](#priority-order) those rules reference.
 
 ## Product vision
@@ -338,10 +338,10 @@ on the separate foundation decision identified above.
 
 A persistent objective a session works toward across turns — pursued, paused,
 resumed, revised — as a product capability, not only this repository's own
-[operating rules](goal-mode.md). A foundation decision must define durable goal
-identity and the pursue, pause, resume, and revise transitions. That lifecycle
-then composes with long-running turns, scheduled creation causes at the explicit
-extension point session creation leaves open, and delegation.
+[operating rules](agents/goal-mode.md). A foundation decision must define
+durable goal identity and the pursue, pause, resume, and revise transitions.
+That lifecycle then composes with long-running turns, scheduled creation causes
+at the explicit extension point session creation leaves open, and delegation.
 
 ### The tool system as the load-bearing layer
 
@@ -401,10 +401,9 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    ([model-call-execution](spec/model-call-execution.md)).
 4. **A smoke against a real provider** — landed for the owner-run smoke
    ([model-call-execution](spec/model-call-execution.md),
-   [runtime-substrate](spec/runtime-substrate.md)); the production security
-   posture for outbound provider calls remains open per
-   [provider-call-security](open-questions.md#provider-call-security). This was
-   the gate before destination-feature milestones.
+   [runtime-substrate](spec/runtime-substrate.md)), including the production
+   security posture for outbound provider calls. This was the gate before
+   destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
    tool. Blocked on the tool-policy and approval decisions, which do not yet
