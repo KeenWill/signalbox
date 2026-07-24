@@ -405,6 +405,19 @@ fn continuation_tool_results(
         .collect())
 }
 
+#[track_caller]
+fn assert_confirmed_catalog(operation: &ModelOperation<ModelCallId>) {
+    let [definition] = operation.tools.as_slice() else {
+        panic!("each model operation carries the one compiled definition")
+    };
+    assert_eq!(definition.name.as_str(), "confirmed");
+    assert_eq!(definition.description, "Runs the confirmed fixture tool.");
+    assert_eq!(
+        definition.input_schema.get(),
+        r#"{"additionalProperties":true,"type":"object"}"#
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutorMode {
     Complete,
@@ -621,6 +634,12 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
             is_error: false,
         }]
     );
+    let operations = runtime.received_operations();
+    let [initial, continuation] = operations.as_slice() else {
+        panic!("the completed tool loop has exactly two model operations")
+    };
+    assert_confirmed_catalog(initial);
+    assert_confirmed_catalog(continuation);
     assert_eq!(
         fixture.transcript_kinds().await?,
         vec![
@@ -887,6 +906,9 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     let outcome = scan.execute().await?;
     assert!(outcome.is_complete());
     assert_eq!(outcome.recovered_turn_count(), 0);
+    let repeated = scan.execute().await?;
+    assert!(repeated.is_complete());
+    assert_eq!(repeated.recovered_turn_count(), 0);
     let parked: (String, Option<Uuid>, i64) = sqlx::query_as(
         "SELECT active_phase_kind, approval_tool_request_id,
                 (SELECT count(*) FROM tool_attempt WHERE request_id = $3)
