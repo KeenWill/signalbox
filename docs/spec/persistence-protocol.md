@@ -1,16 +1,15 @@
 # Persistence protocol
 
 This page describes the implemented persistence protocol of the Signalbox hub as
-verified against the implementing stack rooted at PR #193
-(`agent/tool-loop-spec`). It covers the Postgres representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+verified against the implementing stack through PR #175 (`agent/stop-requests`).
+It covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -49,18 +48,20 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — fourteen files, `202607180001` through
-`202607220005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — fifteen files, `202607180001` through
+`202607230001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
-re-embeds the set whenever a file changes. The production binary wires the
-required ordering (INV-034): `apps/hubd` (`migrate_scan_then_schedule`) runs
-`migrate` as its first startup phase, then the startup scan, then the scheduler.
-Why: checksummed forward-only files make every schema change a reviewed,
-immutable artifact, so a deployed database's history is never silently edited.
+re-embeds the set whenever a file changes. The production binary holds the
+singleton hub guard and fences the prior pool generation, then runs `migrate` as
+its first schema phase, followed by the startup scan and runtime (INV-034). The
+fence migration's first installation is the sole case without a prior fenced
+pool, because no earlier schema can have admitted one. Why: checksummed
+forward-only files make every schema change a reviewed, immutable artifact, so a
+deployed database's history is never silently edited.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
@@ -75,7 +76,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the fourteen migrations):
+Implemented table families (across the fifteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
@@ -87,6 +88,8 @@ Implemented table families (across the fourteen migrations):
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- the singleton `hub_fence_state`, which supplies the generation used by
+  hub-owned session advisory pool fences;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -167,15 +170,15 @@ states only their storage representation and adapter mechanics.
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
-`replace_session_defaults`, `submit_input`, `decide_tool_request`) and a
-kind-scoped `storage_version` set. Each kind has one typed subordinate record
-keyed by `command_id` that stores every caller-supplied semantic field in typed,
-`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
-its typed result fields; result-shape `CHECK` constraints tie each rejection
-kind to exactly its fields, and deferred reverse constraints require exactly one
-typed record per claimed registry row at commit. Why: typed per-kind records
-keep replay semantics reviewable and constraint-checked, where a universal
-serialized payload would make the serializer a second semantic authority.
+`replace_session_defaults`, `submit_input`) and `storage_version` (currently
+`1`). Each kind has one typed subordinate record keyed by `command_id` that
+stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns, plus the terminal `applied`/`rejected` result and its typed result
+fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
+fields, and deferred reverse constraints require exactly one typed record per
+claimed registry row at commit. Why: typed per-kind records keep replay
+semantics reviewable and constraint-checked, where a universal serialized
+payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -198,7 +201,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 
 ## Lock protocol
 
-Every application-issued SQL statement that takes an explicit row lock lives in
+Every Rust-issued SQL statement that takes an explicit row lock lives in
 `crates/persistence/src/lock_inventory.rs`. One explicit lock lives in the
 schema instead of the inventory: the deferred pending-steering source-turn
 trigger (migration `202607180005`) takes `FOR UPDATE` on the named
@@ -216,17 +219,37 @@ Locks per transaction, in acquisition order:
   pending-steering acceptance additionally locks the named active
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
-- **StartEligibleTurn**, **startup recovery**, **model-call execution**, and
-  **tool-loop transactions** (approval, attempt prepare/authorize/result,
-  continuation — reusing the same inventory statement): the `session_scheduler`
-  row `FOR UPDATE` is the only explicit lock (session existence is checked with
-  a bare `EXISTS`). The session row is locked only `KEY SHARE`, implicitly, by
-  the inserts' foreign keys, and the candidate `turn_lifecycle` row is locked by
-  the guarded `UPDATE` itself.
+- **StartEligibleTurn**, **startup recovery**, and the **model-call execution
+  transactions** (prepare, authorize, observation commit, restart recovery — all
+  in `model_execution.rs`, reusing the same inventory statement): the
+  `session_scheduler` row `FOR UPDATE` is the only explicit lock (session
+  existence is checked with a bare `EXISTS`). The session row is locked only
+  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
+- **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
+  exactly `delivered_through + 1` and its typed record are read. Only an
+  accepted synchronous offer advances that same singleton inside the
+  transaction.
+- **Hub-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then the
+  transaction takes the exclusive transaction-level advisory lock for the prior
+  generation, updates the singleton to its successor, and also obtains the same
+  exclusive session-level advisory lock before commit. Commit releases the
+  transaction-level lock and retains the session-level lock. The advisory key is
+  the exact unsigned bit pattern
+  `generation XOR ((1396852273 << 32) OR 1396852273)`, where `1396852273` is
+  ASCII `SBF1`, reinterpreted unchanged as a two's-complement signed `i64` for
+  PostgreSQL.
+
+The guarded hub database keeps its fenced application pool and singleton guard
+behind one shutdown boundary. Graceful shutdown globally closes the pool and
+waits for every outstanding checkout before closing the guard session. If that
+explicit shutdown is omitted, or cancelled before the pool drain completes, the
+guard session remains retained until process exit rather than releasing while an
+escaped pool clone may still write.
 
 Two standing constraints (recorded beside the code):
 
@@ -258,7 +281,7 @@ ended attempt and optional `known_failed`/`cancelled` call provenance
 (backfilled and closed by migration `202607220003`). Cancelled and
 reconciliation-required terminal turns additionally supply their exact
 proof-bearing attempt end, applied-interrupt result, and optional cancelled or
-required ambiguous operation through the scheduling input described in
+required ambiguous call through the scheduling input described in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). The
 scheduling load proves its own completeness — it counts `queued_input_origin`
 against `turn_lifecycle` and fails on mismatch — rather than trusting whichever
@@ -280,11 +303,6 @@ corruption. Why: the dangerous corruption cases are rows that look individually
 valid while their cross-record correlations are not, so authority comes only
 from complete validated projections, never from raw identifiers.
 
-An `awaiting_approval` projection reconstructs the exact earliest undecided
-request and proves that no live turn or tool attempt exists; startup leaves it
-unchanged. Running tool attempts reconstruct their immutable effect class and
-dispatch fence before crash classification.
-
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
 holding a `Prepared` call follows the same logical closure after ending the call
@@ -305,13 +323,6 @@ the active lifecycle terminalizes `reconciliation_required` with an
 equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
-
-The parallel tool path resolves `awaiting_tool_recovery` without changing its
-terminal ambiguous tool attempt. Its equal-content terminal frontier,
-`terminal_tool_attempt_id`, typed reconciliation outbox record, original ended
-turn attempt, and applied interrupt commit atomically. Scheduling reconstruction
-reloads the producing tool round and exact ambiguous attempt before admitting
-that terminal state; a tool ambiguity never occupies the model-call reference.
 
 ## Corruption taxonomy
 
@@ -381,14 +392,14 @@ protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event`, `turn_failed_outbox_event`,
+  `session_created_outbox_event`, `input_accepted_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
   `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
   `turn_reconciliation_required_outbox_event` — with a deferred trigger
   requiring exactly one typed record per header. The header and typed record
   tables are append-only (`reject_immutable_record_change`), and every outbox
-  table rejects `TRUNCATE`. A reconciliation record names exactly one ambiguous
-  model call or tool attempt.
+  table rejects `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -405,28 +416,47 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; startup recovery appends `turn_failed` for a failed lost turn
-and `turn_reconciliation_required` when stopped issued work becomes ambiguous.
-Model-call state transitions append `model_call_transition`, completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
-known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
-appends `turn_cancelled`, and live stopped ambiguity appends
-`turn_reconciliation_required`; an interrupt against a parked ambiguous tool
-attempt appends the same event kind with that exact tool-attempt reference. A
-guarded transition that changes zero rows appends zero events. Why: writing the
-event in the committing transaction makes the dual-write failure (state without
-event, or event without state) unrepresentable.
+`session_created`; an applied SubmitInput that creates a turn origin appends
+`input_accepted`, while `PendingSteering` appends nothing until terminal
+reclassification mints its successor turn and appends that correlated
+`input_accepted`; an applied StartEligibleTurn appends `turn_activated`. Startup
+recovery appends `turn_failed` for a failed lost turn and
+`turn_reconciliation_required` when stopped issued work becomes ambiguous;
+terminal reclassification of pending steering appends its correlated
+`input_accepted`. Model-call state transitions append `model_call_transition`,
+completion closure appends `turn_completed`, refusal closure appends
+`turn_refused`, and known-failure closure appends `turn_failed`;
+interrupt-confirmed cancellation appends `turn_cancelled`, and live stopped
+ambiguity appends `turn_reconciliation_required`; an interrupt against a parked
+ambiguous tool attempt appends the same event kind with that exact tool-attempt
+reference. A guarded transition that changes zero rows appends zero events. Why:
+writing the event in the committing transaction makes the dual-write failure
+(state without event, or event without state) unrepresentable.
+
+The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
+the delivery singleton, decodes exactly the next typed event, invokes a
+synchronous consumer while retaining the lock, and advances and commits the
+cursor only after consumer acceptance. Consumer retry or exit before the commit
+request leaves the prefix unchanged for redelivery. A lost commit response is
+resolved by the next locked cursor read: a committed advance proceeds, while a
+rolled-back advance redelivers. The injected rolled-back-commit PostgreSQL test
+enforces ordered at-least-once behavior. Before offering a record or reporting
+idle, the dispatcher proves that no header exceeds the allocator cursor. An
+activation must agree with the durable turn's active current attempt or retained
+terminal attempt; a model-call transition must be reachable from the
+authoritative monotonic call state, with an exact disposition match at terminal;
+and failed, completed, refused, cancelled, and reconciliation-required records
+must agree with the durable turn, terminal frontier, semantic marker where
+present, and terminal model call where present. Historical Prepared and InFlight
+transition records remain dispatchable after their call advances. Exhausted
+delivery still validates the allocator singleton and cursor. Hub task ownership,
+polling, fan-out, and client observation semantics are owned by
+[process-protocol](process-protocol.md).
 
 ## Open edges
 
-- No outbox publisher, drain task, or subscription layer exists;
-  `outbox_delivery_state` is advanced only by integration tests.
-- The outbox event-kind set is `session_created`, `turn_failed`,
-  `model_call_transition`, `turn_completed`, `turn_refused`, and
-  `turn_cancelled`, plus `turn_reconciliation_required`; input acceptance,
-  activation, and defaults replacement commit no events yet, pending the
-  protocol projections that define client visibility.
-- Outbox retention and pruning of delivered rows are undecided.
+- Deferred outbox retention, pruning, and multiple-hub fan-out are cataloged in
+  [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is admitted only for the tool-loop yield/approval path;
   no other producer can construct a predecessor-linked attempt.
 - Frontier lineage checks assume `none` ancestry; fork ancestry must replace

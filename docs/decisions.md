@@ -10,6 +10,688 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Snapshot terminal renderer projections
+
+**Context.** Partial substring assertions let missing identities, malformed
+field layout, or unintended extra terminal output pass. The testing-style guide
+requires expect tests when a rendered value's complete shape is the assertion.
+
+**Decision.** Add the repository's existing `expect-test` 1.5 helper as a
+terminal client dev-dependency and snapshot each complete turn and event
+projection changed in this review wave. Keep behavioral law assertions separate.
+
+**Rejected alternatives.** More substring assertions do not close the omitted
+output surface. Whole-structure snapshots would include irrelevant fixtures;
+these snapshots contain only the deterministic rendered value under test.
+
+**Affects.** Terminal-client test dependencies and renderer tests only; terminal
+output and runtime dependencies do not change.
+
+## 2026-07-24 — Release decoded process payloads before response backpressure
+
+**Context.** Cloning a decoded request retained both the frame-owned payload and
+its clone after releasing the inbound-frame permit. Rejected oversized input
+could then remain live while a non-reading peer blocked the error response.
+
+**Decision.** Consume each decoded frame into its request without cloning. Move
+submitted text into application admission, so rejected text is dropped before
+awaiting response output and admitted text reuses the decoded allocation.
+
+**Rejected alternatives.** Keeping the frame until request completion makes the
+frame budget cease to bound its allocation lifetime. Explicitly dropping only
+rejected clones leaves avoidable duplication on successful submissions. Response
+deadlines would add unrelated timing semantics.
+
+**Affects.** Process-protocol frame ownership, submitted-input admission, and
+process-runtime memory retention under response backpressure; wire shapes and
+admission limits do not change.
+
+## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
+
+**Context.** Reserving one of eight frame slots before waiting for input lets
+eight idle clients prevent every later connection from sending a request.
+
+**Decision.** Give each of the at most 128 accepted tasks an explicit 8 KiB
+reader buffer, wait until that buffer observes input, and only then reserve a
+frame slot before accumulating the rest of the frame. This admits at most 1 MiB
+of aggregate pre-slot read-ahead in addition to the existing 64 MiB admitted
+frame bound.
+
+**Rejected alternatives.** Charging idle clients makes the eight-slot budget an
+availability gate. Per-connection read deadlines invent timing semantics.
+Unbounded pre-slot reads merely move the memory defect.
+
+**Affects.** Process-runtime connection scheduling and inbound memory bounds;
+wire framing and the eight-frame concurrency limit do not change.
+
+## 2026-07-23 — Classify snapshot-spool I/O by response exposure
+
+**Context.** Temporary-file creation, write, flush, seek, and read failures were
+classified as peer I/O, so the runtime silently discarded server-side resource
+failures as ordinary client disconnects.
+
+**Decision.** Before any response bytes are exposed, translate spool I/O failure
+to sanitized `unavailable`. During transmission, classify sink failure as
+connection-local peer I/O and source-spool read failure as fatal runtime
+evidence. Close a follow snapshot's file immediately after its transmission.
+
+**Rejected alternatives.** Treating every I/O error as a disconnect hides server
+failure. Making every spool failure fatal denies a request a safe pre-exposure
+infrastructure response. Retaining the file through live follow wastes disk and
+a descriptor.
+
+**Affects.** Session-list and transcript spool errors, follow resource lifetime,
+runtime failure classification, and process-protocol tests.
+
+## 2026-07-23 — Bound process snapshot construction resources
+
+**Context.** A valid deployment has no aggregate session-count or
+transcript-size limit. Materializing every session summary per list request made
+request heap grow with the catalog, while allowing snapshot spooling to occupy
+every application-pool connection could stall mutations, scheduling, and outbox
+delivery.
+
+**Decision.** Spool session lists from a repeatable-read cursor that owns one
+decoded row at a time, then commit before writing the completed temporary file
+to the client. Share one snapshot-reader semaphore across list, transcript, and
+follow snapshot construction, sized to leave two configured application-pool
+connections outside snapshot work. The production pool's baseline ten
+connections therefore admits at most eight concurrent snapshot readers.
+
+**Rejected alternatives.** Complete summary vectors retain catalog-sized heap.
+Writing rows directly to a slow client holds the transaction and pool slot.
+Separate uncoordinated limits can still exhaust the shared pool; reserving only
+one connection leaves scheduling, dispatch, and mutations contending for the
+same last slot.
+
+**Affects.** Process session-list and transcript snapshot construction,
+temporary disk use, process-runtime connection services, and application-pool
+capacity.
+
+## 2026-07-23 — Configure process-socket mode through its retained identity
+
+**Context.** Unix socket bind does not accept a filesystem mode. Temporarily
+changing `umask` is process-wide, so a module-local mutex cannot prevent
+unrelated threads from creating files under the temporary mask.
+
+**Decision.** Bind the socket unlistening inside its verified owner-private
+parent, retain the observed inode at `<socket-path>.identity`, set exact `0600`
+mode through that retained name, and revalidate both names and their modes
+before listening. Never change the process-wide creation mask.
+
+**Rejected alternatives.** A mutex coordinates only participating creators.
+Leaving a restrictive mask installed changes unrelated process behavior.
+Listening before permissioning admits clients before validation.
+
+**Affects.** Guarded local process-socket bind, its tests, and the process
+transport specification.
+
+## 2026-07-23 — Pin compared process-socket identities
+
+**Context.** A device-and-inode comparison cannot prove pathname identity after
+the observed socket has no remaining filesystem link: its inode could be reused
+for a replacement before revalidation or cleanup.
+
+**Decision.** While holding the existing path lock, retain each compared socket
+with a hard link at the reserved adjacent `<socket-path>.identity` name. Reclaim
+an owned socket left there by an abrupt prior exit, fail closed on another
+entry, and hold the active listener's link through public-path removal.
+
+**Rejected alternatives.** Comparing device and inode without retaining the
+inode admits reuse. Opening a socket node as a metadata descriptor is not
+portable to macOS. Random link names leak unbounded directory entries after
+abrupt exits.
+
+**Affects.** Stale-socket recovery, guarded bind, graceful cleanup, and the
+local process-transport specification.
+
+## 2026-07-23 — Bound process-frame JSON container depth
+
+**Context.** The 8 MiB frame limit bounds input bytes, but duplicate-member
+validation retains one key set per open object. A deeply nested frame can
+therefore amplify live allocation before version classification even while
+remaining under the byte cap.
+
+**Decision.** Admit at most 127 simultaneously open JSON objects and arrays,
+including the top-level frame object, and classify deeper input as
+`malformed_frame` before version classification. Duplicate-member validation
+still covers every object within the admitted depth. The value matches the
+existing provider-JSON container boundary and Serde's practical recursion
+boundary.
+
+**Rejected alternatives.** Relying on the byte cap alone permits
+disproportionate scanner memory. Skipping duplicate checks for unsupported
+versions contradicts the closed process grammar. A shallower arbitrary limit
+lacks evidence, while an unbounded or heap-spilling parser preserves the
+amplification.
+
+**Affects.** Process frame decoding, duplicate-member scanning,
+[process-protocol](spec/process-protocol.md), and INV-033 tests.
+
+## 2026-07-23 — Defer native-snapshot review findings to the rewire inventory
+
+**Context.** The native Swift client entered `clients/native/` as an as-is
+snapshot without history, and import review surfaced findings that live in code
+the protocol rewire replaces wholesale — the client, transport, and view-model
+layers plus their associated tooling and scripts. Fixing them piecemeal would
+polish code already scheduled for replacement while scattering ownership of the
+deferral.
+
+**Decision.** Review findings in rewire-replaced code are not fixed piecemeal in
+the snapshot. They are inventoried in the "Known issues (deferred to the
+protocol rewire)" section of `clients/native/README.md`, and the rewire
+milestone takes them up in that order. Until the rewire lands, the snapshot's
+documentation is descriptive inventory, not normative claims; when it lands, the
+native client's documentation joins the normative surface, with spec pages,
+decision entries, and tests for the choices made then. Accepted cost: known
+security-relevant legacy behaviors — the API key carried as a WebSocket URL
+query parameter and plain-HTTP bearer transport — remain in the snapshot until
+the rewire. The snapshot is inert: it speaks the legacy llm-hub protocol and
+cannot talk to `hubd`.
+
+**Rejected alternatives.** Fixing findings in place invests in code the rewire
+deletes and implies the snapshot is a maintained surface. Linking each
+inventoried finding to its own authoritative source would fabricate retroactive
+owners for legacy behavior this entry already governs.
+
+**Affects.** `clients/native/README.md` (known-issues inventory), the rewire
+milestone's work order, review handling for `clients/native/` findings.
+
+## 2026-07-23 — Import the native Swift client as a snapshot under clients/native
+
+**Context.** The owner's private monorepo holds a working SwiftUI client for the
+legacy llm-hub protocol, with deterministic mock-hub flows, capture scripts, and
+golden screenshots. Signalbox needs that client and its agent-visible UI
+iteration loop, but importing monorepo history would import identity and require
+auditing every commit.
+
+**Decision.** Copy the tree at the monorepo's current main state, with the
+stashed screenshot refresh applied, into `clients/native/` as a snapshot without
+git history; the tree was audited clean and scrubbed of private endpoints. Bazel
+build files are excluded — the xcodeproj and shell scripts stand alone, and a
+second build system in a Cargo repo is unjustified until polyglot builds hurt.
+The Tart VM scripts are retained inert: GitHub-hosted macOS runners lack nested
+virtualization, so Tart CI requires self-hosted Apple Silicon or a managed Tart
+service and is deferred with the rest of Swift CI. Screenshot goldens are
+included at roughly 40 MB because the agent-visible UI iteration loop is the
+point of the import. Renaming from LLMHubNative and rewiring to the Signalbox
+process protocol are deferred to the rewire milestone.
+
+**Rejected alternatives.** Cherry-picking history imports identity and requires
+auditing 107 commits. Rewriting with the client as inspiration discards roughly
+55 percent backend-agnostic SwiftUI and the screenshot infrastructure that works
+today.
+
+**Affects.** `clients/native/` (new), `docs/decisions.md`.
+
+## 2026-07-23 — Expose ambiguous commits as a stable process error
+
+**Context.** A lost PostgreSQL commit response can leave `create_session` or
+`submit_input` durably applied even though the hub cannot observe the outcome.
+Mapping that state to the same `unavailable` code as a definitely uncommitted
+failure leaves only unstable human text to tell a client whether replay is
+required.
+
+**Decision.** Version one uses the distinct stable error code `commit_ambiguous`
+when a mutation may have committed. The client retries the exact durable command
+identity and payload to discover the recorded outcome; `unavailable` means no
+mutation may have committed.
+
+**Rejected alternatives.** A free-form message is not protocol state. An
+optional flag complicates every otherwise detail-free error and admits a missing
+value, while generating a new command identity defeats durable replay.
+
+**Affects.** Process error encoding, commit-failure classification, mutation
+serving, and terminal-client diagnostics.
+
+## 2026-07-23 — Require session-affine PostgreSQL for hub fencing
+
+**Context.** PostgreSQL session advisory locks belong to one server backend.
+Transaction- or statement-pooled proxies may execute successive operations from
+one logical client on different backends, invalidating both the dedicated
+single-hub guard and per-connection generation fence.
+
+**Decision.** `DATABASE_URL` must name a direct or otherwise session-affine
+PostgreSQL endpoint. Transaction- and statement-pooled proxy modes are
+unsupported while hub fencing uses session advisory locks.
+
+**Rejected alternatives.** Treating pooled proxies as supported silently weakens
+the singleton invariant. Replacing session locks with a proxy-safe fencing
+design is a materially different persistence protocol without an accepted
+implementation.
+
+**Affects.** Hub deployment requirements, database configuration, fencing
+documentation, and operator guidance.
+
+## 2026-07-23 — Spool process snapshots outside transcript-sized memory
+
+**Context.** A valid durable transcript has no aggregate size limit, while the
+process runtime admits 128 connections. Fetching every turn and semantic entry
+into vectors before writing a snapshot therefore made valid concurrent reads an
+unbounded heap-allocation path.
+
+**Decision.** Persistence exposes a repeatable-read cursor that validates the
+execution lineage in PostgreSQL and yields one decoded turn or frontier member
+at a time. hubd encodes those items into a secure unnamed temporary file using
+the focused `tempfile` 3.27 dependency, commits the read transaction, then
+streams the completed spool to the client. Per-request heap use is bounded by
+one decoded row, one protocol frame, and fixed I/O buffers.
+
+**Rejected alternatives.** Retaining complete vectors leaves the defect. Holding
+a PostgreSQL snapshot open while writing to an arbitrarily slow client ties
+database capacity and MVCC retention to that client. An aggregate transcript
+limit would make valid durable state unreadable despite the existing bounded
+multi-frame wire representation.
+
+**Affects.** Process transcript reads and follow-snapshot startup, the
+persistence read cursor, hubd's direct dependency set, and temporary disk usage;
+wire messages and authoritative snapshot semantics do not change.
+
+## 2026-07-23 — Spool unbounded transcript snapshots to anonymous files
+
+**Context.** Version one intentionally has no aggregate transcript-snapshot
+limit. Retaining every decoded turn, semantic entry, content fragment, and
+identity set until the terminal count frame lets a valid local peer exhaust
+client memory.
+
+**Decision.** Validate and spool snapshot frames to an owner-private anonymous
+temporary file, then replay that file only after the terminal counts validate.
+Use the narrowly scoped `tempfile` crate for portable create-and-unlink
+lifecycle handling; fixed-width identity indexes remain disk-backed as well.
+
+**Rejected alternatives.** Adding an aggregate wire limit changes the protocol's
+recorded ability to carry growing durable transcripts. Rendering before the end
+frame could expose a malformed partial snapshot. Owning platform-specific
+temporary-file creation repeats subtle permissions and cleanup behavior.
+
+**Affects.** Terminal-client snapshot validation, replay, and its direct
+dependency surface only; server framing and durable transcript size remain
+unchanged.
+
+## 2026-07-23 — Use Clap for the terminal command surface
+
+**Context.** The first terminal client hand-parsed nested commands, mutually
+exclusive model selection, recovery-flag pairing, canonical typed values, help,
+and duplicate options. The owner approved Clap as the better long-term fit for
+this growing daily command surface.
+
+**Decision.** Use Clap 4's derive API with default features disabled and only
+the parsing, help, usage, suggestion, and error-context features enabled.
+Signalbox retains focused value parsers for canonical UUIDs, reserved command
+identities, and shortest unsigned decimal spelling.
+
+**Rejected alternatives.** Extending the handwritten parser duplicates mature
+subcommand and constraint handling. Enabling Clap's full default feature set
+adds color and ancillary behavior the closed local client does not need.
+
+**Affects.** `apps/client` argument parsing, generated help and usage
+diagnostics, direct dependencies, and the lockfile; process messages and command
+semantics do not change.
+
+## 2026-07-23 — Bound concurrent inbound frame buffers at eight
+
+**Context.** The 128 accepted process connections could each retain nearly one 8
+MiB partial frame indefinitely, making the connection-count limit alone admit
+roughly 1 GiB of raw inbound payload before reader and request overhead.
+
+**Decision.** Reserve one of eight shared inbound-frame slots before a
+connection begins accumulating its next frame. A slot is held through frame
+decoding, so raw frame accumulation is bounded at 64 MiB; other accepted
+connections wait without a growing frame accumulator and remain shutdown-aware.
+
+**Rejected alternatives.** Lowering the 8 MiB frame cap changes the recorded
+wire contract. A read deadline invents timing semantics and still permits the
+same peak. Byte-granular reservations add accounting complexity without a
+current need for differently sized concurrent limits.
+
+**Affects.** Process-runtime inbound memory capacity only; accepted-connection
+admission, frame validity, request ordering, and application admission do not
+change.
+
+## 2026-07-23 — Bound accepted process connections at 128
+
+**Context.** A finite socket backlog does not bound tasks after acceptance.
+Long-lived follow streams or idle clients could otherwise cause hubd to retain
+an unbounded number of connection tasks, readers, writers, and fan-out
+receivers.
+
+**Decision.** Own at most 128 accepted process-connection tasks. When the limit
+is full, stop accepting until one task exits; the guarded listener's existing
+128-entry kernel backlog remains the queue for additional local attempts.
+
+**Rejected alternatives.** Leaving accepted tasks unbounded converts local
+connection churn into unbounded memory growth. Closing every attempt above the
+limit makes short bursts fail despite the already bounded listener queue.
+
+**Affects.** Process-protocol connection admission and runtime task ownership;
+application command admission and the wire contract do not change.
+
+## 2026-07-23 — Bound process-protocol input at 1 MiB
+
+**Context.** A submitted input is later reflected inside one queued-turn frame
+and one durable-update frame. Allowing content to consume nearly the entire 8
+MiB inbound frame leaves no room for those larger wrappers and lets an accepted
+value become unrepresentable.
+
+**Decision.** The local process server admits at most 1 MiB of UTF-8 input
+content and rejects a larger value before application construction or mutation.
+At that bound, even one-byte control characters with worst-case JSON escaping
+leave the enclosing version-one server frames below 8 MiB.
+
+**Rejected alternatives.** Relying only on the aggregate frame cap admits values
+that cannot be reflected. Fragmenting queued states and live input events would
+add correlated multi-frame state to two more protocol paths without a daily
+client need. Treating an outbound overflow as hub-fatal lets one connection stop
+unrelated work.
+
+**Affects.** Version-one `submit_input` admission and connection-failure
+isolation; domain content and transcript fragment limits do not change.
+
+## 2026-07-23 — Bound each single-hub guard ping at one second
+
+**Context.** The recorded guard polling cadence does not bound how long one
+`PgConnection::ping` may remain pending. An unbounded response wait would also
+leave fatal guard-loss detection unbounded during a database stall or network
+partition.
+
+**Decision.** Give each guard-check query a separate one-second response
+deadline. A deadline expiry is fatal guard loss for that hub incarnation, just
+like a database error; the runtime does not retry or reacquire in place. Treat
+one second as a provisional operational threshold independent of the polling
+cadence.
+
+**Rejected alternatives.** No query deadline can stall the supervisor
+indefinitely. Retrying within the incarnation delays guarded startup recovery
+without proving that the same session still owns authority. A longer threshold
+widens the ambiguous-health window; a shorter one increases false fatal exits
+under ordinary transient latency before measurements justify that trade.
+
+**Affects.** The response deadline and failure classification of
+`SingleHubGuard::check`; it does not change the polling cadence or the
+generation-fence protocol.
+
+## 2026-07-23 — Bind follow rereads to their terminal trigger
+
+**Context.** A transcript reread started by one terminal follow event can
+observe later committed turns. Presenting every new entry from that reread lets
+later content appear before the still-buffered events that introduced it;
+identity deduplication can then hide the content at its ordered position.
+
+**Decision.** A terminal-triggered side reread supplies only the semantic
+material attributable to that exact terminal event. Its newer cursor does not
+make later snapshot material presentation-eligible or advance the primary follow
+stream.
+
+**Rejected alternatives.** Rendering every new snapshot entry reorders the
+durable event stream. Advancing to the reread cursor discards transition-only
+events, while historical as-of snapshots would add a new storage contract.
+
+**Affects.** Terminal-client follow presentation and its ordering tests.
+
+## 2026-07-23 — Require an owner-private socket parent
+
+**Context.** Some Unix-domain-socket implementations do not enforce the socket
+node's permission bits. A `0755` immediate parent therefore permits another
+local user to reach an otherwise owner-mode socket, contrary to version one's
+single-user trust boundary.
+
+**Decision.** Require the resolved immediate socket parent to be owned by the
+hub's effective user with traditional permission mode exactly `0700`. Ancestor
+replacement checks remain separately required.
+
+**Rejected alternatives.** Relying on the socket node's `0600` mode is not
+portable. Peer authentication has no accepted version-one identity model, and a
+platform-specific exception would make the same protocol path carry different
+trust guarantees.
+
+**Affects.** Local process-socket deployment, validation, and startup tests.
+
+## 2026-07-23 — Bound the local process-socket backlog at 128
+
+**Context.** The guarded Unix listener must select a finite kernel accept queue.
+The value affects only how many already-authenticated local connection attempts
+can wait before hubd accepts them; request concurrency and application admission
+remain separately bounded by runtime task ownership.
+
+**Decision.** Request a backlog of 128 when the verified owner-only process
+socket begins listening. Treat it as a provisional local-transport capacity, not
+a protocol or application limit.
+
+**Rejected alternatives.** Leaving the value implicit would make behavior depend
+on a library default that the raw listen boundary does not provide. One would
+make ordinary local bursts fragile. The platform maximum would add no useful
+bound and is still kernel-clamped.
+
+**Affects.** Only the hub-owned local Unix listener's pending connection queue;
+it does not change framing, request ordering, or durable admission.
+
+## 2026-07-23 — Use Rustix for guarded Unix-socket construction
+
+**Context.** The process socket must remain unlistening until its path identity,
+effective-user ownership, and exact permissions are verified. The standard
+library binds and listens in one operation and exposes neither the effective
+user ID nor a separate safe bind/listen sequence. Workspace code also forbids
+unsafe blocks.
+
+**Decision.** hubd directly uses the already locked Rustix crate with only its
+filesystem, network, process, and standard-library features. Rustix supplies
+safe effective-user lookup and the unlistening Unix socket operations; the
+result is converted to Tokio only after path verification and `listen`.
+
+**Rejected alternatives.** `std::os::unix::net::UnixListener::bind` listens too
+early. A local `libc` adapter would require unsafe code and duplicate a
+well-audited syscall abstraction. A subprocess user-ID lookup would add parsing
+and executable-path failure modes without solving separate bind/listen.
+
+**Affects.** The hub-owned local process transport and its direct dependency
+surface; no domain, persistence, or wire representation changes.
+
+## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
+
+**Context.** The version-one process boundary needs closed tagged JSON shapes,
+canonical full-range decimal strings, canonical UUID strings, and explicit
+version rejection without leaking domain or storage types. Serde, serde_json,
+and uuid are already pinned elsewhere in the workspace.
+
+**Decision.** The focused `signalbox-process-protocol` crate directly uses those
+three existing dependencies. Serde derives the closed tagged shapes;
+serde_json's `raw_value` feature preserves the version spelling long enough to
+reject an arbitrary integer as unsupported before decoding its payload; and uuid
+parses values behind custom lowercase-hyphenated and command-sentinel checks.
+The crate owns framing and wire validation only.
+
+**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
+UTF-8, and number handling. Raw string identifiers would defer canonical checks
+to every adapter. A schema generator or protocol framework would add a larger
+toolchain and compatibility policy than exact version one needs.
+
+**Affects.** `crates/process-protocol`, the workspace member inventory, and its
+lockfile package entry; no domain or application public type changes.
+
+## 2026-07-23 — Trust only root or the hub user in socket ancestry
+
+**Context.** A non-writable ancestor owned by a different unprivileged user is
+not stable: its owner can later broaden its mode, rename the next component, and
+substitute an impostor socket hierarchy after startup validation.
+
+**Decision.** Require every resolved socket-parent ancestor to be owned by
+either root or the hub's effective user, in addition to the sticky-directory and
+child-ownership rules. Root remains the operating-system trust boundary.
+
+**Rejected alternatives.** Trusting the mode observed at one instant ignores the
+owner's authority to change it. Requiring the hub user to own system ancestors
+would reject ordinary paths beneath root-owned `/`, `/var`, or `/tmp`.
+
+**Affects.** Local process-socket ancestry validation and its startup tests.
+
+## 2026-07-23 — Bound process fan-out retention at 64 events
+
+**Context.** The initial version-one design retained 1,024 update events while
+allowing each event to carry nearly 1 MiB of text. That event-count-only bound
+could retain roughly 1 GiB of payload in one hub process before overhead, while
+followers can already recover from lag through an authoritative snapshot.
+
+**Decision.** Retain 64 process-local update events. A follower that overruns
+that bounded ring receives `resync_required` and reconnects for a fresh
+snapshot; durable delivery remains independent of follower presence.
+
+**Rejected alternatives.** Keeping 1,024 events reserves an excessive payload
+ceiling for a convenience buffer. Adding a second byte-accounting queue would
+duplicate lag and resynchronization policy before measurements require it.
+
+**Affects.** Process-local update retention, follower lag behavior, and the
+version-one process-protocol specification.
+
+## 2026-07-23 — Treat hub fencing as an initial-deployment migration
+
+**Context.** A first fence installation cannot stop an already-running hub that
+does not participate in generation fencing. The owner confirms that no Signalbox
+deployment or database predates the fence migration in this stack.
+
+**Decision.** Treat this stack as the initial deployment boundary. The fence row
+may be installed without a legacy-writer rollout gate because no pre-fence
+writer or database exists; importing or upgrading a pre-fence database is not a
+supported operation.
+
+**Rejected alternatives.** A legacy bootstrap acknowledgement or operator drain
+protocol would claim a migration population that does not exist. Silently
+assuming compatibility with a hypothetical pre-fence deployment would leave the
+authority gap unresolved.
+
+**Affects.** The first installation of the hub-fence migration and its
+documented deployment premise.
+
+## 2026-07-23 — Require rename-resistant process-socket ancestry
+
+**Context.** Protecting only the socket's immediate resolved parent does not
+prevent another local user from renaming that directory through a writable
+ancestor and substituting an impostor hierarchy at the configured path.
+
+**Decision.** Validate the complete canonical parent ancestry. A group- or
+other-writable ancestor is accepted only when it has the sticky bit and the
+child path component toward the socket is owned by the hub's effective user;
+every other writable-ancestor shape fails startup.
+
+**Rejected alternatives.** Checking only the immediate parent misses ancestor
+replacement. Rejecting every writable ancestor makes ordinary owner-created
+runtime directories beneath `/tmp` unusable despite sticky-directory ownership
+protection.
+
+**Affects.** Local process-socket path validation and its startup tests.
+
+## 2026-07-23 — Fence database pools across hub incarnations
+
+**Context.** Losing only the dedicated singleton-guard session releases its
+advisory lock while the old process can still have usable pooled sessions. A
+successor that ran recovery immediately could overlap those old writers; a
+monitoring interval or graceful drain cannot close that authority gap. Fencing
+only the immediately prior generation would still let an older process reconnect
+after an intermediate successor advanced the generation and then failed.
+
+**Decision.** Add a durable positive hub-fence generation and session advisory
+pool fencing as specified by
+[process-protocol](spec/process-protocol.md#durable-update-dispatch). A
+successor retains the prior generation exclusively before advancing to its own
+shared pool generation. After acquiring its shared generation lock, every pool
+connection verifies that the durable singleton still names that exact generation
+before becoming usable. Guard loss cancels rather than gracefully drains the old
+runtime.
+
+**Rejected alternatives.** Polling faster still leaves a gap. Treating row-lock
+serialization as sufficient allows work admitted after the successor's scan.
+Adding a fence check separately to every repository is broader and easier to
+omit than fencing each pool connection before use.
+
+**Affects.** The persistence schema, production pool construction, hub startup
+and fatal shutdown, and the single-hub guarantee.
+
+## 2026-07-23 — Serialize process-socket ownership with a sidecar lock
+
+**Context.** A metadata recheck followed by `unlink` is not an atomic
+compare-and-remove. Two conforming same-user hubs configured with one path could
+both validate a stale inode before one removes the other's newly bound socket.
+
+**Decision.** Hold one verified owner-only advisory lock at `<socket-path>.lock`
+across stale inspection, bind, service, and graceful socket cleanup. The sidecar
+persists so every incarnation coordinates on the same file.
+
+**Rejected alternatives.** Another `lstat` cannot close the final unlink race.
+Never cleaning stale sockets makes ordinary crash recovery manual. Treating
+same-user peers as benign does not satisfy deterministic behavior for two
+misconfigured hub processes.
+
+**Affects.** The local process transport's startup and cleanup protocol.
+
+## 2026-07-23 — Poll the single-hub guard once per second
+
+**Context.** A PostgreSQL session advisory lock is released when its dedicated
+connection is lost. An otherwise idle guard connection would not promptly tell
+the hub to stop, allowing a second process to acquire the same guard while the
+first continues through a reconnected pool.
+
+**Decision.** While the runtime is active, the hub proves the dedicated guard
+connection usable once per second. Any check or connection failure is a fatal
+runtime condition that cancels request admission, dispatch, and scheduling
+together without graceful drain; the process never reacquires the guard in
+place. Pool-incarnation fencing separately prevents successor overlap.
+
+**Rejected alternatives.** Depending on operating-system TCP failure timing
+would leave detection unbounded. Reacquiring in place would skip guarded startup
+recovery and permit overlapping work during the loss window. A shorter interval
+adds unnecessary steady database traffic before measurements justify it.
+
+**Affects.** The hub runtime supervisor and its dedicated PostgreSQL guard task.
+
+## 2026-07-23 — Local version-one process protocol and terminal client
+
+**Context.** Signalbox has durable sessions, input, model execution, final
+transcript content, and a transactional outbox, but no supported client process
+boundary or outbox consumer. The retired ADR-0019 protocol was never implemented
+or distilled and carries no authority. The owner predecided the version-one
+transport, framing, and trust posture on 2026-07-23.
+
+**Decision.** Version one is a Unix domain stream socket at the required
+`SIGNALBOX_SOCKET_PATH`, with owner-only permissions, versioned JSON-lines, and
+a required `version` on every message. It has no protocol authentication on the
+single-user machine; that no-authentication posture is provisional, with
+authenticated transports and remote clients kept open as an upgrade path. A thin
+`signalbox` terminal client is the daily surface; the debug harness remains
+separate. The protocol supplies create/list, submit, transcript snapshot, and
+snapshot-first follow operations. Exactly one hubd dispatcher offers each next
+committed outbox event before transactionally advancing the durable prefix,
+yielding ordered at-least-once delivery. It polls idle storage every 50 ms, the
+process fan-out initially retained 1,024 events (superseded by the 64-event
+decision above), and frames are capped at 8 MiB. One hub per database is
+enforced by holding the dedicated `pg_try_advisory_lock(1396856881, 1213547057)`
+connection from before migration through shutdown. Socket cleanup uses
+refused-connect plus same-device/inode revalidation inside an
+effective-user-owned, non-group/other-writable resolved parent, never
+unconditional replacement. Transcript snapshots include authoritative turn state
+and use start/turn/entry/content/end frames with text fragments capped at 1 MiB,
+so valid transcripts are not capped at one frame. Mutation command identities
+are caller-visible and reusable after ambiguity; submit requests also carry the
+exact expected defaults version that participates in durable command equality.
+
+**Rejected alternatives.** Resurrecting the retired protocol wholesale: it has
+no accepted semantics. HTTP or a remote socket: either expands version one or
+creates an unauthenticated remote boundary. Authentication on the local socket:
+there is no accepted client-identity or revocation model. Persisting token
+deltas: drafts are nonauthoritative and the durable outbox already defines the
+reconnect boundary. A full-screen TUI first: it adds presentation work before
+the process boundary is exercised. Treating single-hub deployment as an
+unenforced convention or sharing only a database cursor between several
+process-local fan-outs: either permits followers to miss events. Unconditionally
+unlinking an existing socket: it can destroy a live listener. One-frame
+snapshots: the existing transcript has no aggregate size bound. Generating a new
+command identity after an ambiguous result or deriving submit defaults only
+inside the hub: either defeats exact durable replay.
+
+**Affects.** New [process-protocol](spec/process-protocol.md), the protocol and
+terminal-client crates, hubd configuration/composition, outbox consumption,
+INV-032/INV-033 enforcement, S01/S02/S24, and
+[open questions](open-questions.md#protocols-and-persistence). Authenticated
+transports and remote clients remain explicitly open upgrade paths.
+
 ## 2026-07-23 — Bound durable tool execution error details
 
 **Context.** Tool execution errors need an optional operator-safe explanation,
