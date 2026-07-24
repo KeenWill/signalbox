@@ -2683,6 +2683,7 @@ name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
  "rust_decimal",
+ "serde_json",
  "signalbox-application",
  "signalbox-domain",
  "sqlx",

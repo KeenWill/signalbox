@@ -41,6 +41,10 @@ pub(crate) enum SnapshotSelection {
         turn_id: CanonicalUuid,
         model_call_id: CanonicalUuid,
     },
+    ToolReconciliation {
+        turn_id: CanonicalUuid,
+        tool_attempt_id: CanonicalUuid,
+    },
 }
 
 #[derive(Default)]
@@ -493,30 +497,48 @@ impl<'a> Output<'a> {
                 turn_id,
                 model_call_id,
                 tool_request_id,
+                tool_name,
+                arguments,
             }) => writeln!(
                 self.stdout,
                 "assistant_tool_use turn={turn_id} call={model_call_id} \
-                 request={tool_request_id} source={} entry={}",
-                entry.source_session_id, entry.entry_id
+                 request={tool_request_id} name={} arguments={} source={} entry={}",
+                self.render(tool_name),
+                self.render(arguments),
+                entry.source_session_id,
+                entry.entry_id
             ),
             SnapshotEntryKind::Marker(TranscriptEntry::ToolExecutionResult {
                 tool_request_id,
                 tool_attempt_id,
+                content,
             }) => writeln!(
                 self.stdout,
                 "tool_execution_result request={tool_request_id} attempt={tool_attempt_id} \
-                 source={} entry={}",
-                entry.source_session_id, entry.entry_id
+                 content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
             ),
-            SnapshotEntryKind::Marker(TranscriptEntry::ToolDenied { tool_request_id }) => writeln!(
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolDenied {
+                tool_request_id,
+                content,
+            }) => writeln!(
                 self.stdout,
-                "tool_denied request={tool_request_id} source={} entry={}",
-                entry.source_session_id, entry.entry_id
+                "tool_denied request={tool_request_id} content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
             ),
-            SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed { tool_request_id }) => writeln!(
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
+                tool_request_id,
+                content,
+            }) => writeln!(
                 self.stdout,
-                "tool_closed request={tool_request_id} source={} entry={}",
-                entry.source_session_id, entry.entry_id
+                "tool_closed request={tool_request_id} content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
             ),
         }
     }
@@ -544,7 +566,29 @@ impl SnapshotSelection {
         let mut terminal_results = HashSet::new();
         let mut anchor_found = false;
         for record in snapshot.replay()? {
-            let SnapshotRecord::Entry(entry) = record? else {
+            let record = record?;
+            if let SnapshotRecord::Turn(turn) = &record {
+                if matches!(
+                    (self, &turn.state),
+                    (
+                        Self::ToolReconciliation {
+                            turn_id,
+                            tool_attempt_id,
+                        },
+                        TurnState::ReconciliationRequired {
+                            operation:
+                                ReconciliationOperation::ToolAttempt {
+                                    tool_attempt_id: stored_attempt,
+                                },
+                            ..
+                        },
+                    ) if turn_id == turn.turn_id && tool_attempt_id == *stored_attempt
+                ) {
+                    anchor_found = true;
+                }
+                continue;
+            }
+            let SnapshotRecord::Entry(entry) = record else {
                 continue;
             };
             match &entry.kind {
@@ -552,6 +596,7 @@ impl SnapshotSelection {
                     turn_id,
                     model_call_id,
                     tool_request_id,
+                    ..
                 }) => {
                     trailing_results.clear();
                     if self.matches_tool_batch(*turn_id, *model_call_id) {
@@ -565,8 +610,12 @@ impl SnapshotSelection {
                     TranscriptEntry::ToolExecutionResult {
                         tool_request_id, ..
                     }
-                    | TranscriptEntry::ToolDenied { tool_request_id }
-                    | TranscriptEntry::ToolClosed { tool_request_id },
+                    | TranscriptEntry::ToolDenied {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolClosed {
+                        tool_request_id, ..
+                    },
                 ) => {
                     results.insert(*tool_request_id);
                     trailing_results.insert(*tool_request_id);
@@ -602,12 +651,20 @@ impl SnapshotSelection {
                     requests: terminal_results,
                 })
             }
+            Self::ToolReconciliation { .. } if anchor_found && !trailing_results.is_empty() => {
+                Ok(SnapshotSelectionContext {
+                    requests: trailing_results,
+                })
+            }
             Self::ToolBatchProposed { .. } => Err(ClientError::Protocol(
                 "tool-proposal reread omitted the event's exact proposal",
             )),
             Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. } => Err(
                 ClientError::Protocol("terminal reread omitted the event's exact marker"),
             ),
+            Self::ToolReconciliation { .. } => Err(ClientError::Protocol(
+                "tool reconciliation reread omitted its exact terminal result suffix",
+            )),
             Self::All => unreachable!("all entries need no selection context"),
         }
     }
@@ -642,13 +699,20 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
-                Self::ToolBatchResults { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(
                     TranscriptEntry::ToolExecutionResult {
                         tool_request_id, ..
                     }
-                    | TranscriptEntry::ToolDenied { tool_request_id }
-                    | TranscriptEntry::ToolClosed { tool_request_id },
+                    | TranscriptEntry::ToolDenied {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolClosed {
+                        tool_request_id, ..
+                    },
                 ),
             ) => context.requests.contains(tool_request_id),
             (
@@ -660,11 +724,14 @@ impl SnapshotSelection {
                 | Self::Failed { .. }
                 | Self::Cancelled { .. }
                 | Self::ToolBatchProposed { .. }
-                | Self::ToolBatchResults { .. },
+                | Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. },
                 SnapshotEntryKind::Text(_),
             ) => false,
             (
-                Self::ToolBatchProposed { .. } | Self::ToolBatchResults { .. },
+                Self::ToolBatchProposed { .. }
+                | Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. },
                 SnapshotEntryKind::Marker(_),
             ) => false,
         }
@@ -719,7 +786,8 @@ impl SnapshotSelection {
                 | Self::Failed { .. }
                 | Self::Cancelled { .. }
                 | Self::ToolBatchProposed { .. }
-                | Self::ToolBatchResults { .. },
+                | Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::AssistantToolUse { .. }

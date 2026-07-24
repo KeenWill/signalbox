@@ -2399,8 +2399,6 @@ pub struct CorrelatedToolAttemptObservation { /* private */ }
 // accessors: correlation(), observation()
 pub struct CurrentToolAttempt { /* private */ }
 impl CurrentToolAttempt {
-    pub fn authorize(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError>;
-    pub fn resume_in_flight(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError>;
     pub fn end_preflight_error(
         self,
         error: ToolExecutionError,
@@ -2515,6 +2513,14 @@ impl ToolBatch {
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
     ) -> Result<PreparedToolAttempt, ToolBatchExecutionError>;
+    pub fn authorize_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn resume_in_flight_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
     pub fn prepare_result_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -2559,6 +2565,8 @@ pub struct PreparedToolAttempt { /* private */ }
 pub enum ToolBatchExecutionFailure {
     NotExecuting,
     LiveAttemptPresent,
+    AttemptMissing,
+    AttemptStageMismatch,
     ReadyForContinuation,
     TurnLevelFailure,
     AttemptIdentityReuse,

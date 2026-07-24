@@ -355,6 +355,10 @@ pub enum ProcessTranscriptEntry {
         model_call: ModelCallId,
         /// Exact logical tool request.
         request: ToolRequestId,
+        /// Exact stored tool name.
+        name: String,
+        /// Exact stored normalized or scrubbed undecodable arguments.
+        arguments: String,
     },
     /// Executed tool result reference.
     ToolExecutionResult {
@@ -368,6 +372,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact physical tool attempt.
         attempt: ToolAttemptId,
+        /// Exact provider-visible result content.
+        content: String,
     },
     /// Owner or policy denied one tool request.
     ToolDenied {
@@ -379,6 +385,8 @@ pub enum ProcessTranscriptEntry {
         entry: SemanticTranscriptEntryId,
         /// Exact denied request.
         request: ToolRequestId,
+        /// Exact provider-visible denial content.
+        content: String,
     },
     /// The turn ended before one tool request resolved ordinarily.
     ToolClosed {
@@ -390,6 +398,8 @@ pub enum ProcessTranscriptEntry {
         entry: SemanticTranscriptEntryId,
         /// Exact closed request.
         request: ToolRequestId,
+        /// Exact provider-visible terminal-closure content.
+        content: String,
     },
     /// Explicit failed-turn marker.
     TurnFailed {
@@ -1732,7 +1742,15 @@ async fn load_transcript_entry(
             accepted.content_text AS origin_content,
             accepted.origin_turn_id,
             call.turn_id AS assistant_turn_id,
-            result_attempt.request_id AS result_attempt_request_id
+            result_attempt.request_id AS result_attempt_request_id,
+            transcript_request.tool_name AS transcript_tool_name,
+            transcript_request.arguments_text AS transcript_tool_arguments,
+            result_attempt.terminal_disposition_kind AS result_disposition,
+            result_attempt.result_text AS result_text,
+            result_attempt.error_kind AS result_error_kind,
+            result_attempt.error_detail AS result_error_detail,
+            transcript_approval.decision_kind AS transcript_decision_kind,
+            transcript_approval.denial_reason AS transcript_denial_reason
            FROM context_frontier_member AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
@@ -1746,6 +1764,15 @@ async fn load_transcript_entry(
            LEFT JOIN tool_attempt AS result_attempt
              ON result_attempt.session_id = entry.source_session_id
             AND result_attempt.attempt_id = entry.tool_result_attempt_id
+           LEFT JOIN tool_request AS transcript_request
+             ON transcript_request.session_id = entry.source_session_id
+            AND transcript_request.request_id = COALESCE(
+                entry.assistant_tool_request_id,
+                entry.tool_result_request_id,
+                result_attempt.request_id
+            )
+           LEFT JOIN tool_approval_decision AS transcript_approval
+             ON transcript_approval.request_id = transcript_request.request_id
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
             AND member.member_position = $3",
@@ -1789,11 +1816,23 @@ fn decode_transcript_entry(
     let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
     let assistant_turn: Option<Uuid> = row.try_get("assistant_turn_id")?;
     let result_attempt_request: Option<Uuid> = row.try_get("result_attempt_request_id")?;
+    let transcript_tool_name: Option<String> = row.try_get("transcript_tool_name")?;
+    let transcript_tool_arguments: Option<String> = row.try_get("transcript_tool_arguments")?;
+    let result_disposition: Option<String> = row.try_get("result_disposition")?;
+    let result_text: Option<String> = row.try_get("result_text")?;
+    let result_error_kind: Option<String> = row.try_get("result_error_kind")?;
+    let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
+    let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
+    let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
 
     if payload_kind == "assistant_tool_use" {
-        let (Some(call), Some(request), Some(turn)) =
-            (producing_call, tool_request, assistant_turn)
-        else {
+        let (Some(call), Some(request), Some(turn), Some(name), Some(arguments)) = (
+            producing_call,
+            tool_request,
+            assistant_turn,
+            transcript_tool_name,
+            transcript_tool_arguments,
+        ) else {
             return Err(
                 ProcessReadCorruption::Inconsistent("assistant tool-use entry shape").into(),
             );
@@ -1821,14 +1860,40 @@ fn decode_transcript_entry(
             turn: TurnId::from_uuid(turn),
             model_call: ModelCallId::from_uuid(call),
             request: ToolRequestId::from_uuid(request),
+            name,
+            arguments,
         });
     }
 
     if payload_kind == "tool_execution_result" {
-        let (Some(attempt), Some(request)) = (tool_result_attempt, result_attempt_request) else {
+        let (Some(attempt), Some(request), Some(disposition)) = (
+            tool_result_attempt,
+            result_attempt_request,
+            result_disposition.as_deref(),
+        ) else {
             return Err(
                 ProcessReadCorruption::Inconsistent("tool execution-result entry shape").into(),
             );
+        };
+        let content = match (
+            disposition,
+            result_text,
+            result_error_kind,
+            result_error_detail,
+        ) {
+            ("completed", Some(text), None, None) => text,
+            ("known_failed", None, Some(kind), detail) => serde_json::json!({
+                "error": {
+                    "kind": kind,
+                    "detail": detail,
+                }
+            })
+            .to_string(),
+            _ => {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("tool execution-result evidence").into(),
+                );
+            }
         };
         if origin.is_some()
             || steering_source_turn.is_some()
@@ -1853,6 +1918,7 @@ fn decode_transcript_entry(
             entry,
             request: ToolRequestId::from_uuid(request),
             attempt: ToolAttemptId::from_uuid(attempt),
+            content,
         });
     }
 
@@ -1880,11 +1946,21 @@ fn decode_transcript_entry(
             return Err(ProcessReadCorruption::Inconsistent("tool result entry shape").into());
         }
         return Ok(if payload_kind == "tool_denied" {
+            if transcript_decision_kind.as_deref() != Some("deny") {
+                return Err(ProcessReadCorruption::Inconsistent("tool denial decision").into());
+            }
             ProcessTranscriptEntry::ToolDenied {
                 entry_index,
                 source_session,
                 entry,
                 request: ToolRequestId::from_uuid(request),
+                content: serde_json::json!({
+                    "error": {
+                        "kind": "denied",
+                        "detail": transcript_denial_reason,
+                    }
+                })
+                .to_string(),
             }
         } else {
             ProcessTranscriptEntry::ToolClosed {
@@ -1892,6 +1968,7 @@ fn decode_transcript_entry(
                 source_session,
                 entry,
                 request: ToolRequestId::from_uuid(request),
+                content: String::from(r#"{"error":{"detail":null,"kind":"closed_by_turn_end"}}"#),
             }
         });
     }

@@ -76,11 +76,16 @@ Policy resolution uses this accepted precedence:
 3. the registry default (`Auto` or `Confirm`); then
 4. fail-closed `Confirm` when no declaration exists.
 
-Only steps 1, 3, and 4 have producers in this slice. The blanket posture records
-an approved decision sourced as `SessionBlanket`; registry auto records
-`PolicyAuto`; confirm leaves the request undecided. Why: recording the selected
-source makes unattended operation inspectable without laundering policy as human
-consent.
+Only steps 1, 3, and 4 have producers in this slice. The producing-call
+completion transaction resolves policy independently for every proposal: the
+blanket posture records `SessionBlanket`, registry auto records `PolicyAuto`,
+and confirm leaves that request undecided. Thus a frozen automatic decision may
+exist after an earlier confirmation wait without bypassing it; only
+owner-command decisions must form a proposal-order prefix. After each owner
+command, the earliest remaining undecided confirmation is the next wait, while
+already frozen automatic decisions require no later command. Why: recording the
+selected source makes unattended operation inspectable without laundering policy
+as human consent.
 
 The blanket is a field of each immutable `VersionedSessionConfigurationDefaults`
 value and is named `DangerousToolAutoApproval::{Disabled, ApproveAll}`. Safe
@@ -187,7 +192,9 @@ execution and continuation. For each next approved request:
    correlation and that the dispatch generation is current before changing the
    attempt. A stale or duplicate result cannot advance logical state (INV-011,
    INV-021). The row moves monotonically to `Completed`, `KnownFailed`, or
-   `Ambiguous` and never reopens.
+   `Ambiguous` and never reopens. An `Ambiguous` result atomically ends the
+   issuing turn attempt as yielded-to-durable-wait and moves the lifecycle to
+   `awaiting_tool_recovery` correlated with that exact attempt.
 
 If the authorization commit acknowledgement is ambiguous, execution does not
 begin from the returned error. While retaining the dispatch gate and exact
@@ -360,13 +367,19 @@ It does not leave the already-issued call `InFlight`, persist the inadmissible
 proposal, or partially commit the response. All text and tool proposals produced
 by one model call are coalesced into one assistant message, and the
 proposal-ordered results for that batch are coalesced into the immediately
-following user message. OpenAI carries typed failure JSON as ordinary
-tool-message content because its wire shape has no failure flag; Anthropic also
-receives the provider-neutral failure flag. Malformed proposal arguments remain
-exact after preparation-time credential scrubbing on the durable request but
-replay as an object-shaped invalid-arguments placeholder, allowing the paired
-typed error result to reach either provider without pretending the placeholder
-is durable evidence.
+following user message. Every provider-visible failure is this compact
+provider-neutral JSON object: `{"error":{"detail":D,"kind":K}}`. `D` is the
+admitted executor detail, admitted owner denial reason, or JSON null; `K` is
+exactly `unknown_tool`, `invalid_arguments`, `execution_failed`,
+`result_too_large`, `crash_lost`, `denied`, or `closed_by_turn_end`. Execution
+failures select their stored error kind and detail, denial selects `denied` and
+its reason, and terminal closure selects `closed_by_turn_end` with null detail.
+OpenAI carries that JSON as ordinary tool-message content because its wire shape
+has no failure flag; Anthropic also receives the provider-neutral failure flag.
+Malformed proposal arguments remain exact after preparation-time credential
+scrubbing on the durable request but replay as an object-shaped
+invalid-arguments placeholder, allowing the paired typed error result to reach
+either provider without pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 

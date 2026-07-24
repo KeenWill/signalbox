@@ -923,7 +923,7 @@ impl TurnState {
 }
 
 /// Non-text semantic transcript entry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
     /// Assistant proposed one durable tool request.
@@ -934,6 +934,10 @@ pub enum TranscriptEntry {
         model_call_id: CanonicalUuid,
         /// Exact logical tool request.
         tool_request_id: CanonicalUuid,
+        /// Exact checked tool name.
+        tool_name: String,
+        /// Exact normalized or scrubbed-undecodable arguments.
+        arguments: String,
     },
     /// One physical tool attempt produced the logical result.
     ToolExecutionResult {
@@ -941,16 +945,22 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact physical tool attempt.
         tool_attempt_id: CanonicalUuid,
+        /// Exact provider-visible result content.
+        content: String,
     },
     /// One logical tool request was denied.
     ToolDenied {
         /// Exact denied tool request.
         tool_request_id: CanonicalUuid,
+        /// Exact provider-visible denial content.
+        content: String,
     },
     /// One logical tool request closed because its turn ended.
     ToolClosed {
         /// Exact closed tool request.
         tool_request_id: CanonicalUuid,
+        /// Exact provider-visible terminal-closure content.
+        content: String,
     },
     /// Explicit completed-turn marker.
     TurnCompleted {
