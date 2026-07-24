@@ -1291,6 +1291,37 @@ async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// INV-002 / INV-038: the schema admits the two implemented converter versions
+/// and rejects every unimplemented version before storing a header.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv038_unknown_converter_version_is_schema_rejected() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x4ff))
+    .bind(vec![0_u8; 32])
+    .execute(&pool)
+    .await
+    .expect_err("an unimplemented converter version must violate the schema");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_conversation_converter_version_supported")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-002 / INV-038: adapter and domain reconstruction fail closed when
 /// durable declared counts are corrupted behind append-only guards.
 #[tokio::test]
