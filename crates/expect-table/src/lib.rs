@@ -1,6 +1,6 @@
 //! Table rendering for [`expect-test`] snapshots from any `Debug` value.
 //!
-//! Snapshot tables in this workspace follow `docs/testing-style.md` rules
+//! Snapshot tables in this workspace follow `docs/agents/testing-style.md` rules
 //! 9–12: deterministic ordering, relevant fields only, right-trimmed lines
 //! that stay byte-stable under re-blessing. This crate renders such tables
 //! from plain `T: Debug` rows — no serde, no derive, no annotations: each row

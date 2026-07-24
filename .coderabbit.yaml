@@ -1,7 +1,8 @@
 # yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
 #
 # CodeRabbit configuration: pre-merge checks as verdict-logic mirrors of rules
-# owned by AGENTS.md, docs/testing-style.md, docs/goal-mode.md, and the living
+# owned by AGENTS.md, docs/agents/testing-style.md, docs/agents/goal-mode.md,
+# and the living
 # specification under docs/spec/. Ownership stays with those documents; each check
 # restates only the operational pass/fail logic, and the comment above each
 # check names its owning rule document. See the docs/decisions.md entry
@@ -33,18 +34,26 @@ reviews:
         mode: warning
         instructions: |-
           Determine whether this PR makes a decision, then verify it is recorded.
-          Ordinary-decision triggers (any): a dependency added to any Cargo.toml [dependencies] or [dev-dependencies] (not a pure version bump); a change to process or tooling rules (.github/workflows/, scripts/, .coderabbit.yaml, AGENTS.md, CONTRIBUTING.md, docs/goal-mode.md, docs/testing-style.md); a migration under crates/persistence/migrations/ that backfills data, alters constraints on an existing table, or otherwise makes a choice the specification does not already fix; a provisional limit or parameter the PR description itself presents as provisional or owner-decided; an entry in docs/open-questions.md closed or removed whose resolution has no foundation-level effects.
+          Ordinary-decision triggers (any): a dependency added to any Cargo.toml [dependencies] or [dev-dependencies] (not a pure version bump); a change to process or tooling rules (.github/workflows/, scripts/, .coderabbit.yaml, AGENTS.md, CONTRIBUTING.md, docs/agents/goal-mode.md, docs/agents/testing-style.md); a migration under crates/persistence/migrations/ that backfills data, alters constraints on an existing table, or otherwise makes a choice the specification does not already fix; a provisional limit or parameter the PR description itself presents as provisional or owner-decided; an entry in docs/open-questions.md closed or removed whose resolution has no foundation-level effects.
           If any trigger fires, docs/decisions.md must gain a new entry in this PR headed "## YYYY-MM-DD — <title>" (newest first) containing all four bolded sections: **Context.**, **Decision.**, **Rejected alternatives.**, **Affects.**. Fail if the entry or any section is missing.
           NOT a trigger: implementing behavior the docs/spec/ pages and recorded decisions already fix — new public types, ports, or traits, and purely additive migrations realizing specified behavior need no entry; the spec update and PR description are their record.
           Foundation-weight triggers (any): a docs/spec/ page's normative semantics change beyond recording behavior this PR or its stack implements; a boundary between domain, storage, wire, or framework representations moves; an invariant row in docs/invariants.md is weakened or deleted; an entry in docs/open-questions.md is closed or removed AND its resolution has any of these effects (an ordinary closure moving no boundary, weakening no invariant, and introducing no cross-cutting technology is an ordinary decision, not foundation weight). If any fires, the specification diff must ride in this PR or at the bottom of its stack AND a docs/decisions.md entry must record the choice; Fail if either is missing.
           Pass when no trigger fires (mechanical fixes, refactors, formatting, specified-behavior slices), or the required records are present. Report which trigger fired and which record is missing.
+
+      # verdict logic for the public-source hygiene rule owned by AGENTS.md
+      - name: "Public-source hygiene"
+        mode: warning
+        instructions: |-
+          Scope: all text this PR adds on any surface the rule names — code (comments, string literals, identifiers), documentation, all pull-request text (title and description), commit messages, and the head branch name. Pass immediately if none.
+          Fail when added text includes or alludes to non-public material of any organization — internal systems, private documents, specifications not publicly documented, or organization-internal vocabulary — whether as content, source, or inspiration. Citing publicly available open-source projects, papers, and blog posts is always acceptable regardless of publisher. References to the owner's own personal private repositories are acceptable only as provenance notes, never as normative sources (mirroring the owning rule).
+          Report each violation by surface, locator, and category only — file path and line for file surfaces, otherwise the surface name with a content-free locator (pull-request title, description, the commit SHA for a commit message, the head branch). Do NOT quote, excerpt, or paraphrase the violating passage: a review comment is itself persistent pull-request text, and echoing the material would republish exactly what the rule exists to keep out.
 
       # verdict logic for the single-statement-of-record rule owned by AGENTS.md
       - name: "Normative statements live in one place"
         mode: warning
         instructions: |-
           Scope: Markdown prose added or modified under docs/ or in README.md. Pass immediately if none changed.
-          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning docs/spec/ page, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
+          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning docs/spec/ page, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/agents/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
           Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the decision-weight criteria (owned by AGENTS.md), or spec-owned semantics restated into docs/architecture.md or docs/glossary.md.
           Pass when: the new text is itself the statement of record (a new or updated owning spec-page section, invariant row, or decision entry); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
           Report each failure as: the added sentence, the owning document, and the link that should replace the restatement.
@@ -62,12 +71,12 @@ reviews:
           4. The description claims test coverage for a case no test at the PR head exercises (verify the named test or behavior by search).
           Pass when the description is within budget, states the changed-line count, and every enforcement claim maps to a concrete artifact in the diff. Do not fail on style, tone, or missing optional sections. Report each failing claim verbatim with the reason no artifact matches.
 
-      # verdict logic for the rules owned by docs/testing-style.md
+      # verdict logic for the rules owned by docs/agents/testing-style.md
       - name: "Modified tests follow testing-style rules"
         mode: warning
         instructions: |-
           Scope: test code added or modified by this PR — files under crates/*/tests/ and #[cfg(test)] modules touched by the diff. Pass immediately if none.
-          Apply docs/testing-style.md; cite rule numbers in findings:
+          Apply docs/agents/testing-style.md; cite rule numbers in findings:
           1. Rule 2: an added or modified #[test] body must contain no for/while loop and no if/match selecting between test cases. Straight-line calls to #[track_caller] helpers are the accepted replacement. Fail per offending test.
           2. Rule 6: an added assertion must not compare against a literal re-encoding a value the fixture already states (e.g. asserting `.as_u64() == 4` where setup built version 4 from a seeded helper). Fail when the literal duplicates a fixture value reachable through an accessor.
           3. Rule 10: in any file cited by an Enforcement cell of docs/invariants.md, targeted asserts are decisive; a change leaving only an expect![...] snapshot where a targeted assert previously existed is a Fail.
@@ -113,5 +122,5 @@ reviews:
 knowledge_base:
   code_guidelines:
     filePatterns:
-      - "docs/testing-style.md"
-      - "docs/goal-mode.md"
+      - "docs/agents/testing-style.md"
+      - "docs/agents/goal-mode.md"
