@@ -60,16 +60,17 @@ pub use imported_conversation::{
     ImportedTranscriptEntryInput, ImportedTranscriptFrontier, ImportedTranscriptPosition,
 };
 pub use imported_session::{
-    CreateSessionFromImportedFrontierAppliedResult,
+    BoundedImportedSessionReconstitutionError, BoundedImportedSessionReconstitutionFailure,
+    BoundedImportedSessionReconstitutionInput, CreateSessionFromImportedFrontierAppliedResult,
     CreateSessionFromImportedFrontierPreparationError,
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionError,
     CreateSessionFromImportedFrontierReconstitutionFailure,
     CreateSessionFromImportedFrontierReconstitutionInput, ImportedSessionReconstitutionError,
     ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
-    ImportedSessionSeedReconstitutionFailure, ImportedSessionSeedReconstitutionInput,
-    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
-    ReconstitutedSessionCreationFromImportedFrontier,
+    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionFailure,
+    ImportedSessionSeedReconstitutionInput, PreparedCreateSessionFromImportedFrontier,
+    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,

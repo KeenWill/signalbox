@@ -297,6 +297,294 @@ impl ImportedSessionSeedReconstitutionInput {
     }
 }
 
+/// One stored seed-frontier header supplied to bounded session
+/// reconstitution.
+///
+/// Membership is deliberately absent: ordinary session loads validate only
+/// the constant-size seed proof. Purpose-specific semantic-context reads use
+/// [`ImportedSessionReconstitutionInput`] for complete prefix validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportedSessionSeedHeaderReconstitutionInput {
+    owning_session: SessionId,
+    seed_frontier: ContextFrontierId,
+    declared_member_count: u64,
+}
+
+impl ImportedSessionSeedHeaderReconstitutionInput {
+    /// Supplies the independently stored frontier-header fields.
+    pub const fn new(
+        owning_session: SessionId,
+        seed_frontier: ContextFrontierId,
+        declared_member_count: u64,
+    ) -> Self {
+        Self {
+            owning_session,
+            seed_frontier,
+            declared_member_count,
+        }
+    }
+
+    /// Returns the frontier's stored owning session.
+    pub const fn owning_session(&self) -> SessionId {
+        self.owning_session
+    }
+
+    /// Returns the stored seed-frontier identity.
+    pub const fn seed_frontier(&self) -> ContextFrontierId {
+        self.seed_frontier
+    }
+
+    /// Returns the stored frontier-header member count.
+    pub const fn declared_member_count(&self) -> u64 {
+        self.declared_member_count
+    }
+}
+
+/// Complete constant-size stored facts for one ordinary imported-session load.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundedImportedSessionReconstitutionInput {
+    requested_session: SessionId,
+    stored_session: SessionId,
+    provenance: SessionCreationProvenance,
+    current_defaults_session: SessionId,
+    current_defaults_version: SessionConfigurationDefaultsVersion,
+    defaults_session: SessionId,
+    defaults_version: SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+    seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+    seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+}
+
+impl BoundedImportedSessionReconstitutionInput {
+    /// Supplies the complete bounded projection without imported members.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self {
+        Self {
+            requested_session,
+            stored_session,
+            provenance,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+            seed_records,
+            seed_headers,
+        }
+    }
+
+    /// Reconstructs one bounded current session after checking its seed proof.
+    pub fn reconstitute(self) -> Result<Session, BoundedImportedSessionReconstitutionError> {
+        let fail = |input, failure| BoundedImportedSessionReconstitutionError {
+            input: Box::new(input),
+            failure,
+        };
+        if self.requested_session != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::RequestedSessionMismatch,
+            ));
+        }
+        if self.current_defaults_session != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
+            ));
+        }
+        if self.defaults_session != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::DefaultsSessionMismatch,
+            ));
+        }
+        if self.current_defaults_version != self.defaults_version {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ));
+        }
+        let TranscriptAncestry::ImportedConversation {
+            source_frontier, ..
+        } = self.provenance.ancestry()
+        else {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::AncestryNotImported,
+            ));
+        };
+        let [seed] = self.seed_records.as_slice() else {
+            let failure = if self.seed_records.is_empty() {
+                BoundedImportedSessionReconstitutionFailure::MissingSeedRecord
+            } else {
+                BoundedImportedSessionReconstitutionFailure::DuplicateSeedRecord
+            };
+            return Err(fail(self, failure));
+        };
+        if seed.session() != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::SeedSessionMismatch,
+            ));
+        }
+        let [header] = self.seed_headers.as_slice() else {
+            let failure = if self.seed_headers.is_empty() {
+                BoundedImportedSessionReconstitutionFailure::MissingSeedHeader
+            } else {
+                BoundedImportedSessionReconstitutionFailure::DuplicateSeedHeader
+            };
+            return Err(fail(self, failure));
+        };
+        if header.owning_session() != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::SeedHeaderSessionMismatch,
+            ));
+        }
+        if header.seed_frontier() != seed.seed_frontier() {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::SeedHeaderIdentityMismatch,
+            ));
+        }
+        if header.declared_member_count() != source_frontier.through_position().as_u64() {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::SeedMemberCountMismatch,
+            ));
+        }
+
+        Ok(Session::from_validated_imported_reconstitution(
+            self.stored_session,
+            self.provenance,
+            VersionedSessionConfigurationDefaults::reconstitute(
+                self.defaults_version,
+                self.defaults,
+            ),
+        ))
+    }
+
+    /// Returns the requested session identity.
+    pub const fn requested_session(&self) -> SessionId {
+        self.requested_session
+    }
+
+    /// Returns the stored session identity.
+    pub const fn stored_session(&self) -> SessionId {
+        self.stored_session
+    }
+
+    /// Returns the stored immutable provenance.
+    pub const fn provenance(&self) -> SessionCreationProvenance {
+        self.provenance
+    }
+
+    /// Returns the current-defaults pointer owner.
+    pub const fn current_defaults_session(&self) -> SessionId {
+        self.current_defaults_session
+    }
+
+    /// Returns the current-defaults pointer version.
+    pub const fn current_defaults_version(&self) -> SessionConfigurationDefaultsVersion {
+        self.current_defaults_version
+    }
+
+    /// Returns the selected defaults-row owner.
+    pub const fn defaults_session(&self) -> SessionId {
+        self.defaults_session
+    }
+
+    /// Returns the selected defaults-row version.
+    pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion {
+        self.defaults_version
+    }
+
+    /// Returns the selected complete defaults.
+    pub const fn defaults(&self) -> SessionConfigurationDefaults {
+        self.defaults
+    }
+
+    /// Borrows all candidate seed records.
+    pub fn seed_records(&self) -> &[ImportedSessionSeedReconstitutionInput] {
+        &self.seed_records
+    }
+
+    /// Borrows all candidate seed-frontier headers.
+    pub fn seed_headers(&self) -> &[ImportedSessionSeedHeaderReconstitutionInput] {
+        &self.seed_headers
+    }
+}
+
+/// Why a bounded imported-session proof is incomplete or inconsistent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundedImportedSessionReconstitutionFailure {
+    /// The requested session differs from the stored session.
+    RequestedSessionMismatch,
+    /// The current-defaults pointer belongs to another session.
+    CurrentDefaultsSessionMismatch,
+    /// The selected defaults row belongs to another session.
+    DefaultsSessionMismatch,
+    /// The current pointer and selected row name different versions.
+    CurrentDefaultsVersionMismatch,
+    /// The stored ancestry is not imported ancestry.
+    AncestryNotImported,
+    /// No one-to-one seed record was supplied.
+    MissingSeedRecord,
+    /// More than one seed record was supplied.
+    DuplicateSeedRecord,
+    /// The seed record belongs to another session.
+    SeedSessionMismatch,
+    /// No seed-frontier header was supplied.
+    MissingSeedHeader,
+    /// More than one seed-frontier header was supplied.
+    DuplicateSeedHeader,
+    /// The seed-frontier header belongs to another session.
+    SeedHeaderSessionMismatch,
+    /// The header identity differs from the seed link.
+    SeedHeaderIdentityMismatch,
+    /// The header count differs from the selected imported boundary position.
+    SeedMemberCountMismatch,
+}
+
+/// Failed bounded imported-session reconstitution retaining every input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundedImportedSessionReconstitutionError {
+    input: Box<BoundedImportedSessionReconstitutionInput>,
+    failure: BoundedImportedSessionReconstitutionFailure,
+}
+
+impl BoundedImportedSessionReconstitutionError {
+    /// Returns why bounded reconstitution failed.
+    pub const fn failure(&self) -> BoundedImportedSessionReconstitutionFailure {
+        self.failure
+    }
+
+    /// Borrows the complete unchanged input.
+    pub const fn input(&self) -> &BoundedImportedSessionReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the complete unchanged input and failure.
+    pub fn into_parts(
+        self,
+    ) -> (
+        BoundedImportedSessionReconstitutionInput,
+        BoundedImportedSessionReconstitutionFailure,
+    ) {
+        (*self.input, self.failure)
+    }
+}
+
 /// Why stored imported seed facts do not prove one exact imported prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportedSessionSeedReconstitutionFailure {
@@ -501,7 +789,8 @@ fn validate_imported_seed_projection(
     })
 }
 
-/// Complete stored facts for one current imported-seeded session.
+/// Complete stored facts for one purpose-specific imported semantic-context
+/// read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedSessionReconstitutionInput {
     requested_session: SessionId,
@@ -551,7 +840,7 @@ impl ImportedSessionReconstitutionInput {
         }
     }
 
-    /// Reconstructs one complete current imported-seeded session.
+    /// Reconstructs one complete imported semantic-context projection.
     pub fn reconstitute(
         self,
     ) -> Result<ReconstitutedImportedSession, ImportedSessionReconstitutionError> {
@@ -676,7 +965,7 @@ impl ImportedSessionReconstitutionInput {
     }
 }
 
-/// Why a complete current imported-session projection is inconsistent.
+/// Why a complete imported semantic-context projection is inconsistent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportedSessionReconstitutionFailure {
     /// The requested session differs from the stored session.
@@ -691,7 +980,7 @@ pub enum ImportedSessionReconstitutionFailure {
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
-/// Failed current imported-session reconstitution retaining every input.
+/// Failed imported semantic-context reconstitution retaining every input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedSessionReconstitutionError {
     input: Box<ImportedSessionReconstitutionInput>,
@@ -720,8 +1009,8 @@ impl ImportedSessionReconstitutionError {
     }
 }
 
-/// One complete current imported-seeded session reconstructed from durable
-/// facts.
+/// One complete imported semantic-context projection reconstructed from
+/// durable facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconstitutedImportedSession {
     session: Session,
@@ -1247,6 +1536,48 @@ mod tests {
         )
     }
 
+    fn bounded_input(
+        prepared: &PreparedCreateSessionFromImportedFrontier,
+    ) -> BoundedImportedSessionReconstitutionInput {
+        let seed = prepared.imported_seed();
+        BoundedImportedSessionReconstitutionInput::new(
+            prepared.session().id(),
+            prepared.session().id(),
+            prepared.session().provenance(),
+            prepared.session().id(),
+            SessionConfigurationDefaultsVersion::first(),
+            prepared.session().id(),
+            SessionConfigurationDefaultsVersion::first(),
+            prepared.command().initial_configuration_defaults(),
+            vec![ImportedSessionSeedReconstitutionInput::new(
+                seed.session(),
+                seed.seed_frontier(),
+            )],
+            vec![ImportedSessionSeedHeaderReconstitutionInput::new(
+                prepared.session().id(),
+                seed.seed_frontier(),
+                prepared
+                    .command()
+                    .imported_frontier()
+                    .through_position()
+                    .as_u64(),
+            )],
+        )
+    }
+
+    #[track_caller]
+    fn assert_bounded_failure(
+        input: BoundedImportedSessionReconstitutionInput,
+        expected: BoundedImportedSessionReconstitutionFailure,
+    ) {
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("the corrupted bounded seed proof must fail");
+        assert_eq!(error.failure(), expected);
+        assert_eq!(error.input(), &unchanged);
+    }
+
     /// S28 / INV-015 / INV-038 / INV-039: preparation projects every exact
     /// imported prefix member once, in order, and couples it to one exact
     /// separately identified seed frontier.
@@ -1417,6 +1748,152 @@ mod tests {
         assert_eq!(
             reconstituted.semantic_entries(),
             prepared.semantic_entries()
+        );
+    }
+
+    /// S28 / INV-002 / INV-015 / INV-039: an ordinary imported-session load
+    /// proves the immutable seed from constant-size records without loading
+    /// semantic-prefix members.
+    #[test]
+    fn s28_inv002_inv015_inv039_bounded_current_session_reconstitutes() {
+        let (_, _, prepared) = prepared_fixture();
+        let input = bounded_input(&prepared);
+
+        let session = input
+            .reconstitute()
+            .expect("the bounded seed link and frontier header agree");
+
+        assert_eq!(session.id(), prepared.session().id());
+        assert_eq!(
+            session.creation_provenance(),
+            prepared.session().provenance()
+        );
+        assert_eq!(
+            session.current_configuration_defaults(),
+            prepared.session().configuration_defaults()
+        );
+    }
+
+    /// S28 / INV-002 / INV-003 / INV-015 / INV-039: every constructible
+    /// bounded imported-session mismatch retains its input and reports one
+    /// exact typed cause.
+    #[test]
+    fn s28_inv002_inv003_inv015_inv039_bounded_seed_corruption_is_typed() {
+        let (_, _, prepared) = prepared_fixture();
+
+        let mut requested_session = bounded_input(&prepared);
+        requested_session.requested_session = session_id(90);
+        assert_bounded_failure(
+            requested_session,
+            BoundedImportedSessionReconstitutionFailure::RequestedSessionMismatch,
+        );
+
+        let mut current_defaults_session = bounded_input(&prepared);
+        current_defaults_session.current_defaults_session = session_id(91);
+        assert_bounded_failure(
+            current_defaults_session,
+            BoundedImportedSessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
+        );
+
+        let mut defaults_session = bounded_input(&prepared);
+        defaults_session.defaults_session = session_id(92);
+        assert_bounded_failure(
+            defaults_session,
+            BoundedImportedSessionReconstitutionFailure::DefaultsSessionMismatch,
+        );
+
+        let mut defaults_version = bounded_input(&prepared);
+        defaults_version.defaults_version = SessionConfigurationDefaultsVersion::first()
+            .checked_next()
+            .expect("the second synthetic defaults version exists");
+        assert_bounded_failure(
+            defaults_version,
+            BoundedImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+        );
+
+        let mut ancestry = bounded_input(&prepared);
+        ancestry.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        );
+        assert_bounded_failure(
+            ancestry,
+            BoundedImportedSessionReconstitutionFailure::AncestryNotImported,
+        );
+
+        let mut missing_seed = bounded_input(&prepared);
+        missing_seed.seed_records.clear();
+        assert_bounded_failure(
+            missing_seed,
+            BoundedImportedSessionReconstitutionFailure::MissingSeedRecord,
+        );
+
+        let mut duplicate_seed = bounded_input(&prepared);
+        duplicate_seed
+            .seed_records
+            .push(duplicate_seed.seed_records[0]);
+        assert_bounded_failure(
+            duplicate_seed,
+            BoundedImportedSessionReconstitutionFailure::DuplicateSeedRecord,
+        );
+
+        let mut seed_session = bounded_input(&prepared);
+        seed_session.seed_records[0] = ImportedSessionSeedReconstitutionInput::new(
+            session_id(93),
+            prepared.imported_seed().seed_frontier(),
+        );
+        assert_bounded_failure(
+            seed_session,
+            BoundedImportedSessionReconstitutionFailure::SeedSessionMismatch,
+        );
+
+        let mut missing_header = bounded_input(&prepared);
+        missing_header.seed_headers.clear();
+        assert_bounded_failure(
+            missing_header,
+            BoundedImportedSessionReconstitutionFailure::MissingSeedHeader,
+        );
+
+        let mut duplicate_header = bounded_input(&prepared);
+        duplicate_header
+            .seed_headers
+            .push(duplicate_header.seed_headers[0]);
+        assert_bounded_failure(
+            duplicate_header,
+            BoundedImportedSessionReconstitutionFailure::DuplicateSeedHeader,
+        );
+
+        let mut header_session = bounded_input(&prepared);
+        header_session.seed_headers[0] = ImportedSessionSeedHeaderReconstitutionInput::new(
+            session_id(94),
+            prepared.imported_seed().seed_frontier(),
+            2,
+        );
+        assert_bounded_failure(
+            header_session,
+            BoundedImportedSessionReconstitutionFailure::SeedHeaderSessionMismatch,
+        );
+
+        let mut header_identity = bounded_input(&prepared);
+        header_identity.seed_headers[0] = ImportedSessionSeedHeaderReconstitutionInput::new(
+            prepared.session().id(),
+            context_frontier_id(95),
+            2,
+        );
+        assert_bounded_failure(
+            header_identity,
+            BoundedImportedSessionReconstitutionFailure::SeedHeaderIdentityMismatch,
+        );
+
+        let mut member_count = bounded_input(&prepared);
+        member_count.seed_headers[0] = ImportedSessionSeedHeaderReconstitutionInput::new(
+            prepared.session().id(),
+            prepared.imported_seed().seed_frontier(),
+            1,
+        );
+        assert_bounded_failure(
+            member_count,
+            BoundedImportedSessionReconstitutionFailure::SeedMemberCountMismatch,
         );
     }
 
