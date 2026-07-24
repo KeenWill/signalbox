@@ -101,3 +101,9 @@ jobs:
           cargo test -p signalbox-hubd
           --test process_protocol_runtime
           -- --ignored --test-threads=1
+      - name: Run terminal client offline end-to-end test
+        run: >-
+          cargo test -p signalbox-client
+          --test end_to_end
+          terminal_client_completes_an_offline_scripted_conversation
+          -- --ignored --test-threads=1

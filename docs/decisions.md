@@ -10,6 +10,23 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Snapshot terminal renderer projections
+
+**Context.** Partial substring assertions let missing identities, malformed
+field layout, or unintended extra terminal output pass. The testing-style guide
+requires expect tests when a rendered value's complete shape is the assertion.
+
+**Decision.** Add the repository's existing `expect-test` 1.5 helper as a
+terminal client dev-dependency and snapshot each complete turn and event
+projection changed in this review wave. Keep behavioral law assertions separate.
+
+**Rejected alternatives.** More substring assertions do not close the omitted
+output surface. Whole-structure snapshots would include irrelevant fixtures;
+these snapshots contain only the deterministic rendered value under test.
+
+**Affects.** Terminal-client test dependencies and renderer tests only; terminal
+output and runtime dependencies do not change.
+
 ## 2026-07-24 — Release decoded process payloads before response backpressure
 
 **Context.** Cloning a decoded request retained both the frame-owned payload and
@@ -269,6 +286,47 @@ multi-frame wire representation.
 **Affects.** Process transcript reads and follow-snapshot startup, the
 persistence read cursor, hubd's direct dependency set, and temporary disk usage;
 wire messages and authoritative snapshot semantics do not change.
+
+## 2026-07-23 — Spool unbounded transcript snapshots to anonymous files
+
+**Context.** Version one intentionally has no aggregate transcript-snapshot
+limit. Retaining every decoded turn, semantic entry, content fragment, and
+identity set until the terminal count frame lets a valid local peer exhaust
+client memory.
+
+**Decision.** Validate and spool snapshot frames to an owner-private anonymous
+temporary file, then replay that file only after the terminal counts validate.
+Use the narrowly scoped `tempfile` crate for portable create-and-unlink
+lifecycle handling; fixed-width identity indexes remain disk-backed as well.
+
+**Rejected alternatives.** Adding an aggregate wire limit changes the protocol's
+recorded ability to carry growing durable transcripts. Rendering before the end
+frame could expose a malformed partial snapshot. Owning platform-specific
+temporary-file creation repeats subtle permissions and cleanup behavior.
+
+**Affects.** Terminal-client snapshot validation, replay, and its direct
+dependency surface only; server framing and durable transcript size remain
+unchanged.
+
+## 2026-07-23 — Use Clap for the terminal command surface
+
+**Context.** The first terminal client hand-parsed nested commands, mutually
+exclusive model selection, recovery-flag pairing, canonical typed values, help,
+and duplicate options. The owner approved Clap as the better long-term fit for
+this growing daily command surface.
+
+**Decision.** Use Clap 4's derive API with default features disabled and only
+the parsing, help, usage, suggestion, and error-context features enabled.
+Signalbox retains focused value parsers for canonical UUIDs, reserved command
+identities, and shortest unsigned decimal spelling.
+
+**Rejected alternatives.** Extending the handwritten parser duplicates mature
+subcommand and constraint handling. Enabling Clap's full default feature set
+adds color and ancillary behavior the closed local client does not need.
+
+**Affects.** `apps/client` argument parsing, generated help and usage
+diagnostics, direct dependencies, and the lockfile; process messages and command
+semantics do not change.
 
 ## 2026-07-23 — Bound concurrent inbound frame buffers at eight
 
