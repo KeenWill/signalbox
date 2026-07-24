@@ -846,6 +846,8 @@ impl ProcessReadRepository {
             "outbox cursor",
         )?;
         let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
+        // INV-039 remains fail-closed on every transcript open: native lineage
+        // supersedes the seed as the rendered frontier, not as an integrity fact.
         let imported_seed =
             load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =

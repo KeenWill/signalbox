@@ -260,31 +260,27 @@ async fn serve_connection(
             return Ok(());
         };
         let frame = match line {
-            IncomingLine::Complete(line) => {
-                let admitted_version = line
-                    .strip_suffix(b"\n")
-                    .and_then(recover_bounded_client_protocol_version);
-                match decode_client_line(&line) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        let code = match error.kind() {
-                            FrameDecodeErrorKind::UnsupportedVersion => {
-                                ErrorCode::UnsupportedVersion
-                            }
-                            FrameDecodeErrorKind::OversizedFrame
-                            | FrameDecodeErrorKind::MalformedFrame => ErrorCode::MalformedFrame,
-                        };
-                        write_error(
-                            &mut writer,
-                            admitted_version.unwrap_or(ProtocolVersion::One),
-                            error.request_id(),
-                            ProtocolError::without_detail(code),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
+            IncomingLine::Complete(line) => match decode_client_line(&line) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    let admitted_version = line
+                        .strip_suffix(b"\n")
+                        .and_then(recover_bounded_client_protocol_version);
+                    let code = match error.kind() {
+                        FrameDecodeErrorKind::UnsupportedVersion => ErrorCode::UnsupportedVersion,
+                        FrameDecodeErrorKind::OversizedFrame
+                        | FrameDecodeErrorKind::MalformedFrame => ErrorCode::MalformedFrame,
+                    };
+                    write_error(
+                        &mut writer,
+                        admitted_version.unwrap_or(ProtocolVersion::One),
+                        error.request_id(),
+                        ProtocolError::without_detail(code),
+                    )
+                    .await?;
+                    return Ok(());
                 }
-            }
+            },
             IncomingLine::Oversized {
                 request_id,
                 admitted_version,

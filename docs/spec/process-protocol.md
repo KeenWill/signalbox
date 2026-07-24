@@ -126,11 +126,13 @@ spellings decode to the same name. A version other than one or two produces an
 `unsupported_version` error naming the supported versions, then the server
 closes the connection. Every response uses the request's admitted version; when
 no version can be admitted, the server error uses version one as the
-pre-admission fallback. A server error uses `request_id = "0"` only when the
-incoming frame prevents recovery of a valid nonzero identity; zero is never a
-valid client identity or success-response identity. Leading zeroes, a plus sign,
-whitespace, and any spelling other than the shortest ASCII decimal form are
-invalid.
+pre-admission fallback. The version-two terminal client admits that version-one
+fallback only for `malformed_frame` or `unsupported_version`, then applies the
+ordinary request-identity check; every other response-version mismatch fails
+locally. A server error uses `request_id = "0"` only when the incoming frame
+prevents recovery of a valid nonzero identity; zero is never a valid client
+identity or success-response identity. Leading zeroes, a plus sign, whitespace,
+and any spelling other than the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
