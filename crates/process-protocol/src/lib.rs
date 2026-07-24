@@ -1022,6 +1022,27 @@ pub enum ModelCallState {
     },
 }
 
+/// Exact durable state of one tool batch presentation boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolBatchState {
+    /// Assistant tool proposals committed.
+    Proposed {
+        /// Exact frontier containing the assistant tool-use entries.
+        frontier_id: CanonicalUuid,
+    },
+    /// Proposal-ordered logical results committed.
+    ResultsProjected {
+        /// Exact frontier containing the result suffix.
+        frontier_id: CanonicalUuid,
+    },
+    /// One ambiguous physical attempt requires owner recovery.
+    RecoveryRequired {
+        /// Exact ambiguous tool attempt.
+        tool_attempt_id: CanonicalUuid,
+    },
+}
+
 /// Closed durable update event family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1054,6 +1075,15 @@ pub enum SessionEvent {
         model_call_id: CanonicalUuid,
         /// Exact committed state.
         state: ModelCallState,
+    },
+    /// A tool batch crossed one durable presentation boundary.
+    ToolBatchTransition {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Model call that proposed the batch.
+        model_call_id: CanonicalUuid,
+        /// Exact committed batch state.
+        state: ToolBatchState,
     },
     /// Turn completed.
     TurnCompleted {
@@ -1734,8 +1764,8 @@ mod tests {
         FrameEncodeError, FrameValidationError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
         MAX_JSON_CONTAINER_DEPTH, ModelCallDisposition, ModelCallState, ModelSelection,
         PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line,
+        decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -2769,6 +2799,21 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"6","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(31)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(7),
+                session_id: uuid(1),
+                event: SessionEvent::ToolBatchTransition {
+                    turn_id: uuid(3),
+                    model_call_id: uuid(8),
+                    state: ToolBatchState::ResultsProjected {
+                        frontier_id: uuid(6),
+                    },
+                },
+            },
+            r#"{"type":"session_event","cursor":"7","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"tool_batch_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"results_projected","frontier_id":"00000000-0000-0000-0000-000000000006"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(18)?,

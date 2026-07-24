@@ -961,6 +961,7 @@ where
             });
         loop {
             let attempt = self.ids.next_tool_attempt_id();
+            let _dispatch_permit = self.gate.acquire(batch.turn()).await;
             match self
                 .transaction
                 .prepare_next_attempt(batch.session(), batch.turn(), attempt, effect_class)
@@ -972,11 +973,12 @@ where
                 {
                     continue;
                 }
-                Ok(prepared) => {
+                Ok(Some(prepared)) => {
                     return Ok(ToolExecutionServiceOutcome::AttemptCheckpointed(
                         prepared.attempt(),
                     ));
                 }
+                Ok(None) => return Ok(ToolExecutionServiceOutcome::NoWork),
                 Err(error) => return Err(ToolExecutionServiceError::Prepare(error)),
             }
         }
@@ -1430,7 +1432,7 @@ mod tests {
             _turn: TurnId,
             _attempt: ToolAttemptId,
             _effect_class: ToolEffectClass,
-        ) -> Result<signalbox_domain::CurrentToolAttempt, Self::Error> {
+        ) -> Result<Option<signalbox_domain::CurrentToolAttempt>, Self::Error> {
             panic!("prepared fixture never creates another attempt")
         }
 

@@ -7,6 +7,7 @@
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+use serde_json::value::{RawValue, to_raw_value};
 
 /// The name a tool is declared and proposed under.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,24 +44,28 @@ impl ToolCallId {
 
 /// One declared tool: a name, a description for the model, and the JSON
 /// Schema of its arguments.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ToolDefinition {
     /// The name the model proposes this tool under.
     pub name: ToolName,
     /// What the tool does, addressed to the model.
     pub description: String,
     /// JSON Schema for the tool's arguments object.
-    pub input_schema: serde_json::Value,
+    pub input_schema: Box<RawValue>,
+}
+
+impl PartialEq for ToolDefinition {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.description == other.description
+            && self.input_schema.get() == other.input_schema.get()
+    }
 }
 
 impl ToolDefinition {
     /// Declares a tool whose argument schema is generated from `T`.
     pub fn of_type<T: JsonSchema>(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Self {
-            name: ToolName::new(name),
-            description: description.into(),
-            input_schema: schemars::schema_for!(T).to_value(),
-        }
+        Self::with_schema(name, description, schemars::schema_for!(T).to_value())
     }
 
     /// Declares a tool with an explicit argument schema.
@@ -68,6 +73,19 @@ impl ToolDefinition {
         name: impl Into<String>,
         description: impl Into<String>,
         input_schema: serde_json::Value,
+    ) -> Self {
+        Self::with_raw_schema(
+            name,
+            description,
+            to_raw_value(&input_schema).expect("serde_json::Value always serializes as JSON"),
+        )
+    }
+
+    /// Declares a tool with an already validated, stack-safe raw schema.
+    pub fn with_raw_schema(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: Box<RawValue>,
     ) -> Self {
         Self {
             name: ToolName::new(name),
@@ -196,7 +214,11 @@ mod tests {
               "title": "LookupArguments",
               "type": "object"
             }"#]]
-        .assert_eq(&format!("{:#}", definition.input_schema));
+        .assert_eq(&format!(
+            "{:#}",
+            serde_json::from_str::<serde_json::Value>(definition.input_schema.get())
+                .expect("generated schema remains valid JSON")
+        ));
     }
 
     #[test]

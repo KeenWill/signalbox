@@ -10,7 +10,6 @@
 
 use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
-use serde::Deserialize;
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
     ModelConversationMessage, ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
@@ -336,9 +335,9 @@ where
             .tools()
             .iter()
             .map(|definition| {
-                let schema = decode_checked_json(definition.input_schema().as_str())
+                let schema = decode_checked_raw_json(definition.input_schema().as_str())
                     .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
-                Ok(ToolDefinition::with_schema(
+                Ok(ToolDefinition::with_raw_schema(
                     definition.name().as_str(),
                     definition.description(),
                     schema,
@@ -526,7 +525,9 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
     if request.arguments().kind() == ToolArgumentsKind::Json
-        && decode_checked_json(request.arguments().as_str()).is_ok_and(|value| value.is_object())
+        && decode_checked_raw_json(request.arguments().as_str()).is_ok_and(|value| {
+            value.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
+        })
     {
         request.arguments().as_str().to_owned()
     } else {
@@ -537,15 +538,10 @@ fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
     }
 }
 
-fn decode_checked_json(value: &str) -> Result<serde_json::Value, serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_str(value);
-    deserializer.disable_recursion_limit();
-    let decoded = {
-        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
-        serde_json::Value::deserialize(deserializer)?
-    };
-    deserializer.end()?;
-    Ok(decoded)
+fn decode_checked_raw_json(
+    value: &str,
+) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
+    serde_json::value::RawValue::from_string(value.to_owned())
 }
 
 fn require_correlation(
@@ -747,7 +743,8 @@ mod tests {
 
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal, decode_checked_json, render_runtime_messages,
+        RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
+        render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -1101,13 +1098,14 @@ mod tests {
 
     #[test]
     fn checked_tool_json_decoding_is_stack_guarded_beyond_serde_default_depth() {
-        let depth = 256;
+        let depth = 512;
         let json = format!(r#"{{"nested":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
 
         assert!(
-            decode_checked_json(&json)
+            decode_checked_raw_json(&json)
                 .expect("checked bounded JSON remains decodable")
-                .is_object()
+                .get()
+                .starts_with('{')
         );
     }
 

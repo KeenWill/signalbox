@@ -1320,6 +1320,47 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         });
     }
 
+    if matches!(active_phase.as_deref(), Some("running")) && active_tool_round_call.is_some() {
+        let (Some(starting_frontier), Some(attempt), Some(tool_frontier)) = (
+            starting_frontier,
+            current_attempt,
+            active_tool_round_frontier,
+        ) else {
+            return Err(ProcessReadCorruption::Inconsistent("running tool round shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("running tool round shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("running tool frontier").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ActiveRunning {
+                    current_attempt: TurnAttemptId::from_uuid(attempt),
+                    current_model_call: None,
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(latest_frontier),
+        });
+    }
+
     if state_kind == "terminal"
         && terminal_disposition.as_deref() == Some("reconciliation_required")
         && terminal_call.is_none()

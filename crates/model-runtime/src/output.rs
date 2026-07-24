@@ -7,6 +7,7 @@
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+use serde_json::value::{RawValue, to_raw_value};
 
 use crate::message::AssistantPart;
 use crate::tool::ToolName;
@@ -17,14 +18,22 @@ use crate::tool::ToolName;
 /// Adapters realize the contract with provider mechanics (the smoke-critical
 /// provider realizes it as a forced tool call); the decode side is provider
 /// independent.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct StructuredOutputContract {
     /// The name the value is proposed under on the wire.
     pub name: ToolName,
     /// What the value means, addressed to the model.
     pub description: String,
     /// JSON Schema the value must satisfy.
-    pub schema: serde_json::Value,
+    pub schema: Box<RawValue>,
+}
+
+impl PartialEq for StructuredOutputContract {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.description == other.description
+            && self.schema.get() == other.schema.get()
+    }
 }
 
 impl StructuredOutputContract {
@@ -33,7 +42,8 @@ impl StructuredOutputContract {
         Self {
             name: ToolName::new(name),
             description: description.into(),
-            schema: schemars::schema_for!(T).to_value(),
+            schema: to_raw_value(&schemars::schema_for!(T).to_value())
+                .expect("generated JSON Schema always serializes"),
         }
     }
 }

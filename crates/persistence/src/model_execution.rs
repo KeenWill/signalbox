@@ -31,13 +31,13 @@ use signalbox_domain::{
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
-    PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
-    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
-    ReconciliationRequiredToolTurn, RefusedModelCallTurn,
+    PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
+    PreparedToolResultProjection, ProviderModelIdentity, ReclassifiedPendingSteeringTurn,
+    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
-    StopRequestedModelCallTurn, ToolApprovalDecision, ToolDecisionSource, ToolRequest,
-    ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId,
+    StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
+    ToolRequest, ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -46,7 +46,7 @@ use crate::{
         durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
         session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
     },
-    outbox::{self, ModelCallOutboxState, OutboxEvent},
+    outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
         SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection,
@@ -957,7 +957,7 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     turn: TurnId,
     targets: &ModelTargetCatalog,
     credential_reference: &ModelCallCredentialReference,
-    continuation_snapshot: &signalbox_domain::ResolvedContextFrontierSnapshot,
+    projection: &PreparedToolResultProjection,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
     steering_frontier: signalbox_domain::ContextFrontierId,
@@ -967,14 +967,20 @@ where
     NextSteeringIdentities:
         FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
 {
+    let continuation_snapshot = projection.snapshot();
     let continuation = ResolvedContextFrontierReconstitutionInput::new(
         session,
         continuation_snapshot.frontier().snapshot(),
         continuation_snapshot.ordered_entries().collect(),
     );
-    let execution =
-        require_live_execution_with_targets(connection, session, Some(targets), Some(continuation))
-            .await?;
+    let execution = require_live_execution_with_targets(
+        connection,
+        session,
+        Some(targets),
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await?;
     if execution.turn() != turn || execution.current_call().is_some() {
         return Ok(PrepareToolContinuationOutcome::NoWork);
     }
@@ -1068,20 +1074,27 @@ pub(crate) async fn fail_tool_crash_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
-    current_snapshot: &signalbox_domain::ResolvedContextFrontierSnapshot,
+    projection: &PreparedToolResultProjection,
     identities: FailedModelCallTurnIdentities,
     mut next_turn: NextTurn,
 ) -> Result<FailedModelCallTurn, ModelCallRepositoryError>
 where
     NextTurn: FnMut(AcceptedInputId) -> TurnId,
 {
+    let current_snapshot = projection.snapshot();
     let continuation = ResolvedContextFrontierReconstitutionInput::new(
         session,
         current_snapshot.frontier().snapshot(),
         current_snapshot.ordered_entries().collect(),
     );
-    let execution =
-        require_live_execution_with_targets(connection, session, None, Some(continuation)).await?;
+    let execution = require_live_execution_with_targets(
+        connection,
+        session,
+        None,
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await?;
     if execution.turn() != turn || execution.current_call().is_some() {
         return Err(ModelCallRepositoryError::InvalidTransition(
             "tool crash closure does not match live execution",
@@ -2329,14 +2342,15 @@ async fn require_live_execution(
     requested_session: SessionId,
     targets: &ModelTargetCatalog,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    require_live_execution_with_targets(connection, requested_session, Some(targets), None).await
+    require_live_execution_with_targets(connection, requested_session, Some(targets), None, None)
+        .await
 }
 
 pub(crate) async fn require_live_execution_for_restart(
     connection: &mut PgConnection,
     requested_session: SessionId,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    require_live_execution_with_targets(connection, requested_session, None, None).await
+    require_live_execution_with_targets(connection, requested_session, None, None, None).await
 }
 
 pub(crate) async fn require_live_tool_execution(
@@ -2354,6 +2368,7 @@ pub(crate) async fn require_live_tool_execution(
         requested_session,
         None,
         Some(continuation_snapshot),
+        None,
     )
     .await
 }
@@ -2363,6 +2378,7 @@ async fn require_live_execution_with_targets(
     requested_session: SessionId,
     configured_targets: Option<&ModelTargetCatalog>,
     continuation_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
+    uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
@@ -2422,6 +2438,8 @@ async fn require_live_execution_with_targets(
         load_origin_contents(connection, &frontier_entries, &pending_steering).await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
+    let tool_denial_correlations =
+        load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
         targets.clone()
@@ -2459,7 +2477,11 @@ async fn require_live_execution_with_targets(
         pinned_target,
         calls,
     )
-    .with_tool_result_correlations(tool_result_correlations);
+    .with_tool_result_correlations(tool_result_correlations)
+    .with_tool_denial_correlations(tool_denial_correlations);
+    if let Some(projection) = uncommitted_tool_result_projection {
+        input = input.with_uncommitted_tool_result_projection(projection);
+    }
     if let Some(call_snapshot) = call_snapshot {
         input = input.with_call_snapshot(call_snapshot);
     } else if let Some(continuation_snapshot) = continuation_snapshot {
@@ -2469,6 +2491,38 @@ async fn require_live_execution_with_targets(
         let (_, failure) = error.into_parts();
         ModelCallCorruption::Execution(failure).into()
     })
+}
+
+async fn load_tool_denial_correlations(
+    connection: &mut PgConnection,
+    frontier_entries: &[SemanticTranscriptEntry],
+) -> Result<Vec<ToolApprovalResolution>, ModelCallRepositoryError> {
+    let requests = frontier_entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolDenied { request } => Some(request.into_uuid()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT approval.request_id, approval.decision_kind,
+                approval.decision_source, approval.denial_reason
+           FROM tool_approval_decision AS approval
+          WHERE approval.request_id = ANY($1)",
+    )
+    .bind(&requests)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != requests.len() {
+        return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
+    }
+    rows.into_iter()
+        .map(crate::tool_loop::decode_approval)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_tool_evidence_error)
 }
 
 async fn load_tool_result_correlations(
@@ -3496,6 +3550,16 @@ async fn persist_tool_round(
             );
         }
     }
+    outbox::append(
+        connection,
+        OutboxEvent::ToolBatchTransition {
+            session: round.session(),
+            turn: round.turn(),
+            producing_call: round.call().id(),
+            state: ToolBatchOutboxState::Proposed(round.yielded_snapshot().frontier().snapshot()),
+        },
+    )
+    .await?;
     append_terminal_call_event(connection, round.session(), round.turn(), round.call()).await
 }
 

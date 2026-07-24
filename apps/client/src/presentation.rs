@@ -1,9 +1,12 @@
-use std::io::{self, Write};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
-    ModelCallState, ReconciliationOperation, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-    TurnState,
+    ModelCallState, ReconciliationOperation, SessionEvent, ToolBatchState, TranscriptEntry,
+    TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -14,7 +17,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotSelection {
     All,
     Completed {
@@ -30,6 +33,19 @@ pub(crate) enum SnapshotSelection {
         turn_id: CanonicalUuid,
         terminal_entry_id: CanonicalUuid,
     },
+    ToolBatchProposed {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+    },
+    ToolBatchResults {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+    },
+}
+
+#[derive(Default)]
+struct SnapshotSelectionContext {
+    requests: HashSet<CanonicalUuid>,
 }
 
 pub(crate) struct Output<'a> {
@@ -104,7 +120,7 @@ impl<'a> Output<'a> {
         selection: SnapshotSelection,
         render_turns: bool,
     ) -> Result<(), ClientError> {
-        selection.require_terminal_marker(snapshot)?;
+        let selection_context = selection.context(snapshot)?;
         let mut render_content = false;
         for record in snapshot.replay()? {
             match record? {
@@ -112,7 +128,7 @@ impl<'a> Output<'a> {
                 SnapshotRecord::Turn(_) => {}
                 SnapshotRecord::Entry(entry) => {
                     render_content = false;
-                    let selected = selection.includes(&entry);
+                    let selected = selection.includes(&entry, &selection_context);
                     let undisplayed = if selected {
                         match displayed.as_deref_mut() {
                             Some(identities) => {
@@ -199,6 +215,29 @@ impl<'a> Output<'a> {
                  turn={turn_id} call={model_call_id} state={}",
                 model_call_state(*state)
             ),
+            SessionEvent::ToolBatchTransition {
+                turn_id,
+                model_call_id,
+                state,
+            } => match state {
+                ToolBatchState::Proposed { frontier_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=proposed frontier={frontier_id}"
+                ),
+                ToolBatchState::ResultsProjected { frontier_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=results_projected \
+                     frontier={frontier_id}"
+                ),
+                ToolBatchState::RecoveryRequired { tool_attempt_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=recovery_required \
+                     tool_attempt={tool_attempt_id}"
+                ),
+            },
             SessionEvent::TurnCompleted {
                 turn_id,
                 model_call_id,
@@ -492,23 +531,88 @@ impl<'a> Output<'a> {
 }
 
 impl SnapshotSelection {
-    fn require_terminal_marker(self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
+    fn context(
+        self,
+        snapshot: &mut TranscriptSnapshot,
+    ) -> Result<SnapshotSelectionContext, ClientError> {
         if matches!(self, Self::All) {
-            return Ok(());
+            return Ok(SnapshotSelectionContext::default());
         }
+        let mut proposals = HashSet::new();
+        let mut results = HashSet::new();
+        let mut trailing_results = HashSet::new();
+        let mut terminal_results = HashSet::new();
+        let mut anchor_found = false;
         for record in snapshot.replay()? {
-            if let SnapshotRecord::Entry(entry) = record?
-                && self.includes_terminal_marker(&entry)
-            {
-                return Ok(());
+            let SnapshotRecord::Entry(entry) = record? else {
+                continue;
+            };
+            match &entry.kind {
+                SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
+                    turn_id,
+                    model_call_id,
+                    tool_request_id,
+                }) => {
+                    trailing_results.clear();
+                    if self.matches_tool_batch(*turn_id, *model_call_id) {
+                        proposals.insert(*tool_request_id);
+                        if matches!(self, Self::ToolBatchProposed { .. }) {
+                            anchor_found = true;
+                        }
+                    }
+                }
+                SnapshotEntryKind::Marker(
+                    TranscriptEntry::ToolExecutionResult {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolDenied { tool_request_id }
+                    | TranscriptEntry::ToolClosed { tool_request_id },
+                ) => {
+                    results.insert(*tool_request_id);
+                    trailing_results.insert(*tool_request_id);
+                }
+                _ if self.includes_terminal_marker(&entry) => {
+                    anchor_found = true;
+                    terminal_results.clone_from(&trailing_results);
+                    trailing_results.clear();
+                }
+                _ => trailing_results.clear(),
             }
         }
-        Err(ClientError::Protocol(
-            "terminal reread omitted the event's exact marker",
-        ))
+        match self {
+            Self::ToolBatchResults { .. } => {
+                if proposals.is_empty()
+                    || proposals.iter().any(|request| !results.contains(request))
+                {
+                    return Err(ClientError::Protocol(
+                        "tool-result reread omitted the event's exact proposal or result set",
+                    ));
+                }
+                Ok(SnapshotSelectionContext {
+                    requests: proposals,
+                })
+            }
+            Self::ToolBatchProposed { .. } if anchor_found => {
+                Ok(SnapshotSelectionContext::default())
+            }
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. }
+                if anchor_found =>
+            {
+                Ok(SnapshotSelectionContext {
+                    requests: terminal_results,
+                })
+            }
+            Self::ToolBatchProposed { .. } => Err(ClientError::Protocol(
+                "tool-proposal reread omitted the event's exact proposal",
+            )),
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. } => Err(
+                ClientError::Protocol("terminal reread omitted the event's exact marker"),
+            ),
+            Self::All => unreachable!("all entries need no selection context"),
+        }
     }
 
-    fn includes(self, entry: &SnapshotEntry) -> bool {
+    fn includes(self, entry: &SnapshotEntry, context: &SnapshotSelectionContext) -> bool {
         match (self, &entry.kind) {
             (Self::All, _) => true,
             (
@@ -516,6 +620,10 @@ impl SnapshotSelection {
                     turn_id,
                     model_call_id,
                     ..
+                }
+                | Self::ToolBatchProposed {
+                    turn_id,
+                    model_call_id,
                 },
                 SnapshotEntryKind::Text(TranscriptTextEntry::Assistant {
                     turn_id: entry_turn,
@@ -523,14 +631,56 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
+                Self::ToolBatchProposed {
+                    turn_id,
+                    model_call_id,
+                },
+                SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
+                    turn_id: entry_turn,
+                    model_call_id: entry_call,
+                    ..
+                }),
+            ) => turn_id == *entry_turn && model_call_id == *entry_call,
+            (
+                Self::ToolBatchResults { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                SnapshotEntryKind::Marker(
+                    TranscriptEntry::ToolExecutionResult {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolDenied { tool_request_id }
+                    | TranscriptEntry::ToolClosed { tool_request_id },
+                ),
+            ) => context.requests.contains(tool_request_id),
+            (
                 Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(_),
             ) => self.includes_terminal_marker(entry),
             (
-                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::Completed { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::ToolBatchProposed { .. }
+                | Self::ToolBatchResults { .. },
                 SnapshotEntryKind::Text(_),
             ) => false,
+            (
+                Self::ToolBatchProposed { .. } | Self::ToolBatchResults { .. },
+                SnapshotEntryKind::Marker(_),
+            ) => false,
         }
+    }
+
+    fn matches_tool_batch(self, entry_turn: CanonicalUuid, entry_call: CanonicalUuid) -> bool {
+        matches!(
+            self,
+            Self::ToolBatchProposed {
+                turn_id,
+                model_call_id,
+            } | Self::ToolBatchResults {
+                turn_id,
+                model_call_id,
+            } if turn_id == entry_turn && model_call_id == entry_call
+        )
     }
 
     fn includes_terminal_marker(self, entry: &SnapshotEntry) -> bool {
@@ -564,7 +714,12 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && terminal_entry_id == entry.entry_id,
             (
-                Self::All | Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::All
+                | Self::Completed { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::ToolBatchProposed { .. }
+                | Self::ToolBatchResults { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::AssistantToolUse { .. }

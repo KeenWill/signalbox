@@ -26,7 +26,7 @@ use crate::{
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
     SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
-    ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    ToolApprovalDecision, ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
     ToolUsingAssistantResponse, TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId,
     UnstoppedAttemptDisposition, UserContent,
 };
@@ -211,6 +211,8 @@ pub struct ModelCallExecutionReconstitutionInput {
     pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
     calls: Vec<ModelCallReconstitutionInput>,
     tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
+    tool_denial_correlations: Vec<ToolApprovalResolution>,
+    uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
 }
 
 impl ModelCallExecutionReconstitutionInput {
@@ -235,6 +237,8 @@ impl ModelCallExecutionReconstitutionInput {
             pinned_target,
             calls,
             tool_result_correlations: Vec::new(),
+            tool_denial_correlations: Vec::new(),
+            uncommitted_tool_result_projection: None,
         }
     }
 
@@ -245,6 +249,29 @@ impl ModelCallExecutionReconstitutionInput {
         correlations: Vec<ToolResultAttemptCorrelation>,
     ) -> Self {
         self.tool_result_correlations = correlations;
+        self
+    }
+
+    /// Supplies the exact durable denial resolution for every denied request
+    /// referenced by the current frontier.
+    pub fn with_tool_denial_correlations(
+        mut self,
+        correlations: Vec<ToolApprovalResolution>,
+    ) -> Self {
+        self.tool_denial_correlations = correlations;
+        self
+    }
+
+    /// Supplies the domain-prepared result projection being consumed inside
+    /// the same transaction that will insert its continuation call.
+    ///
+    /// A durably visible resolved frontier without a prepared call is rejected;
+    /// this proof admits only the transaction-local intermediate shape.
+    pub fn with_uncommitted_tool_result_projection(
+        mut self,
+        projection: PreparedToolResultProjection,
+    ) -> Self {
+        self.uncommitted_tool_result_projection = Some(projection);
         self
     }
 
@@ -340,6 +367,8 @@ pub enum ModelCallExecutionReconstitutionFailure {
     /// Tool-result attempts do not exactly belong to the referenced requests
     /// and producing model calls.
     ToolResultCorrelationMismatch,
+    /// Tool-denial entries do not exactly match durable denied resolutions.
+    ToolDenialCorrelationMismatch,
     /// More than one model call was supplied to the initial-call slice.
     MultipleCalls,
     /// More than one user-content fact names the same accepted input.
@@ -3233,12 +3262,42 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch,
         ));
     }
+    let referenced_tool_denials = input
+        .frontier_entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolDenied { request } => Some(*request),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut tool_denial_correlations = BTreeSet::new();
+    for correlation in &input.tool_denial_correlations {
+        if !matches!(correlation.decision(), ToolApprovalDecision::Deny { .. })
+            || !tool_denial_correlations.insert(correlation.request())
+        {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch,
+            ));
+        }
+    }
+    if referenced_tool_denials.len() != tool_denial_correlations.len()
+        || referenced_tool_denials
+            .iter()
+            .any(|request| !tool_denial_correlations.contains(request))
+    {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch,
+        ));
+    }
     let running_tool_round =
         frontier_contains_tool_round(&input.starting_snapshot, &input.frontier_entries);
     let running_tool_continuation = match frontier_closes_latest_tool_round(
         &input.starting_snapshot,
         &input.frontier_entries,
         &tool_result_correlations,
+        &tool_denial_correlations,
     ) {
         Ok(closed) => closed,
         Err(()) => {
@@ -3248,6 +3307,27 @@ fn reconstitute(
             ));
         }
     };
+    let uncommitted_tool_result_projection = input
+        .uncommitted_tool_result_projection
+        .as_ref()
+        .is_some_and(|projection| {
+            projection.turn() == turn
+                && projection.snapshot() == &current_snapshot
+                && projection.entries().len() <= current_snapshot.entry_count()
+                && projection
+                    .entries()
+                    .iter()
+                    .map(SemanticTranscriptEntry::reference)
+                    .eq(current_snapshot
+                        .ordered_entries()
+                        .skip(current_snapshot.entry_count() - projection.entries().len()))
+        });
+    if input.uncommitted_tool_result_projection.is_some() && !uncommitted_tool_result_projection {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::ContinuationSnapshotMismatch,
+        ));
+    }
     let lifecycle_valid = matches!(
         (
             current_attempt.state(),
@@ -3273,7 +3353,9 @@ fn reconstitute(
             current_attempt.state(),
             current_call.as_ref().map(CurrentModelCall::state)
         ),
-        (CurrentTurnAttemptState::Running, None) if running_tool_round
+        (CurrentTurnAttemptState::Running, None)
+            if (running_tool_round && !running_tool_continuation)
+                || (running_tool_continuation && uncommitted_tool_result_projection)
     ) || matches!(
         (
             current_attempt.state(),
@@ -3312,6 +3394,7 @@ fn frontier_closes_latest_tool_round(
     starting_snapshot: &ResolvedContextFrontierSnapshot,
     frontier_entries: &[SemanticTranscriptEntry],
     tool_result_correlations: &BTreeMap<crate::ToolAttemptId, ToolResultAttemptCorrelation>,
+    tool_denial_correlations: &BTreeSet<crate::ToolRequestId>,
 ) -> Result<bool, ()> {
     let suffix = &frontier_entries[starting_snapshot.entry_count()..];
     let Some(last_tool_use) = suffix.iter().rposition(|entry| {
@@ -3373,7 +3456,7 @@ fn frontier_closes_latest_tool_round(
             }
             SemanticTranscriptEntryPayload::ToolDenied {
                 request: result_request,
-            } => result_request == request,
+            } => result_request == request && tool_denial_correlations.contains(result_request),
             SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -4618,8 +4701,8 @@ mod tests {
     }
 
     /// S02 / S11 / INV-005 / INV-014 / INV-015 / INV-036: a fresh
-    /// continuation attempt starts from the complete resolved tool frontier
-    /// and retains the turn-level provider pin before its next call exists.
+    /// continuation attempt admits its call-free result frontier only inside
+    /// the transaction that will insert the prepared continuation call.
     #[test]
     fn s02_s11_inv005_inv014_inv015_inv036_continuation_reconstitutes_exact_frontier_and_pin() {
         let initial = active_execution();
@@ -4637,13 +4720,23 @@ mod tests {
             initial.session,
             SemanticTranscriptEntryPayload::ToolDenied { request },
         );
-        let continuation = initial
+        let yielded = initial
             .starting_snapshot
             .derive_appending_candidate(
                 context_frontier_id(34),
-                vec![assistant_tool_use.reference(), denied.reference()],
+                vec![assistant_tool_use.reference()],
             )
-            .expect("tool entries preserve the starting prefix");
+            .expect("tool proposal preserves the starting prefix");
+        let continuation = yielded
+            .derive_appending_candidate(context_frontier_id(37), vec![denied.reference()])
+            .expect("tool denial extends the yielded frontier");
+        let projection = PreparedToolResultProjection::from_validated_parts(
+            yielded.frontier().snapshot(),
+            initial.turn,
+            model_call_id(32),
+            vec![denied.clone()],
+            continuation.clone(),
+        );
         let pinned = PinnedProviderTargetReconstitutionInput::new(
             initial.turn,
             ResolvedProviderTarget::naming(provider_model_identity(8)),
@@ -4677,11 +4770,47 @@ mod tests {
             continuation.frontier().owning_session(),
             continuation.frontier().snapshot(),
             continuation.ordered_entries().collect(),
-        ));
+        ))
+        .with_tool_denial_correlations(vec![denied_approval(request)]);
+        let mut missing_denial = input.clone();
+        missing_denial.tool_denial_correlations.clear();
+        assert_eq!(
+            missing_denial
+                .reconstitute()
+                .expect_err("a denial entry requires its exact durable resolution")
+                .failure(),
+            ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch
+        );
+        let mut approved_instead = input.clone();
+        approved_instead.tool_denial_correlations = vec![
+            ToolApprovalResolutionReconstitutionInput::new(
+                request,
+                ToolApprovalDecision::Approve,
+                ToolDecisionSource::OwnerCommand,
+            )
+            .reconstitute()
+            .expect("the mismatching approval fixture is valid"),
+        ];
+        assert_eq!(
+            approved_instead
+                .reconstitute()
+                .expect_err("approval authority cannot back a denial entry")
+                .failure(),
+            ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch
+        );
+        assert_eq!(
+            input
+                .clone()
+                .reconstitute()
+                .expect_err("a durably visible resolved frontier requires its prepared call")
+                .failure(),
+            ModelCallExecutionReconstitutionFailure::LifecycleMismatch
+        );
+        let input = input.with_uncommitted_tool_result_projection(projection);
         let resumed = input
             .clone()
             .reconstitute()
-            .expect("the complete continuation facts reconstruct");
+            .expect("the exact transaction-local projection reconstructs");
         let crash_failure_entry = semantic_transcript_entry_id(37);
         let crash_failed = input
             .clone()
@@ -4726,6 +4855,7 @@ mod tests {
 
         let mut prepared_input = input;
         prepared_input.call_snapshot = prepared_input.continuation_snapshot.take();
+        prepared_input.uncommitted_tool_result_projection = None;
         prepared_input.calls = vec![ModelCallReconstitutionInput::new(
             prepared.call().id(),
             prepared.turn(),
@@ -4941,7 +5071,8 @@ mod tests {
             continuation.frontier().owning_session(),
             continuation.frontier().snapshot(),
             continuation.ordered_entries().collect(),
-        ));
+        ))
+        .with_tool_denial_correlations(vec![denied_approval(earlier_request)]);
 
         let error = input
             .reconstitute()
@@ -5089,7 +5220,8 @@ mod tests {
             continuation.frontier().owning_session(),
             continuation.frontier().snapshot(),
             continuation.ordered_entries().collect(),
-        ));
+        ))
+        .with_tool_denial_correlations(vec![denied_approval(request)]);
 
         let error = input
             .reconstitute()

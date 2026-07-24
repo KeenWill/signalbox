@@ -199,13 +199,17 @@ so neither retry nor crash classification can be inferred from a lost commit
 response.
 
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
-the authorize → executor → result-commit window. Tool execution holds the gate
-from before authorization until the returned evidence commits; interrupt
-handling acquires the same gate before its atomic command transaction. An
-interrupt that wins before authorization closes the checkpointed attempt as
-crash-lost and terminalizes without entering the executor. An interrupt that
-waits behind executor work reloads the committed result before closing the
-batch, so it cannot strand an issued request or roll back its command.
+both physical-attempt checkpointing and the authorize → executor → result-commit
+window. Before inserting the next attempt, tool execution acquires the gate and
+revalidates the loaded batch in the checkpoint transaction; an interrupt that
+already consumed the batch produces `NoWork`, while an interrupt that arrives
+later waits behind the new checkpoint. Tool execution then holds the gate from
+before authorization until the returned evidence commits; interrupt handling
+acquires the same gate before its atomic command transaction. An interrupt that
+wins before authorization closes the checkpointed attempt as crash-lost and
+terminalizes without entering the executor. An interrupt that waits behind
+executor work reloads the committed result before closing the batch, so it
+cannot strand an issued request or roll back its command.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
@@ -372,10 +376,10 @@ The first compiled tool is `current_time`:
 - an injected `CurrentTimeClock` supplies the instant, so offline tests never
   read wall clock; and
 - success is text containing a compact JSON object with `datetime` as an RFC
-  3339 timestamp to whole seconds and `timezone` as the selected canonical name.
-  A recognized zone at an instant whose historical offset contains nonzero
-  seconds closes as a typed execution failure because RFC 3339 cannot represent
-  that offset without changing the instant.
+  3339 timestamp to whole seconds and `timezone` as the exact accepted IANA
+  identifier (or the `UTC` default). A recognized zone at an instant whose
+  historical offset contains nonzero seconds closes as a typed execution failure
+  because RFC 3339 cannot represent that offset without changing the instant.
 
 An unknown time zone or wrong argument shape produces `InvalidArguments` error
 evidence. An injected instant outside the supported civil-time range produces

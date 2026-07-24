@@ -49,9 +49,7 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
     match block {
         WireResponseBlock::Text { text } => Some(AssistantPart::Text(text)),
         WireResponseBlock::ToolUse { id, name, input } => {
-            if !serde_json::from_str::<serde_json::Value>(input.get())
-                .is_ok_and(|value| value.is_object())
-            {
+            if !crate::wire::raw_json_is_object(&input) {
                 return None;
             }
             Some(AssistantPart::ToolCall(ToolCallProposal {

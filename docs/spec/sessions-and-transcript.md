@@ -274,15 +274,18 @@ practice. Deferred constraint triggers around
 commit bidirectionally: a queued turn carries zero origin or failure entries; a
 started turn carries exactly one correlated origin entry, and its starting
 frontier ends with exactly that entry; a failed turn's terminal frontier extends
-its latest call frontier (or starting frontier) by exactly its failure marker; a
+its latest call frontier (or starting frontier) by its exact terminal
+tool-result suffix when one exists and exactly its failure marker last; a
 completed turn's terminal frontier extends its producing call's frontier by the
 call's assistant entries plus exactly its completion marker last; a cancelled
 turn's terminal frontier extends the latest call frontier (or starting frontier)
-with exactly its cancellation marker; and a refused turn's terminal frontier is
-a distinct equal-content copy of its latest call frontier. A
-reconciliation-required turn likewise carries a distinct equal-content terminal
-frontier over exactly one ambiguous operation — a model call or tool attempt —
-plus its correlated ended turn attempt and applied interrupt proof. Migration
+by its exact terminal tool-result suffix when one exists and exactly its
+cancellation marker last; and a refused turn's terminal frontier is a distinct
+equal-content copy of its latest call frontier. A reconciliation-required turn
+over a model call likewise carries a distinct equal-content terminal frontier;
+one over a tool attempt extends the producing call's frontier by its exact
+terminal tool-result suffix. Both retain exactly one ambiguous operation plus
+the correlated ended turn attempt and applied interrupt proof. Migration
 `202607220001` first defined the model-call assertion; migrations `202607220004`
 and `202607220005` widen it for steering and stop requests. A writer that
 diverges from the transactional practice above is rejected at the commit

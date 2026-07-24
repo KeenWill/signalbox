@@ -399,17 +399,18 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one of
 these closed `event` objects:
 
-| Event                          | Additional members                                                                                                                              |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_created`              | none                                                                                                                                            |
-| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                                            |
-| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                                                              |
-| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                                                         |
-| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                                   |
-| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                                       |
-| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                          |
-| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                                  |
-| `turn_reconciliation_required` | `turn_id`, `operation`, and `terminal_frontier_id`; `operation` is exactly `model_call { model_call_id }` or `tool_attempt { tool_attempt_id }` |
+| Event                          | Additional members                                                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_created`              | none                                                                                                                                                                            |
+| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                                                                            |
+| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                                                                                              |
+| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                                                                                         |
+| `tool_batch_transition`        | `turn_id`, `producing_model_call_id`, and `state`; state is exactly `proposed { frontier_id }`, `results_projected { frontier_id }`, or `recovery_required { tool_attempt_id }` |
+| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                                                                   |
+| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                                                                       |
+| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                                          |
+| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                                                                  |
+| `turn_reconciliation_required` | `turn_id`, `operation`, and `terminal_frontier_id`; `operation` is exactly `model_call { model_call_id }` or `tool_attempt { tool_attempt_id }`                                 |
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is
@@ -442,26 +443,34 @@ that observes `active_awaiting_model_call_recovery` or
 nonzero recovery-required diagnostic: version one has no writer that can
 complete either wait. An `active_awaiting_tool_approval` turn remains an
 ordinary nonterminal wait. When the selected turn instead emits a live terminal
-`ambiguous` model-call transition, `send` rereads the authoritative snapshot and
-produces that same diagnostic if the turn has entered the model-call recovery
-wait. A client disconnect never cancels model or tool work. After each terminal
-turn event, `follow` uses a separate connection to read and validate a fresh
-authoritative transcript before it resumes printing later followed events. That
-side reread does not advance the follow connection's observed cursor: only
-events consumed from the subscribed connection do so, and every buffered event
-remains eligible for ordered presentation. Although the reread may have a cursor
-later than the triggering event, it makes presentation eligible only the
-previously undisplayed semantic material attributable to that exact terminal
-event: assistant text from its named turn and model call plus the exact
-completion marker for `turn_completed`, the exact failure marker for
-`turn_failed`, the exact cancellation marker for `turn_cancelled`, and no
-semantic material for `turn_refused` or `turn_reconciliation_required`, whose
-terminalization creates no content entry. It does not present material
-introduced by any later cursor. Such material remains ordered behind its
-buffered followed event, or behind a new authoritative snapshot after
-`resync_required`. Final durable content is deduplicated by source-qualified
-semantic-entry identity while transition-only events remain visible instead of
-being suppressed by a newer side snapshot.
+`ambiguous` model-call transition or a
+`tool_batch_transition { recovery_required }`, `send` rereads the authoritative
+snapshot and produces that same diagnostic if the turn has entered the
+corresponding recovery wait. A client disconnect never cancels model or tool
+work.
+
+After each `tool_batch_transition { proposed }`,
+`tool_batch_transition { results_projected }`, or terminal turn event, `follow`
+uses a separate connection to read and validate a fresh authoritative transcript
+before it resumes printing later followed events. That side reread does not
+advance the follow connection's observed cursor: only events consumed from the
+subscribed connection do so, and every buffered event remains eligible for
+ordered presentation. Although the reread may have a cursor later than the
+triggering event, it makes presentation eligible only the previously undisplayed
+semantic material attributable to that exact event: assistant text and tool-use
+entries for the named producing call at `proposed`; proposal-correlated
+tool-result entries at `results_projected`; assistant text from the terminal
+event's named turn and model call plus the exact completion marker for
+`turn_completed`; the exact failure marker and any immediately preceding
+terminal tool-result suffix for `turn_failed`; the exact cancellation marker and
+any immediately preceding terminal tool-result suffix for `turn_cancelled`; and
+no semantic material for `turn_refused`, `turn_reconciliation_required`, or
+`recovery_required`. It does not present material introduced by any later
+cursor. Such material remains ordered behind its buffered followed event, or
+behind a new authoritative snapshot after `resync_required`. Final durable
+content is deduplicated by source-qualified semantic-entry identity while
+transition-only events remain visible instead of being suppressed by a newer
+side snapshot.
 
 ## Terminal client
 
