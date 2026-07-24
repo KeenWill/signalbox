@@ -2537,6 +2537,9 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         declared: ImportedConversationFormat,
         converted: ImportedConversationFormat,
     },
+    ConverterEntryIdentityNotIssued {
+        entry: ImportedTranscriptEntryId,
+    },
     StoreSourceDigestMismatch {
         expected: ImportedConversationSourceDigest,
         actual: ImportedConversationSourceDigest,
