@@ -447,6 +447,22 @@ impl CurrentToolAttempt {
         })
     }
 
+    /// Reconstitutes exact dispatch authority after an ambiguous commit
+    /// acknowledgement only from the durable in-flight stage.
+    pub fn resume_in_flight(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
+        if self.state != CurrentToolAttemptState::InFlight {
+            return Err(ToolAttemptTransitionError {
+                attempt: self,
+                failure: ToolAttemptTransitionFailure::InvalidState,
+            });
+        }
+        let correlation = self.correlation();
+        Ok(AuthorizedToolAttempt {
+            attempt: self,
+            correlation,
+        })
+    }
+
     /// Applies pre-execution lookup or argument failure without authorizing an
     /// executor effect.
     pub fn end_preflight_error(
@@ -891,6 +907,28 @@ mod tests {
                 result: ToolResultContent::Text(actual),
             } if actual == &text
         ));
+    }
+
+    /// S12 / INV-011 / INV-024: ambiguous commit recovery can reconstruct
+    /// dispatch authority only from the exact durable in-flight checkpoint.
+    #[test]
+    fn s12_inv011_inv024_in_flight_reread_restores_exact_dispatch_authority() {
+        let authorized = prepared(ToolEffectClass::ExternalEffect)
+            .authorize()
+            .expect("prepared work can be authorized");
+        let (in_flight, expected) = authorized.into_parts();
+        let resumed = in_flight
+            .resume_in_flight()
+            .expect("the durable in-flight stage restores authority");
+
+        assert_eq!(resumed.correlation(), expected);
+        assert_eq!(
+            prepared(ToolEffectClass::ExternalEffect)
+                .resume_in_flight()
+                .expect_err("prepared work has not crossed authorization")
+                .failure(),
+            ToolAttemptTransitionFailure::InvalidState
+        );
     }
 
     /// S15 / INV-024: executor observations cannot claim error kinds reserved

@@ -2345,6 +2345,7 @@ pub struct CorrelatedToolAttemptObservation { /* private */ }
 pub struct CurrentToolAttempt { /* private */ }
 impl CurrentToolAttempt {
     pub fn authorize(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError>;
+    pub fn resume_in_flight(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError>;
     pub fn end_preflight_error(
         self,
         error: ToolExecutionError,
@@ -3328,6 +3329,7 @@ pub enum StartupScanSessionOutcome {
     NoActiveTurn,
     Recovered(Box<FailedAcceptedInputTurn>),
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
+    RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     DeferredPendingSteering { accepted_input: AcceptedInputId },
 }
 
