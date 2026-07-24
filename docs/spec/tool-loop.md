@@ -315,9 +315,11 @@ The first compiled tool is `current_time`:
   3339 timestamp to whole seconds and `timezone` as the selected canonical name.
 
 An unknown time zone or wrong argument shape produces `InvalidArguments` error
-evidence. IANA lookup and offset conversion use the focused `jiff` dependency;
-Signalbox owns only the port and result contract, not a time-zone database
-implementation.
+evidence. An injected instant outside the supported civil-time range produces
+known-failure evidence with detail
+`current time is outside the supported range`. IANA lookup and offset conversion
+use the focused `jiff` dependency; Signalbox owns only the port and result
+contract, not a time-zone database implementation.
 
 ## Persistence boundaries
 

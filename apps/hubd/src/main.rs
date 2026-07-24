@@ -18,9 +18,9 @@ use std::{
 
 use signalbox_application::{
     ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
-    SchedulerLoopExit, StartEligibleTurnService, StartupScanService,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    InProcessToolDecisionWake, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
+    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -28,8 +28,8 @@ use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
     FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
-    LocalProcessListener, PostgresContinuationToolLoopRepository, PostgresProviderModelExecution,
-    ProcessRuntime, ProcessRuntimeError, SystemCurrentTimeClock,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    SystemCurrentTimeClock,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
@@ -460,6 +460,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_decision_wake = InProcessToolDecisionWake::default();
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let process_runtime = ProcessRuntime::new(
         listener,
@@ -471,18 +472,14 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
                 scheduler_pool.clone(),
-                model_targets.clone(),
-                credential_reference.clone(),
+                model_targets,
+                credential_reference,
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
         )
         .with_tool_loop(
-            PostgresContinuationToolLoopRepository::new(
-                scheduler_pool.clone(),
-                model_targets,
-                credential_reference,
-            ),
+            tool_decision_wake,
             tool_dispatch_gate,
             tool_catalog,
             tool_executor,
