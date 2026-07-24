@@ -208,6 +208,11 @@ impl InputContent {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Transfers ownership of the exact decoded text.
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
 /// One bounded transcript-content fragment.
@@ -411,6 +416,11 @@ impl ClientFrame {
     /// Borrows the closed request.
     pub const fn request(&self) -> &ClientRequest {
         &self.request
+    }
+
+    /// Transfers the correlation identity and closed request out of the frame.
+    pub fn into_parts(self) -> (RequestId, ClientRequest) {
+        (self.request_id, self.request)
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
@@ -1771,7 +1781,14 @@ mod tests {
             },
         )?;
         let encoded = encode_client_line(&frame)?;
-        assert_eq!(decode_client_line(&encoded)?, frame);
+        let decoded = decode_client_line(&encoded)?;
+        assert_eq!(decoded, frame);
+        let (decoded_request_id, decoded_request) = decoded.into_parts();
+        assert_eq!(decoded_request_id, request(u64::MAX)?);
+        let ClientRequest::SubmitInput { content, .. } = decoded_request else {
+            return Err("decoded request changed variant".into());
+        };
+        assert_eq!(content.into_string(), "hello");
         assert!(String::from_utf8(encoded)?.contains("\"request_id\":\"18446744073709551615\""));
         Ok(())
     }

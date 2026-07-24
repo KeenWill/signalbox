@@ -107,6 +107,87 @@ model-input rendering, append-only Postgres storage, the domain/application
 spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
 
+## 2026-07-24 — Release decoded process payloads before response backpressure
+
+**Context.** Cloning a decoded request retained both the frame-owned payload and
+its clone after releasing the inbound-frame permit. Rejected oversized input
+could then remain live while a non-reading peer blocked the error response.
+
+**Decision.** Consume each decoded frame into its request without cloning. Move
+submitted text into application admission, so rejected text is dropped before
+awaiting response output and admitted text reuses the decoded allocation.
+
+**Rejected alternatives.** Keeping the frame until request completion makes the
+frame budget cease to bound its allocation lifetime. Explicitly dropping only
+rejected clones leaves avoidable duplication on successful submissions. Response
+deadlines would add unrelated timing semantics.
+
+**Affects.** Process-protocol frame ownership, submitted-input admission, and
+process-runtime memory retention under response backpressure; wire shapes and
+admission limits do not change.
+
+## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
+
+**Context.** Reserving one of eight frame slots before waiting for input lets
+eight idle clients prevent every later connection from sending a request.
+
+**Decision.** Give each of the at most 128 accepted tasks an explicit 8 KiB
+reader buffer, wait until that buffer observes input, and only then reserve a
+frame slot before accumulating the rest of the frame. This admits at most 1 MiB
+of aggregate pre-slot read-ahead in addition to the existing 64 MiB admitted
+frame bound.
+
+**Rejected alternatives.** Charging idle clients makes the eight-slot budget an
+availability gate. Per-connection read deadlines invent timing semantics.
+Unbounded pre-slot reads merely move the memory defect.
+
+**Affects.** Process-runtime connection scheduling and inbound memory bounds;
+wire framing and the eight-frame concurrency limit do not change.
+
+## 2026-07-23 — Classify snapshot-spool I/O by response exposure
+
+**Context.** Temporary-file creation, write, flush, seek, and read failures were
+classified as peer I/O, so the runtime silently discarded server-side resource
+failures as ordinary client disconnects.
+
+**Decision.** Before any response bytes are exposed, translate spool I/O failure
+to sanitized `unavailable`. During transmission, classify sink failure as
+connection-local peer I/O and source-spool read failure as fatal runtime
+evidence. Close a follow snapshot's file immediately after its transmission.
+
+**Rejected alternatives.** Treating every I/O error as a disconnect hides server
+failure. Making every spool failure fatal denies a request a safe pre-exposure
+infrastructure response. Retaining the file through live follow wastes disk and
+a descriptor.
+
+**Affects.** Session-list and transcript spool errors, follow resource lifetime,
+runtime failure classification, and process-protocol tests.
+
+## 2026-07-23 — Bound process snapshot construction resources
+
+**Context.** A valid deployment has no aggregate session-count or
+transcript-size limit. Materializing every session summary per list request made
+request heap grow with the catalog, while allowing snapshot spooling to occupy
+every application-pool connection could stall mutations, scheduling, and outbox
+delivery.
+
+**Decision.** Spool session lists from a repeatable-read cursor that owns one
+decoded row at a time, then commit before writing the completed temporary file
+to the client. Share one snapshot-reader semaphore across list, transcript, and
+follow snapshot construction, sized to leave two configured application-pool
+connections outside snapshot work. The production pool's baseline ten
+connections therefore admits at most eight concurrent snapshot readers.
+
+**Rejected alternatives.** Complete summary vectors retain catalog-sized heap.
+Writing rows directly to a slow client holds the transaction and pool slot.
+Separate uncoordinated limits can still exhaust the shared pool; reserving only
+one connection leaves scheduling, dispatch, and mutations contending for the
+same last slot.
+
+**Affects.** Process session-list and transcript snapshot construction,
+temporary disk use, process-runtime connection services, and application-pool
+capacity.
+
 ## 2026-07-23 — Configure process-socket mode through its retained identity
 
 **Context.** Unix socket bind does not accept a filesystem mode. Temporarily
@@ -261,6 +342,89 @@ implementation.
 
 **Affects.** Hub deployment requirements, database configuration, fencing
 documentation, and operator guidance.
+
+## 2026-07-23 — Spool process snapshots outside transcript-sized memory
+
+**Context.** A valid durable transcript has no aggregate size limit, while the
+process runtime admits 128 connections. Fetching every turn and semantic entry
+into vectors before writing a snapshot therefore made valid concurrent reads an
+unbounded heap-allocation path.
+
+**Decision.** Persistence exposes a repeatable-read cursor that validates the
+execution lineage in PostgreSQL and yields one decoded turn or frontier member
+at a time. hubd encodes those items into a secure unnamed temporary file using
+the focused `tempfile` 3.27 dependency, commits the read transaction, then
+streams the completed spool to the client. Per-request heap use is bounded by
+one decoded row, one protocol frame, and fixed I/O buffers.
+
+**Rejected alternatives.** Retaining complete vectors leaves the defect. Holding
+a PostgreSQL snapshot open while writing to an arbitrarily slow client ties
+database capacity and MVCC retention to that client. An aggregate transcript
+limit would make valid durable state unreadable despite the existing bounded
+multi-frame wire representation.
+
+**Affects.** Process transcript reads and follow-snapshot startup, the
+persistence read cursor, hubd's direct dependency set, and temporary disk usage;
+wire messages and authoritative snapshot semantics do not change.
+
+## 2026-07-23 — Bound concurrent inbound frame buffers at eight
+
+**Context.** The 128 accepted process connections could each retain nearly one 8
+MiB partial frame indefinitely, making the connection-count limit alone admit
+roughly 1 GiB of raw inbound payload before reader and request overhead.
+
+**Decision.** Reserve one of eight shared inbound-frame slots before a
+connection begins accumulating its next frame. A slot is held through frame
+decoding, so raw frame accumulation is bounded at 64 MiB; other accepted
+connections wait without a growing frame accumulator and remain shutdown-aware.
+
+**Rejected alternatives.** Lowering the 8 MiB frame cap changes the recorded
+wire contract. A read deadline invents timing semantics and still permits the
+same peak. Byte-granular reservations add accounting complexity without a
+current need for differently sized concurrent limits.
+
+**Affects.** Process-runtime inbound memory capacity only; accepted-connection
+admission, frame validity, request ordering, and application admission do not
+change.
+
+## 2026-07-23 — Bound accepted process connections at 128
+
+**Context.** A finite socket backlog does not bound tasks after acceptance.
+Long-lived follow streams or idle clients could otherwise cause hubd to retain
+an unbounded number of connection tasks, readers, writers, and fan-out
+receivers.
+
+**Decision.** Own at most 128 accepted process-connection tasks. When the limit
+is full, stop accepting until one task exits; the guarded listener's existing
+128-entry kernel backlog remains the queue for additional local attempts.
+
+**Rejected alternatives.** Leaving accepted tasks unbounded converts local
+connection churn into unbounded memory growth. Closing every attempt above the
+limit makes short bursts fail despite the already bounded listener queue.
+
+**Affects.** Process-protocol connection admission and runtime task ownership;
+application command admission and the wire contract do not change.
+
+## 2026-07-23 — Bound process-protocol input at 1 MiB
+
+**Context.** A submitted input is later reflected inside one queued-turn frame
+and one durable-update frame. Allowing content to consume nearly the entire 8
+MiB inbound frame leaves no room for those larger wrappers and lets an accepted
+value become unrepresentable.
+
+**Decision.** The local process server admits at most 1 MiB of UTF-8 input
+content and rejects a larger value before application construction or mutation.
+At that bound, even one-byte control characters with worst-case JSON escaping
+leave the enclosing version-one server frames below 8 MiB.
+
+**Rejected alternatives.** Relying only on the aggregate frame cap admits values
+that cannot be reflected. Fragmenting queued states and live input events would
+add correlated multi-frame state to two more protocol paths without a daily
+client need. Treating an outbound overflow as hub-fatal lets one connection stop
+unrelated work.
+
+**Affects.** Version-one `submit_input` admission and connection-failure
+isolation; domain content and transcript fragment limits do not change.
 
 ## 2026-07-23 — Bound each single-hub guard ping at one second
 
