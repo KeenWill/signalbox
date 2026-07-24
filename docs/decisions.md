@@ -25,10 +25,10 @@ UNIQUE, and FK constraints where the domain implies them), and a wrong earlier
 choice is fixed rather than papered over. The migration set may additionally be
 squashed to a clean baseline at owner-chosen checkpoints, with dev databases
 recreated. Applied-migration immutability (sqlx checksums) governs any single
-live dev database but does not sanctify history. This entry is amended when the
-first durable deployment freezes migration history and append-only discipline
-begins. A schema audit is underway to decide whether a first baseline squash is
-warranted.
+live dev database but does not sanctify history. A superseding entry ends this
+discipline when the first durable deployment freezes migration history and
+append-only discipline begins. A schema audit is underway to decide whether a
+first baseline squash is warranted.
 
 **Rejected alternatives.** Append-only-forever from day one imports production
 constraints without a production. Silent per-agent judgment produced the prior
