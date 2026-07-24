@@ -332,6 +332,31 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_imported_conversation_complete();
 
+CREATE FUNCTION require_imported_raw_source_record_owned()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM imported_conversation_raw_record
+         WHERE content_hash = NEW.content_hash
+    )
+    THEN
+        RAISE EXCEPTION
+            'imported raw-source record has no conversation occurrence'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER imported_raw_source_record_requires_occurrence
+AFTER INSERT ON imported_raw_source_record
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_imported_raw_source_record_owned();
+
 CREATE FUNCTION reject_imported_table_truncate()
 RETURNS trigger
 LANGUAGE plpgsql
