@@ -91,6 +91,7 @@ pub enum Actor {
 ```rust
 pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
+    ClaudeCodeSessionJsonlV2,
 }
 
 pub struct ImportedRawRecordHash(/* private [u8; 32] */);

@@ -923,7 +923,7 @@ async fn s28_inv038_reingestion_rejects_converter_projection_drift() -> Result<(
     );
     let drifted = ImportedConversation::from_converted_records(
         candidate,
-        ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
         vec![raw],
         vec![projected],
     )
