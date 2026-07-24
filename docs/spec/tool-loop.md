@@ -349,12 +349,15 @@ depend on process-local wake memory.
 Running phases use the staged tool-attempt crash classification above; parked
 external-effect ambiguity is never automatically retried. Version one permits
 only proof-bearing interruption to terminalize that wait as reconciliation
-required; resolving evidence and accepted-risk continuation remain open. When
-restart observes a running batch whose requests are already durably resolved and
-which has no current turn attempt or continuation call, it reports that batch as
-resumable work. The next scheduler pass performs the ordinary atomic result
-projection and continuation preparation instead of failing the turn or waiting
-for process-local wake state.
+required; resolving evidence and accepted-risk continuation remain open. Restart
+requires the running batch's exact continuation turn attempt to remain current:
+`Prepared` after a final decision or a denial-only batch, and `Running` after
+physical execution began. With no live model call, a batch is resumable when it
+has no current tool attempt and either has an approved request not yet attempted
+or has durably resolved every request. The next scheduler pass performs the
+ordinary next-attempt or atomic result-projection-and-continuation transaction
+instead of failing the turn or waiting for process-local wake state. Restart
+never requires the current continuation attempt to disappear.
 
 ## Provider bridge and `current_time`
 
