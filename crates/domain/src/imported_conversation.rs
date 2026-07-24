@@ -4,7 +4,11 @@
 //! Imported entries retain exact source facts without carrying native execution
 //! authority.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -927,6 +931,16 @@ pub enum ImportedConversationReconstitutionFailure {
         /// Corrupt raw-record occurrence.
         position: ImportedRawRecordPosition,
     },
+    /// A raw source-record occurrence was empty.
+    EmptyRawRecord {
+        /// Empty raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
+    /// Equal raw-record hashes named different exact bytes.
+    RawRecordHashCollision {
+        /// Later conflicting raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
     /// A raw JSONL record did not normalize to one object.
     RawRecordNormalizedValueNotObject {
         /// Corrupt raw-record occurrence.
@@ -991,6 +1005,11 @@ pub enum ImportedConversationReconstitutionFailure {
     /// A source event falsely carried a conversational speaker.
     SourceEventSpeakerMismatch {
         /// Invalid source-event entry.
+        entry: ImportedTranscriptEntryId,
+    },
+    /// An entry's kind or speaker contradicted its normalized record type.
+    SourceRecordTypeMismatch {
+        /// Entry contradicted by its owning raw record.
         entry: ImportedTranscriptEntryId,
     },
     /// A message content entry lacked an attested user or assistant speaker.
@@ -1209,6 +1228,7 @@ fn validate_raw_records(
         );
     }
     let mut expected = ImportedRawRecordPosition::first();
+    let mut bytes_by_hash = BTreeMap::new();
     for (index, record) in input.raw_records.iter().enumerate() {
         if record.position != expected {
             return Err(
@@ -1221,6 +1241,20 @@ fn validate_raw_records(
         if ImportedRawRecordHash::digest(&record.bytes) != record.stored_hash {
             return Err(
                 ImportedConversationReconstitutionFailure::RawRecordHashMismatch {
+                    position: record.position,
+                },
+            );
+        }
+        if record.bytes.is_empty() {
+            return Err(ImportedConversationReconstitutionFailure::EmptyRawRecord {
+                position: record.position,
+            });
+        }
+        if let Some(existing_bytes) = bytes_by_hash.insert(record.stored_hash, &record.bytes)
+            && existing_bytes != &record.bytes
+        {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordHashCollision {
                     position: record.position,
                 },
             );
@@ -1305,6 +1339,13 @@ fn validate_entries(
                 },
             );
         }
+        if index == 0 && entry.raw_record_position != expected_raw_position {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordWithoutEntry {
+                    position: expected_raw_position,
+                },
+            );
+        }
 
         if entry.raw_record_position != expected_raw_position {
             let next_raw = expected_raw_position.checked_next();
@@ -1330,7 +1371,7 @@ fn validate_entries(
                 },
             );
         }
-        validate_speaker(entry)?;
+        validate_speaker(input, entry)?;
 
         if let Some(next_entry) = input.entries.get(index + 1) {
             expected_position = expected_position
@@ -1357,12 +1398,43 @@ fn validate_entries(
 }
 
 fn validate_speaker(
+    input: &ImportedConversationReconstitutionInput,
     entry: &ImportedTranscriptEntryInput,
 ) -> Result<(), ImportedConversationReconstitutionFailure> {
-    if matches!(entry.content, ImportedTranscriptContent::SourceEvent { .. }) {
+    let record = input
+        .raw_records
+        .get(
+            usize::try_from(entry.raw_record_position.as_u64() - 1)
+                .map_err(|_| ImportedConversationReconstitutionFailure::PositionExhausted)?,
+        )
+        .ok_or(
+            ImportedConversationReconstitutionFailure::EntryRawRecordNotFound {
+                entry: entry.identity,
+                position: entry.raw_record_position,
+            },
+        )?;
+    let record_speaker = normalized_record_speaker(record.normalized()).map_err(|()| {
+        ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
+            entry: entry.identity,
+        }
+    })?;
+
+    if let ImportedTranscriptContent::SourceEvent { source_type } = &entry.content {
         if entry.source_speaker != ImportedSourceAttestation::NotAttested {
             return Err(
                 ImportedConversationReconstitutionFailure::SourceEventSpeakerMismatch {
+                    entry: entry.identity,
+                },
+            );
+        }
+        let record_type = normalized_record_type(record.normalized()).map_err(|()| {
+            ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
+                entry: entry.identity,
+            }
+        })?;
+        if record_speaker.is_some() || *source_type != record_type {
+            return Err(
+                ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
                     entry: entry.identity,
                 },
             );
@@ -1377,6 +1449,13 @@ fn validate_speaker(
             },
         );
     };
+    if record_speaker != Some(speaker) {
+        return Err(
+            ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch {
+                entry: entry.identity,
+            },
+        );
+    }
     if let ImportedSourceAttestation::Attested(message_role) = entry.source.message_role
         && message_role != speaker
     {
@@ -1387,6 +1466,45 @@ fn validate_speaker(
         );
     }
     Ok(())
+}
+
+fn normalized_record_type(
+    normalized: &ImportedStructuredValue,
+) -> Result<ImportedSourceAttestation<ImportedText>, ()> {
+    let ImportedStructuredValue::Object(members) = normalized else {
+        return Err(());
+    };
+    let mut matches = members
+        .iter()
+        .filter(|member| member.name().as_str() == "type");
+    let value = matches.next();
+    if matches.next().is_some() {
+        return Err(());
+    }
+    match value.map(ImportedStructuredObjectMember::value) {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(ImportedStructuredValue::String(value)) => {
+            Ok(ImportedSourceAttestation::Attested(value.clone()))
+        }
+        Some(_) => Err(()),
+    }
+}
+
+fn normalized_record_speaker(
+    normalized: &ImportedStructuredValue,
+) -> Result<Option<ImportedSpeaker>, ()> {
+    match normalized_record_type(normalized).map_err(|_| ())? {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "user" => {
+            Ok(Some(ImportedSpeaker::User))
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "assistant" => {
+            Ok(Some(ImportedSpeaker::Assistant))
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => Ok(None),
+    }
 }
 
 fn build_conversation(input: ImportedConversationReconstitutionInput) -> ImportedConversation {
@@ -1628,11 +1746,13 @@ mod tests {
                 1,
                 1,
                 1,
-                ImportedSourceAttestation::NotAttested,
-                ImportedTranscriptContent::SourceEvent {
-                    source_type: ImportedSourceAttestation::NotAttested,
-                },
-                metadata(ImportedSourceAttestation::NotAttested),
+                ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                ImportedTranscriptContent::MessageContentAbsent(
+                    ImportedMessageContentAbsence::ContentNotAttested,
+                ),
+                metadata(ImportedSourceAttestation::Attested(
+                    ImportedSpeaker::Assistant,
+                )),
             ),
             input_entry(
                 21,
@@ -1642,7 +1762,7 @@ mod tests {
                 1,
                 ImportedSourceAttestation::NotAttested,
                 ImportedTranscriptContent::SourceEvent {
-                    source_type: ImportedSourceAttestation::NotAttested,
+                    source_type: ImportedSourceAttestation::Attested(text("system")),
                 },
                 metadata(ImportedSourceAttestation::NotAttested),
             ),
@@ -1709,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_mapping_and_speaker_corruption_fail_closed() {
+    fn inv038_message_content_without_source_speaker_fails_closed() {
         let owner = conversation(1);
         let raw = ImportedRawSourceRecord::from_converted(
             br#"{"type":"user","message":{"content":[]}}"#.to_vec(),
@@ -1741,7 +1861,10 @@ mod tests {
                 entry: entry(2),
             }
         );
+    }
 
+    #[test]
+    fn inv038_reversed_raw_record_mapping_fails_closed() {
         let imported = converted();
         let mut entries = imported
             .entries()
@@ -1774,6 +1897,150 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn inv038_first_entry_cannot_skip_first_raw_record() {
+        let owner = conversation(1);
+        let raw_records = vec![
+            ImportedRawSourceRecord::from_converted(
+                br#"{"type":"system"}"#.to_vec(),
+                object(("type", ImportedStructuredValue::String(text("system")))),
+            ),
+            ImportedRawSourceRecord::from_converted(
+                br#"{"type":"summary"}"#.to_vec(),
+                object(("type", ImportedStructuredValue::String(text("summary")))),
+            ),
+        ];
+        let only_second_record = input_entry(
+            2,
+            owner,
+            1,
+            2,
+            1,
+            ImportedSourceAttestation::NotAttested,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("summary")),
+            },
+            metadata(ImportedSourceAttestation::NotAttested),
+        );
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                raw_records,
+                vec![only_second_record],
+            )
+            .expect_err("the first raw record must produce an entry")
+            .failure(),
+            ImportedConversationReconstitutionFailure::RawRecordWithoutEntry {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    #[test]
+    fn inv038_source_event_rejects_a_message_record_type() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"user"}"#.to_vec(),
+            object(("type", ImportedStructuredValue::String(text("user")))),
+        );
+        let source_event = input_entry(
+            2,
+            owner,
+            1,
+            1,
+            1,
+            ImportedSourceAttestation::NotAttested,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("user")),
+            },
+            metadata(ImportedSourceAttestation::NotAttested),
+        );
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![source_event],
+            )
+            .expect_err("message discriminators cannot reconstitute as source events")
+            .failure(),
+            ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch { entry: entry(2) }
+        );
+    }
+
+    #[test]
+    fn inv038_message_speaker_must_match_the_raw_record_type() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"user","message":{"role":"assistant"}}"#.to_vec(),
+            object(("type", ImportedStructuredValue::String(text("user")))),
+        );
+        let contradictory_message = input_entry(
+            2,
+            owner,
+            1,
+            1,
+            1,
+            ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::ContentNotAttested,
+            ),
+            metadata(ImportedSourceAttestation::Attested(
+                ImportedSpeaker::Assistant,
+            )),
+        );
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![contradictory_message],
+            )
+            .expect_err("message speaker must agree with its raw record type")
+            .failure(),
+            ImportedConversationReconstitutionFailure::SourceRecordTypeMismatch { entry: entry(2) }
+        );
+    }
+
+    #[test]
+    fn inv038_empty_raw_source_record_fails_closed() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            Vec::new(),
+            object(("type", ImportedStructuredValue::String(text("system")))),
+        );
+        let source_event = input_entry(
+            2,
+            owner,
+            1,
+            1,
+            1,
+            ImportedSourceAttestation::NotAttested,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("system")),
+            },
+            metadata(ImportedSourceAttestation::NotAttested),
+        );
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![source_event],
+            )
+            .expect_err("a physical JSONL source record cannot be empty")
+            .failure(),
+            ImportedConversationReconstitutionFailure::EmptyRawRecord {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
     #[track_caller]
     fn assert_valid_json_number(value: &str) {
         assert_eq!(
@@ -1785,15 +2052,14 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_invalid_json_number_is_redacted(value: &str) {
+    fn assert_invalid_json_number(value: &str) {
         let error =
             ImportedJsonNumber::try_new(String::from(value)).expect_err("fixture is invalid");
         assert_eq!(error.value(), value);
-        assert!(!format!("{error:?}").contains(value));
     }
 
     #[test]
-    fn imported_json_number_checks_complete_grammar_without_exposing_value_in_debug() {
+    fn imported_json_number_checks_complete_grammar() {
         assert_valid_json_number("0");
         assert_valid_json_number("-0");
         assert_valid_json_number("12");
@@ -1803,12 +2069,20 @@ mod tests {
 
         let empty = ImportedJsonNumber::try_new(String::new()).expect_err("fixture is invalid");
         assert!(empty.value().is_empty());
-        assert_invalid_json_number_is_redacted("01");
-        assert_invalid_json_number_is_redacted("-");
-        assert_invalid_json_number_is_redacted(".1");
-        assert_invalid_json_number_is_redacted("1.");
-        assert_invalid_json_number_is_redacted("1e");
-        assert_invalid_json_number_is_redacted("+1");
-        assert_invalid_json_number_is_redacted("NaN");
+        assert_invalid_json_number("01");
+        assert_invalid_json_number("-");
+        assert_invalid_json_number(".1");
+        assert_invalid_json_number("1.");
+        assert_invalid_json_number("1e");
+        assert_invalid_json_number("+1");
+        assert_invalid_json_number("NaN");
+    }
+
+    #[test]
+    fn imported_json_number_debug_redacts_the_source_value() {
+        let source_value = "1234567890123456789012345678901234567890e+";
+        let error = ImportedJsonNumber::try_new(String::from(source_value))
+            .expect_err("fixture has an incomplete exponent");
+        assert!(!format!("{error:?}").contains(source_value));
     }
 }
