@@ -239,7 +239,7 @@ impl Parser<'_> {
 mod tests {
     use signalbox_domain::{ImportedStructuredValue, ImportedText};
 
-    use super::{JsonFailure, MAX_CONTAINER_DEPTH, parse_record};
+    use super::{JsonFailure, parse_record};
 
     #[test]
     fn preserves_object_order_duplicates_and_number_spelling() {
@@ -263,16 +263,8 @@ mod tests {
 
     #[test]
     fn bounds_container_nesting() {
-        let accepted = format!(
-            "{}0{}",
-            "[".repeat(MAX_CONTAINER_DEPTH),
-            "]".repeat(MAX_CONTAINER_DEPTH)
-        );
-        let rejected = format!(
-            "{}0{}",
-            "[".repeat(MAX_CONTAINER_DEPTH + 1),
-            "]".repeat(MAX_CONTAINER_DEPTH + 1)
-        );
+        let accepted = format!("{}0{}", "[".repeat(128), "]".repeat(128));
+        let rejected = format!("{}0{}", "[".repeat(129), "]".repeat(129));
         assert!(parse_record(accepted.as_bytes()).is_ok());
         assert_eq!(
             parse_record(rejected.as_bytes()),
