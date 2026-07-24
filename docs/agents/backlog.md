@@ -1,5 +1,16 @@
 # Work backlog
 
+> **Non-authoritative planning scratchpad — do not review for consistency.**
+> This file decides nothing and is not a statement of record. It is the owner's
+> working map of what work exists and what can run in parallel; entries are
+> orientation, not design. Every design choice, accepted cost, blocker, and open
+> question named here is settled elsewhere and that record governs, never this
+> file: design in the owning `docs/spec/` page's diff at pickup, decisions in
+> `docs/decisions.md`, open questions in `docs/open-questions.md`. Do not hold
+> entries to cross-document consistency or treat their prose as normative — it
+> is deliberately loose and is superseded by the real record when an item is
+> picked up. The owner revises this file freely; agents never reorder it.
+
 The owner-curated menu of pullable work for goal runs, a granular companion to
 the target model's [priority order](../target-model.md#priority-order). Entries
 state what they touch so parallel launches are mechanical: any set of items with
