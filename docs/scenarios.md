@@ -12,7 +12,7 @@ added only alongside the decision that motivates it, and a decision introducing
 a new lifecycle edge adds or amends its scenario fixture in the same change.
 Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
-[testing-style.md](testing-style.md), and the
+[testing-style.md](agents/testing-style.md), and the
 [invariant catalog](invariants.md)'s enforcement column accumulates the links to
 those tests.
 

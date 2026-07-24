@@ -20,7 +20,7 @@ semantics are linked, never restated, and only target-only concepts are owned by
 this document.
 
 Milestone selection rules for autonomous runs live in
-[goal-mode.md](goal-mode.md); this document owns only the
+[goal-mode.md](agents/goal-mode.md); this document owns only the
 [priority order](#priority-order) those rules reference.
 
 ## Product vision
@@ -336,10 +336,10 @@ on the separate foundation decision identified above.
 
 A persistent objective a session works toward across turns — pursued, paused,
 resumed, revised — as a product capability, not only this repository's own
-[operating rules](goal-mode.md). A foundation decision must define durable goal
-identity and the pursue, pause, resume, and revise transitions. That lifecycle
-then composes with long-running turns, scheduled creation causes at the explicit
-extension point session creation leaves open, and delegation.
+[operating rules](agents/goal-mode.md). A foundation decision must define
+durable goal identity and the pursue, pause, resume, and revise transitions.
+That lifecycle then composes with long-running turns, scheduled creation causes
+at the explicit extension point session creation leaves open, and delegation.
 
 ### The tool system as the load-bearing layer
 
