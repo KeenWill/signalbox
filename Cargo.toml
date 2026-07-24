@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/client",
     "apps/hubd",
     "crates/application",
     "crates/domain",
