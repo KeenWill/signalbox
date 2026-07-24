@@ -6,6 +6,12 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
 
+use crate::{
+    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
+    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
@@ -17,13 +23,6 @@ use signalbox_domain::{
     ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
     ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
-};
-
-use crate::{
-    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -1019,6 +1018,28 @@ where
                 ),
             },
         };
+        let dispatch_permit = self.gate.acquire(prepared.turn()).await;
+        let Some(revalidated_batch) = self
+            .transaction
+            .load_active_batch(prepared.session(), prepared.turn())
+            .await
+            .map_err(ToolExecutionServiceError::Load)?
+        else {
+            drop(dispatch_permit);
+            return Ok(ToolExecutionServiceOutcome::NoWork);
+        };
+        let Some(signalbox_domain::ReconstitutedToolAttempt::Current(revalidated)) =
+            revalidated_batch.attempt(request.id())
+        else {
+            drop(dispatch_permit);
+            return Ok(ToolExecutionServiceOutcome::NoWork);
+        };
+        if revalidated.attempt() != prepared.attempt()
+            || revalidated.state() != CurrentToolAttemptState::Prepared
+        {
+            return Err(ToolExecutionServiceError::CatalogDrift);
+        }
+        let prepared = revalidated.clone();
         if let Some(error) = preflight {
             let ended = self
                 .transaction
@@ -1035,7 +1056,6 @@ where
             )));
         }
         let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
-        let dispatch_permit = self.gate.acquire(prepared.turn()).await;
         let authorized = match self
             .transaction
             .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
@@ -1383,6 +1403,8 @@ mod tests {
         batch: ToolBatch,
         prepared: signalbox_domain::CurrentToolAttempt,
         events: Arc<Mutex<Vec<&'static str>>>,
+        dispatch_consumed_after_first_load: bool,
+        load_count: usize,
         ambiguous_authorization: bool,
         authorization_committed: bool,
         commit_failures: usize,
@@ -1397,6 +1419,10 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
         ) -> Result<Option<ToolBatch>, Self::Error> {
+            self.load_count += 1;
+            if self.dispatch_consumed_after_first_load && self.load_count > 1 {
+                return Ok(None);
+            }
             Ok(Some(self.batch.clone()))
         }
 
@@ -1710,6 +1736,8 @@ mod tests {
             },
             batch: batch.clone(),
             events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
@@ -1759,6 +1787,8 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
@@ -1803,6 +1833,106 @@ mod tests {
             *events.lock().expect("event lock"),
             ["authorize", "execute", "commit"]
         );
+    }
+
+    /// INV-011 / INV-037: dispatch authority is reread after the shared gate,
+    /// so an interrupt that consumed the checkpoint while execution waited
+    /// leaves no executor work to perform.
+    #[tokio::test]
+    async fn inv011_inv037_gate_wait_revalidates_interrupt_consumed_attempt() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: true,
+            load_count: 0,
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("consumed attempt is cleanly absent"),
+            ToolExecutionServiceOutcome::NoWork
+        );
+        let (_, _, _, executor, _, _) = service.into_parts();
+        assert_eq!(executor.calls, 0);
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-037: pure preflight evidence shares the interrupt gate
+    /// and cannot commit against a checkpoint an interrupt already consumed.
+    #[tokio::test]
+    async fn inv011_inv037_preflight_revalidates_interrupt_consumed_attempt() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: true,
+            load_count: 0,
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            NoToolCatalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("consumed preflight checkpoint is cleanly absent"),
+            ToolExecutionServiceOutcome::NoWork
+        );
+        let (_, _, _, executor, _, _) = service.into_parts();
+        assert_eq!(executor.calls, 0);
+        assert!(events.lock().expect("event lock").is_empty());
     }
 
     #[track_caller]
@@ -1865,6 +1995,8 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
@@ -1917,6 +2049,8 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
             ambiguous_authorization: true,
             authorization_committed: false,
             commit_failures: 0,
@@ -1971,6 +2105,8 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 1,

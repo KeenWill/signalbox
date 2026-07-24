@@ -75,8 +75,8 @@ impl PostgresEligibilitySweep {
         }
     }
 
-    /// Finds the next bounded page of sessions with queued work and no active
-    /// slot owner.
+    /// Finds the next bounded page of sessions with queued work or a durable
+    /// active tool batch ready for reconciliation.
     ///
     /// The result is only a set of hints. The authoritative per-session pass
     /// reconstitutes complete queue and lifecycle state under its scheduler-row
@@ -98,6 +98,12 @@ impl PostgresEligibilitySweep {
                           AND active.state_kind = 'active'
                    )
                  GROUP BY queued.session_id
+                UNION
+                SELECT active.session_id
+                  FROM turn_lifecycle AS active
+                 WHERE active.state_kind = 'active'
+                   AND active.active_phase_kind = 'running'
+                   AND active.active_tool_round_call_id IS NOT NULL
              ), bounded AS (
                 SELECT COALESCE(
                     $2::uuid,

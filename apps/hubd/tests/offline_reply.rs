@@ -7,10 +7,13 @@
 use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit,
+    ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
+    CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
     StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
@@ -43,6 +46,37 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_hubd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+#[derive(Clone, Copy, Debug)]
+struct UnexpectedToolExecutor;
+
+#[derive(Clone, Copy, Debug)]
+struct UnexpectedToolExecution;
+
+impl std::fmt::Display for UnexpectedToolExecution {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("empty catalog dispatched a tool")
+    }
+}
+
+impl Error for UnexpectedToolExecution {}
+
+impl ClassifyOperatorFailure for UnexpectedToolExecution {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::CallerOrHubBug
+    }
+}
+
+impl ToolExecutor for UnexpectedToolExecutor {
+    type Error = UnexpectedToolExecution;
+
+    async fn execute(
+        &mut self,
+        _invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        Err(UnexpectedToolExecution)
+    }
+}
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let container = Postgres::default()
@@ -118,11 +152,12 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let mut submit = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
         nudge,
-        signalbox_application::InProcessToolDispatchGate::default(),
+        tool_dispatch_gate.clone(),
     );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
@@ -169,16 +204,19 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         },
     )));
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
-    let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+    let credential_reference = ModelCallCredentialReference::new("scripted-test");
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
                 pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-test"),
+                targets.clone(),
+                credential_reference.clone(),
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
-        ));
+        )
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
+    );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,

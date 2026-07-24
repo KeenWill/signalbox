@@ -9,15 +9,18 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallProvider, OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider,
-    ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
+    InProcessToolDispatchGate, ModelCallExecutionError, ModelCallExecutionOutcome,
+    ModelCallExecutionService, ModelCallProvider, OperatorFailureClass, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
+    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
+    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
+use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use tokio::sync::watch;
 
 mod configuration;
@@ -38,13 +41,24 @@ pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {
     /// Classified failure from the application service or provider adapter.
-    type Error: ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure + Send + 'static;
 
     /// Consumes one exact activation outcome and drives its initial call.
     fn execute(
         &self,
         activated: Box<ActivatedAcceptedInputTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+
+    /// Reconciles a durable active tool turn for one scheduler hint.
+    ///
+    /// Implementations without tool orchestration have no active work to
+    /// resume. PostgreSQL authority is rechecked by the concrete adapter.
+    fn resume_active(
+        &self,
+        _session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        std::future::ready(Ok(()))
+    }
 
     /// Reports that durable activation may require startup recovery.
     fn report_post_activation_failure(&self) {}
@@ -112,6 +126,14 @@ where
         supervise_execution(self.fatal_signal.clone(), execution)
     }
 
+    fn resume_active(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.resume_active(session);
+        supervise_execution(self.fatal_signal.clone(), execution)
+    }
+
     fn report_post_activation_failure(&self) {
         self.fatal_signal.send_replace(true);
     }
@@ -135,13 +157,13 @@ where
 async fn reconcile_retained_once<Outcome, ExecutionError, Execution>(
     original_error: ExecutionError,
     execution: Execution,
-) -> Result<Outcome, RetainedModelExecutionError<ExecutionError>>
+) -> Result<Outcome, RetainedExecutionError<ExecutionError>>
 where
     Execution: Future<Output = Result<Outcome, ExecutionError>>,
 {
     match execution.await {
         Ok(outcome) => Ok(outcome),
-        Err(reconciliation_error) => Err(RetainedModelExecutionError::Reconciliation {
+        Err(reconciliation_error) => Err(RetainedExecutionError::Reconciliation {
             original: original_error,
             reconciliation: reconciliation_error,
         }),
@@ -151,7 +173,7 @@ where
 /// Execution failure retaining both the causal stage error and a failed
 /// same-incarnation retained-state reconciliation.
 #[derive(Debug)]
-pub enum RetainedModelExecutionError<ExecutionError> {
+pub enum RetainedExecutionError<ExecutionError> {
     /// Execution failed without a retained-state reconciliation failure.
     Primary(ExecutionError),
     /// The causal stage failed and its one authoritative reconciliation also
@@ -164,7 +186,7 @@ pub enum RetainedModelExecutionError<ExecutionError> {
     },
 }
 
-impl<ExecutionError> RetainedModelExecutionError<ExecutionError> {
+impl<ExecutionError> RetainedExecutionError<ExecutionError> {
     /// Borrows the causal stage failure.
     pub const fn original(&self) -> &ExecutionError {
         match self {
@@ -184,7 +206,7 @@ impl<ExecutionError> RetainedModelExecutionError<ExecutionError> {
     }
 }
 
-impl<ExecutionError> fmt::Display for RetainedModelExecutionError<ExecutionError>
+impl<ExecutionError> fmt::Display for RetainedExecutionError<ExecutionError>
 where
     ExecutionError: fmt::Display,
 {
@@ -202,7 +224,7 @@ where
     }
 }
 
-impl<ExecutionError> Error for RetainedModelExecutionError<ExecutionError>
+impl<ExecutionError> Error for RetainedExecutionError<ExecutionError>
 where
     ExecutionError: Error + 'static,
 {
@@ -211,7 +233,7 @@ where
     }
 }
 
-impl<ExecutionError> ClassifyOperatorFailure for RetainedModelExecutionError<ExecutionError>
+impl<ExecutionError> ClassifyOperatorFailure for RetainedExecutionError<ExecutionError>
 where
     ExecutionError: ClassifyOperatorFailure,
 {
@@ -230,6 +252,9 @@ where
         }
     }
 }
+
+/// Backwards-compatible name for retained model-call execution evidence.
+pub type RetainedModelExecutionError<ExecutionError> = RetainedExecutionError<ExecutionError>;
 
 const fn is_fatal_failure_class(failure: OperatorFailureClass) -> bool {
     matches!(
@@ -350,6 +375,10 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         async move {
+            execution
+                .resume_active(session)
+                .await
+                .map_err(ActivatedTurnPassError::Execution)?;
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -422,6 +451,63 @@ pub type PostgresProviderModelExecutionError<ProviderError> = RetainedModelExecu
     >,
 >;
 
+/// Classified tool execution failure, including a failed same-incarnation
+/// reconciliation of retained executor evidence.
+pub type PostgresProviderToolExecutionError<ExecutorError> =
+    RetainedExecutionError<ToolExecutionServiceError<ToolLoopRepositoryError, ExecutorError>>;
+
+/// Classified failure while alternating provider calls and serialized tool
+/// stages within one turn.
+#[derive(Debug)]
+pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
+    /// Model-call execution or same-incarnation reconciliation failed.
+    Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
+    /// Tool preparation, execution, evidence commit, or continuation failed.
+    Tool(Box<PostgresProviderToolExecutionError<ExecutorError>>),
+}
+
+impl<ProviderError, ExecutorError> fmt::Display
+    for PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>
+where
+    ProviderError: fmt::Display,
+    ExecutorError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => error.fmt(formatter),
+            Self::Tool(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<ProviderError, ExecutorError> Error
+    for PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>
+where
+    ProviderError: Error + 'static,
+    ExecutorError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Model(error) => Some(error),
+            Self::Tool(error) => Some(error),
+        }
+    }
+}
+
+impl<ProviderError, ExecutorError> ClassifyOperatorFailure
+    for PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>
+where
+    ProviderError: ClassifyOperatorFailure,
+    ExecutorError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Model(error) => error.operator_failure_class(),
+            Self::Tool(error) => error.operator_failure_class(),
+        }
+    }
+}
+
 /// Production execution factory over PostgreSQL orchestration and one cloned
 /// provider-port adapter per activation.
 #[derive(Clone, Debug)]
@@ -442,6 +528,26 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             repository,
             gate,
             provider,
+        }
+    }
+
+    /// Adds serialized tool execution and continuation to the provider
+    /// composition without changing the provider-facing application boundary.
+    pub fn with_tool_loop<Catalog, Executor>(
+        self,
+        tool_dispatch_gate: InProcessToolDispatchGate,
+        catalog: Catalog,
+        executor: Executor,
+    ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
+        let tool_repository = self.repository.tool_loop_repository();
+        PostgresProviderToolLoopExecution {
+            model_repository: self.repository,
+            tool_repository,
+            model_gate: self.gate,
+            tool_gate: tool_dispatch_gate,
+            provider: self.provider,
+            catalog,
+            executor,
         }
     }
 }
@@ -494,6 +600,190 @@ where
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
                 }
+            }
+        }
+    }
+}
+
+/// Production execution factory alternating provider calls with serialized
+/// PostgreSQL-backed tool stages until the turn parks or terminalizes.
+#[derive(Clone, Debug)]
+pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
+    model_repository: PostgresModelCallRepository,
+    tool_repository: PostgresToolLoopRepository,
+    model_gate: InProcessAttemptDispatchGate,
+    tool_gate: InProcessToolDispatchGate,
+    provider: Provider,
+    catalog: Catalog,
+    executor: Executor,
+}
+
+impl<Provider, Catalog, Executor> PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
+where
+    Provider: ModelCallProvider + Clone + Send + 'static,
+    Provider::Capability: Send,
+    Provider::Error: Send + 'static,
+    Catalog: ToolCatalog + Clone + Send + 'static,
+    Executor: ToolExecutor + Clone + Send + 'static,
+    Executor::Error: Send + 'static,
+{
+    fn execute_scope(
+        &self,
+        session: SessionId,
+        turn: signalbox_domain::TurnId,
+    ) -> impl Future<
+        Output = Result<
+            (),
+            PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>,
+        >,
+    > + Send
+    + 'static {
+        let model_repository = self.model_repository.clone();
+        let tool_repository = self.tool_repository.clone();
+        let model_gate = self.model_gate.clone();
+        let tool_gate = self.tool_gate.clone();
+        let provider = self.provider.clone();
+        let catalog = self.catalog.clone();
+        let executor = self.executor.clone();
+        async move {
+            let mut model = ModelCallExecutionService::new(
+                UuidV7ModelCallExecutionIdGenerator,
+                model_repository.clone(),
+                model_repository.clone(),
+                model_repository.clone(),
+                model_repository,
+                provider,
+                model_gate,
+            )
+            .with_tool_catalog(catalog.clone());
+            let mut tools = ToolExecutionService::new(
+                UuidV7ToolLoopIdGenerator,
+                tool_repository,
+                catalog,
+                executor,
+                tool_gate,
+            );
+            let mut run_tools = true;
+            let mut return_if_tools_absent = false;
+
+            loop {
+                if run_tools {
+                    let tool_outcome = match tools.execute(session, turn).await {
+                        Ok(outcome) => outcome,
+                        Err(error) if tools.retained_state().is_some() => {
+                            reconcile_retained_once(error, tools.execute(session, turn))
+                                .await
+                                .map_err(|error| {
+                                    PostgresProviderToolLoopExecutionError::Tool(Box::new(error))
+                                })?
+                        }
+                        Err(error) => {
+                            return Err(PostgresProviderToolLoopExecutionError::Tool(Box::new(
+                                RetainedExecutionError::Primary(error),
+                            )));
+                        }
+                    };
+                    match tool_outcome {
+                        ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+                        | ToolExecutionServiceOutcome::PreflightFailed(_)
+                        | ToolExecutionServiceOutcome::ObservationCommitted(_)
+                        | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
+                        | ToolExecutionServiceOutcome::CrashClassified(_) => {
+                            return_if_tools_absent = true;
+                            continue;
+                        }
+                        ToolExecutionServiceOutcome::ContinuationCheckpointed(_) => {
+                            run_tools = false;
+                        }
+                        ToolExecutionServiceOutcome::NoWork => {
+                            if return_if_tools_absent {
+                                return Ok(());
+                            }
+                            run_tools = false;
+                        }
+                        ToolExecutionServiceOutcome::AwaitingApproval(_)
+                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                let model_outcome = match model.execute(session).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if model.retained_state().is_some() => {
+                        reconcile_retained_once(error, model.execute(session))
+                            .await
+                            .map_err(|error| {
+                                PostgresProviderToolLoopExecutionError::Model(Box::new(error))
+                            })?
+                    }
+                    Err(error) => {
+                        return Err(PostgresProviderToolLoopExecutionError::Model(Box::new(
+                            RetainedModelExecutionError::Primary(error),
+                        )));
+                    }
+                };
+                match model_outcome {
+                    ModelCallExecutionOutcome::Checkpointed(_) => {}
+                    ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::PendingSteering { .. }
+                    | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
+                        return Ok(());
+                    }
+                    ModelCallExecutionOutcome::NoWork => return Ok(()),
+                    ModelCallExecutionOutcome::ObservationCommitted(_)
+                    | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {
+                        run_tools = true;
+                        return_if_tools_absent = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<Provider, Catalog, Executor> ActivatedTurnExecution
+    for PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
+where
+    Provider: ModelCallProvider + Clone + Send + 'static,
+    Provider::Capability: Send,
+    Provider::Error: Send + 'static,
+    Catalog: ToolCatalog + Clone + Send + 'static,
+    Executor: ToolExecutor + Clone + Send + 'static,
+    Executor::Error: Send + 'static,
+{
+    type Error = PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedAcceptedInputTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let session = activated.session();
+        let turn = activated.turn();
+        drop(activated);
+        self.execute_scope(session, turn)
+    }
+
+    fn resume_active(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let tool_repository = self.tool_repository.clone();
+        let execution = self.clone();
+        async move {
+            let turn = tool_repository
+                .find_resumable_turn(session)
+                .await
+                .map_err(|error| {
+                    PostgresProviderToolLoopExecutionError::Tool(Box::new(
+                        RetainedExecutionError::Primary(ToolExecutionServiceError::Load(error)),
+                    ))
+                })?;
+            match turn {
+                Some(turn) => execution.execute_scope(session, turn).await,
+                None => Ok(()),
             }
         }
     }
@@ -748,6 +1038,79 @@ mod tests {
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct OrderedResumeTransaction {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl StartEligibleTurnTransaction for OrderedResumeTransaction {
+        type Error = ExecutionFailure;
+
+        fn handle(
+            &mut self,
+            _session: SessionId,
+            _identities: AcceptedInputTurnActivationIdentities,
+        ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+            self.events
+                .lock()
+                .expect("ordered event lock")
+                .push("activate");
+            ready(Ok(StartEligibleTurnOutcome::NoEligibleTurn))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingResumeExecution {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ActivatedTurnExecution for RecordingResumeExecution {
+        type Error = ExecutionFailure;
+
+        fn execute(
+            &self,
+            _activated: Box<ActivatedAcceptedInputTurn>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Ok(()))
+        }
+
+        fn resume_active(
+            &self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            self.events
+                .lock()
+                .expect("ordered event lock")
+                .push("resume");
+            ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn active_tool_reconciliation_precedes_queued_activation() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut pass = ActivatedTurnPass::new(
+            StartEligibleTurnService::new(
+                AdvancingIds::new(),
+                OrderedResumeTransaction {
+                    events: Arc::clone(&events),
+                },
+            ),
+            RecordingResumeExecution {
+                events: Arc::clone(&events),
+            },
+        );
+
+        pass.run(SessionId::from_uuid(Uuid::from_u128(9)))
+            .await
+            .expect("active reconciliation and activation check both finish");
+
+        assert_eq!(
+            *events.lock().expect("ordered event lock"),
+            ["resume", "activate"]
+        );
     }
 
     #[tokio::test]

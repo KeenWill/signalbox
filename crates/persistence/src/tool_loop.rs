@@ -218,6 +218,28 @@ impl PostgresToolLoopRepository {
         result
     }
 
+    /// Finds the exact active tool turn whose durable phase can make progress.
+    ///
+    /// This is a reconciliation hint only. Every later tool transaction
+    /// rechecks the complete batch under the session scheduler lock.
+    pub async fn find_resumable_turn(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<TurnId>, ToolLoopRepositoryError> {
+        let turn = sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id
+               FROM turn_lifecycle
+              WHERE session_id = $1
+                AND state_kind = 'active'
+                AND active_phase_kind = 'running'
+                AND active_tool_round_call_id IS NOT NULL",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(turn.map(turn_id_from_uuid))
+    }
+
     /// Atomically records one replay-idempotent owner decision and successor
     /// phase. A fresh continuation attempt is supplied only for the final
     /// undecided request.
@@ -734,9 +756,11 @@ impl PostgresToolLoopRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let Some(batch) =
+                load_active_batch_from_connection(&mut transaction, session, turn).await?
+            else {
+                return Ok(PrepareToolContinuationOutcome::NoWork);
+            };
             let turn_attempt = match batch.phase() {
                 signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
                     if batch.producing_call() == producing_call =>
