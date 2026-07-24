@@ -256,7 +256,11 @@ loading never returns a receipt and command replay never returns a `Session`.
 
 `load_session(SessionId)` performs one statement-consistent read joining the
 session row, its one current-defaults pointer, and exactly the version that
-pointer names (`crates/persistence/src/session.rs`). The pointer is
+pointer names (`crates/persistence/src/session.rs`). For imported ancestry, that
+same read also projects the imported conversation, the one-to-one seed record,
+the seed frontier and ordered members, and their referenced semantic entries;
+the adapter passes that complete projection through
+`ImportedSessionReconstitutionInput::reconstitute`. The pointer is
 authoritative; a load never infers current defaults from version one, the
 greatest stored version, a caller-supplied version, or a cache.
 
@@ -265,11 +269,13 @@ installation; only the pointer records the accepted current choice.
 
 `None` is returned only when no session row exists in the read snapshot. Once
 the row exists, a missing pointer, missing selected version, ownership mismatch,
-pointer/record version disagreement, unknown discriminator, or invalid ordinal
-fails closed as typed corruption: the adapter's decode checks feed the
-domain-owned `SessionReconstitutionInput::reconstitute` seam, which accepts only
-complete agreeing domain values (INV-002). Reconstitution never yields `None`, a
-default, or a partial session.
+pointer/record version disagreement, unknown discriminator, invalid ordinal, or
+an incomplete or inconsistent imported seed projection fails closed as typed
+corruption: the adapter's decode checks feed the ancestry-appropriate
+domain-owned `SessionReconstitutionInput::reconstitute` or
+`ImportedSessionReconstitutionInput::reconstitute` seam, each of which accepts
+only complete agreeing domain values (INV-002, INV-039). Reconstitution never
+yields `None`, a default, or a partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
