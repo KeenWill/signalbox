@@ -1757,10 +1757,10 @@ impl ActiveTurnSchedulingReconstitutionInput {
         call: ModelCallId,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
-    pub const fn awaiting_approval(
+    pub fn awaiting_approval(
         owning_turn: TurnId,
-        wait: AwaitingToolApproval,
-    ) -> Self;
+        batch: &ToolBatch,
+    ) -> Option<Self>;
     pub const fn awaiting_tool_recovery(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
@@ -2918,11 +2918,9 @@ impl ToolApprovalResolution {
 }
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
-    pub const fn new(
-        request: ToolRequestId,
-        decision: ToolApprovalDecision,
-        source: ToolDecisionSource,
-    ) -> Self;
+    pub const fn owner_command(command: PreparedDecideToolRequest) -> Self;
+    pub const fn policy_auto(request: ToolRequestId) -> Self;
+    pub const fn session_blanket(request: ToolRequestId) -> Self;
     pub fn reconstitute(
         self,
     ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;
@@ -2938,11 +2936,11 @@ pub enum InitialToolApproval {
 pub struct DecideToolRequest { /* private */ }
 // canonical equality and hashing exclude command_id
 impl DecideToolRequest {
-    pub const fn new(
+    pub fn try_new(
         command_id: DurableCommandId,
         request: ToolRequestId,
         decision: ToolApprovalDecision,
-    ) -> Self;
+    ) -> Result<Self, DecideToolRequestConstructionError>;
     pub fn prepare_applied(
         self,
         request: &ToolRequest,
@@ -2955,6 +2953,8 @@ impl DecideToolRequest {
     ) -> PreparedDecideToolRequest;
     // accessors: command_id(), request(), decision()
 }
+pub struct DecideToolRequestConstructionError { /* private */ }
+// accessor: command_id()
 pub enum DecideToolRequestResult {
     Applied(DecideToolRequestAppliedResult),
     Rejected(DecideToolRequestRejectedResult),
@@ -3136,8 +3136,12 @@ impl ToolAttemptReconstitutionInput {
         generation: ToolDispatchGeneration,
         state: ToolAttemptReconstitutionState,
     ) -> Self;
-    pub fn reconstitute(self) -> ReconstitutedToolAttempt;
+    pub fn reconstitute(
+        self,
+    ) -> Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError>;
 }
+pub struct ToolAttemptReconstitutionError { /* private */ }
+// accessors: input(), into_input()
 pub enum ReconstitutedToolAttempt {
     Current(CurrentToolAttempt),
     Ended(EndedToolAttempt),
@@ -4630,14 +4634,14 @@ pub trait ToolExecutionTransaction {
 | domain: model_execution                            | 49                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
-| domain: tool                                       | 37                   |
-| domain: tool_attempt                               | 23                   |
+| domain: tool                                       | 38                   |
+| domain: tool_attempt                               | 24                   |
 | domain: tool_execution                             | 17                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| **signalbox-domain total**                         | **348 (+1 free fn)** |
+| **signalbox-domain total**                         | **350 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

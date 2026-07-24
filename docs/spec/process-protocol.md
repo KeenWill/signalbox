@@ -343,6 +343,14 @@ boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
 final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
 limit even when every byte requires worst-case JSON escaping.
 
+The tool-entry `arguments` and `content` members are JSON strings, never nested
+untyped JSON values. `arguments` contains the exact normalized JSON text or
+credential-scrubbed undecodable text stored on the request. `content` contains
+the exact provider-visible result string: admitted success text, or the compact
+closed error object serialized as text by the provider bridge. Tool entry
+discriminators and identifiers determine the semantic arm; clients never infer
+it by reparsing either string.
+
 The process projection resolves the domain's reference-only tool entries before
 crossing the wire. Tool use carries the exact checked name and exact
 normalized-or-scrubbed-undecodable arguments. Execution, denial, and closure

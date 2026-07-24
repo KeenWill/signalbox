@@ -132,11 +132,11 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt: TurnAttemptId,
         /// The preserved stored end classification for that attempt.
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
-        /// Opaque evidence for the exact ambiguous tool attempt and its source.
-        ambiguous_tool: crate::AwaitingToolRecovery,
+        /// Complete checked batch carrying the exact ambiguous tool attempt.
+        tool_batch: crate::ToolBatch,
         /// The later or already-applied interrupt that requires reconciliation.
         interrupt: AppliedInterruptCommandResult,
-        /// The equal-content terminal frontier identifying the turn boundary.
+        /// The exact proposal-ordered result-suffix terminal frontier.
         terminal_frontier: ContextFrontierId,
     },
 }
@@ -358,6 +358,7 @@ struct ExecutingToolBatchReconstitutionFacts {
     producing_call: crate::ModelCallId,
     yielded_snapshot: ResolvedContextFrontierSnapshot,
     batch_attempt: Option<TurnAttemptId>,
+    awaiting_request: Option<ToolRequestId>,
     requests: Box<[ToolRequestId]>,
 }
 
@@ -415,6 +416,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 crate::ToolBatchPhase::AwaitingApproval { .. }
                 | crate::ToolBatchPhase::AwaitingRecovery { .. } => None,
             },
+            awaiting_request: None,
             requests: batch
                 .requests()
                 .iter()
@@ -439,14 +441,27 @@ impl ActiveTurnSchedulingReconstitutionInput {
         }
     }
 
-    /// Supplies an evidence-bearing stored approval wait.
-    pub const fn awaiting_approval(owning_turn: TurnId, wait: crate::AwaitingToolApproval) -> Self {
-        Self {
+    /// Supplies an evidence-bearing stored approval wait derived from the
+    /// complete current tool batch.
+    pub fn awaiting_approval(owning_turn: TurnId, batch: &crate::ToolBatch) -> Option<Self> {
+        let wait = batch.awaiting_approval()?;
+        (batch.turn() == owning_turn).then(|| Self {
             owning_turn,
             current_attempt: None,
             state: StoredActiveTurnPhase::AwaitingApproval { wait },
-            executing_tool_batch: None,
-        }
+            executing_tool_batch: Some(ExecutingToolBatchReconstitutionFacts {
+                session: batch.session(),
+                producing_call: batch.producing_call(),
+                yielded_snapshot: batch.yielded_snapshot().clone(),
+                batch_attempt: None,
+                awaiting_request: Some(wait.request()),
+                requests: batch
+                    .requests()
+                    .iter()
+                    .map(crate::ToolRequest::id)
+                    .collect(),
+            }),
+        })
     }
 
     /// Supplies an evidence-bearing same-process ambiguous tool wait.
@@ -3074,10 +3089,10 @@ fn reconstitute_inner(
                                 )
                     }
                     AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
-                        ambiguous_tool,
+                        tool_batch,
                         ..
                     } => {
-                        model_call.id() == ambiguous_tool.producing_call()
+                        model_call.id() == tool_batch.producing_call()
                             && model_call.state()
                                 == crate::ModelCallReconstitutionState::Terminal(
                                     ModelCallDisposition::Completed,
@@ -3694,19 +3709,23 @@ fn reconstitute_inner(
                             if call.turn() == turn
                                 && call.disposition() == ModelCallDisposition::Completed
                     );
-                    let Some(turn_attempt) = tool_batch.batch_attempt else {
-                        return Err(
-                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                                turn,
-                                accepted_input: record.accepted_input.id(),
-                            },
-                        );
+                    let phase_matches = match (
+                        &phase.state,
+                        tool_batch.batch_attempt,
+                        tool_batch.awaiting_request,
+                    ) {
+                        (
+                            StoredActiveTurnPhase::Prepared | StoredActiveTurnPhase::Running,
+                            Some(turn_attempt),
+                            None,
+                        ) => phase.current_attempt == Some(turn_attempt),
+                        (StoredActiveTurnPhase::AwaitingApproval { wait }, None, Some(request)) => {
+                            phase.current_attempt.is_none() && wait.request() == request
+                        }
+                        _ => false,
                     };
-                    if !matches!(
-                        phase.state,
-                        StoredActiveTurnPhase::Prepared | StoredActiveTurnPhase::Running
-                    ) || tool_batch.session != session
-                        || Some(turn_attempt) != phase.current_attempt
+                    if !phase_matches
+                        || tool_batch.session != session
                         || stored_yielded != Some(&tool_batch.yielded_snapshot)
                         || !producing_matches
                         || !suffix_valid
@@ -3721,13 +3740,15 @@ fn reconstitute_inner(
                     }
                     referenced_model_calls.insert(tool_batch.producing_call);
                     referenced_snapshots.insert(yielded_frontier);
-                    active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
-                        session,
-                        turn,
-                        producing_call: tool_batch.producing_call,
-                        yielded_frontier,
-                        turn_attempt,
-                    });
+                    if let Some(turn_attempt) = tool_batch.batch_attempt {
+                        active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
+                            session,
+                            turn,
+                            producing_call: tool_batch.producing_call,
+                            yielded_frontier,
+                            turn_attempt,
+                        });
+                    }
                 }
                 ReconstitutedSchedulingState::Active {
                     start,
@@ -4370,7 +4391,7 @@ fn reconstitute_inner(
                 starting_frontier,
                 reconciling_attempt,
                 reconciling_attempt_end,
-                ambiguous_tool,
+                tool_batch,
                 interrupt,
                 terminal_frontier,
             } => {
@@ -4397,6 +4418,14 @@ fn reconstitute_inner(
                     _ => false,
                 };
                 let successor = records_by_turn.get(&interrupt.successor());
+                let Some(ambiguous_tool) = tool_batch.awaiting_recovery() else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
+                            turn,
+                            attempt: *reconciling_attempt,
+                        },
+                    );
+                };
                 if interrupt.session() != session
                     || interrupt.proof().predecessor() != turn
                     || !attempt_end_matches
@@ -4445,25 +4474,21 @@ fn reconstitute_inner(
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
-                if !referenced_snapshots.insert(*terminal_frontier)
-                    || !source.is_semantic_prefix_of(&terminal)
-                    || terminal.entry_count() == source.entry_count()
-                    || terminal
-                        .ordered_entries()
-                        .skip(source.entry_count())
-                        .any(|entry| {
-                            !matches!(
-                                semantic_entries
-                                    .get(&entry)
-                                    .map(SemanticTranscriptEntry::payload),
-                                Some(
-                                    SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
-                                        | SemanticTranscriptEntryPayload::ToolDenied { .. }
-                                        | SemanticTranscriptEntryPayload::ToolClosed { .. }
-                                )
-                            )
+                let entry_ids = terminal
+                    .ordered_entries()
+                    .skip(source.entry_count())
+                    .map(|reference| reference.entry())
+                    .collect();
+                let expected_projection = tool_batch
+                    .prepare_reconciliation_projection(entry_ids, *terminal_frontier)
+                    .ok();
+                let projection_matches = expected_projection.as_ref().is_some_and(|projection| {
+                    projection.snapshot() == &terminal
+                        && projection.entries().iter().all(|expected| {
+                            semantic_entries.get(&expected.reference()) == Some(expected)
                         })
-                {
+                });
+                if !referenced_snapshots.insert(*terminal_frontier) || !projection_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
                             turn,
@@ -5402,9 +5427,8 @@ mod tests {
         SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
         ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
         ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDecisionSource,
-        ToolDispatchGeneration, ToolEffectClass, ToolName, ToolRequestOrdinal,
-        ToolRequestReconstitutionInput,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
+        ToolEffectClass, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
             imported_transcript_entry_id, model_call_id, provider_model_identity,
@@ -6789,10 +6813,9 @@ mod tests {
                 .expect("fixture arguments are canonical"),
         )
         .into_request();
-        let approval = ToolApprovalResolutionReconstitutionInput::new(
+        let approval = ToolApprovalResolutionReconstitutionInput::owner_fixture(
             request_id,
             ToolApprovalDecision::Approve,
-            ToolDecisionSource::OwnerCommand,
         )
         .reconstitute()
         .expect("owner approval is implemented");
@@ -9570,10 +9593,9 @@ mod tests {
                 .expect("fixture arguments are canonical"),
         )
         .into_request();
-        let approval = ToolApprovalResolutionReconstitutionInput::new(
+        let approval = ToolApprovalResolutionReconstitutionInput::owner_fixture(
             request.id(),
             ToolApprovalDecision::Approve,
-            ToolDecisionSource::OwnerCommand,
         )
         .reconstitute()
         .expect("owner approval is implemented");
@@ -9587,7 +9609,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
             session.id(),
             starting_frontier.id(),
@@ -9663,7 +9686,7 @@ mod tests {
                     CancellationStopDisposition::Lost,
                     interrupt,
                 ),
-                ambiguous_tool: wait,
+                tool_batch: batch.clone(),
                 interrupt,
                 terminal_frontier: starting_frontier.id(),
             },

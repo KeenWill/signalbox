@@ -52,6 +52,52 @@ focused capability.
 crate-specific exception in `deny.toml`; stored argument kinds, canonical
 encoding, and byte limits do not change.
 
+## 2026-07-24 — Complete tool rounds inside one hub-owned turn
+
+**Context.** The owner fixed the tool-loop semantics on 2026-07-23. The
+model-runtime vocabulary already carries tool definitions, tool-call parts,
+results, and a tool-use finish reason, while the durable transcript reserves
+`AssistantToolUse` and the active-turn algebra reserves `AwaitingApproval`.
+Storage deliberately blocks both. Shipping the first tool requires the request,
+approval, physical-attempt, result, continuation, and restart boundaries to land
+together; otherwise a provider response could create unowned work or a side
+effect could outlive its evidence. Interrupts must also order against the
+in-process executor boundary without making an interrupt an approval decision.
+
+**Decision.** Adopt the complete hub-owned loop specified by
+[tool-loop](spec/tool-loop.md): tool-using model completions yield within the
+same logical turn; requests and reference-only semantic entries commit
+atomically; approval sources remain explicit; the dangerous session blanket is
+versioned, stored by every defaults-bearing command family, and frozen per turn;
+execution is serialized behind catalog/executor ports and durably fenced; a
+process-shared turn dispatch gate orders execution against interrupts;
+deny-and-end records the canonical denial before applying the separately durable
+interrupt from execution, with the ordinary dispatch race after execution opens;
+interrupting an ambiguous tool recovery wait retains that exact ambiguity in the
+proof-bearing terminal boundary; 1 MiB bounds both normalized arguments and
+admitted text results; crash classification follows recorded effect class, and a
+known crash failure materializes its exact result evidence plus proposal-ordered
+closure for the remaining requests before `TurnFailed`; and the proposal-ordered
+all-resolved boundary atomically projects results, consumes steering, and
+prepares the next model call. `current_time` is the first effect-free auto tool,
+with an injected clock and IANA conversion supplied by the focused `jiff`
+dependency.
+
+**Rejected alternatives.** Making each round a new turn would fragment one
+conversational outcome and misplace `TurnCompleted`. Process-local approvals or
+results would disappear across restart. Copying request/result content into
+semantic entries would create competing authorities. Concurrent execution now
+would weaken two simple database guards before evidence justified the extra
+state space. Auto-retrying effect-free crash loss would introduce retry policy
+instead of reporting the version-one known failure. Treating blanket, policy, or
+judge decisions as owner approval would violate INV-020.
+
+**Affects.** S02, S05, S06, S07, S10–S12, and S15; INV-004–INV-006,
+INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-036,
+and INV-037; the tool-loop page and linked sibling specifications;
+session-default command storage versions; domain/application spines;
+model/provider bridge, persistence, hubd composition, and offline proof tests.
+
 ## 2026-07-24 — Expose durable tool-batch presentation boundaries
 
 **Context.** Tool proposals and all-resolved results become semantic history
@@ -82,17 +128,22 @@ prior batch's results. The all-resolved continuation barrier bounds each batch
 but, without a turn-wide limit, a provider-controlled sequence can retain the
 session slot and consume resources indefinitely.
 
-**Decision.** Admit at most 32 tool-using provider rounds in one turn. After the
-thirty-second batch resolves, prepare the ordinary continuation checkpoint but
-close it as a known failure before provider preparation or send. Count distinct
-producing calls for the turn, not requests, so a multi-request batch consumes
-one round and inherited history from earlier turns consumes none.
+**Decision.** Admit at most 32 tool requests in one completed provider response
+and at most 32 tool-using provider rounds in one turn. A response exceeding the
+request bound closes its model call as a known failure without materializing a
+partial batch. After the thirty-second admitted batch resolves, prepare the
+ordinary continuation checkpoint but close it as a known failure before provider
+preparation or send. Count distinct producing calls for the turn, not requests,
+so a multi-request batch consumes one round and inherited history from earlier
+turns consumes none.
 
 **Rejected alternatives.** An elapsed-time limit makes durable replay depend on
-wall-clock timing. Counting requests penalizes bounded parallel proposals
-instead of repeated model continuation. An unbounded loop leaves availability
-under provider control. A configurable first version adds policy surface without
-evidence for another value.
+wall-clock timing. Counting requests as rounds penalizes bounded parallel
+proposals instead of repeated model continuation. A 128-request response bound
+still permits one serialized batch to retain up to 128 MiB of admitted result
+text. Unbounded batches or rounds leave availability under provider control. A
+configurable first version adds policy surface without evidence for another
+value.
 
 **Affects.** Tool-loop continuation, model-call execution, the current turn's
 failure boundary, and application/offline proofs.
@@ -1029,78 +1080,6 @@ terminal-client crates, hubd configuration/composition, outbox consumption,
 INV-032/INV-033 enforcement, S01/S02/S24, and
 [open questions](open-questions.md#protocols-and-persistence). Authenticated
 transports and remote clients remain explicitly open upgrade paths.
-
-## 2026-07-23 — Reuse serde_json for canonical tool arguments
-
-**Context.** Tool requests need a bounded provider-neutral argument value: valid
-JSON is compact with recursively lexical object keys, while malformed provider
-text remains exact for typed `InvalidArguments` reporting. Hand-written JSON
-parsing or canonical serialization would add security-sensitive format code to
-the domain crate. `serde_json` is already a pinned workspace dependency used at
-provider boundaries.
-
-**Decision.** Add the existing focused `serde_json` dependency to the domain
-crate and use its value parser and compact serializer around an explicit
-`BTreeMap` recursion. Keep serde types private: the public API accepts and
-returns checked strings plus a domain-owned representation tag. The persistence
-process projection reuses the same focused serializer to expose bounded typed
-tool-failure JSON without copying storage records onto the wire.
-
-**Rejected alternatives.** Preserve all JSON text verbatim: semantically equal
-requests would lack one normalized representation. Reject malformed text at the
-provider bridge: that would lose the durable request and its model-visible typed
-failure. Write a repository-local JSON parser: larger ownership and audit cost
-without a domain benefit.
-
-**Affects.** `crates/domain/Cargo.toml`, `crates/persistence/Cargo.toml`,
-normalized tool-argument construction, process transcript projection, and the
-lockfile dependency list; no storage, wire, or framework type crosses into the
-domain API.
-
-## 2026-07-23 — Complete tool rounds inside one hub-owned turn
-
-**Context.** The model-runtime vocabulary already carries tool definitions,
-tool-call parts, results, and a tool-use finish reason, while the durable
-transcript reserves `AssistantToolUse` and the active-turn algebra reserves
-`AwaitingApproval`. Storage deliberately blocks both. Shipping the first tool
-requires the request, approval, physical-attempt, result, continuation, and
-restart boundaries to land together; otherwise a provider response could create
-unowned work or a side effect could outlive its evidence. Interrupts must also
-order against the in-process executor boundary without making an interrupt an
-approval decision.
-
-**Decision.** Adopt the complete hub-owned loop specified by
-[tool-loop](spec/tool-loop.md): tool-using model completions yield within the
-same logical turn; requests and reference-only semantic entries commit
-atomically; approval sources remain explicit; the dangerous session blanket is
-versioned, stored by every defaults-bearing command family, and frozen per turn;
-execution is serialized behind catalog/executor ports and durably fenced; a
-process-shared turn dispatch gate orders execution against interrupts;
-deny-and-end records the canonical denial before applying the separately durable
-interrupt from execution, with the ordinary dispatch race after execution opens;
-interrupting an ambiguous tool recovery wait retains that exact ambiguity in the
-proof-bearing terminal boundary; 1 MiB bounds both normalized arguments and
-admitted text results; crash classification follows recorded effect class, and a
-known crash failure materializes proposal-ordered tool closure before
-`TurnFailed`; and the proposal-ordered all-resolved boundary atomically projects
-results, consumes steering, and prepares the next model call. `current_time` is
-the first effect-free auto tool, with an injected clock and IANA conversion
-supplied by the focused `jiff` dependency.
-
-**Rejected alternatives.** Making each round a new turn would fragment one
-conversational outcome and misplace `TurnCompleted`. Process-local approvals or
-results would disappear across restart. Copying request/result content into
-semantic entries would create competing authorities. Concurrent execution now
-would weaken two simple database guards before evidence justified the extra
-state space. Auto-retrying effect-free crash loss would introduce retry policy
-instead of reporting the version-one known failure. Treating blanket, policy, or
-judge decisions as owner approval would violate INV-020.
-
-**Affects.** S02, S05, S06, S07, S10–S12, and S15; INV-004–INV-006,
-INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-036,
-and INV-037; the tool-loop page and linked sibling specifications;
-session-default command storage versions; domain/application spines;
-model/provider bridge, persistence, hubd composition, and offline proof tests.
 
 ## 2026-07-23 — Owner-curated work backlog under docs/agents
 

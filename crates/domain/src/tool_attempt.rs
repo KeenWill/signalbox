@@ -769,8 +769,12 @@ impl ToolAttemptReconstitutionInput {
     }
 
     /// Reconstitutes local immutable/current shape without claiming aggregate
-    /// ordering, uniqueness, or approval correlation.
-    pub fn reconstitute(self) -> ReconstitutedToolAttempt {
+    /// ordering, uniqueness, or approval correlation. Version one accepts only
+    /// the first dispatch generation.
+    pub fn reconstitute(self) -> Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError> {
+        if self.generation != ToolDispatchGeneration::first() {
+            return Err(ToolAttemptReconstitutionError { input: self });
+        }
         let Self {
             attempt,
             request,
@@ -781,7 +785,7 @@ impl ToolAttemptReconstitutionInput {
             generation,
             state,
         } = self;
-        match state {
+        Ok(match state {
             ToolAttemptReconstitutionState::Prepared => {
                 ReconstitutedToolAttempt::Current(CurrentToolAttempt {
                     attempt,
@@ -818,7 +822,25 @@ impl ToolAttemptReconstitutionInput {
                     end,
                 })
             }
-        }
+        })
+    }
+}
+
+/// Stored attempt facts used a dispatch generation outside version one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolAttemptReconstitutionError {
+    input: ToolAttemptReconstitutionInput,
+}
+
+impl ToolAttemptReconstitutionError {
+    /// Borrows the unchanged stored facts.
+    pub const fn input(&self) -> &ToolAttemptReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the unchanged stored facts.
+    pub fn into_input(self) -> ToolAttemptReconstitutionInput {
+        self.input
     }
 }
 
@@ -871,6 +893,28 @@ mod tests {
 
     fn prepared(effect_class: ToolEffectClass) -> CurrentToolAttempt {
         approved_request().prepare_attempt(tool_attempt_id(6), turn_attempt_id(7), effect_class)
+    }
+
+    /// S12 / INV-011: version one rejects stored attempts that claim a later
+    /// dispatch generation.
+    #[test]
+    fn s12_inv011_reconstitution_rejects_nonfirst_dispatch_generation() {
+        let input = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(1),
+            tool_request_id(2),
+            session_id(3),
+            turn_id(4),
+            turn_attempt_id(5),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::try_from_u64(2).expect("two is positive"),
+            ToolAttemptReconstitutionState::Prepared,
+        );
+        let error = input
+            .clone()
+            .reconstitute()
+            .expect_err("version one cannot restore later-generation authority");
+
+        assert_eq!(error.into_input(), input);
     }
 
     /// S12: persisted error detail rejects POSIX edge whitespace while

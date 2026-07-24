@@ -293,21 +293,24 @@ end (INV-034):
 - an approval wait remains parked unchanged, with no fabricated decision or live
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or
-  effect-free work closes known-failed and fails the turn, while in-flight
+  effect-free work closes known-failed, appends the exact proposal-ordered
+  result suffix plus `TurnFailed`, and fails the turn, while in-flight
   external-effect work closes ambiguous and parks on that exact attempt; and
 - a running tool batch whose requests are all already resolved and which has no
   current attempt is returned as resumable work, so a scheduler pass projects
   its results and prepares the next call without relying on a lost local wake.
 
-In the two failing branches only: one `TurnFailed` semantic entry is appended.
+In the three failing branches only, one `TurnFailed` semantic entry is appended.
 The evidence-free branch extends the starting frontier; the prepared-call branch
 extends that call's exact source frontier, which already contains every steering
-entry consumed when the call was prepared. The turn terminalizes `Failed`,
-releasing the slot via one guarded attempt-end update and one guarded lifecycle
-update, each required to match exactly one row; and a `turn_failed` outbox
-record is appended in the same transaction (entry payloads are
-[sessions-and-transcript](sessions-and-transcript.md) scope; outbox mechanics
-are [persistence-protocol](persistence-protocol.md) scope).
+entry consumed when the call was prepared; and the prepared/effect-free tool
+branch extends the yielded tool-use frontier by exactly one correlated result
+entry per request in proposal order before the failure marker. The turn
+terminalizes `Failed`, releasing the slot via one guarded attempt-end update and
+one guarded lifecycle update, each required to match exactly one row; and a
+`turn_failed` outbox record is appended in the same transaction (entry payloads
+are [sessions-and-transcript](sessions-and-transcript.md) scope; outbox
+mechanics are [persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
@@ -440,10 +443,13 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   exactly one required terminal `ambiguous` model call or tool attempt. The
   attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
   turn-correlated applied interrupt, or `AfterCancellation(Ambiguous|Lost)`
-  carrying that same proof. Its terminal frontier is an equal-content boundary
-  over the ambiguous operation's source frontier. The checked scheduling input
-  validates those correlations before the turn can serve as a terminal
-  predecessor.
+  carrying that same proof. A model-call reconciliation terminal frontier is an
+  equal-content boundary over the ambiguous call's source frontier. A
+  tool-attempt reconciliation terminal frontier extends the producing call's
+  yielded frontier by exactly one batch-correlated result entry per request in
+  proposal order, with the ambiguous request represented as `ToolClosed`. The
+  checked scheduling input validates those correlations before the turn can
+  serve as a terminal predecessor.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session

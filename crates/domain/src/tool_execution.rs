@@ -575,10 +575,10 @@ impl ToolBatch {
     /// Builds the terminal result suffix for a batch blocked by one
     /// crash-lost physical attempt.
     ///
-    /// This is the failure counterpart to cancellation projection: completed
-    /// and denied requests retain their ordinary references, while the
-    /// crash-lost request and every not-yet-attempted request close without
-    /// fabricated executor evidence.
+    /// This is the failure counterpart to cancellation projection: completed,
+    /// known-failed, and denied requests retain their ordinary references,
+    /// while every not-yet-attempted request closes without fabricated
+    /// executor evidence.
     pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -652,17 +652,6 @@ impl ToolBatch {
                 }
                 Some(resolution) if resolution.is_approved() => {
                     match self.attempts.get(&request.id()) {
-                        Some(ReconstitutedToolAttempt::Ended(attempt))
-                            if matches!(
-                                attempt.end(),
-                                ToolAttemptEnd::KnownFailed { error }
-                                    if error.kind() == ToolExecutionErrorKind::CrashLost
-                            ) =>
-                        {
-                            SemanticTranscriptEntryPayload::ToolClosed {
-                                request: request.id(),
-                            }
-                        }
                         Some(ReconstitutedToolAttempt::Ended(attempt))
                             if attempt.end() != &ToolAttemptEnd::Ambiguous =>
                         {
@@ -1402,23 +1391,15 @@ mod tests {
     }
 
     fn approval(request: ToolRequestId, decision: ToolApprovalDecision) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::new(
-            request,
-            decision,
-            ToolDecisionSource::OwnerCommand,
-        )
-        .reconstitute()
-        .expect("owner decisions are implemented")
+        ToolApprovalResolutionReconstitutionInput::owner_fixture(request, decision)
+            .reconstitute()
+            .expect("owner decisions are implemented")
     }
 
     fn automatic_approval(request: ToolRequestId) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::new(
-            request,
-            ToolApprovalDecision::Approve,
-            ToolDecisionSource::PolicyAuto,
-        )
-        .reconstitute()
-        .expect("automatic approval is implemented")
+        ToolApprovalResolutionReconstitutionInput::policy_auto(request)
+            .reconstitute()
+            .expect("automatic approval is implemented")
     }
 
     fn yielded_snapshot() -> ResolvedContextFrontierSnapshot {
@@ -1620,7 +1601,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1660,7 +1642,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1698,7 +1681,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Prepared,
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let later = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(14),
             second.id(),
@@ -1714,7 +1698,8 @@ mod tests {
                 ),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1759,7 +1744,8 @@ mod tests {
                 ),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let ambiguous = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(14),
             second.id(),
@@ -1770,7 +1756,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1813,7 +1800,8 @@ mod tests {
                 error: crate::ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let approvals = vec![
             approval(first.id(), ToolApprovalDecision::Approve),
             approval(second.id(), ToolApprovalDecision::Approve),
@@ -1850,8 +1838,8 @@ mod tests {
             .expect("the blocked batch has a public failure projection");
         assert_eq!(
             failure_projection.entries()[0].payload(),
-            &SemanticTranscriptEntryPayload::ToolClosed {
-                request: tool_request_id(10),
+            &SemanticTranscriptEntryPayload::ToolExecutionResult {
+                attempt: tool_attempt_id(13),
             }
         );
         assert_eq!(
@@ -1876,7 +1864,8 @@ mod tests {
                 ),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1918,7 +1907,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(success),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1979,7 +1969,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
