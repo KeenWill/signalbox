@@ -450,6 +450,42 @@ impl RecordingExecutor {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SerialProbeExecutor {
+    events: Arc<Mutex<Vec<String>>>,
+    first_entered: Arc<tokio::sync::Notify>,
+    release_first: Arc<tokio::sync::Notify>,
+}
+
+impl SerialProbeExecutor {
+    fn new() -> Self {
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            first_entered: Arc::new(tokio::sync::Notify::new()),
+            release_first: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .expect("fixture event lock is available")
+            .clone()
+    }
+
+    async fn wait_for_first(&self) -> Result<(), tokio::time::error::Elapsed> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.first_entered.notified(),
+        )
+        .await
+    }
+
+    fn release_first(&self) {
+        self.release_first.notify_one();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FixtureExecutorError;
 
@@ -491,6 +527,29 @@ impl ToolExecutor for RecordingExecutor {
             ))),
             ExecutorMode::LoseProcess => Err(FixtureExecutorError),
         }
+    }
+}
+
+impl ToolExecutor for SerialProbeExecutor {
+    type Error = FixtureExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        let name = invocation.request().name().as_str().to_owned();
+        let is_first = {
+            let mut events = self.events.lock().expect("fixture event lock is available");
+            events.push(name.clone());
+            events.len() == 1
+        };
+        if is_first {
+            self.first_entered.notify_one();
+            self.release_first.notified().await;
+        }
+        Ok(invocation.bind(ToolExecutorEvidence::CompletedText(format!(
+            "completed:{name}"
+        ))))
     }
 }
 
@@ -888,7 +947,7 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
             ToolEffectClass::EffectFree,
         ),
     ]);
-    let executor = RecordingExecutor::completing();
+    let executor = SerialProbeExecutor::new();
     let (execution, _runtime) = fixture.execution(
         [
             tool_use_script(&[("automatic", "{}"), ("confirmed", "{}")]),
@@ -927,7 +986,18 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
     fixture
         .decide(requests[1], ToolApprovalDecision::Approve)
         .await?;
-    execution.resume_active(fixture.session).await?;
+    let (resumed, observed_first) = tokio::join!(execution.resume_active(fixture.session), async {
+        executor.wait_for_first().await?;
+        assert_eq!(
+            executor.events(),
+            vec![String::from("automatic")],
+            "the second executor must not enter while the first remains pending"
+        );
+        executor.release_first();
+        Ok::<(), tokio::time::error::Elapsed>(())
+    });
+    observed_first?;
+    resumed?;
 
     assert_eq!(
         executor.events(),
