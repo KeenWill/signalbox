@@ -2479,7 +2479,7 @@ fn map_tool_loop_error(
     error: crate::tool_loop::ToolLoopRepositoryError,
 ) -> SubmitInputRepositoryError {
     match error {
-        crate::tool_loop::ToolLoopRepositoryError::Database(error) => error.into(),
+        crate::tool_loop::ToolLoopRepositoryError::Database { source, .. } => source.into(),
         crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
         | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind
         | crate::tool_loop::ToolLoopRepositoryError::InvalidTransition(_) => {

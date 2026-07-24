@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound durable tool execution error details
+
+**Context.** Tool execution errors need an optional operator-safe explanation,
+but the durable attempt row is the single content authority and must not admit
+unbounded or terminal-control text. The tool-loop decision fixed bounded
+sanitization without selecting its concrete storage limit.
+
+**Decision.** Admit an optional detail only when it is 1–4096 UTF-8 bytes,
+contains no control character, and has no leading or trailing whitespace. The
+domain constructor and relational check enforce the same byte bound and shape.
+
+**Rejected alternatives.** Reuse the 1 MiB result limit: error diagnostics do
+not need result-sized storage. Store unbounded executor text: that would permit
+storage amplification and unsafe rendering. Drop detail entirely: typed kinds
+alone are insufficient for concise sanitized executor context.
+
+**Affects.** `ToolExecutionErrorDetail`, the `tool_attempt.error_detail`
+constraint, and the result-authority section of [tool-loop](spec/tool-loop.md).
+
 ## 2026-07-23 — Reuse serde_json for canonical tool arguments
 
 **Context.** Tool requests need a bounded provider-neutral argument value: valid
@@ -75,25 +94,6 @@ INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-0
 and INV-037; the tool-loop page and linked sibling specifications;
 session-default command storage versions; domain/application spines;
 model/provider bridge, persistence, hubd composition, and offline proof tests.
-
-## 2026-07-23 — Bound durable tool execution error details
-
-**Context.** Tool execution errors need an optional operator-safe explanation,
-but the durable attempt row is the single content authority and must not admit
-unbounded or terminal-control text. The tool-loop decision fixed bounded
-sanitization without selecting its concrete storage limit.
-
-**Decision.** Admit an optional detail only when it is 1–4096 UTF-8 bytes,
-contains no control character, and has no leading or trailing whitespace. The
-domain constructor and relational check enforce the same byte bound and shape.
-
-**Rejected alternatives.** Reuse the 1 MiB result limit: error diagnostics do
-not need result-sized storage. Store unbounded executor text: that would permit
-storage amplification and unsafe rendering. Drop detail entirely: typed kinds
-alone are insufficient for concise sanitized executor context.
-
-**Affects.** `ToolExecutionErrorDetail`, the `tool_attempt.error_detail`
-constraint, and the result-authority section of [tool-loop](spec/tool-loop.md).
 
 ## 2026-07-23 — Owner-curated work backlog under docs/agents
 

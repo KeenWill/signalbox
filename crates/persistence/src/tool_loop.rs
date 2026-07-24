@@ -7,7 +7,9 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use signalbox_application::ModelCallCredentialReference;
+use signalbox_application::{
+    ClassifyOperatorFailure, ModelCallCredentialReference, OperatorFailureClass,
+};
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
     CurrentToolAttemptState, DecideToolRequest, DecideToolRequestRejectedResult,
@@ -78,7 +80,12 @@ impl Error for ToolLoopCorruption {}
 #[derive(Debug)]
 pub enum ToolLoopRepositoryError {
     /// PostgreSQL failure.
-    Database(sqlx::Error),
+    Database {
+        /// Original driver error.
+        source: sqlx::Error,
+        /// Whether a failed commit acknowledgement leaves outcome unknown.
+        commit_ambiguous: bool,
+    },
     /// Durable facts failed closed reconstruction.
     Corruption(ToolLoopCorruption),
     /// The command identity belongs to another durable command kind.
@@ -90,7 +97,9 @@ pub enum ToolLoopRepositoryError {
 impl fmt::Display for ToolLoopRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Database(error) => write!(formatter, "tool-loop database failure: {error}"),
+            Self::Database { source, .. } => {
+                write!(formatter, "tool-loop database failure: {source}")
+            }
             Self::Corruption(error) => error.fmt(formatter),
             Self::DifferentCommandKind => {
                 formatter.write_str("command identity already belongs to another kind")
@@ -105,7 +114,7 @@ impl fmt::Display for ToolLoopRepositoryError {
 impl Error for ToolLoopRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
             Self::DifferentCommandKind | Self::InvalidTransition(_) => None,
         }
@@ -114,13 +123,32 @@ impl Error for ToolLoopRepositoryError {
 
 impl From<sqlx::Error> for ToolLoopRepositoryError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        Self::Database {
+            source: error,
+            commit_ambiguous: false,
+        }
     }
 }
 
 impl From<ToolLoopCorruption> for ToolLoopRepositoryError {
     fn from(error: ToolLoopCorruption) -> Self {
         Self::Corruption(error)
+    }
+}
+
+impl ClassifyOperatorFailure for ToolLoopRepositoryError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Database {
+                commit_ambiguous, ..
+            } => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
+            },
+            Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::DifferentCommandKind | Self::InvalidTransition(_) => {
+                OperatorFailureClass::CallerOrHubBug
+            }
+        }
     }
 }
 
@@ -142,8 +170,11 @@ impl PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
     ) -> Result<Option<ToolBatch>, ToolLoopRepositoryError> {
-        let mut connection = self.pool.acquire().await?;
-        load_active_batch_from_connection(&mut connection, session, turn).await
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, session).await?;
+        let result = load_active_batch_from_connection(&mut transaction, session, turn).await;
+        transaction.rollback().await?;
+        result
     }
 
     /// Atomically records one replay-idempotent owner decision and successor
@@ -170,6 +201,36 @@ impl PostgresToolLoopRepository {
                 }
                 return Ok(receipt);
             }
+            let claimed = sqlx::query(
+                "INSERT INTO durable_command
+                    (command_id, command_kind, storage_version, claimed_at)
+                 VALUES ($1, $2, $3, transaction_timestamp())
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(durable_command_id_to_uuid(command.command_id()))
+            .bind(DECIDE_TOOL_REQUEST_KIND)
+            .bind(STORAGE_VERSION)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                == 1;
+            if !claimed {
+                let kind = inspect_registry(&mut transaction, command.command_id())
+                    .await?
+                    .ok_or(ToolLoopCorruption::Missing("winner command claim"))?;
+                if kind != CommandKind::DecideToolRequest {
+                    return Err(ToolLoopRepositoryError::DifferentCommandKind);
+                }
+                let receipt = load_decision_receipt(&mut transaction, command.command_id())
+                    .await?
+                    .ok_or(ToolLoopCorruption::Missing("winner decision receipt"))?;
+                if receipt.command() != &command {
+                    return Err(ToolLoopRepositoryError::InvalidTransition(
+                        "command replay payload differs from the durable command",
+                    ));
+                }
+                return Ok(receipt);
+            }
 
             let ownership = sqlx::query_as::<_, (Uuid, Uuid)>(
                 "SELECT session_id, turn_id
@@ -180,24 +241,17 @@ impl PostgresToolLoopRepository {
             .fetch_optional(&mut *transaction)
             .await?;
             let prepared = match ownership {
-                None => {
-                    if continuation_attempt.is_some() {
-                        return Err(ToolLoopRepositoryError::InvalidTransition(
-                            "missing request cannot consume a continuation attempt",
-                        ));
-                    }
-                    command.prepare_request_not_found()
-                }
+                None => command.prepare_request_not_found(),
                 Some((stored_session, stored_turn)) => {
                     let session = session_id_from_uuid(stored_session);
                     let turn = turn_id_from_uuid(stored_turn);
                     lock_tool_session(&mut transaction, session).await?;
                     if decision_exists(&mut transaction, command.request()).await? {
-                        if continuation_attempt.is_some() {
-                            return Err(ToolLoopRepositoryError::InvalidTransition(
-                                "already-resolved request cannot consume a continuation attempt",
-                            ));
-                        }
+                        let prepared = command.prepare_already_resolved();
+                        persist_decision_command(&mut transaction, &prepared).await?;
+                        return Ok(prepared);
+                    }
+                    if request_closed_by_turn_end(&mut transaction, command.request()).await? {
                         let prepared = command.prepare_already_resolved();
                         persist_decision_command(&mut transaction, &prepared).await?;
                         return Ok(prepared);
@@ -272,6 +326,7 @@ impl PostgresToolLoopRepository {
             let authorized = current.authorize().map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared")
             })?;
+            mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
             let rows = sqlx::query(
                 "UPDATE tool_attempt
                     SET state_kind = 'in_flight'
@@ -297,6 +352,31 @@ impl PostgresToolLoopRepository {
         }
         .await;
         finish_commit(transaction, result).await
+    }
+
+    /// Rereads exact dispatch authority after an ambiguous authorization
+    /// commit acknowledgement.
+    pub async fn reread_ambiguous_authorization(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> Result<AuthorizedToolAttempt, ToolLoopRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, session).await?;
+        let current = load_current_attempt(&mut transaction, attempt)
+            .await?
+            .ok_or(ToolLoopCorruption::Missing("authorized tool attempt"))?;
+        if current.session() != session || current.turn() != turn {
+            return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
+        }
+        let authorized = current.resume_in_flight().map_err(|_| {
+            ToolLoopRepositoryError::InvalidTransition(
+                "ambiguous authorization did not commit in flight",
+            )
+        })?;
+        transaction.rollback().await?;
+        Ok(authorized)
     }
 
     /// Atomically applies exact executor evidence through the returned fence.
@@ -350,94 +430,6 @@ impl PostgresToolLoopRepository {
             })?;
             persist_ended_attempt(&mut transaction, &ended).await?;
             Ok(ended)
-        }
-        .await;
-        finish_commit(transaction, result).await
-    }
-
-    /// Classifies one process-lost attempt from durable stage and effect class.
-    /// The returned terminal attempt is committed; an ambiguous result also
-    /// parks the turn on exact recovery evidence.
-    pub async fn classify_crash_loss(
-        &self,
-        session: SessionId,
-        turn: TurnId,
-        attempt: ToolAttemptId,
-    ) -> Result<signalbox_domain::ToolAttemptCrashOutcome, ToolLoopRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_tool_session(&mut transaction, session).await?;
-            let current = load_current_attempt(&mut transaction, attempt)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("live tool attempt"))?;
-            if current.session() != session || current.turn() != turn {
-                return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
-            }
-            let outcome = current.classify_crash_loss();
-            let ended = match &outcome {
-                signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(ended)
-                | signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(ended) => ended,
-            };
-            persist_ended_attempt(&mut transaction, ended).await?;
-            if matches!(
-                outcome,
-                signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(_)
-            ) {
-                persist_tool_recovery_wait(&mut transaction, ended, true).await?;
-            }
-            Ok(outcome)
-        }
-        .await;
-        finish_commit(transaction, result).await
-    }
-
-    /// Commits reference-only result entries and their exact continuation
-    /// frontier without yet preparing the next model call.
-    ///
-    /// Production continuation uses
-    /// [`Self::commit_result_and_prepare_continuation`] so no observable
-    /// boundary can contain results without the successor call.
-    pub async fn commit_result_projection(
-        &self,
-        session: SessionId,
-        turn: TurnId,
-        producing_call: signalbox_domain::ModelCallId,
-        projection: &PreparedToolResultProjection,
-    ) -> Result<(), ToolLoopRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
-            if batch.producing_call() != producing_call
-                || batch.yielded_snapshot().frontier().owning_session() != session
-            {
-                return Err(ToolLoopCorruption::Inconsistent("result projection batch").into());
-            }
-            persist_result_entries(&mut transaction, projection).await?;
-            insert_snapshot(&mut transaction, projection.snapshot())
-                .await
-                .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
-            let rows = sqlx::query(
-                "UPDATE turn_lifecycle
-                    SET active_tool_round_call_id = NULL,
-                        approval_tool_request_id = NULL,
-                        recovery_tool_attempt_id = NULL
-                  WHERE turn_id = $1
-                    AND session_id = $2
-                    AND state_kind = 'active'
-                    AND active_phase_kind = 'running'
-                    AND active_tool_round_call_id = $3",
-            )
-            .bind(turn_id_to_uuid(turn))
-            .bind(session_id_to_uuid(session))
-            .bind(producing_call.into_uuid())
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            require_single(rows, "tool result continuation boundary")?;
-            Ok(())
         }
         .await;
         finish_commit(transaction, result).await
@@ -523,9 +515,13 @@ fn map_model_call_error(
     error: crate::model_execution::ModelCallRepositoryError,
 ) -> ToolLoopRepositoryError {
     match error {
-        crate::model_execution::ModelCallRepositoryError::Database { source, .. } => {
-            ToolLoopRepositoryError::Database(source)
-        }
+        crate::model_execution::ModelCallRepositoryError::Database {
+            source,
+            commit_ambiguous,
+        } => ToolLoopRepositoryError::Database {
+            source,
+            commit_ambiguous,
+        },
         crate::model_execution::ModelCallRepositoryError::Corruption(_)
         | crate::model_execution::ModelCallRepositoryError::IdentityCollision(_)
         | crate::model_execution::ModelCallRepositoryError::NoLiveExecution
@@ -967,7 +963,7 @@ async fn insert_prepared_attempt(
     Ok(())
 }
 
-async fn persist_ended_attempt(
+pub(crate) async fn persist_ended_attempt(
     connection: &mut PgConnection,
     attempt: &EndedToolAttempt,
 ) -> Result<(), ToolLoopRepositoryError> {
@@ -1007,6 +1003,29 @@ async fn persist_ended_attempt(
     require_single(rows, "terminal tool attempt")
 }
 
+async fn mark_issuing_turn_attempt_running(
+    connection: &mut PgConnection,
+    attempt: &CurrentToolAttempt,
+) -> Result<(), ToolLoopRepositoryError> {
+    let rows = sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'running'
+          WHERE turn_attempt_id = $1
+            AND turn_id = $2
+            AND session_id = $3
+            AND state_kind IN ('prepared', 'running')
+            AND end_variant IS NULL
+            AND end_disposition IS NULL",
+    )
+    .bind(attempt.issuing_attempt().into_uuid())
+    .bind(turn_id_to_uuid(attempt.turn()))
+    .bind(session_id_to_uuid(attempt.session()))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(rows, "tool issuing attempt authorization")
+}
+
 type EncodedToolAttemptEnd<'a> = (
     &'static str,
     Option<&'static str>,
@@ -1041,7 +1060,7 @@ const fn encode_error_kind(value: ToolExecutionErrorKind) -> &'static str {
     }
 }
 
-async fn persist_tool_recovery_wait(
+pub(crate) async fn persist_tool_recovery_wait(
     connection: &mut PgConnection,
     attempt: &EndedToolAttempt,
     crash_lost: bool,
@@ -1225,7 +1244,8 @@ async fn persist_decision_command(
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, $2, $3, transaction_timestamp())",
+         VALUES ($1, $2, $3, transaction_timestamp())
+         ON CONFLICT DO NOTHING",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(DECIDE_TOOL_REQUEST_KIND)
@@ -1309,6 +1329,27 @@ async fn decision_exists(
     )
     .bind(tool_request_id_to_uuid(request))
     .fetch_one(&mut *connection)
+    .await
+    .map_err(Into::into)
+}
+
+async fn request_closed_by_turn_end(
+    connection: &mut PgConnection,
+    request: ToolRequestId,
+) -> Result<bool, ToolLoopRepositoryError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM tool_request AS request
+               JOIN turn_lifecycle AS turn
+                 ON turn.turn_id = request.turn_id
+                AND turn.session_id = request.session_id
+              WHERE request.request_id = $1
+                AND turn.state_kind = 'terminal'
+         )",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .fetch_one(connection)
     .await
     .map_err(Into::into)
 }
@@ -1471,12 +1512,27 @@ async fn finish_commit<T>(
 ) -> Result<T, ToolLoopRepositoryError> {
     match result {
         Ok(value) => {
-            transaction.commit().await?;
+            transaction.commit().await.map_err(|source| {
+                let commit_ambiguous = commit_failure_is_ambiguous(&source);
+                ToolLoopRepositoryError::Database {
+                    source,
+                    commit_ambiguous,
+                }
+            })?;
             Ok(value)
         }
         Err(error) => {
             transaction.rollback().await?;
             Err(error)
         }
+    }
+}
+
+fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => {
+            matches!(database.code().as_deref(), Some("08007" | "40003"))
+        }
+        _ => true,
     }
 }

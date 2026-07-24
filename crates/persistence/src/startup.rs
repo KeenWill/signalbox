@@ -10,8 +10,9 @@ use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
     AttemptEnd, CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
     PendingSteeringReclassificationIdentity, PreparedAcceptedInputTurnFailure,
+    ReconstitutedToolAttempt,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
-    TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    ToolAttemptCrashOutcome, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
@@ -27,6 +28,10 @@ use crate::{
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
+    tool_loop::{
+        ToolLoopRepositoryError, load_active_batch_from_connection, persist_ended_attempt,
+        persist_tool_recovery_wait,
+    },
 };
 
 /// Which fresh startup-recovery identity collided durably.
@@ -373,6 +378,53 @@ where
         .first()
         .map(signalbox_domain::PendingSteeringInput::accepted_input);
 
+    if let Some(batch) =
+        load_active_batch_from_connection(connection, requested_session, active_turn.turn())
+            .await
+            .map_err(map_tool_loop_error)?
+        && let Some(current) =
+            batch
+                .requests()
+                .iter()
+                .find_map(|request| match batch.attempt(request.id()) {
+                    Some(ReconstitutedToolAttempt::Current(current)) => Some(current.clone()),
+                    Some(ReconstitutedToolAttempt::Ended(_)) | None => None,
+                })
+    {
+        if let Some(accepted_input) = pending_steering {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
+            ));
+        }
+        let outcome = current.classify_crash_loss();
+        let ended = match &outcome {
+            ToolAttemptCrashOutcome::KnownFailed(ended)
+            | ToolAttemptCrashOutcome::Ambiguous(ended) => ended,
+        };
+        persist_ended_attempt(connection, ended)
+            .await
+            .map_err(map_tool_loop_error)?;
+        match &outcome {
+            ToolAttemptCrashOutcome::Ambiguous(ended) => {
+                persist_tool_recovery_wait(connection, ended, true)
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                return Ok(TransactionDecision::Commit(
+                    StartupScanSessionOutcome::RecoveredToolAttempt(Box::new(outcome)),
+                ));
+            }
+            ToolAttemptCrashOutcome::KnownFailed(_) => {
+                let prepared = scheduling
+                    .prepare_active_turn_lost_failure(identities)
+                    .map_err(map_active_turn_failure)?;
+                insert_prepared_failure(connection, prepared).await?;
+                return Ok(TransactionDecision::Commit(
+                    StartupScanSessionOutcome::RecoveredToolAttempt(Box::new(outcome)),
+                ));
+            }
+        }
+    }
+
     let model_execution = require_live_execution_for_restart(connection, requested_session)
         .await
         .map_err(map_model_call_error)?;
@@ -595,7 +647,10 @@ async fn insert_prepared_failure(
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_model_call_id = NULL,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                active_tool_round_call_id = NULL,
+                approval_tool_request_id = NULL,
+                recovery_tool_attempt_id = NULL
           WHERE turn_id = $2
             AND session_id = $3
             AND origin_accepted_input_id = $4
@@ -651,6 +706,42 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
+        }
+    }
+}
+
+fn map_active_turn_failure(
+    error: signalbox_domain::AcceptedInputTurnFailureError,
+) -> StartupScanRepositoryError {
+    match error.failure() {
+        AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::FailureEntry,
+            )
+        }
+        AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists => {
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::TerminalFrontier,
+            )
+        }
+        AcceptedInputTurnFailureFailure::NoActiveTurn
+        | AcceptedInputTurnFailureFailure::PendingSteering { .. }
+        | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+        | AcceptedInputTurnFailureFailure::ActiveStartMissing
+        | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
+        | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
+            StartupScanCorruption::Inconsistent("tool-attempt restart failure").into()
+        }
+    }
+}
+
+fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryError {
+    match error {
+        ToolLoopRepositoryError::Database { source, .. } => source.into(),
+        ToolLoopRepositoryError::Corruption(_)
+        | ToolLoopRepositoryError::DifferentCommandKind
+        | ToolLoopRepositoryError::InvalidTransition(_) => {
+            StartupScanCorruption::Inconsistent("tool-attempt restart state").into()
         }
     }
 }

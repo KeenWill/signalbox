@@ -234,7 +234,9 @@ CREATE TABLE decide_tool_request_command (
                     denial_reason IS NULL
                     OR (
                         octet_length(denial_reason) BETWEEN 1 AND 1024
-                        AND denial_reason = btrim(denial_reason)
+                        AND denial_reason !~ '[[:cntrl:]]'
+                        AND denial_reason !~ '^[[:space:]]'
+                        AND denial_reason !~ '[[:space:]]$'
                     )
                 )
             )
@@ -437,7 +439,9 @@ CREATE TABLE tool_approval_decision (
                     denial_reason IS NULL
                     OR (
                         octet_length(denial_reason) BETWEEN 1 AND 1024
-                        AND denial_reason = btrim(denial_reason)
+                        AND denial_reason !~ '[[:cntrl:]]'
+                        AND denial_reason !~ '^[[:space:]]'
+                        AND denial_reason !~ '[[:space:]]$'
                     )
                 )
             )
@@ -518,7 +522,9 @@ CREATE TABLE tool_attempt (
             error_detail IS NULL
             OR (
                 octet_length(error_detail) BETWEEN 1 AND 4096
-                AND error_detail = btrim(error_detail)
+                AND error_detail !~ '[[:cntrl:]]'
+                AND error_detail !~ '^[[:space:]]'
+                AND error_detail !~ '[[:space:]]$'
             )
         ),
     CONSTRAINT tool_attempt_state_payload_shape
@@ -1480,6 +1486,37 @@ BEGIN
                        AND member.semantic_entry_id = entry.semantic_entry_id
                )
        )
+       OR EXISTS (
+            SELECT 1
+              FROM (
+                    SELECT
+                        request.request_ordinal,
+                        row_number() OVER (
+                            ORDER BY member.member_position
+                        ) - 1 AS frontier_request_ordinal
+                      FROM tool_request AS request
+                      JOIN semantic_transcript_entry AS entry
+                        ON entry.source_session_id = round_record.session_id
+                       AND entry.producing_model_call_id =
+                           checked_model_call_id
+                       AND entry.payload_kind = 'assistant_tool_use'
+                       AND entry.assistant_tool_request_id =
+                           request.request_id
+                      JOIN context_frontier_member AS member
+                        ON member.owning_session_id =
+                           round_record.session_id
+                       AND member.context_frontier_id =
+                           round_record.boundary_frontier_id
+                       AND member.source_session_id =
+                           entry.source_session_id
+                       AND member.semantic_entry_id =
+                           entry.semantic_entry_id
+                     WHERE request.producing_model_call_id =
+                           checked_model_call_id
+              ) AS ordered_request
+             WHERE ordered_request.request_ordinal
+                   <> ordered_request.frontier_request_ordinal
+       )
     THEN
         RAISE EXCEPTION 'tool round frontier omits its ordered response'
             USING ERRCODE = '23514';
@@ -1501,6 +1538,49 @@ BEGIN
          WHERE request.producing_model_call_id = checked_model_call_id
            AND entry.payload_kind = 'tool_closed_by_turn_end';
         IF closed_result_count <> round_record.request_count
+           OR boundary_count IS DISTINCT FROM (
+                source_count
+                + round_record.response_part_count
+                + round_record.request_count
+                + 1
+           )
+           OR EXISTS (
+                SELECT 1
+                  FROM tool_request AS request
+                  LEFT JOIN semantic_transcript_entry AS entry
+                    ON entry.source_session_id = round_record.session_id
+                   AND entry.payload_kind = 'tool_closed_by_turn_end'
+                   AND entry.tool_result_request_id = request.request_id
+                  LEFT JOIN context_frontier_member AS member
+                    ON member.owning_session_id = round_record.session_id
+                   AND member.context_frontier_id =
+                       round_record.boundary_frontier_id
+                   AND member.member_position = (
+                        source_count
+                        + round_record.response_part_count
+                        + request.request_ordinal
+                        + 1
+                   )
+                   AND member.source_session_id = entry.source_session_id
+                   AND member.semantic_entry_id = entry.semantic_entry_id
+                 WHERE request.producing_model_call_id =
+                       checked_model_call_id
+                   AND member.semantic_entry_id IS NULL
+           )
+           OR NOT EXISTS (
+                SELECT 1
+                  FROM semantic_transcript_entry AS entry
+                  JOIN context_frontier_member AS member
+                    ON member.owning_session_id = round_record.session_id
+                   AND member.context_frontier_id =
+                       round_record.boundary_frontier_id
+                   AND member.member_position = boundary_count
+                   AND member.source_session_id = entry.source_session_id
+                   AND member.semantic_entry_id = entry.semantic_entry_id
+                 WHERE entry.source_session_id = round_record.session_id
+                   AND entry.payload_kind = 'turn_cancelled'
+                   AND entry.cancelled_turn_id = round_record.turn_id
+           )
            OR NOT EXISTS (
                 SELECT 1
                   FROM turn_lifecycle
