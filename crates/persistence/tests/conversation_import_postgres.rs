@@ -1,0 +1,345 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+)]
+
+use std::{
+    collections::VecDeque,
+    env,
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use rust_decimal::Decimal;
+use signalbox_application::{
+    ImportConversationOutcome, ImportConversationService, ImportedConversationIdGenerator,
+};
+use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_domain::{
+    ImportedConversationId, ImportedConversationReconstitutionFailure, ImportedTranscriptEntryId,
+};
+use signalbox_persistence::{
+    conversation_import::{
+        ImportedConversationCorruption, ImportedConversationRepository,
+        ImportedConversationRepositoryError,
+    },
+    local_test_connection_options, migrate,
+};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+
+const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+const DATABASE_NAME: &str = "signalbox_import_integration";
+const DATABASE_USER: &str = "signalbox";
+const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+struct FixedIds {
+    conversations: VecDeque<ImportedConversationId>,
+    entries: VecDeque<ImportedTranscriptEntryId>,
+}
+
+impl FixedIds {
+    fn new(conversations: &[u128], entries: impl IntoIterator<Item = u128>) -> Self {
+        Self {
+            conversations: conversations
+                .iter()
+                .copied()
+                .map(|value| ImportedConversationId::from_uuid(Uuid::from_u128(value)))
+                .collect(),
+            entries: entries
+                .into_iter()
+                .map(|value| ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(value)))
+                .collect(),
+        }
+    }
+}
+
+impl ImportedConversationIdGenerator for FixedIds {
+    fn next_conversation_id(&mut self) -> ImportedConversationId {
+        self.conversations
+            .pop_front()
+            .expect("fixture supplies every conversation identity")
+    }
+
+    fn next_entry_id(&mut self) -> ImportedTranscriptEntryId {
+        self.entries
+            .pop_front()
+            .expect("fixture supplies every imported-entry identity")
+    }
+}
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool, database_url))
+}
+
+/// S28 / INV-038 / INV-039: exact reingestion resolves the immutable winner,
+/// raw blobs deduplicate by content hash, and restart loading reconstructs every
+/// addressable imported frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_inv039_import_round_trip_is_idempotent_and_restart_safe()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let source = concat!(
+        "{\"type\":\"summary\",\"value\":null}\r\n",
+        "{\"type\":\"summary\",\"value\":null}"
+    );
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x100, 0x200], 0x300..0x304),
+        ClaudeCodeJsonlConverter,
+        repository,
+    );
+
+    assert_eq!(
+        service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+    assert_eq!(
+        service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::AlreadyImported {
+            conversation: winner
+        }
+    );
+    let (_, _, repository) = service.into_parts();
+    let stored = repository
+        .load(winner)
+        .await?
+        .expect("inserted imported conversation must load");
+    assert_eq!(stored.raw_records().len(), 2);
+    assert_eq!(stored.entries().len(), 2);
+    assert_eq!(stored.frontiers().count(), 2);
+    assert_eq!(
+        stored.raw_records()[0].bytes(),
+        stored.raw_records()[1].bytes()
+    );
+
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_conversation_raw_record),
+            (SELECT count(*) FROM imported_transcript_entry)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (1, 1, 2, 2));
+    assert!(
+        sqlx::query(
+            "UPDATE imported_raw_source_record
+                SET raw_bytes = raw_bytes",
+        )
+        .execute(&pool)
+        .await
+        .is_err(),
+        "raw source records must reject updates"
+    );
+    assert!(
+        sqlx::query("TRUNCATE TABLE imported_transcript_entry")
+            .execute(&pool)
+            .await
+            .is_err(),
+        "imported entries must reject statement-level truncate"
+    );
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let restarted = ImportedConversationRepository::new(restarted_pool.clone())
+        .load(winner)
+        .await?
+        .expect("durable imported conversation must survive pool restart");
+    assert_eq!(restarted, stored);
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-038: a header cannot commit without its exact declared contiguous raw
+/// and normalized-entry membership.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x400))
+    .bind(vec![0_u8; 32])
+    .execute(&mut *transaction)
+    .await?;
+    assert!(
+        transaction.commit().await.is_err(),
+        "deferred complete-membership constraint must reject a partial aggregate"
+    );
+    let headers: i64 = sqlx::query_scalar("SELECT count(*) FROM imported_conversation")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(headers, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-038: adapter and domain reconstruction fail closed when
+/// durable declared counts are corrupted behind append-only guards.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv038_corrupt_import_fails_typed_load() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x500));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x500], [0x501]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    service
+        .execute(br#"{"type":"summary","value":null}"#)
+        .await?;
+
+    sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation
+            SET declared_entry_count = $1
+          WHERE imported_conversation_id = $2",
+    )
+    .bind(Decimal::from(2_u64))
+    .bind(winner.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = repository
+        .load(winner)
+        .await
+        .expect_err("corrupt imported conversation must not load");
+    assert!(matches!(
+        error,
+        ImportedConversationRepositoryError::Corruption(ImportedConversationCorruption::Domain(
+            ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch { .. }
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Local-only validation of conversion, raw hash round-trip, frontier
+/// addressing, Postgres reconstitution, and second-import idempotency. The test
+/// deliberately emits no paths, content, identities, raw bytes, or parser data.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires explicit local real-transcript and PostgreSQL opt-in"]
+async fn opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Error>> {
+    if env::var("SIGNALBOX_RUN_REAL_CLAUDE_IMPORT").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let Some(root) = env::var_os("SIGNALBOX_REAL_CLAUDE_TRANSCRIPTS") else {
+        return Ok(());
+    };
+    let mut paths = Vec::new();
+    for root in env::split_paths(&root) {
+        collect_transcripts(&root, &mut paths).map_err(|()| "real inputs unavailable")?;
+    }
+    paths.sort();
+    let path = paths
+        .first()
+        .ok_or("real transcript directory contained no JSONL files")?;
+    let source = fs::read(path).map_err(|_| "real input unavailable")?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x600));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x600, 0x700], 0x1000..0x100000),
+        ClaudeCodeJsonlConverter,
+        repository,
+    );
+    assert_eq!(
+        service.execute(&source).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+    assert_eq!(
+        service.execute(&source).await?,
+        ImportConversationOutcome::AlreadyImported {
+            conversation: winner
+        }
+    );
+    let (_, _, repository) = service.into_parts();
+    let stored = repository
+        .load(winner)
+        .await?
+        .ok_or("real imported conversation disappeared")?;
+    assert_eq!(stored.frontiers().count(), stored.entries().len());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+fn collect_transcripts(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), ()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_file() {
+        files.push(path.to_path_buf());
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    for child in fs::read_dir(path).map_err(|_| ())? {
+        let child = child.map_err(|_| ())?.path();
+        let child_metadata = fs::symlink_metadata(&child).map_err(|_| ())?;
+        if child_metadata.is_dir() {
+            collect_transcripts(&child, files)?;
+        } else if child_metadata.is_file()
+            && child.extension().and_then(|value| value.to_str()) == Some("jsonl")
+        {
+            files.push(child);
+        }
+    }
+    Ok(())
+}
