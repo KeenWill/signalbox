@@ -723,6 +723,22 @@ impl BoundedImportedSessionReconstitutionInput {
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
+    pub fn from_stored_imported_parts(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        creation_cause: SessionCreationCause,
+        imported_conversation: ImportedConversationId,
+        imported_frontier_entry: ImportedTranscriptEntryId,
+        imported_frontier_position: ImportedTranscriptPosition,
+        imported_relationship: ImportedSessionRelationship,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self;
     pub fn reconstitute(
         self,
     ) -> Result<Session, BoundedImportedSessionReconstitutionError>;
