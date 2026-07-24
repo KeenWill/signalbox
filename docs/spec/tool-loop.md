@@ -335,9 +335,10 @@ proposal-ordered results for that batch are coalesced into the immediately
 following user message. OpenAI carries typed failure JSON as ordinary
 tool-message content because its wire shape has no failure flag; Anthropic also
 receives the provider-neutral failure flag. Malformed proposal arguments remain
-exact on the durable request but replay as an object-shaped invalid-arguments
-placeholder, allowing the paired typed error result to reach either provider
-without pretending the placeholder is durable evidence.
+exact after preparation-time credential scrubbing on the durable request but
+replay as an object-shaped invalid-arguments placeholder, allowing the paired
+typed error result to reach either provider without pretending the placeholder
+is durable evidence.
 
 The first compiled tool is `current_time`:
 
