@@ -302,11 +302,14 @@ BEGIN
          WHERE turn_id = checked_predecessor
            AND session_id = checked_session_id;
 
-        SELECT max(acceptance_position)
+        SELECT acceptance_position
           INTO expected_predecessor_position
           FROM turn_lifecycle
          WHERE session_id = checked_session_id
-           AND acceptance_position < checked_position;
+           AND turn_id = accepted_input_turn_queue_predecessor(
+                checked_session_id,
+                checked_turn_id
+           );
 
         IF predecessor_state IS DISTINCT FROM 'terminal'
            OR predecessor_position IS DISTINCT FROM expected_predecessor_position
@@ -724,4 +727,3 @@ BEGIN
     END IF;
 END;
 $$;
-
