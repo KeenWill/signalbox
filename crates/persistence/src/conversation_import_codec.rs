@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_structured_encoding_preserves_complete_domain_algebra() {
+    fn s28_inv002_inv038_structured_encoding_preserves_complete_domain_algebra() {
         let value = ImportedStructuredValue::Object(
             vec![
                 ImportedStructuredObjectMember::new(
@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_content_encoding_round_trips_every_variant() {
+    fn s28_inv002_inv038_content_encoding_round_trips_every_variant() {
         let structured = ImportedStructuredValue::Object(
             vec![ImportedStructuredObjectMember::new(
                 text("key"),
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_source_metadata_encoding_retains_independent_attestations() {
+    fn s28_inv002_inv038_source_metadata_encoding_retains_independent_attestations() {
         let source = ImportedSourceMetadata::new(
             attested_text("record"),
             ImportedSourceAttestation::AttestedAbsent,
@@ -780,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_version_one_structured_bytes_pin_every_tag_and_ordering() {
+    fn s28_inv002_inv038_version_one_structured_bytes_pin_every_tag_and_ordering() {
         let value = ImportedStructuredValue::Object(
             vec![
                 ImportedStructuredObjectMember::new(text("n"), ImportedStructuredValue::Null),
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_version_one_content_bytes_pin_every_tag_and_field_order() {
+    fn s28_inv002_inv038_version_one_content_bytes_pin_every_tag_and_field_order() {
         assert_version_one_content(
             ImportedTranscriptContent::SourceEvent {
                 source_type: attested_text("e"),
@@ -938,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn inv002_version_one_source_metadata_bytes_pin_field_and_scalar_order() {
+    fn s28_inv002_inv038_version_one_source_metadata_bytes_pin_field_and_scalar_order() {
         let source = ImportedSourceMetadata::new(
             attested_text("r"),
             ImportedSourceAttestation::AttestedAbsent,
