@@ -15624,9 +15624,9 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
     Ok(())
 }
 
-/// S01 / INV-032: an activation remains dispatchable after its turn
-/// terminalizes only while the retained terminal attempt is the activated
-/// attempt; cross-wired lifecycle provenance fails closed.
+/// S01 / INV-032: an activation remains dispatchable after continuation while
+/// its exact initial attempt and the lifecycle's current or terminal attempt
+/// remain authoritative; cross-wired lifecycle provenance fails closed.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()

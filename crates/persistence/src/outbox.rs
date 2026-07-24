@@ -541,12 +541,43 @@ async fn load_event(
         TURN_ACTIVATED => {
             let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
                 "SELECT event.turn_id, event.current_attempt_id,
-                        attempt.turn_attempt_id IS NOT NULL AS lifecycle_correlated
+                        (
+                            initial_attempt.turn_attempt_id IS NOT NULL
+                            AND turn.turn_id IS NOT NULL
+                            AND (
+                                (
+                                    turn.state_kind = 'active'
+                                    AND (
+                                        turn.active_phase_kind <> 'running'
+                                        OR authoritative_attempt.turn_attempt_id
+                                            IS NOT NULL
+                                    )
+                                )
+                                OR (
+                                    turn.state_kind = 'terminal'
+                                    AND authoritative_attempt.turn_attempt_id
+                                        IS NOT NULL
+                                )
+                            )
+                        ) AS lifecycle_correlated
                    FROM turn_activated_outbox_event AS event
-                   LEFT JOIN turn_attempt AS attempt
-                     ON attempt.turn_attempt_id = event.current_attempt_id
-                    AND attempt.turn_id = event.turn_id
-                    AND attempt.session_id = event.session_id
+                   LEFT JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                   LEFT JOIN turn_attempt AS initial_attempt
+                     ON initial_attempt.turn_attempt_id =
+                        event.current_attempt_id
+                    AND initial_attempt.turn_id = event.turn_id
+                    AND initial_attempt.session_id = event.session_id
+                    AND initial_attempt.continued_from_attempt_id IS NULL
+                   LEFT JOIN turn_attempt AS authoritative_attempt
+                     ON authoritative_attempt.turn_attempt_id =
+                        CASE turn.state_kind
+                            WHEN 'active' THEN turn.current_attempt_id
+                            WHEN 'terminal' THEN turn.terminal_attempt_id
+                        END
+                    AND authoritative_attempt.turn_id = event.turn_id
+                    AND authoritative_attempt.session_id = event.session_id
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
