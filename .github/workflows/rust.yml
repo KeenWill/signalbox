@@ -70,9 +70,33 @@ jobs:
       - name: Build documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
-  postgres-integration:
+  # GitHub-hosted Ubuntu runners provide Docker. Each suite below starts its
+  # own pinned PostgreSQL containers through testcontainers.
+  postgres-integration-suite:
+    name: postgres-integration (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: persistence
+            command: >-
+              cargo test -p signalbox-persistence
+              --features postgres-integration
+              --tests
+              -- --ignored --test-threads=1
+          - suite: hubd
+            command: >-
+              cargo test -p signalbox-hubd
+              --tests
+              -- --ignored --test-threads=1
+          - suite: terminal-client
+            command: >-
+              cargo test -p signalbox-client
+              --test end_to_end
+              terminal_client_completes_an_offline_scripted_conversation
+              -- --ignored --test-threads=1
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,42 +104,19 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
-      - name: Run ephemeral Postgres integration tests
-        run: >-
-          cargo test -p signalbox-persistence
-          --features postgres-integration
-          --test postgres_integration
-          -- --ignored --test-threads=1
-      - name: Run imported-conversation Postgres integration tests
-        run: >-
-          cargo test -p signalbox-persistence
-          --features postgres-integration
-          --test conversation_import_postgres
-          -- --ignored --test-threads=1
-      - name: Run imported-session Postgres integration tests
-        run: >-
-          cargo test -p signalbox-persistence
-          --features postgres-integration
-          --test imported_session_postgres
-          -- --ignored --test-threads=1
-      - name: Run hubd end-to-end Postgres tests
-        run: >-
-          cargo test -p signalbox-hubd
-          --test offline_reply
-          -- --ignored --test-threads=1
-      - name: Run hubd process-substrate Postgres tests
-        run: >-
-          cargo test -p signalbox-hubd
-          --test process_substrate
-          -- --ignored --test-threads=1
-      - name: Run hubd process-runtime Postgres tests
-        run: >-
-          cargo test -p signalbox-hubd
-          --test process_protocol_runtime
-          -- --ignored --test-threads=1
-      - name: Run terminal client offline end-to-end test
-        run: >-
-          cargo test -p signalbox-client
-          --test end_to_end
-          terminal_client_completes_an_offline_scripted_conversation
-          -- --ignored --test-threads=1
+      - name: Run ${{ matrix.suite }} integration tests
+        run: ${{ matrix.command }}
+
+  # Preserve the existing required-check name while the suites run as a
+  # fail-fast-disabled matrix.
+  postgres-integration:
+    name: postgres-integration
+    if: ${{ always() }}
+    needs: postgres-integration-suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm every PostgreSQL integration suite passed
+        env:
+          SUITE_RESULT: ${{ needs.postgres-integration-suite.result }}
+        run: test "$SUITE_RESULT" = success
