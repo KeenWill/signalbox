@@ -218,7 +218,7 @@ pub(crate) mod test_support {
     //! is a distinct UUID-backed newtype built by [`define_identity`]. These
     //! constructors keep the `from_uuid(Uuid::from_u128(..))` pattern in one
     //! place instead of repeating it in each module's test helpers. Snapshot
-    //! tables for the expect tests described in `docs/testing-style.md` come
+    //! tables for the expect tests described in `docs/agents/testing-style.md` come
     //! from the `signalbox-expect-table` dev-dependency.
 
     macro_rules! identity_constructors {
