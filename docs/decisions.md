@@ -37,6 +37,383 @@ today.
 
 **Affects.** `clients/native/` (new), `docs/decisions.md`.
 
+## 2026-07-23 — Expose ambiguous commits as a stable process error
+
+**Context.** A lost PostgreSQL commit response can leave `create_session` or
+`submit_input` durably applied even though the hub cannot observe the outcome.
+Mapping that state to the same `unavailable` code as a definitely uncommitted
+failure leaves only unstable human text to tell a client whether replay is
+required.
+
+**Decision.** Version one uses the distinct stable error code `commit_ambiguous`
+when a mutation may have committed. The client retries the exact durable command
+identity and payload to discover the recorded outcome; `unavailable` means no
+mutation may have committed.
+
+**Rejected alternatives.** A free-form message is not protocol state. An
+optional flag complicates every otherwise detail-free error and admits a missing
+value, while generating a new command identity defeats durable replay.
+
+**Affects.** Process error encoding, commit-failure classification, mutation
+serving, and terminal-client diagnostics.
+
+## 2026-07-23 — Require session-affine PostgreSQL for hub fencing
+
+**Context.** PostgreSQL session advisory locks belong to one server backend.
+Transaction- or statement-pooled proxies may execute successive operations from
+one logical client on different backends, invalidating both the dedicated
+single-hub guard and per-connection generation fence.
+
+**Decision.** `DATABASE_URL` must name a direct or otherwise session-affine
+PostgreSQL endpoint. Transaction- and statement-pooled proxy modes are
+unsupported while hub fencing uses session advisory locks.
+
+**Rejected alternatives.** Treating pooled proxies as supported silently weakens
+the singleton invariant. Replacing session locks with a proxy-safe fencing
+design is a materially different persistence protocol without an accepted
+implementation.
+
+**Affects.** Hub deployment requirements, database configuration, fencing
+documentation, and operator guidance.
+
+## 2026-07-23 — Bind follow rereads to their terminal trigger
+
+**Context.** A transcript reread started by one terminal follow event can
+observe later committed turns. Presenting every new entry from that reread lets
+later content appear before the still-buffered events that introduced it;
+identity deduplication can then hide the content at its ordered position.
+
+**Decision.** A terminal-triggered side reread supplies only the semantic
+material attributable to that exact terminal event. Its newer cursor does not
+make later snapshot material presentation-eligible or advance the primary follow
+stream.
+
+**Rejected alternatives.** Rendering every new snapshot entry reorders the
+durable event stream. Advancing to the reread cursor discards transition-only
+events, while historical as-of snapshots would add a new storage contract.
+
+**Affects.** Terminal-client follow presentation and its ordering tests.
+
+## 2026-07-23 — Require an owner-private socket parent
+
+**Context.** Some Unix-domain-socket implementations do not enforce the socket
+node's permission bits. A `0755` immediate parent therefore permits another
+local user to reach an otherwise owner-mode socket, contrary to version one's
+single-user trust boundary.
+
+**Decision.** Require the resolved immediate socket parent to be owned by the
+hub's effective user with traditional permission mode exactly `0700`. Ancestor
+replacement checks remain separately required.
+
+**Rejected alternatives.** Relying on the socket node's `0600` mode is not
+portable. Peer authentication has no accepted version-one identity model, and a
+platform-specific exception would make the same protocol path carry different
+trust guarantees.
+
+**Affects.** Local process-socket deployment, validation, and startup tests.
+
+## 2026-07-23 — Trust only root or the hub user in socket ancestry
+
+**Context.** A non-writable ancestor owned by a different unprivileged user is
+not stable: its owner can later broaden its mode, rename the next component, and
+substitute an impostor socket hierarchy after startup validation.
+
+**Decision.** Require every resolved socket-parent ancestor to be owned by
+either root or the hub's effective user, in addition to the sticky-directory and
+child-ownership rules. Root remains the operating-system trust boundary.
+
+**Rejected alternatives.** Trusting the mode observed at one instant ignores the
+owner's authority to change it. Requiring the hub user to own system ancestors
+would reject ordinary paths beneath root-owned `/`, `/var`, or `/tmp`.
+
+**Affects.** Local process-socket ancestry validation and its startup tests.
+
+## 2026-07-23 — Bound process fan-out retention at 64 events
+
+**Context.** The initial version-one design retained 1,024 update events while
+allowing each event to carry nearly 1 MiB of text. That event-count-only bound
+could retain roughly 1 GiB of payload in one hub process before overhead, while
+followers can already recover from lag through an authoritative snapshot.
+
+**Decision.** Retain 64 process-local update events. A follower that overruns
+that bounded ring receives `resync_required` and reconnects for a fresh
+snapshot; durable delivery remains independent of follower presence.
+
+**Rejected alternatives.** Keeping 1,024 events reserves an excessive payload
+ceiling for a convenience buffer. Adding a second byte-accounting queue would
+duplicate lag and resynchronization policy before measurements require it.
+
+**Affects.** Process-local update retention, follower lag behavior, and the
+version-one process-protocol specification.
+
+## 2026-07-23 — Treat hub fencing as an initial-deployment migration
+
+**Context.** A first fence installation cannot stop an already-running hub that
+does not participate in generation fencing. The owner confirms that no Signalbox
+deployment or database predates the fence migration in this stack.
+
+**Decision.** Treat this stack as the initial deployment boundary. The fence row
+may be installed without a legacy-writer rollout gate because no pre-fence
+writer or database exists; importing or upgrading a pre-fence database is not a
+supported operation.
+
+**Rejected alternatives.** A legacy bootstrap acknowledgement or operator drain
+protocol would claim a migration population that does not exist. Silently
+assuming compatibility with a hypothetical pre-fence deployment would leave the
+authority gap unresolved.
+
+**Affects.** The first installation of the hub-fence migration and its
+documented deployment premise.
+
+## 2026-07-23 — Require rename-resistant process-socket ancestry
+
+**Context.** Protecting only the socket's immediate resolved parent does not
+prevent another local user from renaming that directory through a writable
+ancestor and substituting an impostor hierarchy at the configured path.
+
+**Decision.** Validate the complete canonical parent ancestry. A group- or
+other-writable ancestor is accepted only when it has the sticky bit and the
+child path component toward the socket is owned by the hub's effective user;
+every other writable-ancestor shape fails startup.
+
+**Rejected alternatives.** Checking only the immediate parent misses ancestor
+replacement. Rejecting every writable ancestor makes ordinary owner-created
+runtime directories beneath `/tmp` unusable despite sticky-directory ownership
+protection.
+
+**Affects.** Local process-socket path validation and its startup tests.
+
+## 2026-07-23 — Fence database pools across hub incarnations
+
+**Context.** Losing only the dedicated singleton-guard session releases its
+advisory lock while the old process can still have usable pooled sessions. A
+successor that ran recovery immediately could overlap those old writers; a
+monitoring interval or graceful drain cannot close that authority gap. Fencing
+only the immediately prior generation would still let an older process reconnect
+after an intermediate successor advanced the generation and then failed.
+
+**Decision.** Add a durable positive hub-fence generation and session advisory
+pool fencing as specified by
+[process-protocol](spec/process-protocol.md#durable-update-dispatch). A
+successor retains the prior generation exclusively before advancing to its own
+shared pool generation. After acquiring its shared generation lock, every pool
+connection verifies that the durable singleton still names that exact generation
+before becoming usable. Guard loss cancels rather than gracefully drains the old
+runtime.
+
+**Rejected alternatives.** Polling faster still leaves a gap. Treating row-lock
+serialization as sufficient allows work admitted after the successor's scan.
+Adding a fence check separately to every repository is broader and easier to
+omit than fencing each pool connection before use.
+
+**Affects.** The persistence schema, production pool construction, hub startup
+and fatal shutdown, and the single-hub guarantee.
+
+## 2026-07-23 — Serialize process-socket ownership with a sidecar lock
+
+**Context.** A metadata recheck followed by `unlink` is not an atomic
+compare-and-remove. Two conforming same-user hubs configured with one path could
+both validate a stale inode before one removes the other's newly bound socket.
+
+**Decision.** Hold one verified owner-only advisory lock at `<socket-path>.lock`
+across stale inspection, bind, service, and graceful socket cleanup. The sidecar
+persists so every incarnation coordinates on the same file.
+
+**Rejected alternatives.** Another `lstat` cannot close the final unlink race.
+Never cleaning stale sockets makes ordinary crash recovery manual. Treating
+same-user peers as benign does not satisfy deterministic behavior for two
+misconfigured hub processes.
+
+**Affects.** The local process transport's startup and cleanup protocol.
+
+## 2026-07-23 — Poll the single-hub guard once per second
+
+**Context.** A PostgreSQL session advisory lock is released when its dedicated
+connection is lost. An otherwise idle guard connection would not promptly tell
+the hub to stop, allowing a second process to acquire the same guard while the
+first continues through a reconnected pool.
+
+**Decision.** While the runtime is active, the hub proves the dedicated guard
+connection usable once per second. Any check or connection failure is a fatal
+runtime condition that cancels request admission, dispatch, and scheduling
+together without graceful drain; the process never reacquires the guard in
+place. Pool-incarnation fencing separately prevents successor overlap.
+
+**Rejected alternatives.** Depending on operating-system TCP failure timing
+would leave detection unbounded. Reacquiring in place would skip guarded startup
+recovery and permit overlapping work during the loss window. A shorter interval
+adds unnecessary steady database traffic before measurements justify it.
+
+**Affects.** The hub runtime supervisor and its dedicated PostgreSQL guard task.
+
+## 2026-07-23 — Local version-one process protocol and terminal client
+
+**Context.** Signalbox has durable sessions, input, model execution, final
+transcript content, and a transactional outbox, but no supported client process
+boundary or outbox consumer. The retired ADR-0019 protocol was never implemented
+or distilled and carries no authority. The owner predecided the version-one
+transport, framing, and trust posture on 2026-07-23.
+
+**Decision.** Version one is a Unix domain stream socket at the required
+`SIGNALBOX_SOCKET_PATH`, with owner-only permissions, versioned JSON-lines, and
+a required `version` on every message. It has no protocol authentication on the
+single-user machine; that no-authentication posture is provisional, with
+authenticated transports and remote clients kept open as an upgrade path. A thin
+`signalbox` terminal client is the daily surface; the debug harness remains
+separate. The protocol supplies create/list, submit, transcript snapshot, and
+snapshot-first follow operations. Exactly one hubd dispatcher offers each next
+committed outbox event before transactionally advancing the durable prefix,
+yielding ordered at-least-once delivery. It polls idle storage every 50 ms, the
+process fan-out initially retained 1,024 events (superseded by the 64-event
+decision above), and frames are capped at 8 MiB. One hub per database is
+enforced by holding the dedicated `pg_try_advisory_lock(1396856881, 1213547057)`
+connection from before migration through shutdown. Socket cleanup uses
+refused-connect plus same-device/inode revalidation inside an
+effective-user-owned, non-group/other-writable resolved parent, never
+unconditional replacement. Transcript snapshots include authoritative turn state
+and use start/turn/entry/content/end frames with text fragments capped at 1 MiB,
+so valid transcripts are not capped at one frame. Mutation command identities
+are caller-visible and reusable after ambiguity; submit requests also carry the
+exact expected defaults version that participates in durable command equality.
+
+**Rejected alternatives.** Resurrecting the retired protocol wholesale: it has
+no accepted semantics. HTTP or a remote socket: either expands version one or
+creates an unauthenticated remote boundary. Authentication on the local socket:
+there is no accepted client-identity or revocation model. Persisting token
+deltas: drafts are nonauthoritative and the durable outbox already defines the
+reconnect boundary. A full-screen TUI first: it adds presentation work before
+the process boundary is exercised. Treating single-hub deployment as an
+unenforced convention or sharing only a database cursor between several
+process-local fan-outs: either permits followers to miss events. Unconditionally
+unlinking an existing socket: it can destroy a live listener. One-frame
+snapshots: the existing transcript has no aggregate size bound. Generating a new
+command identity after an ambiguous result or deriving submit defaults only
+inside the hub: either defeats exact durable replay.
+
+**Affects.** New [process-protocol](spec/process-protocol.md), the protocol and
+terminal-client crates, hubd configuration/composition, outbox consumption,
+INV-032/INV-033 enforcement, S01/S02/S24, and
+[open questions](open-questions.md#protocols-and-persistence). Authenticated
+transports and remote clients remain explicitly open upgrade paths.
+
+## 2026-07-23 — Owner-curated work backlog under docs/agents
+
+**Context.** With the domain core landed, throughput is bounded by how many
+non-colliding work items can run concurrently across goal sessions. Ordering
+lived in the target model's priority order (coarse) and in owner sessions
+(unrecorded); collision analysis was redone by hand for every launch.
+
+**Decision.** `docs/agents/backlog.md` is the owner-curated granular expansion
+of the priority order: pullable entries carrying status, size, and
+`Owns`/`Collides-with` collision groups so concurrent launches are mechanical.
+It is an ordering and parallelism artifact, not a design document — designs
+remain specification diffs at pickup. Goal-mode selection consults it when a
+goal names no milestone. The owner reorders; agents never do.
+
+**Rejected alternatives.** An external task tracker: invisible to goal agents
+and review bots, and a dead end once the platform itself hosts orchestration.
+Design detail in backlog entries: recreates a living record corpus with
+consistency obligations.
+
+**Affects.** `docs/agents/backlog.md` (new), `docs/agents/goal-mode.md`
+(selection rule), launch workflow for concurrent goal sessions.
+
+## 2026-07-23 — Bound and authenticate every provider exchange
+
+**Context.** The first provider adapters landed with one-send discipline,
+cumulative 8 MiB buffered and streamed response bounds, per-record SSE bounds,
+strict terminal-integrity parsing, and credential sanitization, but the
+provider-call-security questions still left TLS, proxy, timeout, and
+malicious-output posture undecided. Reqwest 0.13 also changes the rustls feature
+and platform-root integration while retaining unsafe-for-Signalbox defaults for
+redirects, protocol-NACK retries, ambient proxies, and an absent timeout.
+
+**Decision.** Take reqwest 0.13 with default features disabled and select its
+providerless rustls platform verifier and byte streaming explicitly. Select
+rustls's ring crypto provider in both adapters, matching the process-wide
+provider already selected by SQLx. Require certificate and hostname verification
+against platform roots, TLS 1.2 or newer, and HTTPS for every non-loopback
+target; admit plain HTTP only to an IP-literal loopback host for deterministic
+tests. Disable ambient proxies, redirects, protocol retries, and idle reuse
+explicitly. Accept CDLA-Permissive-2.0 in the dependency license policy solely
+for `webpki-root-certs`, the platform verifier's bundled fallback root data.
+Retain the already-enforced 8 MiB cumulative buffered and streamed limits and
+the configurable positive SSE record bound. Before typed parsing, newly reject
+provider JSON nested beyond 127 containers, matching serde_json's admitted
+recursion boundary. A buffered parse rejection is response loss, a streamed
+rejection is protocol violation, and an invalid error envelope still falls back
+to its definitive HTTP status. Require a positive whole-exchange timeout from
+connect through body completion, provisionally ten minutes by default. Revisit
+that default through a later ordinary decision after production latency
+observations can justify provider/model-specific budgets without weakening the
+always-bounded contract.
+
+**Rejected alternatives.** Reqwest defaults permit hidden redirect/retry sends,
+ambient proxy routing, and an unbounded exchange. Native TLS or reqwest's
+changeable default backend would make behavior platform-dependent beyond the
+chosen root verifier. Reqwest's AWS-LC-selecting rustls feature would enable two
+crypto providers in the hub's single rustls instance and make implicit provider
+selection panic. TLS 1.3-only would exclude supported provider endpoints without
+a demonstrated need. WebPKI-only roots would ignore owner-managed platform
+trust; rejecting the root-data license would therefore reject the selected
+platform verifier, while a broader license-policy exception would admit
+unrelated dependencies. Arbitrary custom roots or proxy configuration need an
+explicit operational trust decision. A token-derived response bound does not
+constrain errors, whitespace, or protocol overhead. Byte bounds alone limit
+memory but do not give parsing depth an explicit malicious-input contract.
+
+**Affects.** `crates/model-runtime`, both provider-adapter crates, reqwest and
+its resolved dependency graph, provider loopback tests,
+[runtime-substrate](spec/runtime-substrate.md), the timeout edge in
+[model-call-execution](spec/model-call-execution.md), the dependency license
+policy, and priority-order step 4.
+
+## 2026-07-23 — Agent-process documents separated under docs/agents/
+
+**Context.** `docs/` mixed documents about the system — the living
+specification, invariant catalog, scenarios, glossary, target model, decision
+log — with documents about how agents work on the repository. The owner reviews
+system documents and agents consume process documents, but the two audiences
+were not separable by path.
+
+**Decision.** Agent-process documents move to `docs/agents/`:
+[goal-mode.md](agents/goal-mode.md) and
+[testing-style.md](agents/testing-style.md), with a short README stating the
+directory's scope. Root `AGENTS.md` stays at the repository root as the
+ecosystem-standard entry point tools read, pointing into `docs/agents/` for the
+details.
+
+**Rejected alternatives.** Leaving the concerns mixed: every future process
+document would land ambiguously. A top-level `agents/` directory outside
+`docs/`: nonstandard next to the ecosystem-root `AGENTS.md`, and it would split
+documentation across two roots.
+
+**Affects.** `docs/agents/goal-mode.md` and `docs/agents/testing-style.md`
+(moved); `docs/agents/README.md` (new); pointer updates in `AGENTS.md`,
+`README.md`, `CONTRIBUTING.md`, `.coderabbit.yaml` (owner comments and
+knowledge-base file patterns), `docs/target-model.md`, `docs/scenarios.md`,
+hyperlink targets in earlier entries of this log, and the
+`docs/agents/testing-style.md` citations in rustdoc and test comments across
+`crates/domain`, `crates/application`, and `crates/expect-table`.
+
+## 2026-07-23 — Public-source hygiene rule committed
+
+**Context.** The repository is public. A content-hygiene rule had been applied
+through owner-briefed review sweeps but never committed, so autonomous agents
+and reviewers reading only the repository could not know it; the tree stayed
+clean by construction rather than by rule.
+
+**Decision.** [AGENTS.md](../AGENTS.md) gains the public-source hygiene rule —
+repository content cites only public sources — and is its one statement of
+record; the rule's scope and allowances live there, not here. A warning-mode
+reviewer check in `.coderabbit.yaml` mirrors the verdict logic.
+
+**Rejected alternatives.** Keeping the rule as out-of-band owner guidance:
+invisible to agents and reviewers, unenforceable at review time. Committing a
+term-level filter list: a list would disclose more than it protects.
+
+**Affects.** `AGENTS.md`, `.coderabbit.yaml`, every future pull request.
+
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
 
 **Context.** Capability preparation and provider invocation need one same-call
@@ -906,7 +1283,7 @@ features has settled semantics to propose. Leaving it to the priority order
 alone: the order says when, not what the destination is or which seats own it.
 
 **Affects.** [target-model.md](target-model.md) and milestone selection under
-[goal-mode.md](goal-mode.md); no code, schema, or accepted semantics.
+[goal-mode.md](agents/goal-mode.md); no code, schema, or accepted semantics.
 
 ## 2026-07-19 — CodeRabbit pre-merge checks mirror repository rules
 
@@ -920,16 +1297,16 @@ per pull request from a version-controlled `.coderabbit.yaml`.
 
 **Decision.** Adopt nine custom pre-merge checks in `.coderabbit.yaml` as
 verdict-logic mirrors of rules owned by [AGENTS.md](../AGENTS.md),
-[testing-style.md](testing-style.md), [goal-mode.md](goal-mode.md), and
-decisions/README.md. Ownership stays with those documents; the YAML restates
-only operational pass/fail logic, and a comment above each check names its
-owning document. The three mechanical checks — migration immutability,
-frozen-surface citation, append-only decision records — run in `error` mode now;
-the six judgment checks run in `warning` mode pending calibration against real
-reviews, with the catalog-honesty and description-accuracy checks first in line
-for promotion to `error`. `request_changes_workflow` and
-`override_requested_reviewers_only` are enabled so failing checks gate approval
-and only requested reviewers can override them.
+[testing-style.md](agents/testing-style.md),
+[goal-mode.md](agents/goal-mode.md), and decisions/README.md. Ownership stays
+with those documents; the YAML restates only operational pass/fail logic, and a
+comment above each check names its owning document. The three mechanical checks
+— migration immutability, frozen-surface citation, append-only decision records
+— run in `error` mode now; the six judgment checks run in `warning` mode pending
+calibration against real reviews, with the catalog-honesty and
+description-accuracy checks first in line for promotion to `error`.
+`request_changes_workflow` and `override_requested_reviewers_only` are enabled
+so failing checks gate approval and only requested reviewers can override them.
 
 **Rejected alternatives.** Configuring the checks only in CodeRabbit's web UI:
 unreviewable, unversioned, and subject to a documented 1,000-character limit on
@@ -1007,9 +1384,9 @@ distinct `Inconsistent` outcome; and the future reclassification slice must
 widen the pending-steering replay decode (the `queued_effect_count == 0`
 coupling and the migration-0005 active-source trigger) or original-command
 replay fails closed as corruption. Two process facts: the milestone-2
-wave-history report [goal-mode.md](goal-mode.md) requires was not posted — the
-rule postdated most of that stack's waves — and future milestones comply; and
-`ActiveTurnPhase`'s wait variants remain publicly constructible pending the
+wave-history report [goal-mode.md](agents/goal-mode.md) requires was not posted
+— the rule postdated most of that stack's waves — and future milestones comply;
+and `ActiveTurnPhase`'s wait variants remain publicly constructible pending the
 `StopRequested` slice sealing them under ADR-0041's discipline.
 
 **Rejected alternatives.** Fixing the tracked items inside this corrective
@@ -1024,8 +1401,8 @@ side and triggers already hold.
 **Affects.** `.github/workflows/rust.yml` and the validation sequences in
 [AGENTS.md](../AGENTS.md) and `README.md`; annotation and status corrections in
 [domain-spine.md](domain-spine.md), [target-model.md](target-model.md),
-[goal-mode.md](goal-mode.md), and `README.md`; the INV-009/INV-016 rows in
-[invariants.md](invariants.md); and pointer comments in
+[goal-mode.md](agents/goal-mode.md), and `README.md`; the INV-009/INV-016 rows
+in [invariants.md](invariants.md); and pointer comments in
 `crates/domain/src/submit_input.rs`, `crates/persistence/src/submit_input.rs`,
 and `crates/persistence/src/start_eligible_turn.rs`. No behavior, schema, API,
 or accepted semantics change; the tracked obligations bind their future slices.
@@ -1113,7 +1490,7 @@ policy, or recovery orchestration.
 owner judgment because the current slices cannot construct ADR-0027's
 cancellation, immediate-successor, and applied-proof authority. That choice was
 an owner gate and should have blocked and been reported on the affected
-matching-interrupt track under [goal-mode.md](goal-mode.md), while other
+matching-interrupt track under [goal-mode.md](agents/goal-mode.md), while other
 unblocked work continued, rather than being made within that track.
 
 **Decision.** The owner ratifies the current nonclaiming preparation failure for
@@ -1268,8 +1645,8 @@ decoupled fix commits from their rationale.
 **Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now
 govern review-fix waves by adaptive hit-rate continuation with a five-wave
 escalation backstop and push-time reply triage, and the goal-mode owner
-alignment-review request in [goal-mode.md](goal-mode.md) reports each pull
-request's wave history. Those two documents are the rules' single normative
+alignment-review request in [goal-mode.md](agents/goal-mode.md) reports each
+pull request's wave history. Those two documents are the rules' single normative
 homes; this entry records the ownership and rationale without restating the
 operative rules.
 
@@ -1278,17 +1655,18 @@ for both extremes. Unbounded continuation: no churn bound. Agent-judged "review
 quality" thresholds: self-serving without the accepted-finding anchor.
 
 **Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner
-alignment-review reporting in [goal-mode.md](goal-mode.md), and every future
-review loop. It changes no code, ADR, or validation rule.
+alignment-review reporting in [goal-mode.md](agents/goal-mode.md), and every
+future review loop. It changes no code, ADR, or validation rule.
 
 ## 2026-07-19 — Workspace expect-table crate for Debug-derived snapshot tables
 
-**Context.** [Testing-style](testing-style.md) rules 9–12 send value-shaped
-claims to expect-test snapshots and require curated, byte-stable tables, but the
-only renderer was the ad-hoc `table(headers, rows)` helper in the domain crate's
-`test_support`, which took pre-stringified cells, forced each test module to
-hand-build `Vec<Vec<String>>` plumbing, and could not be imported by other
-crates' tests. Rule 12 already anticipated lifting it into shared test support.
+**Context.** [Testing-style](agents/testing-style.md) rules 9–12 send
+value-shaped claims to expect-test snapshots and require curated, byte-stable
+tables, but the only renderer was the ad-hoc `table(headers, rows)` helper in
+the domain crate's `test_support`, which took pre-stringified cells, forced each
+test module to hand-build `Vec<Vec<String>>` plumbing, and could not be imported
+by other crates' tests. Rule 12 already anticipated lifting it into shared test
+support.
 
 **Decision.** Add the dev-only workspace crate `signalbox-expect-table`
 (`crates/expect-table`). Input is any `T: Debug` row set: each row is formatted
@@ -1332,9 +1710,9 @@ burden.
 **Affects.** `crates/expect-table` (new workspace member), the domain crate's
 `[dev-dependencies]` and the snapshots in `queue_order.rs` and
 `replace_session_defaults.rs`, and rule 12's helper naming in
-[testing-style.md](testing-style.md). Production dependency graphs, the domain
-spine (test-only dev-dependency; not spine-covered), and all runtime crates are
-unaffected.
+[testing-style.md](agents/testing-style.md). Production dependency graphs, the
+domain spine (test-only dev-dependency; not spine-covered), and all runtime
+crates are unaffected.
 
 ## 2026-07-19 — Exact accepted delivery in scheduling origin records
 
@@ -1626,11 +2004,11 @@ eligible-failure transition.
 
 ## 2026-07-18 — expect-test dev-dependency for snapshot assertions
 
-**Context.** The [testing style guide](testing-style.md) fixes forward-looking
-snapshot norms — expect tests for shape-is-the-assertion values, supplementing
-invariant-linked asserts, curated tables — but no snapshot machinery existed.
-Matrix-outcome and derived-order tests spelled their shapes only through
-per-case `assert_eq!` chains that hide the whole at a glance.
+**Context.** The [testing style guide](agents/testing-style.md) fixes
+forward-looking snapshot norms — expect tests for shape-is-the-assertion values,
+supplementing invariant-linked asserts, curated tables — but no snapshot
+machinery existed. Matrix-outcome and derived-order tests spelled their shapes
+only through per-case `assert_eq!` chains that hide the whole at a glance.
 
 **Decision.** Add [`expect-test`](https://github.com/rust-analyzer/expect-test)
 1.5 as a `signalbox-domain` dev-dependency — a small, focused inline-snapshot
@@ -1668,10 +2046,10 @@ accumulating in domain test modules.
 
 **Decision.** Test style — fixture and assertion rules plus forward-looking
 expect-test snapshot norms — is owned by
-[docs/testing-style.md](testing-style.md) as numbered rules cited by number in
-review. This entry authorizes that document as the rules' single home and does
-not restate them. CONTRIBUTING.md keeps owning what to test; the two documents
-cross-link and restate nothing.
+[docs/testing-style.md](agents/testing-style.md) as numbered rules cited by
+number in review. This entry authorizes that document as the rules' single home
+and does not restate them. CONTRIBUTING.md keeps owning what to test; the two
+documents cross-link and restate nothing.
 
 **Rejected alternatives.** Inlining the style rules into CONTRIBUTING.md's
 testing section: it merges two ownerships into one section, and style rules

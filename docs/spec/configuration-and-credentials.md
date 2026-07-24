@@ -1,8 +1,8 @@
 # Configuration and credentials
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against the implementing stack through PR #175
-(`agent/stop-requests`; hubd configuration loading in
+Signalbox, verified against the implementing stack through PR #183
+(`agent/provider-call-security-parser`; hubd configuration loading in
 `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
 catalog, and the provider bridge in `crates/model-provider-runtime`) together
 with the model-runtime crates it composes
@@ -12,7 +12,7 @@ with the model-runtime crates it composes
 
 ## Process configuration
 
-`signalbox-hubd` reads exactly three deployment values from the process
+`signalbox-hubd` reads exactly four deployment values from the process
 environment at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -22,6 +22,9 @@ environment at startup:
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `ANTHROPIC_API_KEY_FILE` — path to the file whose bytes are the current
   Anthropic API key value.
+- `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
+  [process protocol](process-protocol.md), which owns its binding and trust
+  semantics.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,
@@ -37,11 +40,15 @@ invalid limit (see Open edges). The two file paths are accepted without I/O at
 configuration time; only the catalog file is actually read during startup. The
 key file is never read at startup (see credential lifecycle below).
 
-The Anthropic endpoint parameters are composition-fixed at the adapter defaults
-(public API base URL, `anthropic-version: 2023-06-01`, no connect or exchange
-timeout, 8 MiB SSE record cap); no deployment knob exists for them. Startup
-ordering, migration, the recovery scan, and shutdown policy are the
-[runtime-substrate](runtime-substrate.md) page's material.
+The deployed hub supplies no Anthropic endpoint or timeout knob; it constructs
+the adapter with its defaults. The [runtime-substrate](runtime-substrate.md)
+page owns those transport defaults, positive caller-level exchange-timeout
+overrides, and the whole-exchange bound. Startup ordering, recovery scanning,
+and shutdown policy are
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope;
+migration behavior is [persistence-protocol](persistence-protocol.md) scope, and
+the socket boundary and single-hub guard are
+[process-protocol](process-protocol.md) material.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` plus
 the same two file variables in its `--anthropic` mode; it is a development
@@ -284,9 +291,5 @@ here because the surviving hub-side mechanics depend on them):
   Anthropic-construction variants (and connection and migration errors) collapse
   to a generic `Infrastructure` class plus phase, so startup logs cannot
   distinguish failure causes within the `Configuration` phase.
-- No connect or exchange timeout is configured in hubd composition (the evidence
-  contract assigns the budget to the caller); a hung provider exchange is
-  bounded only by process shutdown — the 30-second grace window, then
-  abandonment to startup recovery.
-- In-memory credential hygiene (zeroization or equivalent) remains an open
-  question with no implementation.
+- [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
+  owns the unresolved in-memory credential-hygiene question.
