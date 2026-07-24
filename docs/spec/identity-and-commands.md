@@ -137,9 +137,10 @@ identifying the kind. The hubd startup-failure site logs
 of `Option<SessionId>`/`Option<TurnId>`, which renders `Some(SessionId(..))` or
 `None`, not bare canonical UUID text (`apps/hubd/src/main.rs`).
 
-No wire encoding exists: there is no protocol surface, and commands enter only
-through in-process application services. Wire field types remain reserved (see
-Open edges).
+The local [process protocol](process-protocol.md) maps identity values at its
+wire adapter boundary and admits commands through the same application services;
+domain types acquire no serialization trait. Public URL identity forms remain
+open.
 
 ## Durable command records
 
@@ -323,11 +324,9 @@ edges.
   its attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
-- Wire field types and public identity encodings remain reserved for the future
-  client and process protocols
-  ([identity representation](../open-questions.md#identity-representation)); no
-  protocol surface exists and commands enter only through in-process application
-  services.
+- Public URL identity encodings remain undecided
+  ([identity representation](../open-questions.md#identity-representation));
+  local wire forms are owned by [process-protocol](process-protocol.md).
 - `ProviderTargetEvidenceId` has an assigned supply class but no production
   minting seam. Tool request and attempt UUIDv7 generators are implemented by
   the application tool-loop service. `ProviderModelIdentity` is persisted and

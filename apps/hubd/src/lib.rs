@@ -27,6 +27,10 @@ use tokio::sync::watch;
 
 mod configuration;
 mod current_time;
+mod fenced_database;
+mod local_socket;
+mod process_runtime;
+mod single_hub;
 
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
@@ -36,6 +40,10 @@ pub use current_time::{
     CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
     CurrentTimeToolConstructionError, SystemCurrentTimeClock,
 };
+pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
+pub use local_socket::{LocalProcessListener, LocalSocketError};
+pub use process_runtime::{ProcessRuntime, ProcessRuntimeError};
+pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {

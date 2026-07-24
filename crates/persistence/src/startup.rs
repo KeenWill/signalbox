@@ -695,6 +695,9 @@ async fn insert_prepared_failure(
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
+        SubmitInputRepositoryError::CommitAmbiguous(error) => {
+            StartupScanRepositoryError::from_database(error, true)
+        }
         SubmitInputRepositoryError::Corruption(error) => {
             StartupScanCorruption::Scheduling(error).into()
         }

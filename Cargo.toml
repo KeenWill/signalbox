@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/client",
     "apps/hubd",
     "crates/application",
     "crates/domain",
@@ -9,6 +10,7 @@ members = [
     "crates/model-runtime-openai",
     "crates/model-provider-runtime",
     "crates/persistence",
+    "crates/process-protocol",
 ]
 resolver = "3"
 

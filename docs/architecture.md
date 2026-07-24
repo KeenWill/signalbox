@@ -235,11 +235,10 @@ in the same page; their listed operational refinements remain open.
 
 ## Explicitly open boundaries
 
-- Client and process protocol: the retired protocol designs are unimplemented
-  and carry no current authority, so future client-protocol work is designed
-  fresh as a specification diff
-  ([open questions](open-questions.md#protocols-and-persistence)); exact browser
-  transport and Swift generation remain open.
+- Local client and process protocol are owned by
+  [process-protocol](spec/process-protocol.md); authenticated remote access,
+  browser transport, and Swift generation remain
+  [open](open-questions.md#protocols-and-persistence).
 - Scheduler implementation within the accepted dispatch-fencing and
   scheduler-mechanics baseline
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)):

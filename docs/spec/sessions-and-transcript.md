@@ -358,6 +358,17 @@ agencies exist would force a semantic migration.
 that has not been taken. `Recovery`, `Model`, and `Tool` are representable but
 no implemented boundary constructs them.
 
+## Implemented transcript projections
+
+The terminal client renders the authoritative semantic-entry projection for
+`transcript` and snapshot-first `follow`, including user and assistant text plus
+completed- and failed-turn markers. The version-one wire mapping, update
+synchronization, and presentation rules are owned by
+[process-protocol](process-protocol.md). The provider-prompt projection is also
+implemented: `PreparedModelOperation::render` maps frontier entries to
+provider-neutral messages; system-prompt composition remains deferred under the
+open edges of [model-call-execution](model-call-execution.md).
+
 ## Open edges
 
 - Fork creation is typed but unimplemented: `SingleSource` ancestry fails
@@ -375,11 +386,6 @@ no implemented boundary constructs them.
 - Assistant text, tool-use/result references, completed-turn, steering, and
   cancelled-turn semantic entries are implemented; refusal, reconciliation,
   approval-event, and delegation entry variants remain open.
-- The client transcript rendering projection over semantic entries is not
-  implemented. The provider-prompt message projection is:
-  `PreparedModelOperation::render` maps frontier entries to provider-neutral
-  messages ([model-call-execution](model-call-execution.md)); only system-prompt
-  composition remains deferred, as that page's open edge.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so
