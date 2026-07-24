@@ -983,12 +983,12 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
     Ok(())
 }
 
-/// S05 / INV-005 / INV-024: losing a dispatched effect-free attempt
+/// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
 /// never retries it; a fresh process classifies it `known_failed` with
-/// `crash_lost` evidence and fails the turn honestly.
+/// `crash_lost` evidence, closes the request, and then fails the turn honestly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s05_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
+async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retry()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
@@ -1040,6 +1040,15 @@ async fn s05_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
             String::from("crash_lost"),
             String::from("failed"),
         )
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_closed_by_turn_end",
+            "turn_failed",
+        ]
     );
     Ok(())
 }
