@@ -14,6 +14,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
@@ -30,6 +31,8 @@ use signalbox_model_runtime_anthropic::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+const OVERSIZED_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 1;
 
 /// A loopback server that answers each accepted connection with the next
 /// canned response and records every raw request it read.
@@ -400,6 +403,30 @@ async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
 }
 
 #[tokio::test]
+async fn buffered_response_overflow_is_typed_body_loss() {
+    let body = vec![b' '; OVERSIZED_PROVIDER_RESPONSE_BYTES];
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("content-type", "application/json")],
+        &body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-buffer-overflow"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("an oversized buffered response must fail closed as boundary loss");
+    };
+    assert!(matches!(loss.cause, LossCause::ResponseBodyLost(_)));
+}
+
+#[tokio::test]
 async fn connection_refused_is_proven_unsent() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -748,6 +775,54 @@ fn base_url_user_information_is_rejected_at_construction() {
 }
 
 #[test]
+fn plain_http_requires_a_literal_loopback_ip_host() {
+    assert_anthropic_plain_http_rejected("http://example.com");
+    assert_anthropic_plain_http_rejected("http://localhost:8080");
+    assert_anthropic_plain_http_rejected("http://192.0.2.1");
+
+    let mut ipv4_loopback = AnthropicConfig::new();
+    ipv4_loopback.base_url = "http://127.0.0.1:1".to_string();
+    assert!(AnthropicRuntime::new(ipv4_loopback, FixedKey).is_ok());
+
+    let mut ipv6_loopback = AnthropicConfig::new();
+    ipv6_loopback.base_url = "http://[::1]:1".to_string();
+    assert!(AnthropicRuntime::new(ipv6_loopback, FixedKey).is_ok());
+}
+
+#[track_caller]
+fn assert_anthropic_plain_http_rejected(base_url: &str) {
+    let mut config = AnthropicConfig::new();
+    config.base_url = base_url.to_string();
+
+    assert!(
+        matches!(
+            AnthropicRuntime::new(config, FixedKey),
+            Err(AnthropicConstructionError::InvalidBaseUrl { .. })
+        ),
+        "{base_url} must not be admitted without transport security"
+    );
+}
+
+#[test]
+fn the_default_exchange_timeout_is_ten_minutes() {
+    assert_eq!(
+        AnthropicConfig::new().exchange_timeout,
+        Duration::from_secs(10 * 60)
+    );
+}
+
+#[test]
+fn a_zero_exchange_timeout_is_rejected_at_construction() {
+    let mut config = AnthropicConfig::new();
+    config.exchange_timeout = Duration::ZERO;
+
+    assert!(matches!(
+        AnthropicRuntime::new(config, FixedKey),
+        Err(AnthropicConstructionError::InvalidExchangeTimeout)
+    ));
+}
+
+#[test]
 fn a_zero_sse_record_limit_is_rejected_at_construction() {
     let mut config = AnthropicConfig::new();
     config.sse_record_limit = 0;
@@ -1067,6 +1142,45 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
         error,
         signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
     ));
+}
+
+#[test]
+fn an_authority_less_base_url_fails_construction() {
+    let mut config = AnthropicConfig::new();
+    config.base_url = "https://".to_string();
+
+    let error = AnthropicRuntime::new(config, FixedKey)
+        .expect_err("an absent authority must not be repaired from the endpoint path");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_base_url_path_is_preserved_when_the_endpoint_is_appended() {
+    let server = CannedServer::serving(vec![http_response(
+        "400 Bad Request",
+        &[("content-type", "application/json")],
+        br#"{"type":"error","error":{"type":"invalid_request_error"}}"#,
+    )])
+    .await;
+    let mut config = AnthropicConfig::new();
+    config.base_url = format!("{}/proxy", server.base_url);
+    let runtime =
+        AnthropicRuntime::new(config, FixedKey).expect("path-bearing base URL constructs");
+
+    let _ = execute(
+        &runtime,
+        operation("call-base-path"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let requests = server.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /proxy/v1/messages HTTP/1.1\r\n"));
 }
 
 #[test]
