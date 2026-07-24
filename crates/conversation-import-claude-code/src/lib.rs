@@ -819,6 +819,29 @@ mod tests {
     }
 
     #[test]
+    fn s28_inv038_null_typed_result_block_retains_explicit_absence() {
+        let imported = convert_synthetic(
+            "{\"type\":\"user\",\"message\":{\"content\":[\
+             {\"type\":\"tool_result\",\"content\":[{\"type\":null}]}]}}",
+        );
+        let ImportedTranscriptContent::ToolResult { content, .. } = imported.entries()[0].content()
+        else {
+            panic!("synthetic entry should remain one tool result");
+        };
+        let ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)) = content
+        else {
+            panic!("synthetic tool result should retain its ordered blocks");
+        };
+
+        assert_eq!(
+            blocks.as_ref(),
+            [ImportedToolResultBlock::SourceResultBlock {
+                source_type: ImportedSourceAttestation::AttestedAbsent,
+            }]
+        );
+    }
+
+    #[test]
     fn s28_inv038_untyped_source_message_block_retains_typed_absence() {
         let imported = convert_synthetic(
             "{\"type\":\"assistant\",\"message\":{\"content\":[\

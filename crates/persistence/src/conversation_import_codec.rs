@@ -45,7 +45,7 @@ pub(crate) fn decode_structured(
 pub(crate) fn encode_content(
     content: &ImportedTranscriptContent,
 ) -> Result<Vec<u8>, ImportedConversationEncodingFailure> {
-    let mut bytes = encoding_header(ENCODING_VERSION_TWO, CONTENT_PAYLOAD);
+    let mut bytes = encoding_header(content_encoding_version(content), CONTENT_PAYLOAD);
     match content {
         ImportedTranscriptContent::SourceEvent { source_type } => {
             push(&mut bytes, 0);
@@ -161,11 +161,9 @@ pub(crate) fn decode_content(
                 });
             }
         }),
-        8 if decoder.version() >= ENCODING_VERSION_TWO => {
-            ImportedTranscriptContent::SourceMessageBlock {
-                source_type: decoder.attestation(Decoder::text)?,
-            }
-        }
+        8 => ImportedTranscriptContent::SourceMessageBlock {
+            source_type: decoder.attestation(Decoder::text)?,
+        },
         value => {
             return Err(ImportedConversationEncodingFailure::UnsupportedTag {
                 kind: "imported transcript content",
@@ -206,6 +204,21 @@ pub(crate) fn decode_source_metadata(
     );
     decoder.finish()?;
     Ok(source)
+}
+
+fn content_encoding_version(content: &ImportedTranscriptContent) -> u8 {
+    match content {
+        ImportedTranscriptContent::ToolResult {
+            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
+            ..
+        } if blocks
+            .iter()
+            .any(|block| matches!(block, ImportedToolResultBlock::SourceResultBlock { .. })) =>
+        {
+            ENCODING_VERSION_TWO
+        }
+        _ => ENCODING_VERSION_ONE,
+    }
 }
 
 fn encode_attestation<Value>(
@@ -676,18 +689,12 @@ mod tests {
 
     #[track_caller]
     fn assert_version_one_content(content: ImportedTranscriptContent, expected: &[u8]) {
-        let encoded = encode_content(&content).expect("fixture content must encode");
         assert_eq!(
-            encoded.first(),
-            Some(&2),
-            "new content encodings must use version two"
+            encode_content(&content).expect("fixture content must encode"),
+            expected
         );
         assert_eq!(
             decode_content(expected).expect("literal version-one bytes must decode"),
-            content
-        );
-        assert_eq!(
-            decode_content(&encoded).expect("new version-two bytes must decode"),
             content
         );
     }
@@ -987,21 +994,20 @@ mod tests {
             ),
             &[1, 1, 7, 4],
         );
-        assert_version_two_content(
+        assert_version_one_content(
             ImportedTranscriptContent::SourceMessageBlock {
                 source_type: attested_text("f"),
             },
-            &[2, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 1, 102],
+            &[1, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 1, 102],
         );
     }
 
     #[test]
-    fn inv002_version_one_content_rejects_version_two_only_tags() {
+    fn inv002_version_one_content_accepts_message_blocks_and_rejects_result_block_tag() {
         assert_eq!(
             decode_content(&[1, 1, 8, 0]),
-            Err(ImportedConversationEncodingFailure::UnsupportedTag {
-                kind: "imported transcript content",
-                value: 8,
+            Ok(ImportedTranscriptContent::SourceMessageBlock {
+                source_type: ImportedSourceAttestation::NotAttested,
             })
         );
         assert_eq!(
