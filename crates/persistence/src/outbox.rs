@@ -44,6 +44,8 @@ type OutboxSlotRow = (
     Option<Uuid>,
 );
 
+type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
+
 /// One committed outbox event offered to the hub's single dispatcher consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
@@ -822,9 +824,8 @@ async fn load_event(
             }
         }
         TOOL_BATCH_TRANSITION => {
-            let row: Option<(Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool)> =
-                sqlx::query_as(
-                    "SELECT event.turn_id, event.producing_model_call_id,
+            let row: Option<ToolBatchTransitionRow> = sqlx::query_as(
+                "SELECT event.turn_id, event.producing_model_call_id,
                             event.transition_kind, event.frontier_id,
                             event.tool_attempt_id,
                             CASE event.transition_kind
@@ -922,11 +923,11 @@ async fn load_event(
                             recovery_attempt.request_id
                       WHERE event.event_sequence = $1
                         AND event.session_id = $2",
-                )
-                .bind(Decimal::from(expected_sequence))
-                .bind(stored_session)
-                .fetch_optional(&mut **transaction)
-                .await?;
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?;
             let (turn, producing_call, transition, frontier, attempt, valid) =
                 row.ok_or(OutboxCorruption::MissingTypedRecord)?;
             if !valid {
