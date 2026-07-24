@@ -288,9 +288,9 @@ mod tests {
     }
 
     /// S15: the first compiled declaration is exactly auto-approved and
-    /// effect-free, while its schema rejects unexpected fields.
+    /// effect-free.
     #[test]
-    fn s15_current_time_definition_carries_exact_policy_and_schema() {
+    fn s15_current_time_definition_carries_exact_policy() {
         let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
             .expect("static current_time tool compiles")
             .into_parts();
@@ -302,6 +302,20 @@ mod tests {
         assert_eq!(definition.name().as_str(), CURRENT_TIME_NAME);
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
+    }
+
+    /// S15: the declaration schema accepts the empty object and rejects
+    /// unexpected fields.
+    #[test]
+    fn s15_current_time_schema_rejects_unexpected_fields() {
+        let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
+            .expect("static current_time tool compiles")
+            .into_parts();
+        let definitions = catalog.definitions();
+        let [definition] = definitions.as_ref() else {
+            panic!("current_time is the one compiled definition")
+        };
+
         assert_eq!(
             catalog.validate_arguments(definition.name(), &arguments("{}")),
             Ok(())
