@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Release decoded process payloads before response backpressure
+
+**Context.** Cloning a decoded request retained both the frame-owned payload and
+its clone after releasing the inbound-frame permit. Rejected oversized input
+could then remain live while a non-reading peer blocked the error response.
+
+**Decision.** Consume each decoded frame into its request without cloning. Move
+submitted text into application admission, so rejected text is dropped before
+awaiting response output and admitted text reuses the decoded allocation.
+
+**Rejected alternatives.** Keeping the frame until request completion makes the
+frame budget cease to bound its allocation lifetime. Explicitly dropping only
+rejected clones leaves avoidable duplication on successful submissions. Response
+deadlines would add unrelated timing semantics.
+
+**Affects.** Process-protocol frame ownership, submitted-input admission, and
+process-runtime memory retention under response backpressure; wire shapes and
+admission limits do not change.
+
 ## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
 
 **Context.** Reserving one of eight frame slots before waiting for input lets

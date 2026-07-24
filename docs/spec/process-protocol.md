@@ -84,7 +84,12 @@ inbound frame simultaneously. An idle connection holds no frame slot: each
 connection may buffer at most 8 KiB while waiting for its first byte, then
 reserves a slot before extending that buffered prefix into a frame. This bounds
 pre-admission read-ahead across 128 tasks at 1 MiB and aggregate admitted raw
-frame accumulation at 64 MiB.
+frame accumulation at 64 MiB. After decoding, the task consumes the frame into
+one owned request rather than cloning its payload. Submitted text moves into
+application admission: rejection drops it before awaiting response output, and
+acceptance reuses the decoded allocation. A peer that stops reading responses
+therefore cannot retain out-of-policy input content after its rejection is
+known.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
