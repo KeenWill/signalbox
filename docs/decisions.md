@@ -57,6 +57,52 @@ model-input rendering, append-only Postgres storage, the domain/application
 spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
 
+## 2026-07-23 — Agent-process documents separated under docs/agents/
+
+**Context.** `docs/` mixed documents about the system — the living
+specification, invariant catalog, scenarios, glossary, target model, decision
+log — with documents about how agents work on the repository. The owner reviews
+system documents and agents consume process documents, but the two audiences
+were not separable by path.
+
+**Decision.** Agent-process documents move to `docs/agents/`:
+[goal-mode.md](agents/goal-mode.md) and
+[testing-style.md](agents/testing-style.md), with a short README stating the
+directory's scope. Root `AGENTS.md` stays at the repository root as the
+ecosystem-standard entry point tools read, pointing into `docs/agents/` for the
+details.
+
+**Rejected alternatives.** Leaving the concerns mixed: every future process
+document would land ambiguously. A top-level `agents/` directory outside
+`docs/`: nonstandard next to the ecosystem-root `AGENTS.md`, and it would split
+documentation across two roots.
+
+**Affects.** `docs/agents/goal-mode.md` and `docs/agents/testing-style.md`
+(moved); `docs/agents/README.md` (new); pointer updates in `AGENTS.md`,
+`README.md`, `CONTRIBUTING.md`, `.coderabbit.yaml` (owner comments and
+knowledge-base file patterns), `docs/target-model.md`, `docs/scenarios.md`,
+hyperlink targets in earlier entries of this log, and the
+`docs/agents/testing-style.md` citations in rustdoc and test comments across
+`crates/domain`, `crates/application`, and `crates/expect-table`.
+
+## 2026-07-23 — Public-source hygiene rule committed
+
+**Context.** The repository is public. A content-hygiene rule had been applied
+through owner-briefed review sweeps but never committed, so autonomous agents
+and reviewers reading only the repository could not know it; the tree stayed
+clean by construction rather than by rule.
+
+**Decision.** [AGENTS.md](../AGENTS.md) gains the public-source hygiene rule —
+repository content cites only public sources — and is its one statement of
+record; the rule's scope and allowances live there, not here. A warning-mode
+reviewer check in `.coderabbit.yaml` mirrors the verdict logic.
+
+**Rejected alternatives.** Keeping the rule as out-of-band owner guidance:
+invisible to agents and reviewers, unenforceable at review time. Committing a
+term-level filter list: a list would disclose more than it protects.
+
+**Affects.** `AGENTS.md`, `.coderabbit.yaml`, every future pull request.
+
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
 
 **Context.** Capability preparation and provider invocation need one same-call
@@ -926,7 +972,7 @@ features has settled semantics to propose. Leaving it to the priority order
 alone: the order says when, not what the destination is or which seats own it.
 
 **Affects.** [target-model.md](target-model.md) and milestone selection under
-[goal-mode.md](goal-mode.md); no code, schema, or accepted semantics.
+[goal-mode.md](agents/goal-mode.md); no code, schema, or accepted semantics.
 
 ## 2026-07-19 — CodeRabbit pre-merge checks mirror repository rules
 
@@ -940,16 +986,16 @@ per pull request from a version-controlled `.coderabbit.yaml`.
 
 **Decision.** Adopt nine custom pre-merge checks in `.coderabbit.yaml` as
 verdict-logic mirrors of rules owned by [AGENTS.md](../AGENTS.md),
-[testing-style.md](testing-style.md), [goal-mode.md](goal-mode.md), and
-decisions/README.md. Ownership stays with those documents; the YAML restates
-only operational pass/fail logic, and a comment above each check names its
-owning document. The three mechanical checks — migration immutability,
-frozen-surface citation, append-only decision records — run in `error` mode now;
-the six judgment checks run in `warning` mode pending calibration against real
-reviews, with the catalog-honesty and description-accuracy checks first in line
-for promotion to `error`. `request_changes_workflow` and
-`override_requested_reviewers_only` are enabled so failing checks gate approval
-and only requested reviewers can override them.
+[testing-style.md](agents/testing-style.md),
+[goal-mode.md](agents/goal-mode.md), and decisions/README.md. Ownership stays
+with those documents; the YAML restates only operational pass/fail logic, and a
+comment above each check names its owning document. The three mechanical checks
+— migration immutability, frozen-surface citation, append-only decision records
+— run in `error` mode now; the six judgment checks run in `warning` mode pending
+calibration against real reviews, with the catalog-honesty and
+description-accuracy checks first in line for promotion to `error`.
+`request_changes_workflow` and `override_requested_reviewers_only` are enabled
+so failing checks gate approval and only requested reviewers can override them.
 
 **Rejected alternatives.** Configuring the checks only in CodeRabbit's web UI:
 unreviewable, unversioned, and subject to a documented 1,000-character limit on
@@ -1027,9 +1073,9 @@ distinct `Inconsistent` outcome; and the future reclassification slice must
 widen the pending-steering replay decode (the `queued_effect_count == 0`
 coupling and the migration-0005 active-source trigger) or original-command
 replay fails closed as corruption. Two process facts: the milestone-2
-wave-history report [goal-mode.md](goal-mode.md) requires was not posted — the
-rule postdated most of that stack's waves — and future milestones comply; and
-`ActiveTurnPhase`'s wait variants remain publicly constructible pending the
+wave-history report [goal-mode.md](agents/goal-mode.md) requires was not posted
+— the rule postdated most of that stack's waves — and future milestones comply;
+and `ActiveTurnPhase`'s wait variants remain publicly constructible pending the
 `StopRequested` slice sealing them under ADR-0041's discipline.
 
 **Rejected alternatives.** Fixing the tracked items inside this corrective
@@ -1044,8 +1090,8 @@ side and triggers already hold.
 **Affects.** `.github/workflows/rust.yml` and the validation sequences in
 [AGENTS.md](../AGENTS.md) and `README.md`; annotation and status corrections in
 [domain-spine.md](domain-spine.md), [target-model.md](target-model.md),
-[goal-mode.md](goal-mode.md), and `README.md`; the INV-009/INV-016 rows in
-[invariants.md](invariants.md); and pointer comments in
+[goal-mode.md](agents/goal-mode.md), and `README.md`; the INV-009/INV-016 rows
+in [invariants.md](invariants.md); and pointer comments in
 `crates/domain/src/submit_input.rs`, `crates/persistence/src/submit_input.rs`,
 and `crates/persistence/src/start_eligible_turn.rs`. No behavior, schema, API,
 or accepted semantics change; the tracked obligations bind their future slices.
@@ -1133,7 +1179,7 @@ policy, or recovery orchestration.
 owner judgment because the current slices cannot construct ADR-0027's
 cancellation, immediate-successor, and applied-proof authority. That choice was
 an owner gate and should have blocked and been reported on the affected
-matching-interrupt track under [goal-mode.md](goal-mode.md), while other
+matching-interrupt track under [goal-mode.md](agents/goal-mode.md), while other
 unblocked work continued, rather than being made within that track.
 
 **Decision.** The owner ratifies the current nonclaiming preparation failure for
@@ -1288,8 +1334,8 @@ decoupled fix commits from their rationale.
 **Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now
 govern review-fix waves by adaptive hit-rate continuation with a five-wave
 escalation backstop and push-time reply triage, and the goal-mode owner
-alignment-review request in [goal-mode.md](goal-mode.md) reports each pull
-request's wave history. Those two documents are the rules' single normative
+alignment-review request in [goal-mode.md](agents/goal-mode.md) reports each
+pull request's wave history. Those two documents are the rules' single normative
 homes; this entry records the ownership and rationale without restating the
 operative rules.
 
@@ -1298,17 +1344,18 @@ for both extremes. Unbounded continuation: no churn bound. Agent-judged "review
 quality" thresholds: self-serving without the accepted-finding anchor.
 
 **Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner
-alignment-review reporting in [goal-mode.md](goal-mode.md), and every future
-review loop. It changes no code, ADR, or validation rule.
+alignment-review reporting in [goal-mode.md](agents/goal-mode.md), and every
+future review loop. It changes no code, ADR, or validation rule.
 
 ## 2026-07-19 — Workspace expect-table crate for Debug-derived snapshot tables
 
-**Context.** [Testing-style](testing-style.md) rules 9–12 send value-shaped
-claims to expect-test snapshots and require curated, byte-stable tables, but the
-only renderer was the ad-hoc `table(headers, rows)` helper in the domain crate's
-`test_support`, which took pre-stringified cells, forced each test module to
-hand-build `Vec<Vec<String>>` plumbing, and could not be imported by other
-crates' tests. Rule 12 already anticipated lifting it into shared test support.
+**Context.** [Testing-style](agents/testing-style.md) rules 9–12 send
+value-shaped claims to expect-test snapshots and require curated, byte-stable
+tables, but the only renderer was the ad-hoc `table(headers, rows)` helper in
+the domain crate's `test_support`, which took pre-stringified cells, forced each
+test module to hand-build `Vec<Vec<String>>` plumbing, and could not be imported
+by other crates' tests. Rule 12 already anticipated lifting it into shared test
+support.
 
 **Decision.** Add the dev-only workspace crate `signalbox-expect-table`
 (`crates/expect-table`). Input is any `T: Debug` row set: each row is formatted
@@ -1352,9 +1399,9 @@ burden.
 **Affects.** `crates/expect-table` (new workspace member), the domain crate's
 `[dev-dependencies]` and the snapshots in `queue_order.rs` and
 `replace_session_defaults.rs`, and rule 12's helper naming in
-[testing-style.md](testing-style.md). Production dependency graphs, the domain
-spine (test-only dev-dependency; not spine-covered), and all runtime crates are
-unaffected.
+[testing-style.md](agents/testing-style.md). Production dependency graphs, the
+domain spine (test-only dev-dependency; not spine-covered), and all runtime
+crates are unaffected.
 
 ## 2026-07-19 — Exact accepted delivery in scheduling origin records
 
@@ -1646,11 +1693,11 @@ eligible-failure transition.
 
 ## 2026-07-18 — expect-test dev-dependency for snapshot assertions
 
-**Context.** The [testing style guide](testing-style.md) fixes forward-looking
-snapshot norms — expect tests for shape-is-the-assertion values, supplementing
-invariant-linked asserts, curated tables — but no snapshot machinery existed.
-Matrix-outcome and derived-order tests spelled their shapes only through
-per-case `assert_eq!` chains that hide the whole at a glance.
+**Context.** The [testing style guide](agents/testing-style.md) fixes
+forward-looking snapshot norms — expect tests for shape-is-the-assertion values,
+supplementing invariant-linked asserts, curated tables — but no snapshot
+machinery existed. Matrix-outcome and derived-order tests spelled their shapes
+only through per-case `assert_eq!` chains that hide the whole at a glance.
 
 **Decision.** Add [`expect-test`](https://github.com/rust-analyzer/expect-test)
 1.5 as a `signalbox-domain` dev-dependency — a small, focused inline-snapshot
@@ -1688,10 +1735,10 @@ accumulating in domain test modules.
 
 **Decision.** Test style — fixture and assertion rules plus forward-looking
 expect-test snapshot norms — is owned by
-[docs/testing-style.md](testing-style.md) as numbered rules cited by number in
-review. This entry authorizes that document as the rules' single home and does
-not restate them. CONTRIBUTING.md keeps owning what to test; the two documents
-cross-link and restate nothing.
+[docs/testing-style.md](agents/testing-style.md) as numbered rules cited by
+number in review. This entry authorizes that document as the rules' single home
+and does not restate them. CONTRIBUTING.md keeps owning what to test; the two
+documents cross-link and restate nothing.
 
 **Rejected alternatives.** Inlining the style rules into CONTRIBUTING.md's
 testing section: it merges two ownerships into one section, and style rules

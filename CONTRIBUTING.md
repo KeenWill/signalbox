@@ -49,7 +49,7 @@ acceptance.
 
 This section owns the testing strategy — the test categories and their coverage
 obligations; how tests are written and how a test's value is judged is owned by
-the [testing style guide](docs/testing-style.md).
+the [testing style guide](docs/agents/testing-style.md).
 
 Tests prove domain transitions and recovery semantics before optimizing
 transport or deployment; they use the same distinct identities as the production
