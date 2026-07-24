@@ -1121,6 +1121,27 @@ impl ImportedTranscriptFrontier {
     }
 }
 
+pub(crate) const fn imported_frontier_from_validated_parts(
+    conversation: ImportedConversationId,
+    through_entry: ImportedTranscriptEntryId,
+    through_position: ImportedTranscriptPosition,
+) -> ImportedTranscriptFrontier {
+    ImportedTranscriptFrontier {
+        conversation,
+        through_entry,
+        through_position,
+    }
+}
+
+#[cfg(test)]
+pub(crate) const fn test_imported_frontier(
+    conversation: ImportedConversationId,
+    through_entry: ImportedTranscriptEntryId,
+    through_position: ImportedTranscriptPosition,
+) -> ImportedTranscriptFrontier {
+    imported_frontier_from_validated_parts(conversation, through_entry, through_position)
+}
+
 /// Complete stored fields for imported-conversation reconstitution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversationReconstitutionInput {

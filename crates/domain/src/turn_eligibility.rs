@@ -2374,6 +2374,13 @@ fn reconstitute_inner(
         }
 
         match candidate.payload() {
+            InitialSemanticTranscriptEntryPayload::Imported { .. } => {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::UnsupportedSemanticEntry {
+                        entry: candidate.identity(),
+                    },
+                );
+            }
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
                 let Some(turn) = accepted_input_turns.get(accepted_input).copied() else {
                     return Err(

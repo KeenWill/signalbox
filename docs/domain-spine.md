@@ -463,11 +463,20 @@ pub struct TranscriptFrontier { /* private */ }
 // sealed: no public producer in this slice; the later semantic-history slice
 // supplies the trusted frontier producer. Copy; equality is exact-boundary.
 
+pub enum ImportedSessionRelationship {
+    Resume,
+    Fork,
+}
+
 pub enum TranscriptAncestry {
     None,
     SingleSource {
         source_session: SessionId,
         source_frontier: TranscriptFrontier,
+    },
+    ImportedConversation {
+        source_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
     },
 }
 
@@ -492,15 +501,51 @@ impl CreateSession {
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
 
+pub struct CreateSessionFromImportedFrontier { /* private */ }
+impl CreateSessionFromImportedFrontier {
+    pub const fn new(
+        command_id: DurableCommandId,
+        imported_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    pub fn prepare<NextSemanticEntryId>(
+        self,
+        imported_conversation: &ImportedConversation,
+        session: SessionId,
+        seed_frontier: ContextFrontierId,
+        next_semantic_entry_id: NextSemanticEntryId,
+    ) -> Result<
+        PreparedCreateSessionFromImportedFrontier,
+        CreateSessionFromImportedFrontierPreparationError,
+    >
+    where
+        NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId;
+    // accessors: command_id(), imported_conversation(), imported_frontier(),
+    //   relationship(), initial_configuration_defaults()
+}
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
+
+pub struct ImportedSessionSeed { /* private */ }
+// sealed: checked imported-prefix preparation and reconstitution
+impl ImportedSessionSeed {
+    // accessors: session(), seed_frontier()
+}
+
 pub struct InitialSession { /* private */ }
-// sealed: carried only by PreparedCreateSession::session and
-// ReconstitutedSessionCreation::session
+// sealed: carried only by PreparedCreateSession,
+// ReconstitutedSessionCreation, PreparedCreateSessionFromImportedFrontier,
+// and ReconstitutedSessionCreationFromImportedFrontier
 impl InitialSession {
     // accessors: id(), provenance(), configuration_defaults()
 }
 
 pub struct Session { /* private */ }
-// sealed: SessionReconstitutionInput::reconstitute
+// sealed: SessionReconstitutionInput::reconstitute,
+// BoundedImportedSessionReconstitutionInput::reconstitute, or
+// ReconstitutedImportedSession::into_parts
 // non-Copy: owned snapshot, cloned deliberately (session aggregate,
 // spec/sessions-and-transcript.md)
 impl Session {
@@ -530,6 +575,7 @@ pub enum SessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    ImportedSessionSeedUnavailable,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -602,6 +648,275 @@ pub struct ReconstitutedSessionCreation { /* private */ }
 // sealed: CreateSessionReconstitutionInput::reconstitute; authorizes no effect
 impl ReconstitutedSessionCreation {
     // accessors: command(), session(), applied_result()
+}
+```
+
+## domain: imported_session
+
+```rust
+pub struct CreateSessionFromImportedFrontierAppliedResult { /* private */ }
+// sealed: checked preparation or complete reconstitution
+impl CreateSessionFromImportedFrontierAppliedResult {
+    // accessors: session()
+}
+
+pub struct PreparedCreateSessionFromImportedFrontier { /* private */ }
+// sealed: CreateSessionFromImportedFrontier::prepare
+impl PreparedCreateSessionFromImportedFrontier {
+    pub fn into_parts(
+        self,
+    ) -> (
+        CreateSessionFromImportedFrontier,
+        InitialSession,
+        Box<[SemanticTranscriptEntry]>,
+        ResolvedContextFrontierSnapshot,
+        ImportedSessionSeed,
+        CreateSessionFromImportedFrontierAppliedResult,
+    );
+    // accessors: command(), session(), semantic_entries(), seed_snapshot(),
+    //   imported_seed(), applied_result()
+}
+
+pub enum CreateSessionFromImportedFrontierPreparationFailure {
+    ImportedConversationMismatch,
+    ImportedFrontierNotFound,
+    DuplicateSemanticEntryIdentity { entry: SemanticTranscriptEntryId },
+}
+
+pub struct CreateSessionFromImportedFrontierPreparationError { /* private */ }
+// sealed: Err of CreateSessionFromImportedFrontier::prepare
+impl CreateSessionFromImportedFrontierPreparationError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        CreateSessionFromImportedFrontier,
+        SessionId,
+        ContextFrontierId,
+        CreateSessionFromImportedFrontierPreparationFailure,
+    );
+    // accessors: command(), session(), seed_frontier(), failure()
+}
+
+pub struct ImportedSessionSeedReconstitutionInput { /* private */ }
+impl ImportedSessionSeedReconstitutionInput {
+    pub const fn new(session: SessionId, seed_frontier: ContextFrontierId) -> Self;
+    // accessors: session(), seed_frontier()
+}
+
+pub struct ImportedSessionSeedHeaderReconstitutionInput { /* private */ }
+impl ImportedSessionSeedHeaderReconstitutionInput {
+    pub const fn new(
+        owning_session: SessionId,
+        seed_frontier: ContextFrontierId,
+        declared_member_count: u64,
+    ) -> Self;
+    // accessors: owning_session(), seed_frontier(), declared_member_count()
+}
+
+pub struct BoundedImportedSessionReconstitutionInput { /* private */ }
+impl BoundedImportedSessionReconstitutionInput {
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self;
+    pub fn from_stored_imported_parts(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        creation_cause: SessionCreationCause,
+        imported_conversation: ImportedConversationId,
+        imported_frontier_entry: ImportedTranscriptEntryId,
+        imported_frontier_position: ImportedTranscriptPosition,
+        imported_relationship: ImportedSessionRelationship,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<Session, BoundedImportedSessionReconstitutionError>;
+    // accessors: requested_session(), stored_session(), provenance(),
+    //   current_defaults_session(), current_defaults_version(),
+    //   defaults_session(), defaults_version(), defaults(), seed_records(),
+    //   seed_headers()
+}
+
+pub enum BoundedImportedSessionReconstitutionFailure {
+    RequestedSessionMismatch,
+    CurrentDefaultsSessionMismatch,
+    DefaultsSessionMismatch,
+    CurrentDefaultsVersionMismatch,
+    AncestryNotImported,
+    MissingSeedRecord,
+    DuplicateSeedRecord,
+    SeedSessionMismatch,
+    MissingSeedHeader,
+    DuplicateSeedHeader,
+    SeedHeaderSessionMismatch,
+    SeedHeaderIdentityMismatch,
+    SeedMemberCountMismatch,
+}
+
+pub struct BoundedImportedSessionReconstitutionError { /* private */ }
+// sealed: Err of BoundedImportedSessionReconstitutionInput::reconstitute
+impl BoundedImportedSessionReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        BoundedImportedSessionReconstitutionInput,
+        BoundedImportedSessionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub enum ImportedSessionSeedReconstitutionFailure {
+    AncestryNotImported,
+    ImportedConversationMismatch,
+    ImportedFrontierNotFound,
+    MissingSeedRecord,
+    DuplicateSeedRecord,
+    SeedSessionMismatch,
+    MissingSeedSnapshot,
+    DuplicateSeedSnapshot,
+    SeedSnapshotSessionMismatch,
+    SeedSnapshotIdentityMismatch,
+    SemanticEntryCountMismatch { expected: usize, actual: usize },
+    SemanticEntrySourceSessionMismatch { entry: SemanticTranscriptEntryId },
+    DuplicateSemanticEntry { entry: SemanticTranscriptEntryId },
+    SemanticEntryNotImported { entry: SemanticTranscriptEntryId },
+    ImportedEntryIdentityMismatch { entry: SemanticTranscriptEntryId },
+    ImportedSpeakerMismatch { entry: SemanticTranscriptEntryId },
+    ImportedContentMismatch { entry: SemanticTranscriptEntryId },
+    SeedSnapshotMalformed,
+    SeedSnapshotMembershipMismatch,
+}
+
+pub struct ImportedSessionReconstitutionInput { /* private */ }
+impl ImportedSessionReconstitutionInput {
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        imported_conversation: ImportedConversation,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<ReconstitutedImportedSession, ImportedSessionReconstitutionError>;
+    // accessors: requested_session(), stored_session(), provenance(),
+    //   current_defaults_session(), current_defaults_version(),
+    //   defaults_session(), defaults_version(), defaults(),
+    //   imported_conversation(), seed_records(), seed_snapshots(),
+    //   semantic_entries()
+}
+
+pub enum ImportedSessionReconstitutionFailure {
+    RequestedSessionMismatch,
+    CurrentDefaultsSessionMismatch,
+    DefaultsSessionMismatch,
+    CurrentDefaultsVersionMismatch,
+    Seed(ImportedSessionSeedReconstitutionFailure),
+}
+
+pub struct ImportedSessionReconstitutionError { /* private */ }
+// sealed: Err of ImportedSessionReconstitutionInput::reconstitute
+impl ImportedSessionReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedSessionReconstitutionInput,
+        ImportedSessionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub struct ReconstitutedImportedSession { /* private */ }
+// sealed: ImportedSessionReconstitutionInput::reconstitute
+impl ReconstitutedImportedSession {
+    pub fn into_parts(
+        self,
+    ) -> (
+        Session,
+        ImportedSessionSeed,
+        ResolvedContextFrontierSnapshot,
+        Box<[SemanticTranscriptEntry]>,
+    );
+    // accessors: session(), imported_seed(), seed_snapshot(),
+    //   semantic_entries()
+}
+
+pub struct CreateSessionFromImportedFrontierReconstitutionInput { /* private */ }
+impl CreateSessionFromImportedFrontierReconstitutionInput {
+    pub fn new(
+        command: CreateSessionFromImportedFrontier,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        imported_conversation: ImportedConversation,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<
+        ReconstitutedSessionCreationFromImportedFrontier,
+        CreateSessionFromImportedFrontierReconstitutionError,
+    >;
+    // accessors: command(), result_session(), session(), provenance(),
+    //   defaults_session(), defaults_version(), defaults(),
+    //   imported_conversation(), seed_records(), seed_snapshots(),
+    //   semantic_entries()
+}
+
+pub enum CreateSessionFromImportedFrontierReconstitutionFailure {
+    SessionResultMismatch,
+    ProvenanceMismatch,
+    DefaultsSessionMismatch,
+    DefaultsVersionIsNotFirst,
+    DefaultsMismatch,
+    Seed(ImportedSessionSeedReconstitutionFailure),
+}
+
+pub struct CreateSessionFromImportedFrontierReconstitutionError { /* private */ }
+// sealed: Err of
+// CreateSessionFromImportedFrontierReconstitutionInput::reconstitute
+impl CreateSessionFromImportedFrontierReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        CreateSessionFromImportedFrontierReconstitutionInput,
+        CreateSessionFromImportedFrontierReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub struct ReconstitutedSessionCreationFromImportedFrontier { /* private */ }
+// sealed: complete imported-frontier creation reconstitution
+impl ReconstitutedSessionCreationFromImportedFrontier {
+    // accessors: command(), session(), semantic_entries(), seed_snapshot(),
+    //   imported_seed(), applied_result()
 }
 ```
 
@@ -2262,6 +2577,11 @@ impl AssistantText {
 }
 
 pub enum SemanticTranscriptEntryPayload {
+    Imported {
+        imported_entry: ImportedTranscriptEntryId,
+        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
+        content: ImportedTranscriptContent,
+    },
     OriginAcceptedInput { accepted_input: AcceptedInputId },
     SteeringAcceptedInput {
         accepted_input: AcceptedInputId,
@@ -2703,6 +3023,16 @@ pub enum ModelConversationMessage {
         source: SemanticTranscriptEntryRef,
         producing_call: ModelCallId,
         content: AssistantText,
+    },
+    ImportedUser {
+        source: SemanticTranscriptEntryRef,
+        imported_entry: ImportedTranscriptEntryId,
+        content: ImportedText,
+    },
+    ImportedAssistant {
+        source: SemanticTranscriptEntryRef,
+        imported_entry: ImportedTranscriptEntryId,
+        content: ImportedText,
     },
 }
 
@@ -3344,7 +3674,8 @@ impl<
 | domain: lib.rs identities             | 11                   |
 | domain: actor                         | 1                    |
 | domain: imported_conversation         | 29                   |
-| domain: session                       | 18                   |
+| domain: session                       | 21                   |
+| domain: imported_session              | 18                   |
 | domain: configuration                 | 19                   |
 | domain: accepted_input                | 5                    |
 | domain: delivery_request              | 2                    |
@@ -3362,7 +3693,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **242 (+1 free fn)** |
+| **signalbox-domain total**            | **263 (+1 free fn)** |
 | application: conversation_import      | 8 (incl. 3 traits)   |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |

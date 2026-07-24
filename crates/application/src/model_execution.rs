@@ -16,8 +16,9 @@ use std::{
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
+    ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, TurnAttemptId, TurnId,
@@ -67,6 +68,24 @@ pub enum ModelConversationMessage {
         /// Exact assistant-owned text.
         content: AssistantText,
     },
+    /// Exact imported text rendered with its source-attested user role.
+    ImportedUser {
+        /// The source-qualified semantic projection entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The immutable imported entry that remains content authority.
+        imported_entry: ImportedTranscriptEntryId,
+        /// Exact decoded imported text, including empty text.
+        content: ImportedText,
+    },
+    /// Exact imported text rendered with its source-attested assistant role.
+    ImportedAssistant {
+        /// The source-qualified semantic projection entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The immutable imported entry that remains content authority.
+        imported_entry: ImportedTranscriptEntryId,
+        /// Exact decoded imported text, including empty text.
+        content: ImportedText,
+    },
 }
 
 fn render_frontier_messages<'a>(
@@ -81,6 +100,27 @@ fn render_frontier_messages<'a>(
     let mut messages = Vec::new();
     for (source, payload) in entries {
         match payload {
+            SemanticTranscriptEntryPayload::Imported {
+                imported_entry,
+                source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::User),
+                content:
+                    ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(content)),
+            } => messages.push(ModelConversationMessage::ImportedUser {
+                source,
+                imported_entry: *imported_entry,
+                content: content.clone(),
+            }),
+            SemanticTranscriptEntryPayload::Imported {
+                imported_entry,
+                source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                content:
+                    ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(content)),
+            } => messages.push(ModelConversationMessage::ImportedAssistant {
+                source,
+                imported_entry: *imported_entry,
+                content: content.clone(),
+            }),
+            SemanticTranscriptEntryPayload::Imported { .. } => {}
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 let content = origin_content(*accepted_input).ok_or(
@@ -1451,9 +1491,9 @@ mod tests {
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, Actor,
         DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenModelSelection,
-        ModelCallExecutionReconstitutionInput, ModelCallOriginContent,
-        ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
-        ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+        ImportedMessageContentAbsence, ModelCallExecutionReconstitutionInput,
+        ModelCallOriginContent, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+        ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
         PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
         ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
@@ -2089,6 +2129,286 @@ mod tests {
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
         assert_eq!(content.text().as_str(), "exact user request");
+    }
+
+    /// S28 / INV-038 / INV-039: attested imported text keeps its exact
+    /// source-attested role, semantic source, imported authority, and decoded
+    /// text without acquiring a native input or call identity.
+    #[test]
+    fn s28_inv038_inv039_frontier_rendering_preserves_imported_text_roles_and_sources() {
+        let imported_user_entry =
+            identity(110, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
+        let imported_assistant_entry =
+            identity(111, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
+        let projected_user = SemanticTranscriptEntryRef::from_source(
+            identity(112, SessionId::from_uuid),
+            identity(113, SemanticTranscriptEntryId::from_uuid),
+        );
+        let projected_assistant = SemanticTranscriptEntryRef::from_source(
+            identity(114, SessionId::from_uuid),
+            identity(115, SemanticTranscriptEntryId::from_uuid),
+        );
+        let exact_user = ImportedText::new(String::from(" \timported\0user\r\n"));
+        let exact_assistant = ImportedText::new(String::new());
+        let entries = [
+            (
+                projected_user,
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry: imported_user_entry,
+                    source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::User),
+                    content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
+                        exact_user.clone(),
+                    )),
+                },
+            ),
+            (
+                projected_assistant,
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry: imported_assistant_entry,
+                    source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                    content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
+                        exact_assistant.clone(),
+                    )),
+                },
+            ),
+        ];
+
+        let messages = render_frontier_messages(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |_| panic!("imported text must not request native accepted-input content"),
+        )
+        .expect("attested imported text is conservatively renderable");
+
+        assert_eq!(messages.len(), 2);
+        let ModelConversationMessage::ImportedUser {
+            source,
+            imported_entry,
+            content,
+        } = &messages[0]
+        else {
+            panic!("attested imported user text must retain the imported user role")
+        };
+        assert_eq!(*source, projected_user);
+        assert_eq!(*imported_entry, imported_user_entry);
+        assert_eq!(content.as_str(), exact_user.as_str());
+        let ModelConversationMessage::ImportedAssistant {
+            source,
+            imported_entry,
+            content,
+        } = &messages[1]
+        else {
+            panic!("attested imported assistant text must retain the imported assistant role")
+        };
+        assert_eq!(*source, projected_assistant);
+        assert_eq!(*imported_entry, imported_assistant_entry);
+        assert_eq!(content.as_str(), exact_assistant.as_str());
+    }
+
+    /// S28 / INV-038 / INV-039: typed imported text or speaker absence remains
+    /// model-invisible rather than guessing a role or fabricating content.
+    #[test]
+    fn s28_inv038_inv039_frontier_rendering_skips_imported_text_with_typed_absence() {
+        let projected_session = identity(120, SessionId::from_uuid);
+        let imported_entry = identity(121, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
+        let exact_text = ImportedText::new(String::from("must remain hidden"));
+        let entries = [
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(122, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::User),
+                    content: ImportedTranscriptContent::Text(
+                        ImportedSourceAttestation::AttestedAbsent,
+                    ),
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(123, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                    content: ImportedTranscriptContent::Text(
+                        ImportedSourceAttestation::NotAttested,
+                    ),
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(124, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::AttestedAbsent,
+                    content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
+                        exact_text.clone(),
+                    )),
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(125, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::NotAttested,
+                    content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
+                        exact_text,
+                    )),
+                },
+            ),
+        ];
+
+        let messages = render_frontier_messages(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |_| panic!("imported absence must not request native accepted-input content"),
+        )
+        .expect("typed imported absence is conservatively skipped");
+
+        assert!(
+            messages.is_empty(),
+            "typed absence cannot become provider-visible content"
+        );
+    }
+
+    /// S28 / INV-038 / INV-039: the conservative frontier renderer leaves
+    /// every imported non-text vocabulary member model-invisible without
+    /// removing it from the semantic frontier or inventing native tool facts.
+    #[test]
+    fn s28_inv038_inv039_frontier_rendering_skips_every_imported_non_text_variant() {
+        let projected_session = identity(130, SessionId::from_uuid);
+        let imported_entry = identity(131, signalbox_domain::ImportedTranscriptEntryId::from_uuid);
+        let speaker = ImportedSourceAttestation::Attested(ImportedSpeaker::User);
+        let entries = [
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(132, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::SourceEvent {
+                        source_type: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(133, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::SourceMessageBlock {
+                        source_type: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(134, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::ToolCall {
+                        source_call_id: ImportedSourceAttestation::NotAttested,
+                        name: ImportedSourceAttestation::NotAttested,
+                        input: ImportedSourceAttestation::NotAttested,
+                        caller: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(135, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::ToolResult {
+                        source_call_id: ImportedSourceAttestation::NotAttested,
+                        content: ImportedSourceAttestation::NotAttested,
+                        is_error: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(136, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::Thinking {
+                        thinking: ImportedSourceAttestation::NotAttested,
+                        signature: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(137, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::RedactedThinking {
+                        data: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(138, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker.clone(),
+                    content: ImportedTranscriptContent::Document {
+                        source: ImportedSourceAttestation::NotAttested,
+                    },
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    projected_session,
+                    identity(139, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: speaker,
+                    content: ImportedTranscriptContent::MessageContentAbsent(
+                        ImportedMessageContentAbsence::EmptyBlockArray,
+                    ),
+                },
+            ),
+        ];
+
+        let messages = render_frontier_messages(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |_| panic!("imported non-text must not request native accepted-input content"),
+        )
+        .expect("imported non-text is conservatively skipped");
+
+        assert!(
+            messages.is_empty(),
+            "non-text imported history cannot become a native provider message"
+        );
     }
 
     /// S02 / INV-015: mixed semantic content keeps exact role order and

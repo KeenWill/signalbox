@@ -14,6 +14,7 @@ mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
 mod imported_conversation;
+mod imported_session;
 mod model_call;
 mod model_execution;
 mod provider_evidence;
@@ -57,6 +58,19 @@ pub use imported_conversation::{
     ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
     ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
     ImportedTranscriptEntryInput, ImportedTranscriptFrontier, ImportedTranscriptPosition,
+};
+pub use imported_session::{
+    BoundedImportedSessionReconstitutionError, BoundedImportedSessionReconstitutionFailure,
+    BoundedImportedSessionReconstitutionInput, CreateSessionFromImportedFrontierAppliedResult,
+    CreateSessionFromImportedFrontierPreparationError,
+    CreateSessionFromImportedFrontierPreparationFailure,
+    CreateSessionFromImportedFrontierReconstitutionError,
+    CreateSessionFromImportedFrontierReconstitutionFailure,
+    CreateSessionFromImportedFrontierReconstitutionInput, ImportedSessionReconstitutionError,
+    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
+    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionFailure,
+    ImportedSessionSeedReconstitutionInput, PreparedCreateSessionFromImportedFrontier,
+    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
@@ -102,12 +116,14 @@ pub use semantic_entry::{
     SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
-    CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
-    CreateSessionPreparationFailure, CreateSessionReconstitutionError,
-    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, InitialSession,
-    PreparedCreateSession, ReconstitutedSessionCreation, Session, SessionCreationCause,
-    SessionCreationProvenance, SessionReconstitutionError, SessionReconstitutionFailure,
-    SessionReconstitutionInput, TranscriptAncestry, TranscriptFrontier,
+    CreateSession, CreateSessionAppliedResult, CreateSessionFromImportedFrontier,
+    CreateSessionPreparationError, CreateSessionPreparationFailure,
+    CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
+    CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
+    InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
+    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
+    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
+    TranscriptFrontier,
 };
 pub use submit_input::{
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,
@@ -259,6 +275,8 @@ pub(crate) mod test_support {
         turn_id -> crate::TurnId,
         turn_attempt_id -> crate::TurnAttemptId,
         session_id -> crate::SessionId,
+        imported_conversation_id -> crate::ImportedConversationId,
+        imported_transcript_entry_id -> crate::ImportedTranscriptEntryId,
         accepted_input_id -> crate::AcceptedInputId,
         model_call_id -> crate::ModelCallId,
         provider_target_evidence_id -> crate::ProviderTargetEvidenceId,
