@@ -24,8 +24,9 @@ use signalbox_domain::{
     ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
     ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSourceAttestation,
     ImportedSourceMetadata, ImportedSpeaker, ImportedStructuredObjectMember,
-    ImportedStructuredValue, ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedStructuredValue, ImportedText, ImportedToolResultBlock, ImportedToolResultValue,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
+    ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
     conversation_import::{
@@ -763,8 +764,10 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
 {
     let (container, pool, database_url) = migrated_postgres().await?;
     let source = concat!(
-        "{\"type\":\"summary\",\"value\":null}\r\n",
-        "{\"type\":\"summary\",\"value\":null}"
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
+        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}\r\n",
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
+        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}"
     );
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
     let repository = ImportedConversationRepository::new(pool.clone());
@@ -794,6 +797,18 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     assert_eq!(stored.raw_records().len(), 2);
     assert_eq!(stored.entries().len(), 2);
     assert_eq!(stored.frontiers().count(), 2);
+    assert!(matches!(
+        stored.entries()[0].content(),
+        ImportedTranscriptContent::ToolResult {
+            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
+            ..
+        } if matches!(
+            blocks.as_ref(),
+            [ImportedToolResultBlock::SourceResultBlock {
+                source_type: ImportedSourceAttestation::Attested(value)
+            }] if value.as_str() == "future-result-kind"
+        )
+    ));
     assert_eq!(
         stored.raw_records()[0].bytes(),
         stored.raw_records()[1].bytes()
