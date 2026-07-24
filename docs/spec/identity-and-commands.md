@@ -209,15 +209,16 @@ claim the identifier exactly as applied results do.
 
 The canonical command payload is the typed domain value constructed at the
 boundary before registry lookup — not a serialization. Structural equality
-(hand-written `PartialEq` on `CreateSession`, `ReplaceSessionDefaults`, and
-`SubmitInput` in `crates/domain`) covers every caller-supplied semantic field
-and excludes `DurableCommandId`. Why: the identifier is the lookup key that
-names the payload, not part of the meaning it names.
+(hand-written `PartialEq` on `CreateSession`, `ReplaceSessionDefaults`,
+`SubmitInput`, and `DecideToolRequest` in `crates/domain`) covers every
+caller-supplied semantic field and excludes `DurableCommandId`. Why: the
+identifier is the lookup key that names the payload, not part of the meaning it
+names.
 
 Every command repository (`crates/persistence/src/create_session.rs`,
-`replace_session_defaults.rs`, `submit_input.rs`) follows one claim protocol,
-with registry lookup as the first durable operation, before any current-state
-validation (INV-012):
+`replace_session_defaults.rs`, `submit_input.rs`, and the decision path in
+`tool_loop.rs`) follows one claim protocol, with registry lookup as the first
+durable operation, before any current-state validation (INV-012):
 
 1. Inspect the registry. If the identifier is claimed by the same kind, load and
    reconstruct the recorded typed payload and result through domain-owned
@@ -243,10 +244,11 @@ Each application service calls its atomic transaction port exactly once and
 surfaces infrastructure failure to its caller without retry or receipt
 reconstruction (the `CreateSessionTransaction` contract in
 `crates/application/src/create_session.rs`;
-`s01_inv012_transaction_failure_is_returned_without_retry` tests in all three
-services). Because a failed transaction claims no identifier, retransmitting
-under the same `DurableCommandId` is the caller's retry path and replays or
-claims cleanly.
+`s01_inv012_transaction_failure_is_returned_without_retry` tests in the three
+session/input services and the corresponding
+`decide_service_returns_transaction_failure_without_retry` tool-decision test).
+Because a failed transaction claims no identifier, retransmitting under the same
+`DurableCommandId` is the caller's retry path and replays or claims cleanly.
 
 Reconstructed-then-compare ordering means a storage representation change can
 never turn an equal command into conflicting reuse; unknown kinds and storage

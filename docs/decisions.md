@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Bound and sanitize persisted tool-error detail
+
+**Context.** Executor failures may carry useful diagnostic detail into durable
+attempt evidence, but an unspecified “bounded sanitized” value would leave each
+adapter to invent incompatible admission and could persist terminal controls or
+unbounded content.
+
+**Decision.** Admit optional tool-error detail only when it is 1–4,096 UTF-8
+bytes, contains no control character, and has no leading or trailing POSIX
+whitespace. Preserve every other admitted scalar exactly. Enforce the same rule
+in domain construction and the relational constraint.
+
+**Rejected alternatives.** Omitting detail loses focused diagnostics. Reusing
+the 1 MiB result bound retains far more untrusted failure text than needed.
+Normalizing whitespace would rewrite evidence instead of validating it.
+
+**Affects.** Tool execution-error construction, `tool_attempt.error_detail`
+storage, reconstitution, and the tool-loop specification.
+
 ## 2026-07-24 — Snapshot terminal renderer projections
 
 **Context.** Partial substring assertions let missing identities, malformed
@@ -711,10 +730,12 @@ atomically; approval sources remain explicit; the dangerous session blanket is
 versioned and frozen per turn; execution is serialized behind catalog/executor
 ports and durably fenced; a process-shared turn dispatch gate orders execution
 against interrupts; deny-and-end records the canonical denial before applying
-the interrupt from execution; interrupting an ambiguous tool recovery wait
-retains that exact ambiguity in the proof-bearing terminal boundary; 1 MiB
-bounds both normalized arguments and admitted text results; crash classification
-follows recorded effect class; and the proposal-ordered all-resolved boundary
+the separately durable interrupt from execution, with the ordinary dispatch race
+after execution opens; interrupting an ambiguous tool recovery wait retains that
+exact ambiguity in the proof-bearing terminal boundary; 1 MiB bounds both
+normalized arguments and admitted text results; crash classification follows
+recorded effect class, and a known crash failure materializes proposal-ordered
+tool closure before `TurnFailed`; and the proposal-ordered all-resolved boundary
 atomically projects results, consumes steering, and prepares the next model
 call. `current_time` is the first effect-free auto tool, with an injected clock
 and IANA conversion supplied by the focused `jiff` dependency.

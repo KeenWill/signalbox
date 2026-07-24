@@ -68,14 +68,17 @@ rejects a non-running phase, session or snapshot mismatches, frontier entries
 that do not exactly back ordered membership, missing or unreferenced origin
 content, a call whose turn/attempt/frontier/selection/target contradict the
 checked turn facts, more than one call, and any attempt/call state pair outside
-`(Prepared, none)`, `(Prepared, Prepared)`, `(Running, InFlight)`, or the
-proof-bearing `(StopRequested, CancellationRequested)` pair. The stopped pair
-must reconstruct the exact applied-interrupt proof retained by the attempt
-before it can authorize cancellation observation or restart recovery. Why:
-acting on a partially consistent projection could authorize a second provider
-effect against stale authority, so every invalid shape refuses rather than
-repairs. Sealed constructors (compile-fail-tested) prevent forging call records
-or terminal history outside the aggregate (INV-002).
+`(Prepared, none)`, `(Prepared, Prepared)`, `(Running, Prepared)`,
+`(Running, InFlight)`, or the proof-bearing
+`(StopRequested, CancellationRequested)` pair. `(Running, Prepared)` is admitted
+only for a continuation attempt whose exact stored call frontier includes the
+current tool round's complete result evidence. The stopped pair must reconstruct
+the exact applied-interrupt proof retained by the attempt before it can
+authorize cancellation observation or restart recovery. Why: acting on a
+partially consistent projection could authorize a second provider effect against
+stale authority, so every invalid shape refuses rather than repairs. Sealed
+constructors (compile-fail-tested) prevent forging call records or terminal
+history outside the aggregate (INV-002).
 
 Reconstituting a checkpointed `Prepared` call also reloads the call's exact
 stored snapshot, not only the turn's starting snapshot. When steering extended
