@@ -18,7 +18,9 @@ hub-minted `ImportedConversationId`, one closed source format and converter
 version, one source-content digest, an immutable nonempty sequence of raw source
 record occurrences, and an immutable nonempty sequence of normalized
 `ImportedTranscriptEntry` values (INV-001, INV-038). Every raw record produces
-at least one normalized entry.
+at least one normalized entry. Application orchestration rejects a converted
+aggregate carrying any conversation or entry identity that the hub did not
+supply to that conversion invocation.
 
 Imported entries never carry an `AcceptedInputId`, `TurnId`, `TurnAttemptId`,
 `ModelCallId`, native tool identity, or native terminal evidence. They record
@@ -223,7 +225,11 @@ One transaction resolves or inserts a complete aggregate:
 - an existing format/source-content digest must reconstitute completely and
   byte-match every raw occurrence before returning `AlreadyImported`;
 - a new digest inserts or verifies every content-addressed raw blob, then
-  inserts one header, every raw occurrence, and every normalized entry; and
+  atomically inserts one header, every raw occurrence, and every normalized
+  entry; a concurrent header-insert loser re-inspects and completely
+  reconstitutes the winner, returning `AlreadyImported` only after the same
+  byte-for-byte match, and raw-blob insert conflicts likewise reload and verify
+  the winning bytes before reuse; and
 - deferred constraints require exact declared counts, contiguous positions,
   globally distinct imported-entry identities, valid raw-record references, and
   agreement between every member's owner and header.

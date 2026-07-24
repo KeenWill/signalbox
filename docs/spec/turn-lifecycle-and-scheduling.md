@@ -364,19 +364,21 @@ fixed frontier, and provenance must survive that coincidence.
 Construction authority is sealed: public code cannot assemble a
 `ResolvedContextFrontierSnapshot`, `AcceptedInputTurnStart`, or activated turn
 from raw identifiers; the producers are the sealed domain transitions and
-checked seams — eligibility activation, startup recovery, model-call closure
-(completion, refusal, and known failure in
-`crates/domain/src/model_execution.rs` derive terminal snapshots), and the
-fail-closed reconstitution seams that rebuild a stored snapshot only from its
-complete materialized membership. Persistence materializes complete snapshot
-membership (`context_frontier` + `context_frontier_member`), inserts only; a
-deferred constraint trigger (`context_frontier_requires_complete_membership`)
-re-asserts complete contiguous membership — exact declared count, positions
-`1..count` — at commit, and reconstitution rejects any stored snapshot whose
-resolved membership disagrees with the complete entry set — one identifier can
-never resolve differently. Transcript-ancestry resolution into a first frontier
-is unimplemented (open edge); `TranscriptFrontier` itself is
-[sessions-and-transcript](sessions-and-transcript.md) scope.
+checked seams — imported-frontier session creation (which constructs exactly one
+seed frontier from the selected normalized imported prefix), eligibility
+activation, startup recovery, model-call closure (completion, refusal, and known
+failure in `crates/domain/src/model_execution.rs` derive terminal snapshots),
+and the fail-closed reconstitution seams that rebuild a stored snapshot only
+from its complete materialized membership. Persistence materializes complete
+snapshot membership (`context_frontier` + `context_frontier_member`), inserts
+only; a deferred constraint trigger
+(`context_frontier_requires_complete_membership`) re-asserts complete contiguous
+membership — exact declared count, positions `1..count` — at commit, and
+reconstitution rejects any stored snapshot whose resolved membership disagrees
+with the complete entry set — one identifier can never resolve differently.
+Imported ancestry resolves only through the checked session-creation producer;
+`SingleSource` ancestry resolution remains unimplemented. `TranscriptFrontier`
+itself is [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
 

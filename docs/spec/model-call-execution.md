@@ -113,9 +113,10 @@ projects the exact frontier order into provider-neutral messages:
   assistant speaker and exact decoded text, retaining the imported-entry
   reference rather than a native accepted-input or producing-call identity; a
   text block with typed value absence is skipped;
-- imported `SourceEvent`, `MessageContentAbsent`, `ToolCall`, `ToolResult`,
-  `Thinking`, `RedactedThinking`, and `Document` entries are skipped by the
-  first conservative renderer while remaining in the exact context frontier;
+- imported `SourceEvent`, `SourceMessageBlock`, `MessageContentAbsent`,
+  `ToolCall`, `ToolResult`, `Thinking`, `RedactedThinking`, and `Document`
+  entries are skipped by the first conservative renderer while remaining in the
+  exact context frontier;
 - `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
   delimit history and carry no model-visible content;
 - `AssistantToolUse` fails closed (operator error) until the reserved tool
