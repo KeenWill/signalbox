@@ -13,10 +13,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDecisionWake,
+    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService, SubmitInputOutcome,
+    SubmitInputRequest, SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
     ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
@@ -31,16 +31,17 @@ use signalbox_domain::{
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_hubd::{
-    ActivatedTurnExecution, PostgresContinuationToolLoopRepository, PostgresProviderModelExecution,
-    PostgresProviderToolLoopExecution,
+    ActivatedTurnExecution, PostgresProviderModelExecution, PostgresProviderToolLoopExecution,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
-    Script, ScriptedModel, TerminalEvidence, TokenUsage, ToolCallId,
-    ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
+    AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ExchangeFacts,
+    MessagePart, ModelOperation, ModelRuntime, ObservationSink, PreparationOutcome,
+    ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared, TerminalEvidence,
+    TerminalReport, TokenUsage, ToolCallId, ToolCallProposal as RuntimeToolCallProposal,
+    ToolName as RuntimeToolName, ToolResultRecord,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
@@ -58,6 +59,34 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_hubd_tool_loop_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const FIXTURE_ID_SEED: u128 = 0x3100;
+const DECISION_COMMAND_ID: u128 = 0x3110;
+
+#[derive(Clone, Debug)]
+struct RecordingScriptedModel {
+    inner: Arc<ScriptedModel<ModelCallId>>,
+}
+
+impl ModelRuntime<ModelCallId> for RecordingScriptedModel {
+    type Prepared = ScriptedPrepared<ModelCallId>;
+
+    async fn prepare(
+        &self,
+        operation: ModelOperation<ModelCallId>,
+        cancellation: CancellationSignal,
+    ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
+        self.inner.prepare(operation, cancellation).await
+    }
+
+    async fn execute(
+        &self,
+        prepared: Self::Prepared,
+        sink: &mut (dyn ObservationSink<ModelCallId> + Send),
+        cancellation: CancellationSignal,
+    ) -> TerminalReport<ModelCallId> {
+        self.inner.execute(prepared, sink, cancellation).await
+    }
+}
 
 struct ToolLoopFixture {
     _container: ContainerAsync<Postgres>,
@@ -68,13 +97,14 @@ struct ToolLoopFixture {
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
     credential_reference: ModelCallCredentialReference,
+    tool_decision_wake: InProcessToolDecisionWake,
     tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
 impl ToolLoopFixture {
-    async fn new(posture: DangerousToolAutoApproval, seed: u128) -> Result<Self, Box<dyn Error>> {
+    async fn new(posture: DangerousToolAutoApproval) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = migrated_postgres().await?;
-        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 1));
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 1));
         let defaults = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
             ModelSelectionRequest::Direct(selection),
             posture,
@@ -85,7 +115,7 @@ impl ToolLoopFixture {
         );
         let CreateSessionOutcome::Applied(created) = create
             .execute(CreateSessionRequest::try_new(
-                DurableCommandId::from_uuid(Uuid::from_u128(seed + 2)),
+                DurableCommandId::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 2)),
                 defaults,
             )?)
             .await?
@@ -96,18 +126,19 @@ impl ToolLoopFixture {
 
         let sweep = PostgresEligibilitySweep::new(pool.clone());
         let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let tool_decision_wake = InProcessToolDecisionWake::default();
         let tool_dispatch_gate = InProcessToolDispatchGate::default();
         let mut submit = SubmitInputService::new(
             UuidV7SubmitInputIdGenerator,
             SubmitInputRepository::new(pool.clone()),
             nudge,
-        )
-        .with_tool_dispatch_gate(tool_dispatch_gate.clone());
+            tool_dispatch_gate.clone(),
+        );
         let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::TurnOrigin(origin),
         )) = submit
             .execute(SubmitInputRequest::try_new(
-                DurableCommandId::from_uuid(Uuid::from_u128(seed + 3)),
+                DurableCommandId::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 3)),
                 session,
                 UserContent::try_text(String::from("offline tool-loop request"))
                     .expect("fixture user content is admitted"),
@@ -129,7 +160,8 @@ impl ToolLoopFixture {
             panic!("the queued fixture turn must activate")
         };
 
-        let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4));
+        let provider_identity =
+            ProviderModelIdentity::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 4));
         let target = ResolvedProviderTarget::naming(provider_identity);
         let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
             selection, target,
@@ -153,6 +185,7 @@ impl ToolLoopFixture {
             targets,
             runtime_models,
             credential_reference: ModelCallCredentialReference::new("scripted-tool-loop-test"),
+            tool_decision_wake,
             tool_dispatch_gate,
         })
     }
@@ -162,33 +195,38 @@ impl ToolLoopFixture {
         scripts: impl IntoIterator<Item = Script>,
         catalog: Catalog,
         executor: Executor,
-    ) -> PostgresProviderToolLoopExecution<
-        RuntimeModelCallProvider<ScriptedModel<ModelCallId>>,
-        Catalog,
-        Executor,
-    > {
+    ) -> (
+        PostgresProviderToolLoopExecution<
+            RuntimeModelCallProvider<RecordingScriptedModel>,
+            Catalog,
+            Executor,
+        >,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
+        let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
-            ScriptedModel::<ModelCallId>::following(scripts),
+            RecordingScriptedModel {
+                inner: Arc::clone(&runtime),
+            },
             self.runtime_models.clone(),
         );
-        PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                self.pool.clone(),
-                self.targets.clone(),
-                self.credential_reference.clone(),
+        (
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    self.pool.clone(),
+                    self.targets.clone(),
+                    self.credential_reference.clone(),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            )
+            .with_tool_loop(
+                self.tool_decision_wake.clone(),
+                self.tool_dispatch_gate.clone(),
+                catalog,
+                executor,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-        )
-        .with_tool_loop(
-            PostgresContinuationToolLoopRepository::new(
-                self.pool.clone(),
-                self.targets.clone(),
-                self.credential_reference.clone(),
-            ),
-            self.tool_dispatch_gate.clone(),
-            catalog,
-            executor,
+            runtime,
         )
     }
 
@@ -211,15 +249,15 @@ impl ToolLoopFixture {
         &self,
         request: ToolRequestId,
         decision: ToolApprovalDecision,
-        command: u128,
     ) -> Result<(), Box<dyn Error>> {
         let mut service = DecideToolRequestService::new(
             UuidV7ToolLoopIdGenerator,
             PostgresToolLoopRepository::new(self.pool.clone()),
+            self.tool_decision_wake.clone(),
         );
         let prepared = service
             .execute(DecideToolRequest::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(command)),
+                DurableCommandId::from_uuid(Uuid::from_u128(DECISION_COMMAND_ID)),
                 request,
                 decision,
             ))
@@ -229,6 +267,24 @@ impl ToolLoopFixture {
             "the earliest undecided request must accept its owner decision"
         );
         Ok(())
+    }
+
+    async fn wait_for_requests(
+        &self,
+        expected: usize,
+    ) -> Result<Vec<ToolRequestId>, Box<dyn Error>> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let requests = self.request_ids().await?;
+                if requests.len() == expected {
+                    return Ok::<_, sqlx::Error>(requests);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| std::io::Error::other("tool requests were not durably parked"))?
+        .map_err(Into::into)
     }
 
     async fn transcript_kinds(&self) -> Result<Vec<String>, sqlx::Error> {
@@ -337,6 +393,27 @@ fn completion_script(text: &str) -> Script {
     }))
 }
 
+fn continuation_tool_results(
+    runtime: &ScriptedModel<ModelCallId>,
+) -> Result<Vec<ToolResultRecord>, Box<dyn Error>> {
+    let operations = runtime.received_operations();
+    let continuation = operations
+        .get(1)
+        .ok_or_else(|| std::io::Error::other("continuation model operation was not received"))?;
+    Ok(continuation
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::ToolResult(result) => Some(result.clone()),
+            MessagePart::Text(_)
+            | MessagePart::ToolCall(_)
+            | MessagePart::Thinking { .. }
+            | MessagePart::RedactedThinking { .. } => None,
+        })
+        .collect())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutorMode {
     Complete,
@@ -426,22 +503,22 @@ impl ToolExecutor for RecordingExecutor {
     }
 }
 
-/// S10 / S11 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
+/// S10 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
 /// one offline scripted turn parks for an owner decision, executes exactly
 /// once after approval, commits a reference-only result at the continuation
 /// boundary, and completes only after the second model round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_s11_tool_loop_parks_approves_executes_continues_and_completes()
+async fn s10_tool_loop_parks_approves_executes_continues_and_completes()
 -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3100).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
         ToolPermissionDefault::Confirm,
         ToolEffectClass::EffectFree,
     )]);
     let executor = RecordingExecutor::completing();
-    let execution = fixture.execution(
+    let (execution, runtime) = fixture.execution(
         [
             tool_use_script(&[("confirmed", r#"{"value":"one"}"#)]),
             completion_script("tool result observed"),
@@ -450,10 +527,8 @@ async fn s10_s11_tool_loop_parks_approves_executes_continues_and_completes()
         executor.clone(),
     );
 
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    let requests = fixture.request_ids().await?;
+    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    let requests = fixture.wait_for_requests(1).await?;
     assert_eq!(requests.len(), 1);
     let parked: (String, Option<Uuid>, i64) = sqlx::query_as(
         "SELECT active_phase_kind, approval_tool_request_id,
@@ -476,16 +551,22 @@ async fn s10_s11_tool_loop_parks_approves_executes_continues_and_completes()
     );
 
     fixture
-        .decide(requests[0], ToolApprovalDecision::Approve, 0x3110)
+        .decide(requests[0], ToolApprovalDecision::Approve)
         .await?;
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
+    running.await??;
 
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
     assert_eq!(
         executor.arguments(),
         vec![String::from(r#"{"value":"one"}"#)]
+    );
+    assert_eq!(
+        continuation_tool_results(&runtime)?,
+        vec![ToolResultRecord {
+            tool_call_id: ToolCallId::new(requests[0].into_uuid().to_string()),
+            content: String::from("completed:confirmed"),
+            is_error: false,
+        }]
     );
     assert_eq!(
         fixture.transcript_kinds().await?,
@@ -532,14 +613,14 @@ async fn s10_s11_tool_loop_parks_approves_executes_continues_and_completes()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3200).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
         ToolPermissionDefault::Confirm,
         ToolEffectClass::EffectFree,
     )]);
     let executor = RecordingExecutor::completing();
-    let execution = fixture.execution(
+    let (execution, runtime) = fixture.execution(
         [
             tool_use_script(&[("confirmed", "{}")]),
             completion_script("denial observed"),
@@ -548,18 +629,28 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
         executor.clone(),
     );
 
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    let request = fixture.request_ids().await?[0];
+    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    let request = fixture.wait_for_requests(1).await?[0];
     fixture
-        .decide(request, ToolApprovalDecision::Deny { reason: None }, 0x3210)
+        .decide(request, ToolApprovalDecision::Deny { reason: None })
         .await?;
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
+    running.await??;
 
     assert!(executor.events().is_empty());
+    assert_eq!(
+        continuation_tool_results(&runtime)?,
+        vec![ToolResultRecord {
+            tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+            content: serde_json::json!({
+                "error": {
+                    "kind": "denied",
+                    "detail": null,
+                }
+            })
+            .to_string(),
+            is_error: true,
+        }]
+    );
     assert_eq!(
         fixture.transcript_kinds().await?,
         vec![
@@ -594,25 +685,25 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_turn()
 -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3300).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
         ToolPermissionDefault::Confirm,
         ToolEffectClass::EffectFree,
     )]);
     let executor = RecordingExecutor::completing();
-    let execution = fixture.execution(
+    let (execution, _runtime) = fixture.execution(
         [tool_use_script(&[("confirmed", "{}")])],
         tool_catalog,
         executor.clone(),
     );
 
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    let request = fixture.request_ids().await?[0];
+    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    let request = fixture.wait_for_requests(1).await?[0];
+    running.abort();
+    let _ = running.await;
     fixture
-        .decide(request, ToolApprovalDecision::Deny { reason: None }, 0x3310)
+        .decide(request, ToolApprovalDecision::Deny { reason: None })
         .await?;
 
     let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
@@ -621,8 +712,8 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(fixture.pool.clone()),
         nudge,
-    )
-    .with_tool_dispatch_gate(fixture.tool_dispatch_gate.clone());
+        fixture.tool_dispatch_gate.clone(),
+    );
     let interrupt_command = DurableCommandId::from_uuid(Uuid::from_u128(0x3311));
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
@@ -681,22 +772,22 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3400).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
         ToolPermissionDefault::Confirm,
         ToolEffectClass::EffectFree,
     )]);
     let executor = RecordingExecutor::completing();
-    fixture
-        .execution(
-            [tool_use_script(&[("confirmed", "{}")])],
-            tool_catalog.clone(),
-            executor.clone(),
-        )
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    let request = fixture.request_ids().await?[0];
+    let (first_execution, _first_runtime) = fixture.execution(
+        [tool_use_script(&[("confirmed", "{}")])],
+        tool_catalog.clone(),
+        executor.clone(),
+    );
+    let first_running = tokio::spawn(first_execution.execute(Box::new(fixture.activated.clone())));
+    let request = fixture.wait_for_requests(1).await?[0];
+    first_running.abort();
+    let _ = first_running.await;
 
     let mut scan = StartupScanService::new(
         UuidV7StartupScanIdGenerator,
@@ -727,14 +818,14 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     );
 
     fixture
-        .decide(request, ToolApprovalDecision::Approve, 0x3410)
+        .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    fixture
-        .execution(
-            [completion_script("continued after restart")],
-            tool_catalog,
-            executor.clone(),
-        )
+    let (restarted_execution, _restarted_runtime) = fixture.execution(
+        [completion_script("continued after restart")],
+        tool_catalog,
+        executor.clone(),
+    );
+    restarted_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
@@ -748,7 +839,7 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
 -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3500).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([
         tool(
             "automatic",
@@ -762,7 +853,7 @@ async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         ),
     ]);
     let executor = RecordingExecutor::completing();
-    let execution = fixture.execution(
+    let (execution, _runtime) = fixture.execution(
         [
             tool_use_script(&[("automatic", "{}"), ("confirmed", "{}")]),
             completion_script("batch observed"),
@@ -771,17 +862,34 @@ async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         executor.clone(),
     );
 
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    let requests = fixture.request_ids().await?;
+    let running = tokio::spawn(execution.execute(Box::new(fixture.activated.clone())));
+    let requests = fixture.wait_for_requests(2).await?;
     assert_eq!(requests.len(), 2);
+    assert!(
+        executor.events().is_empty(),
+        "the batch barrier keeps auto-approved work undispatched"
+    );
+    let parked_request: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT active_phase_kind, approval_tool_request_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        parked_request,
+        (
+            String::from("awaiting_tool_approval"),
+            Some(requests[1].into_uuid()),
+        )
+    );
     fixture
-        .decide(requests[1], ToolApprovalDecision::Approve, 0x3510)
+        .decide(requests[1], ToolApprovalDecision::Approve)
         .await?;
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
+    running.await??;
 
     assert_eq!(
         executor.events(),
@@ -828,22 +936,22 @@ async fn s10_s11_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll, 0x3600).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let tool_catalog = catalog([tool(
         "confirmed",
         ToolPermissionDefault::Confirm,
         ToolEffectClass::EffectFree,
     )]);
     let executor = RecordingExecutor::completing();
-    fixture
-        .execution(
-            [
-                tool_use_script(&[("confirmed", "{}")]),
-                completion_script("blanket result observed"),
-            ],
-            tool_catalog,
-            executor.clone(),
-        )
+    let (execution, _runtime) = fixture.execution(
+        [
+            tool_use_script(&[("confirmed", "{}")]),
+            completion_script("blanket result observed"),
+        ],
+        tool_catalog,
+        executor.clone(),
+    );
+    execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
 
@@ -875,26 +983,26 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
     Ok(())
 }
 
-/// S10 / INV-005 / INV-024: losing a dispatched effect-free attempt
+/// S05 / INV-005 / INV-024: losing a dispatched effect-free attempt
 /// never retries it; a fresh process classifies it `known_failed` with
 /// `crash_lost` evidence and fails the turn honestly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
+async fn s05_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
 -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3700).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "effect_free",
         ToolPermissionDefault::Auto,
         ToolEffectClass::EffectFree,
     )]);
     let crashing = RecordingExecutor::losing_process();
-    let first = fixture
-        .execution(
-            [tool_use_script(&[("effect_free", "{}")])],
-            tool_catalog.clone(),
-            crashing.clone(),
-        )
+    let (first_execution, _runtime) = fixture.execution(
+        [tool_use_script(&[("effect_free", "{}")])],
+        tool_catalog,
+        crashing.clone(),
+    );
+    let first = first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await;
     assert!(
@@ -903,15 +1011,14 @@ async fn s10_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
     );
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
 
-    let resumed = RecordingExecutor::completing();
-    fixture
-        .execution([], tool_catalog, resumed.clone())
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    assert!(
-        resumed.events().is_empty(),
-        "crash recovery must not redispatch"
+    let mut startup = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
+    let recovery = startup.execute().await?;
+    assert!(recovery.is_complete());
+    assert_eq!(recovery.recovered_turn_count(), 1);
+    assert_eq!(crashing.events(), vec![String::from("effect_free")]);
     let classified: (String, String, String) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind, attempt.error_kind,
                 lifecycle.terminal_disposition_kind
@@ -937,26 +1044,26 @@ async fn s10_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
     Ok(())
 }
 
-/// S10 / INV-005 / INV-024: losing a dispatched external-effect
+/// S06 / INV-005 / INV-024: losing a dispatched external-effect
 /// attempt never retries it; a fresh process classifies exact ambiguity and
 /// parks the turn for owner recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
+async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
 -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3800).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "external_effect",
         ToolPermissionDefault::Auto,
         ToolEffectClass::ExternalEffect,
     )]);
     let crashing = RecordingExecutor::losing_process();
-    let first = fixture
-        .execution(
-            [tool_use_script(&[("external_effect", "{}")])],
-            tool_catalog.clone(),
-            crashing.clone(),
-        )
+    let (first_execution, _runtime) = fixture.execution(
+        [tool_use_script(&[("external_effect", "{}")])],
+        tool_catalog,
+        crashing.clone(),
+    );
+    let first = first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await;
     assert!(
@@ -965,15 +1072,18 @@ async fn s10_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
     );
     assert_eq!(crashing.events(), vec![String::from("external_effect")]);
 
-    let resumed = RecordingExecutor::completing();
-    fixture
-        .execution([], tool_catalog, resumed.clone())
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
-    assert!(
-        resumed.events().is_empty(),
-        "crash recovery must not redispatch"
+    let mut startup = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
+    let recovery = startup.execute().await?;
+    assert!(recovery.is_complete());
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        0,
+        "the ambiguous turn remains active while its attempt is recovered"
+    );
+    assert_eq!(crashing.events(), vec![String::from("external_effect")]);
     let classified: (String, String, Option<Uuid>) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind,
                 lifecycle.active_phase_kind,

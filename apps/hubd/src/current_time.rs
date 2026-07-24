@@ -394,4 +394,24 @@ mod tests {
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
     }
+
+    /// S15: an injected instant outside the supported civil-time range is a
+    /// typed known failure rather than executor infrastructure failure.
+    #[test]
+    fn s15_current_time_reports_out_of_range_clock_as_known_failure() {
+        let outside_jiff_range =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+
+        assert_eq!(
+            current_time_evidence(
+                outside_jiff_range,
+                &arguments("{}"),
+                &clock_failure_detail(),
+            )
+            .expect("clock range is represented as executor evidence"),
+            ToolExecutorEvidence::KnownFailed {
+                detail: Some(clock_failure_detail()),
+            }
+        );
+    }
 }

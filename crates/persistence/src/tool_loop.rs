@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, ModelCallCredentialReference,
     OperatorFailureClass, PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
-    ToolContinuationIdentities, ToolExecutionTransaction,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolExecutionTransaction,
 };
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
@@ -415,7 +415,7 @@ impl PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, ToolLoopRepositoryError> {
+    ) -> Result<ToolAttemptAuthorizationStatus, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_tool_session(&mut transaction, session).await?;
         let current = load_current_attempt(&mut transaction, attempt)
@@ -424,13 +424,18 @@ impl PostgresToolLoopRepository {
         if current.session() != session || current.turn() != turn {
             return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
         }
-        let authorized = current.resume_in_flight().map_err(|_| {
-            ToolLoopRepositoryError::InvalidTransition(
-                "ambiguous authorization did not commit in flight",
-            )
-        })?;
+        let status = match current.state() {
+            CurrentToolAttemptState::Prepared => ToolAttemptAuthorizationStatus::Prepared(current),
+            CurrentToolAttemptState::InFlight => ToolAttemptAuthorizationStatus::InFlight(
+                current.resume_in_flight().map_err(|_| {
+                    ToolLoopRepositoryError::InvalidTransition(
+                        "in-flight authorization could not restore its fence",
+                    )
+                })?,
+            ),
+        };
         transaction.rollback().await?;
-        Ok(authorized)
+        Ok(status)
     }
 
     /// Atomically applies exact executor evidence through the returned fence.
@@ -799,6 +804,16 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, Self::Error> {
         PostgresToolLoopRepository::authorize_attempt(self, session, turn, attempt).await
+    }
+
+    async fn reread_ambiguous_authorization(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolAttemptAuthorizationStatus, Self::Error> {
+        PostgresToolLoopRepository::reread_ambiguous_authorization(self, session, turn, attempt)
+            .await
     }
 
     async fn commit_preflight_error(

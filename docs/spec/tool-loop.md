@@ -277,9 +277,12 @@ turn or tool attempt. Raw request identity is not approval-wait evidence.
 Startup scanning leaves an approval wait unchanged. It never fabricates an
 approval or denial, advances to a later request, expires the wait, or creates an
 attempt. Pending approval has no timeout and may wait indefinitely (INV-010).
-Running phases use the staged tool-attempt crash classification above; parked
-external-effect ambiguity follows the existing recovery-decision lifecycle and
-is never automatically retried.
+Within one hub incarnation, the activated execution future remains parked on an
+exact request-keyed wake. A durably applied owner decision wakes that future to
+reload the batch and continue the same active turn; rejected or uncommitted
+commands do not wake it. Running phases use the staged tool-attempt crash
+classification above; parked external-effect ambiguity follows the existing
+recovery-decision lifecycle and is never automatically retried.
 
 ## Provider bridge and `current_time`
 
@@ -312,9 +315,11 @@ The first compiled tool is `current_time`:
   3339 timestamp to whole seconds and `timezone` as the selected canonical name.
 
 An unknown time zone or wrong argument shape produces `InvalidArguments` error
-evidence. IANA lookup and offset conversion use the focused `jiff` dependency;
-Signalbox owns only the port and result contract, not a time-zone database
-implementation.
+evidence. An injected instant outside the supported civil-time range produces
+known-failure evidence with detail
+`current time is outside the supported range`. IANA lookup and offset conversion
+use the focused `jiff` dependency; Signalbox owns only the port and result
+contract, not a time-zone database implementation.
 
 ## Persistence boundaries
 

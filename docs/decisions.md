@@ -10,27 +10,70 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-24 — Decode checked tool schemas at the runtime bridge
+## 2026-07-24 — Use jiff for IANA time-zone conversion
 
-**Context.** The application catalog carries provider-neutral JSON Schema as a
-checked canonical string, while the model runtime owns a `serde_json::Value`
-schema field. The provider bridge must cross that representation boundary
-without exposing runtime or serde types to the application API.
+**Context.** `current_time` must resolve IANA names, apply historical offsets,
+canonicalize zone names, and format whole-second RFC 3339 output. Signalbox
+should not own a time-zone parser or database, and the dependency should remain
+focused on the hub-local tool.
+
+**Decision.** Add `jiff` to `signalbox-hubd` with default features disabled and
+only `std` plus `tzdb-zoneinfo` enabled. It reads the deployment's system
+zoneinfo database at runtime and supplies checked `SystemTime` conversion, IANA
+lookup, canonical names, offsets, and formatting. This focused runtime edge does
+not constrain other crates and does not warrant the large-dependency owner gate.
+
+**Rejected alternatives.** Repository-owned zone parsing duplicates mature,
+security-relevant rules. `chrono-tz` embeds generated zone data and adds build
+weight when deployments already provide zoneinfo. Supporting UTC alone violates
+the implemented IANA-name contract.
+
+**Affects.** `apps/hubd/Cargo.toml`, `apps/hubd/src/current_time.rs`, the
+lockfile, and the `current_time` behavior recorded in the tool-loop
+specification.
+
+## 2026-07-24 — Reuse serde_json at the tool runtime bridge
+
+**Context.** The provider bridge must decode checked application JSON Schemas,
+serialize durable tool-result errors safely, and distinguish object-shaped
+arguments from valid scalars or arrays that provider function-call history
+cannot accept. The model runtime owns `serde_json::Value`; application and
+domain APIs must not.
 
 **Decision.** Add the already pinned `serde_json` dependency directly to
-`signalbox-model-provider-runtime` and decode each checked application schema
-when preparing the runtime operation. A decode failure is a fail-closed adapter
-defect; serde values remain private to the outward bridge.
+`signalbox-model-provider-runtime` for schema decoding, object-shape validation,
+and safe error serialization. A checked-schema decode failure is a fail-closed
+adapter defect; serde values remain private to the outward bridge.
 
 **Rejected alternatives.** Put `serde_json::Value` in the application catalog:
-that leaks a codec representation across the application boundary. Reparse in
-each provider adapter: duplicated work and inconsistent failure ownership.
-Hand-write a second JSON representation: unnecessary format code for an existing
-focused dependency.
+that leaks a codec representation across the boundary. Hand-escape JSON: it
+duplicates a security-sensitive codec. Admit non-object function arguments:
+provider replay remains invalid. Reparse in each provider adapter: duplicated
+work and inconsistent failure ownership.
 
 **Affects.** `crates/model-provider-runtime/Cargo.toml`, its tool-definition
-projection, and the lockfile dependency edge; no new resolved package or public
-serde type is introduced.
+projection, durable tool-history translation, and lockfile dependency edge; no
+new resolved package or public serde type is introduced.
+
+## 2026-07-24 — Normalize bounded JSON with stack-safe Serde traversal
+
+**Context.** Tool arguments classify every syntactically valid, byte-bounded
+JSON value as canonical JSON. Serde JSON's default nesting cutoff rejected valid
+inputs, while disabling it without guarded traversal could exhaust the native
+stack during decoding, encoding, or destruction.
+
+**Decision.** Add the focused `serde_stacker` adapter, enable Serde JSON's
+unbounded-depth parser, and guard both deserialization and serialization.
+Destroy the decoded value iteratively after canonical encoding. The existing
+one-megabyte admission bound remains the resource limit.
+
+**Rejected alternatives.** Treating nesting-limit errors as malformed violates
+the implemented valid-JSON classification. A new depth limit would add
+unsupported product semantics. An owned JSON parser would duplicate a mature
+focused capability.
+
+**Affects.** Domain tool-argument normalization and its dependency graph only;
+stored argument kinds, canonical encoding, and byte limits do not change.
 
 ## 2026-07-24 — Snapshot terminal renderer projections
 
@@ -781,8 +824,7 @@ retains that exact ambiguity in the proof-bearing terminal boundary; 1 MiB
 bounds both normalized arguments and admitted text results; crash classification
 follows recorded effect class; and the proposal-ordered all-resolved boundary
 atomically projects results, consumes steering, and prepares the next model
-call. `current_time` is the first effect-free auto tool, with an injected clock
-and IANA conversion supplied by the focused `jiff` dependency.
+call. `current_time` is the first effect-free auto tool with an injected clock.
 
 **Rejected alternatives.** Making each round a new turn would fragment one
 conversational outcome and misplace `TurnCompleted`. Process-local approvals or

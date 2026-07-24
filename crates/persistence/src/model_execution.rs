@@ -255,6 +255,16 @@ impl PostgresModelCallRepository {
         }
     }
 
+    /// Derives tool-loop storage from this repository's exact database and
+    /// continuation configuration.
+    pub fn tool_loop_repository(&self) -> crate::tool_loop::PostgresToolLoopRepository {
+        crate::tool_loop::PostgresToolLoopRepository::with_model_calls(
+            self.pool.clone(),
+            self.targets.clone(),
+            self.credential_reference.clone(),
+        )
+    }
+
     /// Commits Prepared while consuming the complete locked steering inventory.
     pub async fn prepare_initial_call<NextSteeringIdentities>(
         &self,

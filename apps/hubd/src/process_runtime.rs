@@ -771,6 +771,7 @@ where
             model_configuration,
         },
         eligibility_nudge.clone(),
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(

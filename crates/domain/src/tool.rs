@@ -5,7 +5,7 @@
 //! execution lives in `tool_attempt`; persistence, registry lookup, and
 //! executor selection remain outside the domain boundary.
 
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AssistantText, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -130,14 +130,25 @@ impl NormalizedToolArguments {
             });
         }
 
-        let Ok(decoded) = serde_json::from_str::<serde_json::Value>(&value) else {
+        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        deserializer.disable_recursion_limit();
+        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+        let Ok(decoded) = serde_json::Value::deserialize(deserializer) else {
             return Ok(Self {
                 kind: ToolArgumentsKind::Undecodable,
                 value,
             });
         };
-        let canonical = canonicalize_json(decoded);
-        let value = serde_json::to_string(&canonical).map_err(|_| ToolArgumentsError {
+        let mut canonical = Vec::with_capacity(value.len());
+        let mut serializer = serde_json::Serializer::new(&mut canonical);
+        let serializer = serde_stacker::Serializer::new(&mut serializer);
+        let serialization = decoded.serialize(serializer);
+        drop_json_value_iteratively(decoded);
+        serialization.map_err(|_| ToolArgumentsError {
+            value: value.clone(),
+            failure: ToolArgumentsFailure::CanonicalizationFailed,
+        })?;
+        let value = String::from_utf8(canonical).map_err(|_| ToolArgumentsError {
             value,
             failure: ToolArgumentsFailure::CanonicalizationFailed,
         })?;
@@ -191,19 +202,17 @@ impl NormalizedToolArguments {
     }
 }
 
-fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(canonicalize_json).collect())
+fn drop_json_value_iteratively(value: serde_json::Value) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Array(mut values) => pending.append(&mut values),
+            serde_json::Value::Object(values) => pending.extend(values.into_values()),
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
         }
-        serde_json::Value::Object(values) => {
-            let values = values
-                .into_iter()
-                .map(|(key, value)| (key, canonicalize_json(value)))
-                .collect::<BTreeMap<_, _>>();
-            serde_json::Value::Object(values.into_iter().collect())
-        }
-        value => value,
     }
 }
 
@@ -1114,6 +1123,19 @@ mod tests {
             normalized.as_str(),
             r#"{"exponent":1e+400,"wide":18446744073709551617}"#
         );
+    }
+
+    /// S10 / INV-005: the byte bound, rather than serde's default recursion
+    /// cutoff, governs syntactically valid nested JSON.
+    #[test]
+    fn s10_inv005_deeply_nested_arguments_remain_json() {
+        let depth = 512;
+        let value = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        let normalized = NormalizedToolArguments::try_from_provider_text(value.clone())
+            .expect("deep bounded JSON remains admissible");
+
+        assert_eq!(normalized.kind(), ToolArgumentsKind::Json);
+        assert_eq!(normalized.as_str(), value);
     }
 
     /// S10 / INV-020: only the owner-command preparation path can construct
