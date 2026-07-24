@@ -1,8 +1,7 @@
 # Turn lifecycle and scheduling
 
 This page specifies the implemented behavior of turns, turn attempts,
-eligibility derivation, the scheduler, and startup recovery as verified against
-the implementing stack rooted at PR #193 (`agent/tool-loop-spec`). Code homes:
+eligibility derivation, the scheduler, and startup recovery. Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -150,15 +149,24 @@ queued turn, and constructs atomically-committable state:
   `After { immediate_predecessor }` naming the exact terminal turn ordered
   immediately before it;
 - the starting context frontier: the predecessor's terminal frontier with the
-  fresh origin semantic entry appended (prefix-preserving), or a fresh snapshot
-  containing only the origin entry for a first-in-session turn;
+  fresh origin semantic entry appended (prefix-preserving); for a
+  first-in-session turn, the exact frontier identity stored by the session's
+  `ImportedSessionSeed` followed by the origin entry when ancestry is
+  `ImportedConversation`, or only the origin entry when ancestry is `None`;
 - the opaque `AcceptedInputTurnStart` binding lineage and frontier, whose
   constructor is private to validated eligibility (INV-009 — a raw identifier or
   list supplied by a caller is not start authority); and
 - the initial `Prepared` attempt.
 
-Sessions created with transcript ancestry cannot be scheduled yet;
-reconstitution fails with `UnsupportedSessionAncestry` (open edge).
+`SingleSource` native-fork ancestry remains unschedulable and fails
+reconstitution with `UnsupportedSessionAncestry`. Imported ancestry is admitted
+only when its seed satisfies the complete imported-session contract in
+[sessions-and-transcript](sessions-and-transcript.md) (INV-038, INV-039).
+
+Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
+or lineage. Its resume/fork relationship is immutable creation provenance, not a
+scheduler mode. The first native turn is still `FirstInSession`; imported
+entries are a context prefix, not a synthetic predecessor turn.
 
 ## The activation transaction
 
@@ -370,18 +378,23 @@ fixed frontier, and provenance must survive that coincidence.
 Construction authority is sealed: public code cannot assemble a
 `ResolvedContextFrontierSnapshot`, `AcceptedInputTurnStart`, or activated turn
 from raw identifiers; the producers are the sealed domain transitions and
-checked seams — eligibility activation, startup recovery, model-call closure
-(completion, refusal, and known failure in
-`crates/domain/src/model_execution.rs` derive terminal snapshots), and the
-fail-closed reconstitution seams that rebuild a stored snapshot only from its
-complete materialized membership. Persistence materializes complete snapshot
-membership (`context_frontier` + `context_frontier_member`), inserts only; a
-deferred constraint trigger (`context_frontier_requires_complete_membership`)
-re-asserts complete contiguous membership — exact declared count, positions
-`1..count` — at commit, and reconstitution rejects any stored snapshot whose
-resolved membership disagrees with the complete entry set — one identifier can
-never resolve differently. Transcript-ancestry resolution into a first frontier
-is unimplemented (open edge); `TranscriptFrontier` itself is
+checked seams — imported-frontier session creation (which constructs exactly one
+seed frontier from the selected normalized imported prefix), eligibility
+activation, startup recovery, model-call closure (completion, refusal, and known
+failure in `crates/domain/src/model_execution.rs` derive terminal snapshots),
+and the fail-closed reconstitution seams that rebuild a stored snapshot only
+from its complete materialized membership. Persistence materializes complete
+snapshot membership (`context_frontier` + `context_frontier_member`), inserts
+only; a deferred constraint trigger
+(`context_frontier_requires_complete_membership`) re-asserts complete contiguous
+membership — exact declared count, positions `1..count` — at commit, and
+reconstitution rejects any stored snapshot whose resolved membership disagrees
+with the complete entry set — one identifier can never resolve differently.
+Imported ancestry resolves only through the checked session-creation producer;
+its separate one-to-one `ImportedSessionSeed` must name the exact stored
+frontier identity whose membership matches the selected imported prefix.
+Equal-content reminting fails reconstitution. `SingleSource` ancestry resolution
+remains unimplemented. `TranscriptFrontier` itself is
 [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
@@ -490,8 +503,10 @@ clones over the shared pool; no shared locked service instance exists.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
-- Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
-  ancestry-to-first-frontier resolution is unimplemented.
+- Native `SingleSource` ancestry remains unschedulable
+  (`UnsupportedSessionAncestry`); selecting and resolving native fork boundaries
+  is unimplemented. Imported-conversation ancestry has its own exact
+  selected-prefix frontier path and does not close that fork question.
 - Continuation safe points after tool results consume pending steering through
   the atomic boundary in [tool-loop](tool-loop.md).
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes

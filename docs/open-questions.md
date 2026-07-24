@@ -26,11 +26,14 @@ identifiers refer to [scenarios.md](scenarios.md).
   [Tool safety](#tool-safety). The steering payload and stop marker are fixed by
   the
   [steering and stop decision](decisions.md#2026-07-23--atomic-steering-consumption-and-proof-bearing-stop-requests).
-  Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
-- **Selectable transcript-frontier boundaries.** Which terminal semantic
-  boundaries a client may select as a `TranscriptFrontier` remains open; the
-  accepted frontier semantics decide only how a validated selection resolves
-  into a new session's context. Blocks fork selection. (S17)
+  Imported semantic history is owned separately by
+  [conversation-import](spec/conversation-import.md). Blocks only those later
+  native semantic-history slices. (S02–S04, S08, S09, S17)
+- **Selectable native transcript-frontier boundaries.** Which terminal native
+  semantic boundaries a client may select as a `TranscriptFrontier` remains
+  open; imported-frontier selection is already owned by
+  [conversation-import](spec/conversation-import.md#imported-frontier-points).
+  Blocks native fork selection. (S17)
 
 ## Accepted-input content
 
@@ -43,16 +46,30 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Model-input projection
 
-- **Projection and summarization beyond the M3 role mapping.** The
+- **Projection and summarization beyond the implemented role mappings.** The
   [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
-  fixes only the admitted text-entry role mapping and exact frontier order.
-  Semantic compaction, selective omission, summarization, rebasing, and
-  context-window policy remain routed through the accepted frontier extension
-  gate and semantic-entry open-question routing — owned today by
+  and [model-call execution](spec/model-call-execution.md) own the implemented
+  model-input projections; [conversation-import](spec/conversation-import.md)
+  owns only normalized imported source content. Rich imported tool/result/media
+  projection, semantic compaction, selective omission, summarization, rebasing,
+  and context-window policy remain routed through the accepted frontier
+  extension gate owned by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
-  [sessions-and-transcript](spec/sessions-and-transcript.md) — including their
-  foundation-decision requirements. Blocks those extensions, not the admitted
-  text-only M3 rendering. (S02, S17)
+  [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
+  extensions. (S02, S17, S28)
+
+## Conversation import
+
+- **Exact mappings for additional source formats.** Codex sessions and older
+  backup formats have no converter. A later slice must select each source
+  format's exact mapping and converter version, with synthetic fixtures and
+  persistence round-trip coverage. The accepted format-versioned converter seam
+  remains fixed, and no later converter may reinterpret Claude Code version 1.
+  (S28)
+- **Import discovery and operational surfaces.** Directory traversal, file
+  watching, bulk-import policy, source-size admission, client presentation, and
+  raw-record access are not implemented. Their interfaces, limits, and
+  authorization remain undecided. (S28)
 
 ## Delegation
 
