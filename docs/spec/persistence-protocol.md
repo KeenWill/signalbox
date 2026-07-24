@@ -201,7 +201,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 
 ## Lock protocol
 
-Every application-issued SQL statement that takes an explicit row lock lives in
+Every Rust-issued SQL statement that takes an explicit row lock lives in
 `crates/persistence/src/lock_inventory.rs`. One explicit lock lives in the
 schema instead of the inventory: the deferred pending-steering source-turn
 trigger (migration `202607180005`) takes `FOR UPDATE` on the named
@@ -234,6 +234,22 @@ Locks per transaction, in acquisition order:
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
   transaction.
+- **Hub-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then the
+  transaction takes the exclusive transaction-level advisory lock for the prior
+  generation, updates the singleton to its successor, and also obtains the same
+  exclusive session-level advisory lock before commit. Commit releases the
+  transaction-level lock and retains the session-level lock. The advisory key is
+  the exact unsigned bit pattern
+  `generation XOR ((1396852273 << 32) OR 1396852273)`, where `1396852273` is
+  ASCII `SBF1`, reinterpreted unchanged as a two's-complement signed `i64` for
+  PostgreSQL.
+
+The guarded hub database keeps its fenced application pool and singleton guard
+behind one shutdown boundary. Graceful shutdown globally closes the pool and
+waits for every outstanding checkout before closing the guard session. If that
+explicit shutdown is omitted, or cancelled before the pool drain completes, the
+guard session remains retained until process exit rather than releasing while an
+escaped pool clone may still write.
 
 Two standing constraints (recorded beside the code):
 

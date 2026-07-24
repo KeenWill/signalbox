@@ -2407,6 +2407,7 @@ dependencies = [
 name = "signalbox-hubd"
 version = "0.0.0"
 dependencies = [
+ "rustix",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
