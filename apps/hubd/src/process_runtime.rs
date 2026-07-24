@@ -25,8 +25,8 @@ use signalbox_persistence::{
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, OutboxDeliveryDecision,
-        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
@@ -40,8 +40,9 @@ use signalbox_process_protocol::{
     ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
     FrameEncodeError, InputContent, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
     ModelSelection as WireModelSelection, ReconciliationOperation, RejectionDetail, RequestId,
-    ServerFrame, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
-    content_fragments, decode_client_line, encode_server_line, recover_bounded_client_request_id,
+    ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
+    TurnState, content_fragments, decode_client_line, encode_server_line,
+    recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -1808,6 +1809,11 @@ enum ProcessUpdateEvent {
         call: signalbox_domain::ModelCallId,
         state: DispatchedModelCallState,
     },
+    ToolBatchTransition {
+        turn: signalbox_domain::TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        state: DispatchedToolBatchState,
+    },
     TurnCompleted {
         turn: signalbox_domain::TurnId,
         call: signalbox_domain::ModelCallId,
@@ -1874,6 +1880,15 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                     state: *state,
                 }
             }
+            DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call,
+                state,
+            } => Self::ToolBatchTransition {
+                turn: *turn,
+                producing_call: *producing_call,
+                state: *state,
+            },
             DispatchedOutboxEventKind::TurnCompleted {
                 turn,
                 call,
@@ -1942,6 +1957,29 @@ impl ProcessUpdateEvent {
                 turn_id: wire_uuid(turn.into_uuid()),
                 model_call_id: wire_uuid(call.into_uuid()),
                 state: wire_model_call_state(*state),
+            },
+            Self::ToolBatchTransition {
+                turn,
+                producing_call,
+                state,
+            } => SessionEvent::ToolBatchTransition {
+                turn_id: wire_uuid(turn.into_uuid()),
+                model_call_id: wire_uuid(producing_call.into_uuid()),
+                state: match state {
+                    DispatchedToolBatchState::Proposed { frontier } => ToolBatchState::Proposed {
+                        frontier_id: wire_uuid(frontier.into_uuid()),
+                    },
+                    DispatchedToolBatchState::ResultsProjected { frontier } => {
+                        ToolBatchState::ResultsProjected {
+                            frontier_id: wire_uuid(frontier.into_uuid()),
+                        }
+                    }
+                    DispatchedToolBatchState::RecoveryRequired { attempt } => {
+                        ToolBatchState::RecoveryRequired {
+                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        }
+                    }
+                },
             },
             Self::TurnCompleted {
                 turn,
@@ -2153,12 +2191,13 @@ mod tests {
     use std::{error::Error, io, sync::Arc};
 
     use signalbox_domain::{
-        ContextFrontierId, ModelCallId, SemanticTranscriptEntryId, TurnAttemptId, TurnId,
+        ContextFrontierId, ModelCallId, SemanticTranscriptEntryId, ToolAttemptId, TurnAttemptId,
+        TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, InputContent,
         MAX_CONTENT_FRAGMENT_BYTES, ReconciliationOperation, ServerFrame, ServerMessage,
-        SessionEvent, TurnState, decode_server_line, encode_server_line,
+        SessionEvent, ToolBatchState, TurnState, decode_server_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
@@ -2180,7 +2219,7 @@ mod tests {
     use signalbox_persistence::{
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
-            DispatchedReconciliationOperation,
+            DispatchedReconciliationOperation, DispatchedToolBatchState,
         },
         process_read::{ProcessReconciliationOperation, ProcessTurnState},
     };
@@ -2657,6 +2696,24 @@ mod tests {
                     model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
                 },
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
+            }
+        );
+        let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(6));
+        let recovery = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::ToolBatchTransition {
+            turn,
+            producing_call: call,
+            state: DispatchedToolBatchState::RecoveryRequired {
+                attempt: tool_attempt,
+            },
+        });
+        assert_eq!(
+            recovery.wire(),
+            SessionEvent::ToolBatchTransition {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                state: ToolBatchState::RecoveryRequired {
+                    tool_attempt_id: CanonicalUuid::from_uuid(tool_attempt.into_uuid()),
+                },
             }
         );
     }
