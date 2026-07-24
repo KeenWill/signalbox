@@ -601,6 +601,36 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// S28 / INV-038: a newly inserted content-addressed raw blob cannot commit
+/// without at least one conversation-owned occurrence.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_unowned_raw_source_record_cannot_commit() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+         VALUES ($1, $2)",
+    )
+    .bind(vec![0x41_u8; 32])
+    .bind(vec![0x42_u8])
+    .execute(&mut *transaction)
+    .await?;
+
+    assert!(
+        transaction.commit().await.is_err(),
+        "deferred ownership constraint must reject an unowned raw blob"
+    );
+    let raw_blobs: i64 = sqlx::query_scalar("SELECT count(*) FROM imported_raw_source_record")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(raw_blobs, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-038: physical raw records are nonempty at the schema boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -863,7 +893,8 @@ async fn validate_real_transcript(
     let (_, _, repository) = service.into_parts();
     let stored = repository
         .load(winner)
-        .await?
+        .await
+        .map_err(|_| "real imported conversation could not be loaded")?
         .ok_or("real imported conversation disappeared")?;
     assert_eq!(stored.frontiers().count(), stored.entries().len());
     assert!(
