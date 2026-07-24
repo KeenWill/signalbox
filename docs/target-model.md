@@ -78,9 +78,9 @@ The implemented entry payloads are owned by
 [sessions-and-transcript](spec/sessions-and-transcript.md). The target entry set
 additionally includes, each awaiting its owning decision:
 
-- **Remaining content and outcome markers** — refusal, cancellation,
-  reconciliation, accepted-risk, mismatch, steering, tool-result, approval, and
-  other semantic facts whose exact entry boundaries remain open.
+- **Remaining content and outcome markers** — refusal, reconciliation,
+  accepted-risk, mismatch, tool-result, approval, and other semantic facts whose
+  exact entry boundaries remain open.
 - **Supersession** — editing is append-only: a replacement entry plus a typed
   supersession relation, never in-place mutation of committed history.
 - **Compaction summaries** — an explicit semantic marker standing for summarized

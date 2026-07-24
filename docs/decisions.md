@@ -207,13 +207,17 @@ protection.
 **Context.** Losing only the dedicated singleton-guard session releases its
 advisory lock while the old process can still have usable pooled sessions. A
 successor that ran recovery immediately could overlap those old writers; a
-monitoring interval or graceful drain cannot close that authority gap.
+monitoring interval or graceful drain cannot close that authority gap. Fencing
+only the immediately prior generation would still let an older process reconnect
+after an intermediate successor advanced the generation and then failed.
 
 **Decision.** Add a durable positive hub-fence generation and session advisory
 pool fencing as specified by
 [process-protocol](spec/process-protocol.md#durable-update-dispatch). A
 successor retains the prior generation exclusively before advancing to its own
-shared pool generation. Guard loss cancels rather than gracefully drains the old
+shared pool generation. After acquiring its shared generation lock, every pool
+connection verifies that the durable singleton still names that exact generation
+before becoming usable. Guard loss cancels rather than gracefully drains the old
 runtime.
 
 **Rejected alternatives.** Polling faster still leaves a gap. Treating row-lock
@@ -279,17 +283,17 @@ separate. The protocol supplies create/list, submit, transcript snapshot, and
 snapshot-first follow operations. Exactly one hubd dispatcher offers each next
 committed outbox event before transactionally advancing the durable prefix,
 yielding ordered at-least-once delivery. It polls idle storage every 50 ms, the
-process fan-out retains 1,024 events, and frames are capped at 8 MiB. One hub
-per database is enforced by holding the dedicated
-`pg_try_advisory_lock(1396856881, 1213547057)` connection from before migration
-through shutdown. Socket cleanup uses refused-connect plus same-device/inode
-revalidation inside an effective-user-owned, non-group/other-writable resolved
-parent, never unconditional replacement. Transcript snapshots include
-authoritative turn state and use start/turn/entry/content/end frames with text
-fragments capped at 1 MiB, so valid transcripts are not capped at one frame.
-Mutation command identities are caller-visible and reusable after ambiguity;
-submit requests also carry the exact expected defaults version that participates
-in durable command equality.
+process fan-out initially retained 1,024 events (superseded by the 64-event
+decision above), and frames are capped at 8 MiB. One hub per database is
+enforced by holding the dedicated `pg_try_advisory_lock(1396856881, 1213547057)`
+connection from before migration through shutdown. Socket cleanup uses
+refused-connect plus same-device/inode revalidation inside an
+effective-user-owned, non-group/other-writable resolved parent, never
+unconditional replacement. Transcript snapshots include authoritative turn state
+and use start/turn/entry/content/end frames with text fragments capped at 1 MiB,
+so valid transcripts are not capped at one frame. Mutation command identities
+are caller-visible and reusable after ambiguity; submit requests also carry the
+exact expected defaults version that participates in durable command equality.
 
 **Rejected alternatives.** Resurrecting the retired protocol wholesale: it has
 no accepted semantics. HTTP or a remote socket: either expands version one or
@@ -310,6 +314,56 @@ terminal-client crates, hubd configuration/composition, outbox consumption,
 INV-032/INV-033 enforcement, S01/S02/S24, and
 [open questions](open-questions.md#protocols-and-persistence). Authenticated
 transports and remote clients remain explicitly open upgrade paths.
+
+## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
+
+**Context.** Capability preparation and provider invocation need one same-call
+cancellation future that observes stop intent committed by another transaction
+or process. PostgreSQL is the durable authority, while the current adapter has
+no database-notification channel. Polling frequency fixes both cancellation
+latency and steady-state query load.
+
+**Decision.** The PostgreSQL model-call adapter polls the call's durable state
+every 25 milliseconds and resolves the signal when it observes
+`cancellation_requested` or `terminal`. Missed ticks delay from the next
+observation instead of bursting to catch up. This provisional interval bounds
+ordinary observation latency near 25 milliseconds while issuing at most about 40
+state reads per second for each active signal.
+
+**Rejected alternatives.** A process-local notification cannot observe another
+process or survive handoff. PostgreSQL `LISTEN`/`NOTIFY` would add connection
+and reconnection coordination to this slice. A longer interval lowers read load
+but slows stop response; a shorter interval raises load without a demonstrated
+latency requirement.
+
+**Affects.** PostgreSQL model-call authorization, capability-preparation and
+provider-invocation cancellation, and operational database load.
+
+## 2026-07-23 — Atomic steering consumption and proof-bearing stop requests
+
+**Context.** The M3 pending-steering boundary deliberately left safe-point
+consumption and matching interrupt application unimplemented until their
+semantic-history, ordering, atomicity, proof, provider-signal, and restart
+contracts could land together.
+
+**Decision.** Adopt atomic safe-point steering consumption and proof-bearing
+interrupt stop requests as specified by
+[sessions-and-transcript](spec/sessions-and-transcript.md),
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
+[model-call-execution](spec/model-call-execution.md), and
+[persistence-protocol](spec/persistence-protocol.md), with the accepted laws
+recorded by INV-036 and INV-037 in [the invariant catalog](invariants.md).
+
+**Rejected alternatives.** Copying steering content into semantic history would
+create a second authority; one-at-a-time or non-atomic consumption could expose
+acknowledged steering without its consuming call. Process-local stop flags,
+unproven command identifiers, and resuming prior-process attempts would lose
+durable causality or violate restart policy.
+
+**Affects.** S07/S08; INV-016/INV-029/INV-034/INV-036/INV-037; the domain and
+application spines; accepted-input, semantic-entry, scheduling, submit,
+model-execution, startup, runtime-bridge, and PostgreSQL implementation and
+tests. No client or `apps/hubd` surface changes.
 
 ## 2026-07-23 — Review-wave amendments: stale-head declines and exhaust-loop escalation
 

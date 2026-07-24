@@ -1,7 +1,8 @@
 # Process protocol
 
 This page specifies Signalbox process protocol version one and the terminal
-client that consumes it. It is the normative boundary between a local client
+client that consumes it, verified against the implementing stack through PR #177
+(`agent/terminal-client`). It is the normative boundary between a local client
 process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
 messages remain distinct representations.
 
@@ -214,17 +215,25 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
 - `queued { accepted_input_id, content }`;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
-  with state exactly `prepared` or `in_flight`;
+  with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
-- `failed { terminal_frontier_id }`;
+- `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
+  where `terminal_attempt_id` is null only for an evidence-free recovery
+  failure, and `terminal_model_call` is null when that failure or physical
+  attempt owns no call; otherwise it is `{ model_call_id, disposition }` with
+  disposition exactly `known_failed` or `cancelled`. A nonnull
+  `terminal_model_call` requires a nonnull `terminal_attempt_id`;
 - `completed { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
-  or
-- `refused { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
+- `refused { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
+- `cancelled { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`,
+  where `terminal_model_call_id` is null when cancellation closed the turn
+  before a call was prepared; or
+- `reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
 
 Each non-text frontier member is one `transcript_entry` with `entry_index`,
 `source_session_id`, `entry_id`, and one closed `entry` object:
-`turn_completed { turn_id }` or `turn_failed { turn_id }`. A text member begins
-with
+`turn_completed { turn_id }`, `turn_failed { turn_id }`, or
+`turn_cancelled { turn_id }`. A text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -259,18 +268,21 @@ startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`.
 
 The singleton `hub_fence_state` stores a positive generation. Every application
 pool connection acquires and retains a shared session advisory lock keyed by the
-ASCII namespace `SBF1` (`1396852273`) and this hub's generation before the
-connection becomes usable. A successor holding the singleton guard takes and
-retains the exclusive prior-generation fence, then transactionally advances the
-row before constructing its fenced pool. That exclusive request waits for all
-prior pooled sessions and prevents the old process from opening another usable
-connection. The first migration creates and initializes the row for a database
-that cannot have a prior fenced hub; later startups fence before running any
-newer migration. This fence migration belongs to Signalbox's initial deployment:
-the owner confirms that no deployed database or hub predates it, so there is no
-legacy unfenced writer to drain during the first installation. Importing or
-upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
-startup rather than wrapping.
+ASCII namespace `SBF1` (`1396852273`) and this hub's generation, then requires
+the durable singleton still to equal that generation before the connection
+becomes usable. A mismatch rejects the connection. A successor holding the
+singleton guard takes and retains the exclusive prior-generation fence, then
+transactionally advances the row before constructing its fenced pool. That
+exclusive request waits for all prior pooled sessions and prevents the old
+process from opening another usable connection: an older generation that tries
+again after a failed intermediate successor can acquire only its old shared
+lock, then fails the current-generation check. The first migration creates and
+initializes the row for a database that cannot have a prior fenced hub; later
+startups fence before running any newer migration. This fence migration belongs
+to Signalbox's initial deployment: the owner confirms that no deployed database
+or hub predates it, so there is no legacy unfenced writer to drain during the
+first installation. Importing or upgrading a pre-fence database is unsupported.
+Exhaustion or corruption fails startup rather than wrapping.
 
 Together these guards enforce one active hub process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a
@@ -302,20 +314,22 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one of
 these closed `event` objects:
 
-| Event                   | Additional members                                                            |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| `session_created`       | none                                                                          |
-| `input_accepted`        | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
-| `turn_activated`        | `turn_id` and `current_attempt_id`                                            |
-| `model_call_transition` | `turn_id`, `model_call_id`, and `state`                                       |
-| `turn_completed`        | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
-| `turn_failed`           | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
-| `turn_refused`          | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+| Event                          | Additional members                                                            |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| `session_created`              | none                                                                          |
+| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
+| `turn_activated`               | `turn_id` and `current_attempt_id`                                            |
+| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                       |
+| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
+| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
+| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
+| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 
-The model-call `state` object is exactly `prepared`, `in_flight`, or
-`terminal { disposition }`; terminal disposition is one of `completed`,
-`known_failed`, `refused`, `cancelled`, or `ambiguous`. Storage-version columns
-are not exposed as wire-version fields.
+The model-call `state` object is exactly `prepared`, `in_flight`,
+`cancellation_requested`, or `terminal { disposition }`; terminal disposition is
+one of `completed`, `known_failed`, `refused`, `cancelled`, or `ambiguous`.
+Storage-version columns are not exposed as wire-version fields.
 
 ## Follow synchronization
 
@@ -353,13 +367,14 @@ later than the triggering event, it makes presentation eligible only the
 previously undisplayed semantic material attributable to that exact terminal
 event: assistant text from its named turn and model call plus the exact
 completion marker for `turn_completed`, the exact failure marker for
-`turn_failed`, and no semantic material for `turn_refused`, whose refusal
-creates no content entry. It does not present material introduced by any later
-cursor. Such material remains ordered behind its buffered followed event, or
-behind a new authoritative snapshot after `resync_required`. Final durable
-content is deduplicated by source-qualified semantic-entry identity while
-transition-only events remain visible instead of being suppressed by a newer
-side snapshot.
+`turn_failed`, the exact cancellation marker for `turn_cancelled`, and no
+semantic material for `turn_refused` or `turn_reconciliation_required`, whose
+terminalization creates no content entry. It does not present material
+introduced by any later cursor. Such material remains ordered behind its
+buffered followed event, or behind a new authoritative snapshot after
+`resync_required`. Final durable content is deduplicated by source-qualified
+semantic-entry identity while transition-only events remain visible instead of
+being suppressed by a newer side snapshot.
 
 ## Terminal client
 
@@ -390,13 +405,14 @@ protocol or application errors other than the follow-specific `resync_required`
 control case, which reconnects for a fresh snapshot. After completion, `send`
 rereads and prints only authoritative committed assistant text produced for its
 exact turn. A failed or refused turn produces a typed diagnostic and a nonzero
-exit without reply text. `follow` prints the initial transcript and subsequent
-typed durable updates until interrupted. By default every process-derived text
-field written to a terminal preserves line feed but renders every other C0 code
-point, DEL, and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC
-execution. `--raw-output` is the explicit opt-in that writes those fields
-unchanged; the same safe-rendering choice covers assistant text, typed
-diagnostics, and durable updates.
+exit without reply text; cancelled and reconciliation-required turns do the same
+with their distinct typed diagnostics. `follow` prints the initial transcript
+and subsequent typed durable updates until interrupted. By default every
+process-derived text field written to a terminal preserves line feed but renders
+every other C0 code point, DEL, and C1 code points as visible `\u{...}` escapes,
+preventing ESC/OSC execution. `--raw-output` is the explicit opt-in that writes
+those fields unchanged; the same safe-rendering choice covers assistant text,
+typed diagnostics, and durable updates.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
