@@ -48,8 +48,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — fifteen files, `202607180001` through
-`202607230001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixteen files, `202607180001` through
+`202607240001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -76,7 +76,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the fifteen migrations):
+Implemented table families (across the sixteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`,
