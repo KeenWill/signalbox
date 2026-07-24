@@ -11,7 +11,8 @@
 //! history remain later-slice work.
 
 use crate::{
-    DurableCommandId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    ContextFrontierId, DurableCommandId, ImportedConversationId, ImportedTranscriptFrontier,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
     VersionedSessionConfigurationDefaults,
 };
 
@@ -76,14 +77,27 @@ pub struct TranscriptFrontier {
     boundary: uuid::Uuid,
 }
 
+/// How a new native session relates to one selected imported frontier.
+///
+/// Both variants leave the imported conversation immutable and create an
+/// independent Signalbox session. The distinction records only the client's
+/// creation-time intent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ImportedSessionRelationship {
+    /// Continue from the selected imported point.
+    Resume,
+    /// Branch from the selected imported point.
+    Fork,
+}
+
 /// Where one session's initial semantic conversation context came from.
 ///
-/// Ancestry is either none or exactly one immutable source consisting of a
-/// source session and an exact source transcript frontier. [`Self::None`]
-/// explicitly means that no prior session transcript supplied initial
-/// semantic context; it does not mean the session lacks task input,
-/// configuration, or a creation cause. Signalbox never infers ancestry from
-/// related-session links, task briefs, copied text, or delegation.
+/// Ancestry is either none, exactly one native source session and transcript
+/// frontier, or exactly one imported frontier and its resume/fork
+/// relationship. [`Self::None`] explicitly means that no prior transcript
+/// supplied initial semantic context; it does not mean the session lacks task
+/// input, configuration, or a creation cause. Signalbox never infers ancestry
+/// from related-session links, task briefs, copied text, or delegation.
 ///
 /// S17 / INV-003: ancestry never implies a creation cause and no variant
 /// carries one:
@@ -111,6 +125,15 @@ pub enum TranscriptAncestry {
         /// The exact immutable boundary selected within the source
         /// transcript.
         source_frontier: TranscriptFrontier,
+    },
+    /// Exactly one immutable imported frontier supplied initial semantic
+    /// context.
+    ImportedConversation {
+        /// The selected inclusive imported entry boundary. Its owning
+        /// conversation is carried by the frontier and is not duplicated.
+        source_frontier: ImportedTranscriptFrontier,
+        /// The client's creation-time relationship to the imported point.
+        relationship: ImportedSessionRelationship,
     },
 }
 
@@ -293,6 +316,122 @@ impl std::hash::Hash for CreateSession {
     }
 }
 
+/// The distinct command payload for creating a native session from imported
+/// history.
+///
+/// This value selects one imported conversation and addressable entry
+/// boundary at session-creation time. Import itself never constructs this
+/// command or chooses its relationship.
+#[derive(Clone, Copy, Debug)]
+pub struct CreateSessionFromImportedFrontier {
+    command_id: DurableCommandId,
+    imported_frontier: ImportedTranscriptFrontier,
+    relationship: ImportedSessionRelationship,
+    initial_configuration_defaults: SessionConfigurationDefaults,
+}
+
+impl CreateSessionFromImportedFrontier {
+    /// Creates the complete canonical caller payload.
+    pub const fn new(
+        command_id: DurableCommandId,
+        imported_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            command_id,
+            imported_frontier,
+            relationship,
+            initial_configuration_defaults,
+        }
+    }
+
+    /// Returns the owner-global durable command identity.
+    pub const fn command_id(&self) -> DurableCommandId {
+        self.command_id
+    }
+
+    /// Returns the selected immutable imported conversation.
+    pub const fn imported_conversation(&self) -> ImportedConversationId {
+        self.imported_frontier.conversation()
+    }
+
+    /// Returns the selected inclusive imported entry boundary.
+    pub const fn imported_frontier(&self) -> ImportedTranscriptFrontier {
+        self.imported_frontier
+    }
+
+    /// Returns the client's creation-time relationship to the imported point.
+    pub const fn relationship(&self) -> ImportedSessionRelationship {
+        self.relationship
+    }
+
+    /// Returns the complete unversioned initial defaults payload.
+    pub const fn initial_configuration_defaults(&self) -> SessionConfigurationDefaults {
+        self.initial_configuration_defaults
+    }
+
+    /// Establishes defaults version one for the session this command creates.
+    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
+        VersionedSessionConfigurationDefaults::establish(self.initial_configuration_defaults)
+    }
+}
+
+/// The durable-command comparison payload excludes only command identity.
+impl PartialEq for CreateSessionFromImportedFrontier {
+    fn eq(&self, other: &Self) -> bool {
+        self.imported_frontier == other.imported_frontier
+            && self.relationship == other.relationship
+            && self.initial_configuration_defaults == other.initial_configuration_defaults
+    }
+}
+
+impl Eq for CreateSessionFromImportedFrontier {}
+
+impl std::hash::Hash for CreateSessionFromImportedFrontier {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.imported_frontier.hash(state);
+        self.relationship.hash(state);
+        self.initial_configuration_defaults.hash(state);
+    }
+}
+
+/// The exact Signalbox-owned context frontier materialized for one
+/// imported-seeded session.
+///
+/// This one-to-one record is separate from [`TranscriptAncestry`]: ancestry
+/// names the immutable external source, while this value names the local
+/// context artifact. Its fields are private, and the complete imported-prefix
+/// construction and reconstitution seams remain sealed until the imported
+/// semantic-entry projection can validate exact membership.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ImportedSessionSeed {
+    session: SessionId,
+    seed_frontier: ContextFrontierId,
+}
+
+impl ImportedSessionSeed {
+    pub(crate) const fn from_validated_parts(
+        session: SessionId,
+        seed_frontier: ContextFrontierId,
+    ) -> Self {
+        Self {
+            session,
+            seed_frontier,
+        }
+    }
+
+    /// Returns the imported-seeded session that owns this one-to-one record.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact generated context-frontier identity.
+    pub const fn seed_frontier(&self) -> ContextFrontierId {
+        self.seed_frontier
+    }
+}
+
 /// The canonical initial state of one session and its defaults.
 ///
 /// This pure value does not claim that a transaction committed. It is carried
@@ -306,6 +445,18 @@ pub struct InitialSession {
 }
 
 impl InitialSession {
+    pub(crate) const fn from_validated_imported_creation(
+        id: SessionId,
+        provenance: SessionCreationProvenance,
+        configuration_defaults: VersionedSessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            id,
+            provenance,
+            configuration_defaults,
+        }
+    }
+
     /// Returns the hub-minted session identity.
     pub const fn id(&self) -> SessionId {
         self.id
@@ -374,6 +525,18 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) const fn from_validated_imported_reconstitution(
+        id: SessionId,
+        creation_provenance: SessionCreationProvenance,
+        current_configuration_defaults: VersionedSessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            id,
+            creation_provenance,
+            current_configuration_defaults,
+        }
+    }
+
     /// Returns the durable conversation identity.
     pub const fn id(&self) -> SessionId {
         self.id
@@ -499,6 +662,14 @@ impl SessionReconstitutionInput {
                 SessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
             ));
         }
+        if matches!(
+            self.provenance.ancestry(),
+            TranscriptAncestry::ImportedConversation { .. }
+        ) {
+            return Err(fail(
+                SessionReconstitutionFailure::ImportedSessionSeedUnavailable,
+            ));
+        }
 
         Ok(Session {
             id: self.stored_session,
@@ -522,6 +693,9 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The pointer and selected defaults record name different versions.
     CurrentDefaultsVersionMismatch,
+    /// Imported ancestry requires the separate exact-prefix seed
+    /// reconstitution seam.
+    ImportedSessionSeedUnavailable,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -664,7 +838,11 @@ impl CreateSession {
     ) -> Result<PreparedCreateSession, CreateSessionPreparationError> {
         match (self.provenance.cause(), self.provenance.ancestry()) {
             (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
-            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::SingleSource { .. }) => {
+            (
+                SessionCreationCause::OwnerInitiated,
+                TranscriptAncestry::SingleSource { .. }
+                | TranscriptAncestry::ImportedConversation { .. },
+            ) => {
                 return Err(CreateSessionPreparationError {
                     session,
                     command: self,
@@ -785,7 +963,11 @@ impl CreateSessionReconstitutionInput {
         }
         match (self.provenance.cause(), self.provenance.ancestry()) {
             (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
-            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::SingleSource { .. }) => {
+            (
+                SessionCreationCause::OwnerInitiated,
+                TranscriptAncestry::SingleSource { .. }
+                | TranscriptAncestry::ImportedConversation { .. },
+            ) => {
                 return Err(fail(
                     CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
                 ));
@@ -903,15 +1085,20 @@ mod tests {
     use signalbox_expect_table::table;
 
     use super::{
-        CreateSession, CreateSessionPreparationFailure, CreateSessionReconstitutionFailure,
-        CreateSessionReconstitutionInput, SessionCreationCause, SessionCreationProvenance,
-        SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-        test_frontier,
+        CreateSession, CreateSessionFromImportedFrontier, CreateSessionPreparationFailure,
+        CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput,
+        ImportedSessionRelationship, ImportedSessionSeed, SessionCreationCause,
+        SessionCreationProvenance, SessionReconstitutionFailure, SessionReconstitutionInput,
+        TranscriptAncestry, test_frontier,
     };
-    use crate::test_support::{command_id, direct, session_id};
+    use crate::imported_conversation::test_imported_frontier;
+    use crate::test_support::{
+        command_id, context_frontier_id, direct, imported_conversation_id,
+        imported_transcript_entry_id, session_id,
+    };
     use crate::{
-        ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        VersionedSessionConfigurationDefaults,
+        ImportedTranscriptPosition, ModelSelectionRequest, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, VersionedSessionConfigurationDefaults,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -983,6 +1170,97 @@ mod tests {
         };
         assert_eq!(carried_session, source_session);
         assert_eq!(carried_frontier, source_frontier);
+    }
+
+    /// S28 / INV-003 / INV-039: imported ancestry retains the exact imported
+    /// boundary and resume/fork relationship without duplicating the
+    /// conversation identity outside the frontier.
+    #[test]
+    fn s28_inv003_inv039_imported_ancestry_records_exact_frontier_and_relationship() {
+        let source_frontier = test_imported_frontier(
+            imported_conversation_id(1),
+            imported_transcript_entry_id(2),
+            ImportedTranscriptPosition::try_from_u64(3).expect("positive position"),
+        );
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::ImportedConversation {
+                source_frontier,
+                relationship: ImportedSessionRelationship::Resume,
+            },
+        );
+
+        let TranscriptAncestry::ImportedConversation {
+            source_frontier: carried_frontier,
+            relationship,
+        } = provenance.ancestry()
+        else {
+            panic!("imported provenance must retain its selected source");
+        };
+        assert_eq!(carried_frontier, source_frontier);
+        assert_eq!(carried_frontier.conversation(), imported_conversation_id(1));
+        assert_eq!(relationship, ImportedSessionRelationship::Resume);
+        assert_ne!(
+            provenance.ancestry(),
+            TranscriptAncestry::ImportedConversation {
+                source_frontier,
+                relationship: ImportedSessionRelationship::Fork,
+            }
+        );
+    }
+
+    /// S28 / INV-015 / INV-039: the separate seed record retains the exact
+    /// session and generated context-frontier identities; equal semantic
+    /// content cannot substitute another frontier identity at this boundary.
+    #[test]
+    fn s28_inv015_inv039_imported_seed_keeps_exact_local_frontier_identity() {
+        let seed = ImportedSessionSeed {
+            session: session_id(1),
+            seed_frontier: context_frontier_id(2),
+        };
+
+        assert_eq!(seed.session(), session_id(1));
+        assert_eq!(seed.seed_frontier(), context_frontier_id(2));
+        assert_ne!(
+            seed,
+            ImportedSessionSeed {
+                session: session_id(1),
+                seed_frontier: context_frontier_id(3),
+            }
+        );
+    }
+
+    /// S28 / INV-039: the baseline current-session reconstitution seam cannot
+    /// accept imported ancestry without the separate exact-prefix seed facts.
+    #[test]
+    fn s28_inv039_current_session_requires_imported_seed_reconstitution() {
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::ImportedConversation {
+                source_frontier: test_imported_frontier(
+                    imported_conversation_id(1),
+                    imported_transcript_entry_id(2),
+                    ImportedTranscriptPosition::first(),
+                ),
+                relationship: ImportedSessionRelationship::Fork,
+            },
+        );
+        let input = matching_session_input(
+            session_id(3),
+            provenance,
+            SessionConfigurationDefaultsVersion::first(),
+            defaults(4),
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("imported ancestry without its exact seed must fail closed");
+
+        assert_eq!(
+            error.failure(),
+            SessionReconstitutionFailure::ImportedSessionSeedUnavailable
+        );
+        assert_eq!(error.input(), &input);
     }
 
     /// S01 / S17 / INV-003: the same owner-initiated cause pairs with empty
@@ -1316,6 +1594,75 @@ mod tests {
         assert_ne!(
             create,
             CreateSession::new(command_id(3), owner_initiated_empty(), defaults(6))
+        );
+    }
+
+    /// S28 / INV-012 / INV-039: imported-session command comparison excludes
+    /// only command identity; its conversation, boundary, relationship, and
+    /// defaults all remain replay-significant.
+    #[test]
+    fn s28_inv012_inv039_imported_creation_comparison_payload_is_complete() {
+        let conversation = imported_conversation_id(1);
+        let frontier = test_imported_frontier(
+            conversation,
+            imported_transcript_entry_id(2),
+            ImportedTranscriptPosition::first(),
+        );
+        let create = CreateSessionFromImportedFrontier::new(
+            command_id(3),
+            frontier,
+            ImportedSessionRelationship::Resume,
+            defaults(4),
+        );
+
+        assert_eq!(
+            create,
+            CreateSessionFromImportedFrontier::new(
+                command_id(5),
+                frontier,
+                ImportedSessionRelationship::Resume,
+                defaults(4),
+            )
+        );
+        assert_ne!(
+            create,
+            CreateSessionFromImportedFrontier::new(
+                command_id(3),
+                test_imported_frontier(
+                    imported_conversation_id(6),
+                    imported_transcript_entry_id(2),
+                    ImportedTranscriptPosition::first(),
+                ),
+                ImportedSessionRelationship::Resume,
+                defaults(4),
+            )
+        );
+        assert_ne!(
+            create,
+            CreateSessionFromImportedFrontier::new(
+                command_id(3),
+                frontier,
+                ImportedSessionRelationship::Fork,
+                defaults(4),
+            )
+        );
+        assert_ne!(
+            create,
+            CreateSessionFromImportedFrontier::new(
+                command_id(3),
+                frontier,
+                ImportedSessionRelationship::Resume,
+                defaults(7),
+            )
+        );
+        assert_eq!(create.command_id(), command_id(3));
+        assert_eq!(create.imported_conversation(), conversation);
+        assert_eq!(create.imported_frontier(), frontier);
+        assert_eq!(create.relationship(), ImportedSessionRelationship::Resume);
+        assert_eq!(create.initial_configuration_defaults(), defaults(4));
+        assert_eq!(
+            create.establish_initial_defaults().version(),
+            SessionConfigurationDefaultsVersion::first()
         );
     }
 

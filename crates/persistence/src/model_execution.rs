@@ -2153,7 +2153,8 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
-            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. } => None,
         })
         .chain(pending_steering.iter().copied())
         .collect::<BTreeSet<_>>();

@@ -16,7 +16,9 @@ hub-minted `ImportedConversationId`, one closed-source format and converter
 version, one source-content digest, an immutable nonempty sequence of raw source
 record occurrences, and an immutable nonempty sequence of normalized
 `ImportedTranscriptEntry` values (INV-001, INV-038). Every raw record produces
-at least one normalized entry.
+at least one normalized entry. Application orchestration rejects a converted
+aggregate carrying any conversation or entry identity that the hub did not
+supply to that conversion invocation.
 
 Imported entries never carry an `AcceptedInputId`, `TurnId`, `TurnAttemptId`,
 `ModelCallId`, native tool identity, or native terminal evidence. They record
@@ -336,6 +338,10 @@ The Postgres representation uses append-only `imported_raw_source_record` blobs,
 and `imported_transcript_entry` members. Imported text and opaque media data use
 UTF-8 `bytea`; complete structured records and nested values use a checked
 adapter encoding of the domain algebra, never provider JSON as a domain type.
+Every encoded top-level value carries a fixed format version and payload-kind
+discriminator; a decoder rejects a value from another column kind rather than
+reinterpreting it. Encoded collection counts bound parsing but never directly
+drive capacity allocation: collections grow fallibly after each decoded element.
 
 One transaction resolves or inserts a complete aggregate:
 
@@ -351,12 +357,16 @@ One transaction resolves or inserts a complete aggregate:
   entry; a concurrent header-insert loser re-inspects and completely
   reconstitutes the winner, returning `AlreadyImported` only after the same
   conversion-equivalence check, and raw-blob insert conflicts likewise reload
-  and verify the winning bytes before reuse; and
+  and verify the winning bytes before reuse; writers acquire both shared raw
+  hashes and globally unique imported-entry identities in their respective
+  sorted key order while storing physical positions explicitly; and
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
   globally distinct imported-entry identities, valid raw-record references, and
-  agreement between every member's owner and header.
+  agreement between every member's owner and header. Checked loading also
+  compares every raw occurrence's declared entry count with its reconstructed
+  normalized members.
 
 No partial aggregate can commit (INV-038).
 `ImportedConversationRepository::load` returns `None` only when the requested
@@ -364,7 +374,12 @@ header does not exist. Once a header exists, a hash mismatch, missing blob or
 member, gap, duplicate, unknown discriminator/version, contradictory variant
 columns, invalid source value, or domain correlation failure is typed
 corruption. Complete storage records pass through the domain-owned
-reconstitution seam; adapters never default or drop a malformed value (INV-002).
+reconstitution seam; adapters never default or drop a malformed value. For
+Claude Code version 1, that seam independently re-derives every expected entry
+from each complete normalized record and requires exact agreement in entry
+count, order, content, speaker, and source metadata. It also reapplies the
+128-container bound to complete records and entry-carried structured values
+(INV-002).
 
 ## Test data and local validation
 
