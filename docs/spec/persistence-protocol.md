@@ -1,15 +1,15 @@
 # Persistence protocol
 
-This page describes the implemented persistence protocol of the Signalbox hub as
-verified against the implementing stack through PR #175 (`agent/stop-requests`).
-It covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+The baseline persistence protocol was verified through PR #175
+(`agent/stop-requests`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -76,13 +76,18 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the sixteen migrations):
+Implemented table families (across the forward-only migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
+  `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `submit_input_command`,
   `decide_tool_request_command`);
-- `session`, `session_defaults_version`, `session_current_defaults`,
-  `session_scheduler`;
+- `session`, `imported_session_seed`, `session_defaults_version`,
+  `session_current_defaults`, `session_scheduler`;
+- `imported_raw_source_record`, `imported_conversation`,
+  `imported_conversation_raw_record`, and `imported_transcript_entry`, whose
+  exact append-only representation, idempotency, and completeness rules are
+  owned by [conversation-import](conversation-import.md);
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
@@ -110,12 +115,15 @@ Representation rules, all enforced in the schema:
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
-  not a convention. Mutable lifecycle tables carry guard triggers instead:
-  `turn_lifecycle` rows must be inserted `queued`, transition only
-  monotonically, keep identity/origin/order and written starts write-once, and
-  become immutable at `terminal`; `turn_attempt` rows are inserted `prepared`
-  and an `ended` attempt is immutable. Why: restart trusts durable rows as
-  evidence, so the schema itself must forbid rewriting them (INV-006, INV-007).
+  not a convention. This includes raw-record blobs and occurrences,
+  imported-conversation headers and members, imported-frontier command records,
+  session seed projections, and every existing historical fact. Mutable
+  lifecycle tables carry guard triggers instead: `turn_lifecycle` rows must be
+  inserted `queued`, transition only monotonically, keep identity/origin/order
+  and written starts write-once, and become immutable at `terminal`;
+  `turn_attempt` rows are inserted `prepared` and an `ended` attempt is
+  immutable. Why: restart trusts durable rows as evidence, so the schema itself
+  must forbid rewriting them (INV-006, INV-007).
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -148,10 +156,13 @@ Representation rules, all enforced in the schema:
   inside a transaction while every commit boundary sees the complete shape: each
   claimed registry row has exactly one typed command record, each
   `submit_input_command` terminal result correlates with exactly its committed
-  effects, each `context_frontier` header has complete contiguous ordered
-  membership, and turn/attempt/semantic-entry writes re-assert the complete turn
-  final state (origin entry, frontier prefix relationships, live-attempt
-  cardinality, failure-entry correlation).
+  effects, each imported-conversation and context-frontier header has complete
+  contiguous ordered membership, each imported-frontier session names its exact
+  aggregate, boundary, and relationship and has exactly one immutable
+  `imported_session_seed` naming its exact seed frontier, and
+  turn/attempt/semantic-entry writes re-assert the complete turn final state
+  (origin entry, frontier prefix relationships, live-attempt cardinality,
+  failure-entry correlation).
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
@@ -173,18 +184,18 @@ states only their storage representation and adapter mechanics.
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
-`replace_session_defaults`, `submit_input`, `decide_tool_request`). Storage
-versions are kind-scoped: defaults-bearing create/replace records write version
-2 and reconstitute version 1 with the disabled dangerous-tool posture, while
-submit and decision records use version 1. Each kind has one typed subordinate
-record keyed by `command_id` that stores every caller-supplied semantic field in
-typed, `CHECK`-constrained columns, plus the terminal `applied`/`rejected`
-result and its typed result fields; result-shape `CHECK` constraints tie each
-rejection kind to exactly its fields, and deferred reverse constraints require
-exactly one typed record per claimed registry row at commit. Why: typed per-kind
-records keep replay semantics reviewable and constraint-checked, where a
-universal serialized payload would make the serializer a second semantic
-authority.
+`create_session_from_imported_frontier`, `replace_session_defaults`,
+`submit_input`, `decide_tool_request`) and a kind-scoped `storage_version`.
+Defaults-bearing create/replace records write version 2 and reconstitute version
+1 with the disabled dangerous-tool posture, while imported-create, submit, and
+decision records use version 1. Each kind has one typed subordinate record keyed
+by `command_id` that stores every caller-supplied semantic field in typed,
+`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
+its typed result fields; result-shape `CHECK` constraints tie each rejection
+kind to exactly its fields, and deferred reverse constraints require exactly one
+typed record per claimed registry row at commit. Why: typed per-kind records
+keep replay semantics reviewable and constraint-checked, where a universal
+serialized payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -198,9 +209,12 @@ current state inside the claim transaction, while `CreateSession` — which has 
 current session state to lock — arrives as an already-prepared
 `PreparedCreateSession` value and is inserted after the claim
 (`create_session.rs`). Authoritative rejections claim the identifier and commit
-their typed record exactly as applied results do. Replay resolution —
-reconstruct the recorded command, compare structurally, return the recorded
-result or `ConflictingReuse` — follows the owner page's contract.
+their typed record exactly as applied results do. Owner-specified pre-claim
+admission errors are different: after registry inspection, a missing
+conversation named by the selected imported frontier or a boundary absent from
+that conversation returns without inserting a claim or typed record. Replay
+resolution — reconstruct the recorded command, compare structurally, return the
+recorded result or `ConflictingReuse` — follows the owner page's contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.
@@ -218,6 +232,13 @@ because it fires outside the inventory's view.
 
 Locks per transaction, in acquisition order:
 
+- **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
+  insertion and the command/session uniqueness constraints serialize competing
+  command identities. The adapter loads the aggregate named by
+  `frontier.conversation()`; that selected aggregate is immutable and
+  append-only, so complete loading and boundary resolution need no mutable-state
+  lock. Semantic-entry candidates are requested only after the resulting checked
+  prefix fixes their cardinality.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the
@@ -436,26 +457,27 @@ protocol scope). Implemented storage:
 Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
-exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; an applied SubmitInput that creates a turn origin appends
-`input_accepted`, while `PendingSteering` appends nothing until terminal
-reclassification mints its successor turn and appends that correlated
-`input_accepted`; an applied StartEligibleTurn appends `turn_activated`. Startup
-recovery appends `turn_failed` for a failed lost turn and
-`turn_reconciliation_required` when stopped issued work becomes ambiguous;
-terminal reclassification of pending steering appends its correlated
-`input_accepted`. Model-call state transitions append `model_call_transition`,
-tool-round creation appends `tool_batch_transition { proposed }`, all-resolved
-result projection appends `tool_batch_transition { results_projected }`, and an
-external-effect ambiguity appends `tool_batch_transition { recovery_required }`.
-Completion closure appends `turn_completed`, refusal closure appends
-`turn_refused`, and known-failure closure appends `turn_failed`;
-interrupt-confirmed cancellation appends `turn_cancelled`, and live stopped
-ambiguity appends `turn_reconciliation_required`; an interrupt against a parked
-ambiguous tool attempt appends the same event kind with that exact tool-attempt
-reference. A guarded transition that changes zero rows appends zero events. Why:
-writing the event in the committing transaction makes the dual-write failure
-(state without event, or event without state) unrepresentable.
+exists in application code. Implemented appends: `CreateSession` and
+`CreateSessionFromImportedFrontier` handling each append `session_created`; an
+applied `SubmitInput` that creates a turn origin appends `input_accepted`, while
+`PendingSteering` appends nothing until terminal reclassification mints its
+successor turn and appends that correlated `input_accepted`; an applied
+`StartEligibleTurn` appends `turn_activated`. Startup recovery appends
+`turn_failed` for a failed lost turn and `turn_reconciliation_required` when
+stopped issued work becomes ambiguous; terminal reclassification of pending
+steering appends its correlated `input_accepted`. Model-call state transitions
+append `model_call_transition`, tool-round creation appends
+`tool_batch_transition { proposed }`, all-resolved result projection appends
+`tool_batch_transition { results_projected }`, and an external-effect ambiguity
+appends `tool_batch_transition { recovery_required }`. Completion closure
+appends `turn_completed`, refusal closure appends `turn_refused`, and
+known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
+appends `turn_cancelled`, and live stopped ambiguity appends
+`turn_reconciliation_required`; an interrupt against a parked ambiguous tool
+attempt appends the same event kind with that exact tool-attempt reference. A
+guarded transition that changes zero rows appends zero events. Why: writing the
+event in the committing transaction makes the dual-write failure (state without
+event, or event without state) unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a
@@ -487,8 +509,8 @@ by [process-protocol](process-protocol.md).
   [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is admitted only for the tool-loop yield/approval path;
   no other producer can construct a predecessor-linked attempt.
-- Frontier lineage checks assume `none` ancestry; fork ancestry must replace
-  that assumption.
+- Frontier lineage checks admit `none` and checked imported-frontier ancestry;
+  native `SingleSource` fork ancestry remains unimplemented.
 - The aggregate-map rows for model calls and the tool loop have landed; provider
   evidence, authority transfers, and fatal cancellation intent are not yet in
   the schema.
