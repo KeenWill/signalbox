@@ -16,16 +16,17 @@ use std::{
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    DangerousToolAutoApproval, FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, TurnAttemptId, TurnId,
+    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn,
+    StoppedToolRoundModelCallIdentities, ToolRoundModelCallIdentities, TurnAttemptId, TurnId,
     UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::{ClassifyOperatorFailure, OperatorFailureClass};
+use crate::{ClassifyOperatorFailure, OperatorFailureClass, ResolvedToolConversationEntry};
 
 /// Non-secret durable name of the credential pinned for one model call.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,6 +213,10 @@ pub enum PrepareModelCallOutcome {
         request: Box<PreparedModelCallRequest>,
         /// Non-secret credential reference captured with the call.
         credential_reference: ModelCallCredentialReference,
+        /// Frozen dangerous blanket posture for initial request decisions.
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        /// Exact durable authority for every tool-related frontier entry.
+        tool_entries: Box<[ResolvedToolConversationEntry]>,
     },
     /// Immutable target resolution failed and the turn closed atomically.
     TargetUnavailable(Box<FailedModelCallTurn>),
@@ -329,6 +334,24 @@ pub enum ModelCallAuthorizationReread {
     Cancelled,
 }
 
+/// Fresh identity candidates for a terminal observation.
+///
+/// A tool-using response carries both legal closures because an interrupt can
+/// race after provider acceptance. The authoritative transaction selects the
+/// continuing or stopped shape only after locking fresh lifecycle state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelCallTerminalIdentityCandidates {
+    /// One lifecycle-independent terminal identity shape.
+    Exact(ModelCallTerminalIdentities),
+    /// Both legal closures for one tool-using response.
+    ToolRound {
+        /// Nonterminal same-turn continuation identities.
+        continuing: ToolRoundModelCallIdentities,
+        /// Applied-interrupt terminal closure identities.
+        stopped: StoppedToolRoundModelCallIdentities,
+    },
+}
+
 /// Fresh transaction committing a provider-neutral terminal observation.
 pub trait CommitModelCallObservationTransaction {
     /// Adapter-specific classified failure.
@@ -342,7 +365,7 @@ pub trait CommitModelCallObservationTransaction {
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
-        identities: ModelCallTerminalIdentities,
+        identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
     where
@@ -979,6 +1002,7 @@ where
                 Ok(PrepareModelCallOutcome::Ready {
                     request,
                     credential_reference,
+                    ..
                 }) => break (request, credential_reference),
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
                     return Ok(ModelCallExecutionOutcome::TargetUnavailable(failed));
@@ -1210,8 +1234,8 @@ where
     fn next_terminal_identities(
         &mut self,
         observation: &ModelCallTerminalObservation,
-    ) -> ModelCallTerminalIdentities {
-        match observation {
+    ) -> ModelCallTerminalIdentityCandidates {
+        ModelCallTerminalIdentityCandidates::Exact(match observation {
             ModelCallTerminalObservation::Completed { assistant_text } => {
                 let assistant_entries = (0..assistant_text.len())
                     .map(|_| self.ids.next_semantic_entry_id())
@@ -1248,7 +1272,7 @@ where
             ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
-        }
+        })
     }
 }
 
@@ -1489,6 +1513,8 @@ mod tests {
         PrepareModelCallOutcome::Ready {
             request: Box::new(request),
             credential_reference: credential_reference(),
+            dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            tool_entries: Box::new([]),
         }
     }
 
@@ -1942,7 +1968,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _observation: CorrelatedModelCallTerminalObservation,
-            _identities: ModelCallTerminalIdentities,
+            _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
         ) -> Result<ModelCallTerminalOutcome, Self::Error>
         where
@@ -1976,7 +2002,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             observation: CorrelatedModelCallTerminalObservation,
-            _identities: ModelCallTerminalIdentities,
+            _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
         ) -> Result<ModelCallTerminalOutcome, Self::Error>
         where

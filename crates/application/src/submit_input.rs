@@ -186,16 +186,21 @@ pub trait SubmitInputTransaction {
     type Error;
 
     /// Handles one canonical command and its hub-minted identity candidates.
-    fn handle<NextTurn>(
+    fn handle<NextTurn, NextToolCancellation>(
         &mut self,
         command: DomainSubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
+            + Send;
 }
 
 /// Coordinates the durable input-submission use case.
@@ -256,7 +261,7 @@ where
             self.ids.next_semantic_entry_id(),
             self.ids.next_context_frontier_id(),
         );
-        let ids = &mut self.ids;
+        let ids = std::sync::Mutex::new(&mut self.ids);
 
         let outcome = self
             .transaction
@@ -265,7 +270,23 @@ where
                 accepted_input,
                 turn,
                 cancellation_identities,
-                |_| ids.next_turn_id(),
+                |_| {
+                    ids.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .next_turn_id()
+                },
+                |requests| {
+                    let mut ids = ids
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (
+                        requests
+                            .iter()
+                            .map(|_| ids.next_semantic_entry_id())
+                            .collect(),
+                        ids.next_context_frontier_id(),
+                    )
+                },
             )
             .await;
         if matches!(
@@ -517,16 +538,23 @@ mod tests {
     impl SubmitInputTransaction for FakeTransaction {
         type Error = FakeTransactionError;
 
-        fn handle<NextTurn>(
+        fn handle<NextTurn, NextToolCancellation>(
             &mut self,
             command: DomainSubmitInput,
             accepted_input: AcceptedInputId,
             turn: Option<TurnId>,
             _cancellation_identities: CancelledModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
+            _next_tool_cancellation: NextToolCancellation,
         ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+            NextToolCancellation: FnMut(
+                    &[signalbox_domain::ToolRequestId],
+                ) -> (
+                    Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                    signalbox_domain::ContextFrontierId,
+                ) + Send,
         {
             self.observed.push((command, accepted_input, turn));
             ready(

@@ -2837,6 +2837,8 @@ pub enum PrepareModelCallOutcome {
     Ready {
         request: Box<PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        tool_entries: Box<[ResolvedToolConversationEntry]>,
     },
     TargetUnavailable(Box<FailedModelCallTurn>),
 }
@@ -2911,13 +2913,21 @@ pub enum ModelCallAuthorizationReread {
     Cancelled,
 }
 
+pub enum ModelCallTerminalIdentityCandidates {
+    Exact(ModelCallTerminalIdentities),
+    ToolRound {
+        continuing: ToolRoundModelCallIdentities,
+        stopped: StoppedToolRoundModelCallIdentities,
+    },
+}
+
 pub trait CommitModelCallObservationTransaction {
     type Error: ClassifyOperatorFailure;
     fn commit_observation<NextTurn>(
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
-        identities: ModelCallTerminalIdentities,
+        identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
     where
@@ -3419,16 +3429,21 @@ pub enum SubmitInputOutcome {
 pub trait SubmitInputTransaction {
     type Error;
 
-    fn handle<NextTurn>(
+    fn handle<NextTurn, NextToolCancellation>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[ToolRequestId],
+            ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
+            + Send;
 }
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
@@ -3446,6 +3461,126 @@ impl<
         &mut self,
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error>;
+}
+```
+
+## application: tool_loop_ports
+
+```rust
+pub enum ResolvedToolConversationEntry {
+    AssistantToolUse {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+    },
+    ExecutionResult {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+        attempt: EndedToolAttempt,
+    },
+    Denied {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+        approval: ToolApprovalResolution,
+    },
+    Closed {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+    },
+}
+impl ResolvedToolConversationEntry {
+    pub const fn source(&self) -> SemanticTranscriptEntryRef;
+}
+
+pub trait DecideToolRequestTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn decide<NextAttempt>(
+        &mut self,
+        command: DecideToolRequest,
+        next_attempt: NextAttempt,
+    ) -> impl Future<Output = Result<PreparedDecideToolRequest, Self::Error>> + Send
+    where
+        NextAttempt: FnMut() -> TurnAttemptId + Send;
+}
+
+pub struct ToolContinuationIdentities { /* private */ }
+impl ToolContinuationIdentities {
+    pub fn new(
+        result_entries: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        call: ModelCallId,
+        target_failure: FailedModelCallTurnIdentities,
+        steering_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: result_entries(), result_frontier(), call(), target_failure(),
+    // steering_frontier()
+}
+
+pub enum PrepareToolContinuationOutcome {
+    NoWork,
+    Checkpointed(ModelCallId),
+    TargetUnavailable(Box<FailedModelCallTurn>),
+}
+
+pub enum RetainedToolAttemptObservationStatus {
+    Pending,
+    AlreadyCommitted,
+}
+
+pub trait ToolExecutionTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn load_active_batch(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Option<ToolBatch>, Self::Error>> + Send;
+    fn prepare_next_attempt(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        effect_class: ToolEffectClass,
+    ) -> impl Future<Output = Result<CurrentToolAttempt, Self::Error>> + Send;
+    fn authorize_attempt(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    fn commit_preflight_error(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        error: ToolExecutionError,
+    ) -> impl Future<Output = Result<EndedToolAttempt, Self::Error>> + Send;
+    fn commit_observation(
+        &mut self,
+        observation: CorrelatedToolAttemptObservation,
+    ) -> impl Future<Output = Result<EndedToolAttempt, Self::Error>> + Send;
+    fn reread_observation(
+        &mut self,
+        observation: &CorrelatedToolAttemptObservation,
+    ) -> impl Future<Output = Result<RetainedToolAttemptObservationStatus, Self::Error>> + Send;
+    fn classify_crash_loss<NextTurn>(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        failure_identities: FailedModelCallTurnIdentities,
+        next_turn: NextTurn,
+    ) -> impl Future<Output = Result<ToolAttemptCrashOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+    fn prepare_continuation<NextSteering>(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> impl Future<Output = Result<PrepareToolContinuationOutcome, Self::Error>> + Send
+    where
+        NextSteering: FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
 }
 ```
 
@@ -3479,11 +3614,12 @@ impl<
 | **signalbox-domain total**            | **295 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 28 (incl. 7 traits)  |
+| application: model_execution          | 29 (incl. 7 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **75**               |
+| application: tool_loop_ports          | 6 (incl. 2 traits)   |
+| **signalbox-application total**       | **82**               |

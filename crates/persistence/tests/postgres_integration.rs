@@ -820,8 +820,6 @@ struct FixedModelCallExecutionIds {
     entries: VecDeque<SemanticTranscriptEntryId>,
     frontiers: VecDeque<ContextFrontierId>,
     turns: VecDeque<TurnId>,
-    tool_requests: VecDeque<signalbox_domain::ToolRequestId>,
-    tool_attempts: VecDeque<TurnAttemptId>,
 }
 
 impl FixedModelCallExecutionIds {
@@ -830,16 +828,12 @@ impl FixedModelCallExecutionIds {
         entries: impl IntoIterator<Item = SemanticTranscriptEntryId>,
         frontiers: impl IntoIterator<Item = ContextFrontierId>,
         turns: impl IntoIterator<Item = TurnId>,
-        tool_requests: impl IntoIterator<Item = signalbox_domain::ToolRequestId>,
-        tool_attempts: impl IntoIterator<Item = TurnAttemptId>,
     ) -> Self {
         Self {
             calls: calls.into_iter().collect(),
             entries: entries.into_iter().collect(),
             frontiers: frontiers.into_iter().collect(),
             turns: turns.into_iter().collect(),
-            tool_requests: tool_requests.into_iter().collect(),
-            tool_attempts: tool_attempts.into_iter().collect(),
         }
     }
 }
@@ -865,18 +859,6 @@ impl ModelCallExecutionIdGenerator for FixedModelCallExecutionIds {
         self.turns
             .pop_front()
             .expect("successor-turn identity fixture")
-    }
-
-    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId {
-        self.tool_requests
-            .pop_front()
-            .expect("tool-request identity fixture")
-    }
-
-    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
-        self.tool_attempts
-            .pop_front()
-            .expect("tool-attempt identity fixture")
     }
 }
 
@@ -4258,10 +4240,6 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
                 TurnId::from_uuid(Uuid::from_u128(0x1ae2)),
                 TurnId::from_uuid(Uuid::from_u128(0x1ae3)),
             ],
-            [signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
-                0x1ce1,
-            ))],
-            [TurnAttemptId::from_uuid(Uuid::from_u128(0x1ae4))],
         ),
         repository.clone(),
         repository.clone(),
@@ -4344,7 +4322,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             value: assistant_text,
         }
     );
-    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _) = service.into_parts();
     assert_eq!(provider.capability_preparation_count(), 1);
     assert_eq!(provider.interaction_count(), 1);
     let messages = provider

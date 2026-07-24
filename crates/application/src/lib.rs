@@ -12,6 +12,7 @@ mod scheduler;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
+mod tool_loop_ports;
 
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -25,9 +26,9 @@ pub use model_execution::{
     InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit, ModelCallAuthorizationReread,
     ModelCallCapabilityPreparation, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallProvider, ModelConversationMessage, ModelFrontierRenderingError,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelOperation,
-    RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
+    ModelCallProvider, ModelCallTerminalIdentityCandidates, ModelConversationMessage,
+    ModelFrontierRenderingError, PrepareModelCallOutcome, PrepareModelCallTransaction,
+    PreparedModelOperation, RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
     RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
     ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };
@@ -53,4 +54,8 @@ pub use startup_scan::{
 pub use submit_input::{
     SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
     SubmitInputService, SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
+};
+pub use tool_loop_ports::{
+    DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedToolAttemptObservationStatus, ToolContinuationIdentities, ToolExecutionTransaction,
 };
