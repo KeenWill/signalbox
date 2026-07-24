@@ -86,6 +86,18 @@ jobs:
           --features postgres-integration
           --test postgres_integration
           -- --ignored --test-threads=1
+      - name: Run imported-conversation Postgres integration tests
+        run: >-
+          cargo test -p signalbox-persistence
+          --features postgres-integration
+          --test conversation_import_postgres
+          -- --ignored --test-threads=1
+      - name: Run imported-session Postgres integration tests
+        run: >-
+          cargo test -p signalbox-persistence
+          --features postgres-integration
+          --test imported_session_postgres
+          -- --ignored --test-threads=1
       - name: Run hubd end-to-end Postgres tests
         run: >-
           cargo test -p signalbox-hubd

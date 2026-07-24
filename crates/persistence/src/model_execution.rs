@@ -2647,7 +2647,8 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
-            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. } => None,
         })
         .chain(pending_steering.iter().copied())
         .collect::<BTreeSet<_>>();
@@ -3010,6 +3011,7 @@ async fn load_tool_conversation_entries(
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -3104,6 +3106,7 @@ async fn load_tool_conversation_entries(
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }

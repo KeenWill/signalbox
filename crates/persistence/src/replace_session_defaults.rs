@@ -204,7 +204,7 @@ impl ReplaceSessionDefaultsRepository {
                 transaction.rollback().await?;
                 return Ok(outcome);
             }
-            Some(CommandKind::CreateSession) => {
+            Some(CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -239,12 +239,12 @@ impl ReplaceSessionDefaultsRepository {
                         ))?;
                     existing_outcome(&command, &recorded)
                 }
-                Some(CommandKind::CreateSession) => {
-                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id }
-                }
-                Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
-                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id }
-                }
+                Some(
+                    CommandKind::CreateSession
+                    | CommandKind::CreateSessionFromImportedFrontier
+                    | CommandKind::SubmitInput
+                    | CommandKind::DecideToolRequest,
+                ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
                         "winner claim disappeared",
@@ -316,7 +316,7 @@ impl ReplaceSessionDefaultsRepository {
             Some(CommandKind::ReplaceSessionDefaults) => {
                 load_from_connection(&mut connection, command_id).await
             }
-            Some(CommandKind::CreateSession) => {
+            Some(CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier) => {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
             Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
