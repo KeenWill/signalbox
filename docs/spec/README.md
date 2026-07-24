@@ -19,6 +19,7 @@ linked, never restated.
 
 ## Pages
 
+- [Conversation import](conversation-import.md)
 - [Sessions and the transcript](sessions-and-transcript.md)
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
 - [Model-call execution](model-call-execution.md)
