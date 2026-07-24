@@ -465,6 +465,8 @@ pub enum ErrorCode {
     ResyncRequired,
     /// Infrastructure prevented completion.
     Unavailable,
+    /// Infrastructure obscured whether a requested mutation committed.
+    CommitAmbiguous,
     /// Fail-closed corruption or a hub defect stopped the request.
     Internal,
 }
@@ -1993,6 +1995,27 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"error","code":"internal","message":"failed","detail":null}}"#
         ))
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_commit_ambiguity_has_one_stable_error_code() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::CommitAmbiguous,
+                message: "ambiguous commit".to_owned(),
+                detail: ErrorDetail::none(),
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+        assert!(
+            encoded
+                .windows(br#""code":"commit_ambiguous""#.len())
+                .any(|window| window == br#""code":"commit_ambiguous""#)
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
     }
 
