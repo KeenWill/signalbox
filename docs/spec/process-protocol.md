@@ -76,6 +76,21 @@ protocol authentication is provisional; it has no authorization exchange or
 remote transport. Socket filesystem access is the deployment boundary; it is not
 represented as application-level owner proof.
 
+The hub owns at most 128 accepted connection tasks. At that limit it leaves new
+connections in the bounded listener backlog until an active task exits, then
+resumes accepting. The limit counts long-lived follow connections and ordinary
+request connections alike. At most eight connection tasks may accumulate an
+inbound frame simultaneously. An idle connection holds no frame slot: each
+connection may buffer at most 8 KiB while waiting for its first byte, then
+reserves a slot before extending that buffered prefix into a frame. This bounds
+pre-admission read-ahead across 128 tasks at 1 MiB and aggregate admitted raw
+frame accumulation at 64 MiB. After decoding, the task consumes the frame into
+one owned request rather than cloning its payload. Submitted text moves into
+application admission: rejection drops it before awaiting response output, and
+acceptance reuses the decoded allocation. A peer that stops reading responses
+therefore cannot retain out-of-policy input content after its rejection is
+known.
+
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
 exist.
@@ -152,6 +167,13 @@ treatment in version one. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
+Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
+before application construction or mutation and returns `invalid_request` when
+it is exceeded. This leaves enough space for worst-case JSON escaping when the
+same accepted content is projected in a queued turn or durable update event. The
+exact capacity choice is recorded in the
+[input-bound decision](../decisions.md#2026-07-23--bound-process-protocol-input-at-1-mib).
+
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
@@ -171,11 +193,14 @@ A session summary contains `session_id`, `defaults_version`, and
 `model_selection`. A successful `list_sessions` response is `sessions_start`,
 one `session_summary` per result in session-identity order, then
 `sessions_end { session_count }`. The summaries are read in one read-only
-repeatable-read transaction, and the sequence becomes authoritative only after
-the end message and count validate. This avoids an aggregate frame-size limit.
-Identifiers are canonical UUID strings. Request identities, ordinal versions,
-indices, counts, and outbox cursors are canonical decimal strings, preserving
-their full unsigned 64-bit range without JSON-number precision loss.
+repeatable-read transaction and spooled from one decoded row at a time before
+client output. A slow client therefore retains temporary disk rather than the
+complete session catalog in request heap or an open database transaction. The
+sequence becomes authoritative only after the end message and count validate.
+This avoids an aggregate frame-size limit. Identifiers are canonical UUID
+strings. Request identities, ordinal versions, indices, counts, and outbox
+cursors are canonical decimal strings, preserving their full unsigned 64-bit
+range without JSON-number precision loss.
 
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. For the version-one treatment, its
@@ -210,6 +235,10 @@ maps to `unavailable`.
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
 
+An oversized outbound frame terminates only its connection. Other encoding
+failures remain fatal evidence that the runtime cannot satisfy the closed wire
+contract.
+
 ## Transcript snapshots
 
 A transcript snapshot is read in one PostgreSQL repeatable-read, read-only
@@ -227,6 +256,27 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`;
 3. the entry messages below in frontier-member order; and
 4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
+
+The hub builds that complete sequence in a secure unnamed temporary file before
+writing its first snapshot frame to the connection. Persistence validates the
+execution lineage in PostgreSQL and yields one turn or frontier member at a time
+from the same read-only repeatable-read transaction; hubd encodes each item
+directly to the spool, commits the transaction after the final item, rewinds,
+and streams the completed file. A slow client therefore holds neither a
+PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
+is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
+temporary disk usage follows the complete encoded transcript size. Projection or
+spool failure before transmission returns `unavailable` and exposes no partial
+snapshot sequence. Once transmission starts, peer-write failure closes only that
+connection, while an unexpected read failure from the completed spool is fatal
+runtime evidence because a valid snapshot has already begun. A follow request
+closes the spool immediately after transmitting the snapshot, before waiting for
+live events.
+
+Session-list, transcript-read, and follow-snapshot construction share bounded
+admission that reserves application-pool capacity for non-snapshot work. The
+exact reservation is owned by the
+[snapshot-resource decision](../decisions.md#2026-07-23--bound-process-snapshot-construction-resources).
 
 Each `transcript_turn` has `turn_id` and one closed `state` object:
 
