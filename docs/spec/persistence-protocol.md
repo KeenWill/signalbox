@@ -50,8 +50,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — fourteen files, `202607180001` through
-`202607220005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — fifteen files, `202607180001` through
+`202607230001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -403,9 +403,10 @@ protocol scope). Implemented storage:
 Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
-exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; startup recovery appends `turn_failed` for a failed lost turn
-and `turn_reconciliation_required` when stopped issued work becomes ambiguous.
+exists in application code. Implemented appends: `CreateSession` and
+`CreateSessionFromImportedFrontier` handling each append `session_created`;
+startup recovery appends `turn_failed` for a failed lost turn and
+`turn_reconciliation_required` when stopped issued work becomes ambiguous.
 Model-call state transitions append `model_call_transition`, completion closure
 appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation

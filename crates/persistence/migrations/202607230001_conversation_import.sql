@@ -7,7 +7,9 @@ CREATE TABLE imported_raw_source_record (
     raw_bytes bytea NOT NULL,
 
     CONSTRAINT imported_raw_source_record_hash_size
-        CHECK (octet_length(content_hash) = 32)
+        CHECK (octet_length(content_hash) = 32),
+    CONSTRAINT imported_raw_source_record_bytes_nonempty
+        CHECK (octet_length(raw_bytes) >= 1)
 );
 
 CREATE TABLE imported_conversation (

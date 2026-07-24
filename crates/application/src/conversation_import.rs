@@ -4,7 +4,7 @@
 //! adapters implement [`ImportedConversationStore`]. The application supplies
 //! hub identities and performs one complete resolve-or-insert operation.
 
-use std::{error::Error, fmt, future::Future};
+use std::{collections::BTreeSet, error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -149,6 +149,11 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// The format carried by the converted aggregate.
         converted: ImportedConversationFormat,
     },
+    /// The converter returned an entry identity not issued by the hub callback.
+    ConverterEntryIdentityNotIssued {
+        /// Unissued identity carried by the converted aggregate.
+        entry: ImportedTranscriptEntryId,
+    },
     /// The store reported a digest other than the converted exact source.
     StoreSourceDigestMismatch {
         /// The converted aggregate digest.
@@ -189,6 +194,10 @@ where
             } => write!(
                 formatter,
                 "conversation converter format mismatch: declared {declared:?}, converted {converted:?}"
+            ),
+            Self::ConverterEntryIdentityNotIssued { entry } => write!(
+                formatter,
+                "conversation converter returned an unissued entry identity: {entry:?}"
             ),
             Self::StoreSourceDigestMismatch { expected, actual } => write!(
                 formatter,
@@ -257,8 +266,13 @@ where
         } = self;
         let candidate = ids.next_conversation_id();
         let declared = converter.format();
+        let mut issued_entries = BTreeSet::new();
         let converted = converter
-            .convert(candidate, source, || ids.next_entry_id())
+            .convert(candidate, source, || {
+                let entry = ids.next_entry_id();
+                issued_entries.insert(entry);
+                entry
+            })
             .map_err(ImportConversationError::Conversion)?;
         if converted.id() != candidate {
             return Err(ImportConversationError::ConverterIdentityMismatch {
@@ -270,6 +284,16 @@ where
             return Err(ImportConversationError::ConverterFormatMismatch {
                 declared,
                 converted: converted.format(),
+            });
+        }
+        if let Some(unissued) = converted
+            .entries()
+            .iter()
+            .map(|entry| entry.identity())
+            .find(|entry| !issued_entries.contains(entry))
+        {
+            return Err(ImportConversationError::ConverterEntryIdentityNotIssued {
+                entry: unissued,
             });
         }
         let expected_digest = converted.source_digest();
@@ -463,6 +487,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeConverter {
         returned_owner: Option<ImportedConversationId>,
+        returned_entries: Option<[ImportedTranscriptEntryId; 2]>,
         reject: bool,
         observed: Vec<(ImportedConversationId, Vec<u8>)>,
     }
@@ -487,9 +512,10 @@ mod tests {
             if self.reject {
                 return Err(FakeConversionError::Rejected);
             }
+            let issued_entries = [next_entry_id(), next_entry_id()];
             Ok(converted(
                 self.returned_owner.unwrap_or(owner),
-                [next_entry_id(), next_entry_id()],
+                self.returned_entries.unwrap_or(issued_entries),
                 ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
             ))
         }
@@ -528,12 +554,15 @@ mod tests {
     }
 
     fn service(
+        candidate: ImportedConversationId,
+        entries: [ImportedTranscriptEntryId; 2],
         store_response: Result<ImportedConversationStoreOutcome, FakeStoreError>,
     ) -> ImportConversationService<FakeIds, FakeConverter, FakeStore> {
         ImportConversationService::new(
-            FakeIds::new([conversation(1)], [entry(2), entry(3)]),
+            FakeIds::new([candidate], entries),
             FakeConverter {
                 returned_owner: None,
+                returned_entries: None,
                 reject: false,
                 observed: Vec::new(),
             },
@@ -544,10 +573,13 @@ mod tests {
         )
     }
 
-    fn candidate_digest() -> ImportedConversationSourceDigest {
+    fn candidate_digest(
+        candidate: ImportedConversationId,
+        entries: [ImportedTranscriptEntryId; 2],
+    ) -> ImportedConversationSourceDigest {
         converted(
-            conversation(1),
-            [entry(2), entry(3)],
+            candidate,
+            entries,
             ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
         )
         .source_digest()
@@ -555,11 +587,17 @@ mod tests {
 
     /// INV-038: first ingestion converts once and commits one complete candidate.
     #[tokio::test]
-    async fn inv038_first_ingestion_returns_inserted_candidate() {
-        let mut service = service(Ok(ImportedConversationStoreOutcome::Inserted {
-            conversation: conversation(1),
-            source_digest: candidate_digest(),
-        }));
+    async fn s28_inv038_first_ingestion_returns_inserted_candidate() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
 
         assert_eq!(
             service
@@ -567,7 +605,7 @@ mod tests {
                 .await
                 .expect("complete source inserts"),
             ImportConversationOutcome::Inserted {
-                conversation: conversation(1),
+                conversation: candidate,
             }
         );
         let (ids, converter, store) = service.into_parts();
@@ -575,20 +613,27 @@ mod tests {
         assert_eq!(ids.entry_calls, 2);
         assert_eq!(
             converter.observed,
-            vec![(conversation(1), b"source bytes".to_vec())]
+            vec![(candidate, b"source bytes".to_vec())]
         );
         assert_eq!(store.observed.len(), 1);
-        assert_eq!(store.observed[0].id(), conversation(1));
+        assert_eq!(store.observed[0].id(), candidate);
     }
 
     /// INV-038: exact reingestion discards candidates and returns the existing
     /// immutable imported-conversation identity.
     #[tokio::test]
-    async fn inv038_exact_reingestion_returns_existing_identity() {
-        let mut service = service(Ok(ImportedConversationStoreOutcome::AlreadyImported {
-            conversation: conversation(99),
-            source_digest: candidate_digest(),
-        }));
+    async fn s28_inv038_exact_reingestion_returns_existing_identity() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let existing = conversation(99);
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::AlreadyImported {
+                conversation: existing,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
 
         assert_eq!(
             service
@@ -596,7 +641,7 @@ mod tests {
                 .await
                 .expect("exact duplicate resolves"),
             ImportConversationOutcome::AlreadyImported {
-                conversation: conversation(99),
+                conversation: existing,
             }
         );
         let (ids, _, store) = service.into_parts();
@@ -606,11 +651,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversion_failure_never_reaches_store() {
-        let mut service = service(Ok(ImportedConversationStoreOutcome::Inserted {
-            conversation: conversation(1),
-            source_digest: candidate_digest(),
-        }));
+    async fn s28_inv038_conversion_failure_never_reaches_store() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
         service.converter.reject = true;
 
         assert_eq!(
@@ -627,18 +678,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn converter_identity_mismatch_never_reaches_store() {
-        let mut service = service(Ok(ImportedConversationStoreOutcome::Inserted {
-            conversation: conversation(1),
-            source_digest: candidate_digest(),
-        }));
-        service.converter.returned_owner = Some(conversation(9));
+    async fn s28_inv001_inv038_converter_identity_mismatch_never_reaches_store() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let converted = conversation(9);
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
+        service.converter.returned_owner = Some(converted);
 
         assert_eq!(
             service.execute(b"cross-wired").await,
             Err(ImportConversationError::ConverterIdentityMismatch {
-                supplied: conversation(1),
-                converted: conversation(9),
+                supplied: candidate,
+                converted,
             })
         );
         let (_, _, store) = service.into_parts();
@@ -646,37 +704,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_outcome_mismatches_fail_closed() {
-        let expected_digest = candidate_digest();
-        let different_digest = ImportedConversationSourceDigest::from_bytes([9; 32]);
-        let mut wrong_digest = service(Ok(ImportedConversationStoreOutcome::AlreadyImported {
-            conversation: conversation(99),
-            source_digest: different_digest,
-        }));
+    async fn s28_inv001_converter_unissued_entry_identity_never_reaches_store() {
+        let candidate = conversation(1);
+        let issued_entries = [entry(2), entry(3)];
+        let unissued_entry = entry(9);
+        let mut service = service(
+            candidate,
+            issued_entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: candidate,
+                source_digest: candidate_digest(candidate, issued_entries),
+            }),
+        );
+        service.converter.returned_entries = Some([unissued_entry, entry(10)]);
+
         assert_eq!(
-            wrong_digest.execute(b"source").await,
+            service.execute(b"cross-wired").await,
+            Err(ImportConversationError::ConverterEntryIdentityNotIssued {
+                entry: unissued_entry,
+            })
+        );
+        let (_, _, store) = service.into_parts();
+        assert!(store.observed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn s28_inv038_store_source_digest_mismatch_fails_closed() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let expected_digest = candidate_digest(candidate, entries);
+        let different_digest = ImportedConversationSourceDigest::from_bytes([9; 32]);
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::AlreadyImported {
+                conversation: conversation(99),
+                source_digest: different_digest,
+            }),
+        );
+        assert_eq!(
+            service.execute(b"source").await,
             Err(ImportConversationError::StoreSourceDigestMismatch {
                 expected: expected_digest,
                 actual: different_digest,
             })
         );
+    }
 
-        let mut wrong_inserted_id = service(Ok(ImportedConversationStoreOutcome::Inserted {
-            conversation: conversation(99),
-            source_digest: expected_digest,
-        }));
+    #[tokio::test]
+    async fn s28_inv038_store_inserted_identity_mismatch_fails_closed() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let wrong_identity = conversation(99);
+        let mut service = service(
+            candidate,
+            entries,
+            Ok(ImportedConversationStoreOutcome::Inserted {
+                conversation: wrong_identity,
+                source_digest: candidate_digest(candidate, entries),
+            }),
+        );
         assert_eq!(
-            wrong_inserted_id.execute(b"source").await,
+            service.execute(b"source").await,
             Err(ImportConversationError::StoreInsertedIdentityMismatch {
-                expected: conversation(1),
-                actual: conversation(99),
+                expected: candidate,
+                actual: wrong_identity,
             })
         );
     }
 
     #[tokio::test]
-    async fn store_failure_is_not_retried() {
-        let mut service = service(Err(FakeStoreError::Unavailable));
+    async fn s28_inv038_store_failure_is_not_retried() {
+        let candidate = conversation(1);
+        let entries = [entry(2), entry(3)];
+        let mut service = service(candidate, entries, Err(FakeStoreError::Unavailable));
 
         assert_eq!(
             service.execute(b"complete").await,
