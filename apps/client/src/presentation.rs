@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use signalbox_process_protocol::{
-    CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
-    ModelCallState, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+    CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
+    ImportedSourceSpeaker, ImportedSpeaker, ModelCallDisposition, ModelCallState, SessionEvent,
+    TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -401,6 +402,15 @@ impl<'a> Output<'a> {
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
+                    TranscriptTextEntry::Imported {
+                        imported_conversation_id,
+                        imported_entry_id,
+                        source_speaker,
+                    } => format!(
+                        "imported_{} imported_conversation={imported_conversation_id} \
+                         imported_entry={imported_entry_id}",
+                        imported_speaker_label(*source_speaker)
+                    ),
                 };
                 writeln!(
                     self.stdout,
@@ -429,6 +439,20 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::Imported {
+                imported_conversation_id,
+                imported_entry_id,
+                source_speaker,
+                content_kind,
+            }) => writeln!(
+                self.stdout,
+                "imported_{} kind={} imported_conversation={imported_conversation_id} \
+                 imported_entry={imported_entry_id} source={} entry={}",
+                imported_speaker_label(*source_speaker),
+                imported_content_kind(*content_kind),
+                entry.source_session_id,
+                entry.entry_id
+            ),
         }
     }
 
@@ -519,10 +543,38 @@ impl SnapshotSelection {
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::TurnCompleted { .. }
                     | TranscriptEntry::TurnFailed { .. }
-                    | TranscriptEntry::TurnCancelled { .. },
+                    | TranscriptEntry::TurnCancelled { .. }
+                    | TranscriptEntry::Imported { .. },
                 ),
             ) => false,
         }
+    }
+}
+
+const fn imported_speaker_label(source: ImportedSourceSpeaker) -> &'static str {
+    match source {
+        ImportedSourceSpeaker::NotAttested {} => "speaker_unattested",
+        ImportedSourceSpeaker::AttestedAbsent {} => "speaker_absent",
+        ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::User,
+        } => "user",
+        ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::Assistant,
+        } => "assistant",
+    }
+}
+
+const fn imported_content_kind(kind: ImportedContentKind) -> &'static str {
+    match kind {
+        ImportedContentKind::SourceEvent => "source_event",
+        ImportedContentKind::SourceMessageBlock => "source_message_block",
+        ImportedContentKind::Text => "text",
+        ImportedContentKind::ToolCall => "tool_call",
+        ImportedContentKind::ToolResult => "tool_result",
+        ImportedContentKind::Thinking => "thinking",
+        ImportedContentKind::RedactedThinking => "redacted_thinking",
+        ImportedContentKind::Document => "document",
+        ImportedContentKind::MessageContentAbsent => "message_content_absent",
     }
 }
 

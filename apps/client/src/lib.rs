@@ -957,7 +957,8 @@ mod tests {
                     ..
                 } if *requested_session == session_id
             ));
-            let response = ServerFrame::try_new(
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
                 request.request_id(),
                 ServerMessage::InputSubmitted {
                     session_id,

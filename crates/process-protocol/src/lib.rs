@@ -1,4 +1,4 @@
-//! Closed version-one JSON-lines process protocol.
+//! Closed versioned JSON-lines process protocol.
 //!
 //! This crate owns wire representations and frame validation only. Domain,
 //! persistence, and client presentation values remain distinct mappings
@@ -13,8 +13,61 @@ use serde::{
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-/// The only protocol version accepted by this crate.
+/// The baseline protocol version retained for existing clients.
 pub const PROTOCOL_VERSION: u64 = 1;
+
+/// The imported-transcript snapshot protocol version.
+pub const IMPORTED_TRANSCRIPT_PROTOCOL_VERSION: u64 = 2;
+
+/// One admitted process-protocol version.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProtocolVersion {
+    /// Baseline native-only transcript vocabulary.
+    One,
+    /// Conservative imported-transcript snapshot vocabulary.
+    Two,
+}
+
+impl ProtocolVersion {
+    /// Returns the integer carried in every wire frame.
+    pub const fn as_u64(self) -> u64 {
+        match self {
+            Self::One => PROTOCOL_VERSION,
+            Self::Two => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
+        }
+    }
+
+    const fn from_u64(value: u64) -> Option<Self> {
+        match value {
+            PROTOCOL_VERSION => Some(Self::One),
+            IMPORTED_TRANSCRIPT_PROTOCOL_VERSION => Some(Self::Two),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for ProtocolVersion {
+    fn serialize<SerializerT>(
+        &self,
+        serializer: SerializerT,
+    ) -> Result<SerializerT::Ok, SerializerT::Error>
+    where
+        SerializerT: Serializer,
+    {
+        serializer.serialize_u64(self.as_u64())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProtocolVersion {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::from_u64(value)
+            .ok_or_else(|| serde::de::Error::custom("frame version is unsupported"))
+    }
+}
 
 /// Maximum encoded frame size, including its final newline.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -388,7 +441,7 @@ pub enum ClientRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientFrame {
-    version: u64,
+    version: ProtocolVersion,
     request_id: RequestId,
     request: ClientRequest,
 }
@@ -399,13 +452,27 @@ impl ClientFrame {
         request_id: RequestId,
         request: ClientRequest,
     ) -> Result<Self, FrameValidationError> {
+        Self::try_new_for_version(ProtocolVersion::One, request_id, request)
+    }
+
+    /// Constructs a frame in one admitted protocol version.
+    pub fn try_new_for_version(
+        version: ProtocolVersion,
+        request_id: RequestId,
+        request: ClientRequest,
+    ) -> Result<Self, FrameValidationError> {
         let frame = Self {
-            version: PROTOCOL_VERSION,
+            version,
             request_id,
             request,
         };
         frame.validate()?;
         Ok(frame)
+    }
+
+    /// Returns the admitted protocol version.
+    pub const fn version(&self) -> ProtocolVersion {
+        self.version
     }
 
     /// Returns the correlation identity.
@@ -424,9 +491,6 @@ impl ClientFrame {
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
-        if self.version != PROTOCOL_VERSION {
-            return Err(FrameValidationError::UnsupportedVersion);
-        }
         if !self.request_id.is_correlated() {
             return Err(FrameValidationError::UncorrelatedClientRequest);
         }
@@ -437,7 +501,7 @@ impl ClientFrame {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawClientFrame {
-    version: u64,
+    version: ProtocolVersion,
     request_id: RequestId,
     request: ClientRequest,
 }
@@ -877,6 +941,55 @@ impl TurnState {
     }
 }
 
+/// Source speaker admitted by an imported transcript entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedSpeaker {
+    /// The source identified the entry as user-authored.
+    User,
+    /// The source identified the entry as assistant-authored.
+    Assistant,
+}
+
+/// Exact source attestation for an imported entry's speaker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImportedSourceSpeaker {
+    /// The source omitted the speaker field.
+    NotAttested {},
+    /// The source explicitly supplied no speaker.
+    AttestedAbsent {},
+    /// The source supplied one admitted speaker.
+    Attested {
+        /// Exact source-supplied speaker.
+        speaker: ImportedSpeaker,
+    },
+}
+
+/// Conservative kind projection for imported content without rendered text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedContentKind {
+    /// One source-defined event.
+    SourceEvent,
+    /// One source-defined message block.
+    SourceMessageBlock,
+    /// Text whose value was absent or unattested.
+    Text,
+    /// One imported tool call.
+    ToolCall,
+    /// One imported tool result.
+    ToolResult,
+    /// One imported thinking block.
+    Thinking,
+    /// One imported redacted-thinking block.
+    RedactedThinking,
+    /// One imported document block.
+    Document,
+    /// A typed absence for message content.
+    MessageContentAbsent,
+}
+
 /// Non-text semantic transcript entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -895,6 +1008,17 @@ pub enum TranscriptEntry {
     TurnCancelled {
         /// Cancelled turn.
         turn_id: CanonicalUuid,
+    },
+    /// Conservative imported entry without rendered text.
+    Imported {
+        /// Owning imported conversation.
+        imported_conversation_id: CanonicalUuid,
+        /// Exact imported entry identity.
+        imported_entry_id: CanonicalUuid,
+        /// Exact source-speaker attestation.
+        source_speaker: ImportedSourceSpeaker,
+        /// Conservative normalized content kind.
+        content_kind: ImportedContentKind,
     },
 }
 
@@ -915,6 +1039,15 @@ pub enum TranscriptTextEntry {
         turn_id: CanonicalUuid,
         /// Producing model call.
         model_call_id: CanonicalUuid,
+    },
+    /// Imported text whose exact value was source-attested.
+    Imported {
+        /// Owning imported conversation.
+        imported_conversation_id: CanonicalUuid,
+        /// Exact imported entry identity.
+        imported_entry_id: CanonicalUuid,
+        /// Exact source-speaker attestation.
+        source_speaker: ImportedSourceSpeaker,
     },
 }
 
@@ -1150,6 +1283,21 @@ pub enum ServerMessage {
     },
 }
 
+impl ServerMessage {
+    fn requires_version_two(&self) -> bool {
+        matches!(
+            self,
+            Self::TranscriptEntry {
+                entry: TranscriptEntry::Imported { .. },
+                ..
+            } | Self::TranscriptTextEntry {
+                entry: TranscriptTextEntry::Imported { .. },
+                ..
+            }
+        )
+    }
+}
+
 fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
     deserializer: DeserializerT,
 ) -> Result<Option<ValueT>, DeserializerT::Error>
@@ -1164,7 +1312,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerFrame {
-    version: u64,
+    version: ProtocolVersion,
     request_id: RequestId,
     message: ServerMessage,
 }
@@ -1175,13 +1323,27 @@ impl ServerFrame {
         request_id: RequestId,
         message: ServerMessage,
     ) -> Result<Self, FrameValidationError> {
+        Self::try_new_for_version(ProtocolVersion::One, request_id, message)
+    }
+
+    /// Constructs one response in an admitted protocol version.
+    pub fn try_new_for_version(
+        version: ProtocolVersion,
+        request_id: RequestId,
+        message: ServerMessage,
+    ) -> Result<Self, FrameValidationError> {
         let frame = Self {
-            version: PROTOCOL_VERSION,
+            version,
             request_id,
             message,
         };
         frame.validate()?;
         Ok(frame)
+    }
+
+    /// Returns the admitted protocol version.
+    pub const fn version(&self) -> ProtocolVersion {
+        self.version
     }
 
     /// Returns the request correlation identity.
@@ -1195,8 +1357,8 @@ impl ServerFrame {
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
-        if self.version != PROTOCOL_VERSION {
-            return Err(FrameValidationError::UnsupportedVersion);
+        if self.version == ProtocolVersion::One && self.message.requires_version_two() {
+            return Err(FrameValidationError::MessageRequiresVersionTwo);
         }
         if let ServerMessage::TranscriptTurn { state, .. } = &self.message {
             state.validate()?;
@@ -1227,7 +1389,7 @@ impl ServerFrame {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServerFrame {
-    version: u64,
+    version: ProtocolVersion,
     request_id: RequestId,
     message: ServerMessage,
 }
@@ -1253,6 +1415,8 @@ impl<'de> Deserialize<'de> for ServerFrame {
 pub enum FrameValidationError {
     /// In-memory frame used another version.
     UnsupportedVersion,
+    /// A version-one response tried to carry imported transcript vocabulary.
+    MessageRequiresVersionTwo,
     /// A client request used reserved correlation identity zero.
     UncorrelatedClientRequest,
     /// A success response used reserved correlation identity zero.
@@ -1269,6 +1433,9 @@ impl fmt::Display for FrameValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::UnsupportedVersion => "frame version is unsupported",
+            Self::MessageRequiresVersionTwo => {
+                "server message requires process-protocol version two"
+            }
             Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
             Self::UncorrelatedSuccess => "successful server message is uncorrelated",
             Self::UncorrelatedApplicationError => "application server error is uncorrelated",
@@ -1326,15 +1493,16 @@ impl fmt::Display for FrameDecodeError {
             FrameDecodeErrorKind::MalformedFrame => {
                 formatter.write_str("process-protocol frame is malformed")
             }
-            FrameDecodeErrorKind::UnsupportedVersion => formatter
-                .write_str("process-protocol version is unsupported; the supported version is 1"),
+            FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
+                "process-protocol version is unsupported; supported versions are 1 and 2",
+            ),
         }
     }
 }
 
 impl Error for FrameDecodeError {}
 
-/// Outgoing frame could not be encoded within the version-one boundary.
+/// Outgoing frame could not be encoded within the admitted version boundary.
 #[derive(Debug)]
 pub enum FrameEncodeError {
     /// In-memory value violated its closed frame shape.
@@ -1535,7 +1703,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if version_spelling != "1" {
+    if !matches!(version_spelling, "1" | "2") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -1633,6 +1801,17 @@ fn request_id_from_probe(probe: &RawHeaderProbe<'_>, allow_uncorrelated: bool) -
     }
 }
 
+fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVersion> {
+    if probe.duplicate_member {
+        return None;
+    }
+    match probe.version?.get() {
+        "1" => Some(ProtocolVersion::One),
+        "2" => Some(ProtocolVersion::Two),
+        _ => None,
+    }
+}
+
 fn recover_request_id(content: &[u8], allow_uncorrelated: bool) -> RequestId {
     // Recovery is best effort and must not parse an arbitrarily large rejected
     // line. A complete minimally oversized line can still fit this content cap.
@@ -1654,17 +1833,30 @@ pub fn recover_bounded_client_request_id(content: &[u8]) -> RequestId {
     recover_request_id(content, false)
 }
 
+/// Recovers an admitted version from bounded complete client-frame content.
+///
+/// A duplicate top-level member or any unsupported spelling admits no version.
+pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<ProtocolVersion> {
+    if content.len() > MAX_FRAME_BYTES {
+        return None;
+    }
+    deserialize_header_probe(content)
+        .ok()
+        .and_then(|probe| protocol_version_from_probe(&probe))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
         FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_JSON_CONTAINER_DEPTH, ModelCallDisposition, ModelCallState, ModelSelection,
-        PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        FrameEncodeError, FrameValidationError, ImportedContentKind, ImportedSourceSpeaker,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry,
+        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -1728,7 +1920,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":2,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":3,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -1794,6 +1986,77 @@ mod tests {
     }
 
     #[test]
+    fn inv033_version_two_reuses_the_closed_request_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Two,
+            request(7)?,
+            ClientRequest::ReadTranscript {
+                session_id: uuid(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert_eq!(frame.version(), ProtocolVersion::Two);
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":2,"));
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_imported_snapshot_entries_exist_only_in_version_two()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let imported_text = ServerMessage::TranscriptTextEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptTextEntry::Imported {
+                imported_conversation_id: uuid(3),
+                imported_entry_id: uuid(4),
+                source_speaker: ImportedSourceSpeaker::Attested {
+                    speaker: ImportedSpeaker::User,
+                },
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new(request(8)?, imported_text.clone())
+                .expect_err("version one must retain its native-only vocabulary"),
+            FrameValidationError::MessageRequiresVersionTwo
+        );
+        let text_frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Two, request(8)?, imported_text)?;
+        let encoded_text = encode_server_line(&text_frame)?;
+        assert!(String::from_utf8(encoded_text.clone())?.contains(
+            r#""entry":{"type":"imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003","imported_entry_id":"00000000-0000-0000-0000-000000000004","source_speaker":{"type":"attested","speaker":"user"}}"#
+        ));
+        assert_eq!(decode_server_line(&encoded_text)?, text_frame);
+
+        let conservative = ServerFrame::try_new_for_version(
+            ProtocolVersion::Two,
+            request(9)?,
+            ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(1),
+                source_session_id: uuid(1),
+                entry_id: uuid(5),
+                entry: TranscriptEntry::Imported {
+                    imported_conversation_id: uuid(3),
+                    imported_entry_id: uuid(6),
+                    source_speaker: ImportedSourceSpeaker::NotAttested {},
+                    content_kind: ImportedContentKind::ToolResult,
+                },
+            },
+        )?;
+        let encoded_conservative = encode_server_line(&conservative)?;
+        assert!(
+            String::from_utf8(encoded_conservative.clone())?.contains(
+                r#""source_speaker":{"type":"not_attested"},"content_kind":"tool_result""#
+            )
+        );
+        assert_eq!(decode_server_line(&encoded_conservative)?, conservative);
+        Ok(())
+    }
+
+    #[test]
     fn inv033_unknown_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions","extra":true}}"#,
@@ -1831,7 +2094,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("2");
+        assert_unsupported_version("3");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -1859,7 +2122,7 @@ mod tests {
     #[test]
     fn inv033_nested_duplicates_are_malformed_before_unsupported_version() {
         let error = decode_client_line(&line(
-            r#"{"version":2,"request_id":"9","request":{"future":1,"future":2}}"#,
+            r#"{"version":3,"request_id":"9","request":{"future":1,"future":2}}"#,
         ))
         .expect_err("nested duplicate members are malformed for every version");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);

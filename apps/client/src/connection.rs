@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use signalbox_process_protocol::{
-    ClientFrame, ClientRequest, MAX_FRAME_BYTES, RequestId, ServerFrame, ServerMessage,
-    decode_server_line, encode_client_line,
+    ClientFrame, ClientRequest, MAX_FRAME_BYTES, ProtocolVersion, RequestId, ServerFrame,
+    ServerMessage, decode_server_line, encode_client_line,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -64,6 +64,7 @@ enum RequestDelivery {
 }
 
 pub(crate) struct Connection {
+    version: ProtocolVersion,
     request_id: RequestId,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
@@ -79,11 +80,12 @@ impl Connection {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
+            version: ProtocolVersion::Two,
             request_id,
             reader: BufReader::new(reader),
             writer,
         };
-        let frame = ClientFrame::try_new(request_id, request)
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Two, request_id, request)
             .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame)?;
         connection
@@ -107,6 +109,9 @@ impl Connection {
     pub(crate) async fn frame(&mut self) -> Result<ServerFrame, ClientError> {
         let line = read_frame_line(&mut self.reader).await?;
         let frame: ServerFrame = decode_server_line(&line)?;
+        if frame.version() != self.version {
+            return Err(ClientError::Protocol("response protocol version mismatch"));
+        }
         if frame.request_id() != self.request_id {
             return Err(ClientError::Protocol("response request identity mismatch"));
         }

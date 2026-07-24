@@ -32,6 +32,10 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::ImportedSessionRepository,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
+    process_read::{
+        ProcessImportedSourceSpeaker, ProcessReadRepository, ProcessSessionAncestry,
+        ProcessTranscriptEntry,
+    },
     session::{SessionRepository, SessionRepositoryError},
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
@@ -308,6 +312,41 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
     };
     assert_eq!(created.session(), session);
 
+    let process_reads = ProcessReadRepository::new(pool.clone());
+    assert_eq!(
+        process_reads.session_ancestry(session).await?,
+        Some(ProcessSessionAncestry::ImportedConversation)
+    );
+    let seed_snapshot = process_reads
+        .read_transcript(session)
+        .await?
+        .expect("the imported session has an immediate seed snapshot");
+    assert!(seed_snapshot.turns().is_empty());
+    assert!(matches!(
+        seed_snapshot.entries(),
+        [
+            ProcessTranscriptEntry::ImportedText {
+                imported_conversation: projected_conversation,
+                imported_entry: projected_entry,
+                source_speaker: ProcessImportedSourceSpeaker::User,
+                content,
+                ..
+            },
+            ProcessTranscriptEntry::ImportedText {
+                imported_conversation: second_conversation,
+                imported_entry: second_entry,
+                source_speaker: ProcessImportedSourceSpeaker::Assistant,
+                content: second_content,
+                ..
+            },
+        ] if *projected_conversation == conversation
+            && *projected_entry == imported_entries[0]
+            && content == "imported user"
+            && *second_conversation == conversation
+            && *second_entry == imported_entries[1]
+            && second_content == "imported assistant"
+    ));
+
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x600));
     let turn = TurnId::from_uuid(Uuid::from_u128(0x601));
     let native_content =
@@ -339,6 +378,18 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
     };
     assert_eq!(origin.accepted_input(), accepted_input);
     assert_eq!(origin.turn(), turn);
+    let queued_snapshot = process_reads
+        .read_transcript(session)
+        .await?
+        .expect("the queued native turn keeps the imported fallback visible");
+    assert_eq!(queued_snapshot.turns().len(), 1);
+    assert_eq!(queued_snapshot.entries().len(), 2);
+    assert!(
+        queued_snapshot
+            .entries()
+            .iter()
+            .all(|entry| matches!(entry, ProcessTranscriptEntry::ImportedText { .. }))
+    );
 
     let origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x700));
     let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x701));
@@ -489,6 +540,51 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
     .await?;
     assert_eq!(durable_terminal, (3, 1, 2, 3));
     assert_session_reloads(&pool, session).await?;
+    let completed_snapshot = process_reads
+        .read_transcript(session)
+        .await?
+        .expect("the native terminal frontier remains process-readable");
+    assert_eq!(completed_snapshot.turns().len(), 1);
+    assert_eq!(completed_snapshot.entries().len(), 5);
+    assert!(matches!(
+        &completed_snapshot.entries()[0],
+        ProcessTranscriptEntry::ImportedText {
+            imported_entry: projected,
+            content,
+            ..
+        } if *projected == imported_entries[0] && content == "imported user"
+    ));
+    assert!(matches!(
+        &completed_snapshot.entries()[1],
+        ProcessTranscriptEntry::ImportedText {
+            imported_entry: projected,
+            content,
+            ..
+        } if *projected == imported_entries[1] && content == "imported assistant"
+    ));
+    assert!(matches!(
+        &completed_snapshot.entries()[2],
+        ProcessTranscriptEntry::User {
+            accepted_input: projected,
+            content,
+            ..
+        } if *projected == accepted_input && content == "native continuation"
+    ));
+    assert!(matches!(
+        &completed_snapshot.entries()[3],
+        ProcessTranscriptEntry::Assistant {
+            model_call: projected,
+            content,
+            ..
+        } if *projected == call && content == "native assistant reply"
+    ));
+    assert!(matches!(
+        &completed_snapshot.entries()[4],
+        ProcessTranscriptEntry::TurnCompleted {
+            turn: projected,
+            ..
+        } if *projected == turn
+    ));
 
     let mut terminal_reconstitution = StartEligibleTurnService::new(
         FixedActivationIds {
