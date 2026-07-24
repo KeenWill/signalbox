@@ -22,8 +22,8 @@ use signalbox_application::{
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     BoundedImportedSessionReconstitutionFailure, ContextFrontierId,
-    CreateSessionFromImportedFrontier, DirectModelSelection, DurableCommandId,
-    ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
+    CreateSessionFromImportedFrontier, DangerousToolAutoApproval, DirectModelSelection,
+    DurableCommandId, ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
     ImportedTranscriptEntryId, ModelSelectionRequest, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
@@ -233,11 +233,12 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
     Ok(())
 }
 
-/// S28 / INV-002 / INV-038 / INV-039: the purpose-specific command load
-/// reconstitutes the complete stored command, result, semantic prefix, and seed.
+/// S28 / INV-002 / INV-008 / INV-038 / INV-039: the purpose-specific command
+/// load reconstitutes the complete stored command, defaults, result, semantic
+/// prefix, and seed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv002_inv038_inv039_command_load_reconstitutes_complete_checked_seed()
+async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_checked_seed()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
@@ -254,7 +255,18 @@ async fn s28_inv002_inv038_inv039_command_load_reconstitutes_complete_checked_se
     )
     .await?;
 
-    let command = imported_command(0x302, &conversation, ImportedSessionRelationship::Fork);
+    let command = CreateSessionFromImportedFrontier::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x302)),
+        conversation
+            .frontiers()
+            .last()
+            .expect("synthetic conversation has an addressable entry"),
+        ImportedSessionRelationship::Fork,
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(0x500))),
+            DangerousToolAutoApproval::ApproveAll,
+        ),
+    );
     let repository = ImportedSessionRepository::new(pool);
     let mut next_semantic = 0x620_u128;
     let created = repository

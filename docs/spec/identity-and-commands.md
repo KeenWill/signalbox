@@ -212,11 +212,11 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-New `CreateSession` and `ReplaceSessionDefaults` records use version 2 for the
-complete defaults value; version 1 reconstitutes with dangerous blanket approval
-disabled. `CreateSessionFromImportedFrontier`, `SubmitInput`, and
-`DecideToolRequest` use version 1. `CreateSession` records applied results only
-(its one preparation failure is an error, not a recorded rejection);
+New `CreateSession`, `CreateSessionFromImportedFrontier`, and
+`ReplaceSessionDefaults` records use version 2 for the complete defaults value;
+version 1 reconstitutes with dangerous blanket approval disabled. `SubmitInput`
+and `DecideToolRequest` use version 1. `CreateSession` records applied results
+only (its one preparation failure is an error, not a recorded rejection);
 `CreateSessionFromImportedFrontier` also records applied results only, because a
 missing conversation named by the frontier or a boundary absent from that
 conversation is a pre-claim admission error rather than an authoritative

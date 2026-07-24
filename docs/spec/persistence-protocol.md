@@ -186,10 +186,10 @@ identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `submit_input`, `decide_tool_request`) and a kind-scoped `storage_version`.
-Defaults-bearing create/replace records write version 2 and reconstitute version
-1 with the disabled dangerous-tool posture, while imported-create, submit, and
-decision records use version 1. Each kind has one typed subordinate record keyed
-by `command_id` that stores every caller-supplied semantic field in typed,
+Defaults-bearing create/imported-create/replace records write version 2 and
+reconstitute version 1 with the disabled dangerous-tool posture, while submit
+and decision records use version 1. Each kind has one typed subordinate record
+keyed by `command_id` that stores every caller-supplied semantic field in typed,
 `CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
 its typed result fields; result-shape `CHECK` constraints tie each rejection
 kind to exactly its fields, and deferred reverse constraints require exactly one
