@@ -82,7 +82,7 @@ mod tests {
 
     /// A complete current session snapshot whose current defaults carry the
     /// given version. The model-selection seed derives from that one knob,
-    /// decorrelated (`docs/testing-style.md`, rule 4), so a projection reading
+    /// decorrelated (`docs/agents/testing-style.md`, rule 4), so a projection reading
     /// one value where it should read the other cannot accidentally pass.
     fn current_session(id: SessionId, defaults_version: u64) -> Session {
         let version = SessionConfigurationDefaultsVersion::try_from_u64(defaults_version)

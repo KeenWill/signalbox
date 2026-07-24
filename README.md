@@ -60,7 +60,7 @@ boundaries and important qualifications behind this sketch.
 - [Scenarios](docs/scenarios.md)
 - [Invariant catalog](docs/invariants.md)
 - [Domain spine](docs/domain-spine.md)
-- [Testing style](docs/testing-style.md)
+- [Testing style](docs/agents/testing-style.md)
 - [Decision log](docs/decisions.md)
 - [Open questions](docs/open-questions.md)
 - [Living specification](docs/spec/README.md)
