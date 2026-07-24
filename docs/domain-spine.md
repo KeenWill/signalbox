@@ -1759,6 +1759,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
     ) -> Self;
+    pub fn with_executing_tool_batch(self, batch: &ToolBatch) -> Self;
     pub const fn stop_requested(
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,

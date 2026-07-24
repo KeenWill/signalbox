@@ -742,10 +742,17 @@ where
                         interrupt,
                         identities,
                     )
-                    .map_err(|_| {
-                        SubmitInputCorruption::Inconsistent(
-                            "applied interrupt does not match executing tool batch",
-                        )
+                    .map_err(|error| {
+                        let context = match error {
+                            signalbox_domain::ModelCallClosureError::InterruptCorrelationMismatch => {
+                                "applied interrupt does not correlate with executing tool batch"
+                            }
+                            signalbox_domain::ModelCallClosureError::AttemptStateMismatch => {
+                                "applied interrupt does not match executing tool attempt state"
+                            }
+                            _ => "applied interrupt cannot close executing tool batch",
+                        };
+                        SubmitInputCorruption::Inconsistent(context)
                     })?,
             ))
         } else {
@@ -1466,7 +1473,7 @@ pub(crate) async fn load_scheduling_projection(
                             )
                             .into());
                         }
-                        let phase = match attempt_state.as_str() {
+                        let mut phase = match attempt_state.as_str() {
                             "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(
                                 lifecycle_turn,
                                 attempt_id,
@@ -1520,7 +1527,10 @@ pub(crate) async fn load_scheduling_projection(
                                 )
                                 .into());
                             }
+                            required_frontiers
+                                .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                             required_model_calls.insert(round_call);
+                            phase = phase.with_executing_tool_batch(&batch);
                         }
                         phase
                     }
