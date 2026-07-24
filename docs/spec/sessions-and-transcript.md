@@ -1,11 +1,10 @@
 # Sessions and the transcript
 
 The baseline session and transcript behavior was verified through PR #175
-(`agent/stop-requests`); the import additions specify the implementing stack
-rooted at `agent/conversation-import-spec`. This page covers session creation
-and ancestry, creation from an imported frontier, session-level configuration
-defaults and their replacement, the long-lived session aggregate, semantic
-transcript entries, accepted-input user content, and actor attribution. The
+(`agent/stop-requests`). This page covers session creation and ancestry,
+creation from an imported frontier, session-level configuration defaults and
+their replacement, the long-lived session aggregate, semantic transcript
+entries, accepted-input user content, and actor attribution. The
 imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where

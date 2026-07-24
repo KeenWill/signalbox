@@ -1,9 +1,8 @@
 # Turn lifecycle and scheduling
 
-The baseline turn behavior was verified through PR #175 (`agent/stop-requests`);
-the imported seed-prefix addition specifies the implementing stack rooted at
-`agent/conversation-import-spec`. This page covers turns, turn attempts,
-eligibility derivation, the scheduler, and startup recovery. Code homes:
+The baseline turn behavior was verified through PR #175 (`agent/stop-requests`).
+This page covers turns, turn attempts, eligibility derivation, the scheduler,
+and startup recovery. Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -159,11 +158,8 @@ queued turn, and constructs atomically-committable state:
 
 `SingleSource` native-fork ancestry remains unschedulable and fails
 reconstitution with `UnsupportedSessionAncestry`. Imported ancestry is admitted
-only with its complete seed projection: reconstitution requires that the seed
-frontier belongs to the current session and contains exactly one `Imported`
-semantic entry for every normalized imported position from one through the
-selected addressable boundary. No seed entry may carry native accepted-input,
-turn, attempt, call, or tool evidence (INV-038, INV-039).
+only when its seed satisfies the complete imported-session contract in
+[sessions-and-transcript](sessions-and-transcript.md) (INV-038, INV-039).
 
 Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
 or lineage. Its resume/fork relationship is immutable creation provenance, not a

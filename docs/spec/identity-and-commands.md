@@ -200,11 +200,12 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 from recorded domain rejection.
 
 `CreateSession` v1 records applied results only (its one preparation failure is
-an error, not a recorded rejection); `CreateSessionFromImportedFrontier` records
-either the applied session or its closed imported-target rejection;
+an error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
+records applied results only, because a missing imported conversation or
+frontier is a pre-claim admission error rather than an authoritative rejection;
 `ReplaceSessionDefaults` and `SubmitInput` record both applied results and
-closed, typed rejection discriminators. Rejections claim the identifier exactly
-as applied results do.
+closed, typed rejection discriminators. Authoritative rejections claim the
+identifier exactly as applied results do.
 
 ## Replay and equality
 
@@ -217,9 +218,9 @@ in `crates/domain`) covers every caller-supplied semantic field and excludes
 payload, not part of the meaning it names.
 
 Every command repository (`crates/persistence/src/create_session.rs`,
-`replace_session_defaults.rs`, `submit_input.rs`) follows one claim protocol,
-with registry lookup as the first durable operation, before any current-state
-validation (INV-012):
+`create_session_from_imported_frontier.rs`, `replace_session_defaults.rs`,
+`submit_input.rs`) follows one claim protocol, with registry lookup as the first
+durable operation, before any current-state validation (INV-012):
 
 1. Inspect the registry. If the identifier is claimed by the same kind, load and
    reconstruct the recorded typed payload and result through domain-owned
@@ -234,6 +235,14 @@ validation (INV-012):
    applied result is returned before commit, and a failed transaction claims no
    identifier.
 
+After registry inspection and before claiming an unseen identifier, a command
+may perform an owner-specified pre-claim admission read.
+`CreateSessionFromImportedFrontier` uses that phase to resolve the selected
+imported conversation and boundary; a missing target returns the corresponding
+admission error without claiming the identifier. This is distinct from an
+authoritative rejection, which is derived only after claim and stored for
+replay.
+
 First handling may re-derive the terminal result inside the claim transaction:
 `ReplaceSessionDefaults` applies through a compare-and-set `UPDATE` on
 `session_current_defaults`, and a CAS lost to a concurrent commit re-prepares
@@ -244,11 +253,13 @@ terminal result; a CAS lost without a version change is corruption
 Each application service calls its atomic transaction port exactly once and
 surfaces infrastructure failure to its caller without retry or receipt
 reconstruction (the `CreateSessionTransaction` contract in
-`crates/application/src/create_session.rs`;
-`s01_inv012_transaction_failure_is_returned_without_retry` tests in all three
-services). Because a failed transaction claims no identifier, retransmitting
-under the same `DurableCommandId` is the caller's retry path and replays or
-claims cleanly.
+`crates/application/src/create_session.rs`, the
+`CreateSessionFromImportedFrontierTransaction` contract, and the corresponding
+transaction-failure tests in all four services). Because a failed transaction
+claims no identifier, retransmitting under the same `DurableCommandId` is the
+caller's retry path and replays or claims cleanly. Every repository also treats
+an unreadable claimed payload or result as typed corruption rather than
+unclaimed state, including the imported-frontier command.
 
 Reconstructed-then-compare ordering means a storage representation change can
 never turn an equal command into conflicting reuse; unknown kinds and storage
