@@ -3,10 +3,10 @@
 This document owns how tests are written and how a test's value is judged — how
 a test body reads, how fixtures are shaped, what an assertion may reference, how
 snapshot (expect) tests are used, and when a test is worth keeping; the
-[testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns the
+[testing section of CONTRIBUTING.md](../../CONTRIBUTING.md#testing) owns the
 testing strategy — the test categories and their coverage obligations — and is
 not restated here. Test naming follows the rule stated in
-[AGENTS.md](../AGENTS.md).
+[AGENTS.md](../../AGENTS.md).
 
 The numbered rules are normative for new and modified tests; cite them by number
 in review. Apply them to existing tests only when already changing those tests
@@ -165,8 +165,8 @@ dev-dependency arriving with its first adopting tests.
 
 10. **Snapshots supplement invariant enforcement; they never replace it.** A
     test linked from an enforcement column in
-    [the invariant catalog](invariants.md) keeps its precise targeted asserts; a
-    snapshot proves output-didn't-change, not invariant-holds.
+    [the invariant catalog](../invariants.md) keeps its precise targeted
+    asserts; a snapshot proves output-didn't-change, not invariant-holds.
 
 11. **Never bless a diff you haven't read.** Review a snapshot update with the
     same care as a code change; the snapshot diff is the review surface.
@@ -284,17 +284,17 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
     distinct behaviors split into separately named tests — one behavior per test
     (rule 7). The exception is a requirement that is itself atomic: when one
     contract conjoins correlated guarantees — such as the atomic guarantees the
-    [testing strategy](../CONTRIBUTING.md#testing) requires of restart and race
-    tests — that conjunction is one behavior and stays in one test even though
-    its description contains "and". Splitting such guarantees across separate
-    executions lets each half pass under a different interleaving while no test
-    can detect a violation of the combined contract. Before renaming or
+    [testing strategy](../../CONTRIBUTING.md#testing) requires of restart and
+    race tests — that conjunction is one behavior and stays in one test even
+    though its description contains "and". Splitting such guarantees across
+    separate executions lets each half pass under a different interleaving while
+    no test can detect a violation of the combined contract. Before renaming or
     splitting any test, check the enforcement column of
-    [the invariant catalog](invariants.md): it binds by file and INV-tag, not by
-    test function name, so verify the file's tagged coverage still holds after
-    the change and update the column in the same change if it moves. Keep names
-    stable anyway — reviewers and diffs read them — but the binding reference is
-    the file plus its tags.
+    [the invariant catalog](../invariants.md): it binds by file and INV-tag, not
+    by test function name, so verify the file's tagged coverage still holds
+    after the change and update the column in the same change if it moves. Keep
+    names stable anyway — reviewers and diffs read them — but the binding
+    reference is the file plus its tags.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a
 split, not an unroll:
