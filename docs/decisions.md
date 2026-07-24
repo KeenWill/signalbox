@@ -35,6 +35,48 @@ same last slot.
 temporary disk use, process-runtime connection services, and application-pool
 capacity.
 
+## 2026-07-23 — Pin compared process-socket identities
+
+**Context.** A device-and-inode comparison cannot prove pathname identity after
+the observed socket has no remaining filesystem link: its inode could be reused
+for a replacement before revalidation or cleanup.
+
+**Decision.** While holding the existing path lock, retain each compared socket
+with a hard link at the reserved adjacent `<socket-path>.identity` name. Reclaim
+an owned socket left there by an abrupt prior exit, fail closed on another
+entry, and hold the active listener's link through public-path removal.
+
+**Rejected alternatives.** Comparing device and inode without retaining the
+inode admits reuse. Opening a socket node as a metadata descriptor is not
+portable to macOS. Random link names leak unbounded directory entries after
+abrupt exits.
+
+**Affects.** Stale-socket recovery, guarded bind, graceful cleanup, and the
+local process-transport specification.
+
+## 2026-07-23 — Bound process-frame JSON container depth
+
+**Context.** The 8 MiB frame limit bounds input bytes, but duplicate-member
+validation retains one key set per open object. A deeply nested frame can
+therefore amplify live allocation before version classification even while
+remaining under the byte cap.
+
+**Decision.** Admit at most 127 simultaneously open JSON objects and arrays,
+including the top-level frame object, and classify deeper input as
+`malformed_frame` before version classification. Duplicate-member validation
+still covers every object within the admitted depth. The value matches the
+existing provider-JSON container boundary and Serde's practical recursion
+boundary.
+
+**Rejected alternatives.** Relying on the byte cap alone permits
+disproportionate scanner memory. Skipping duplicate checks for unsupported
+versions contradicts the closed process grammar. A shallower arbitrary limit
+lacks evidence, while an unbounded or heap-spilling parser preserves the
+amplification.
+
+**Affects.** Process frame decoding, duplicate-member scanning,
+[process-protocol](spec/process-protocol.md), and INV-033 tests.
+
 ## 2026-07-23 — Expose ambiguous commits as a stable process error
 
 **Context.** A lost PostgreSQL commit response can leave `create_session` or
@@ -459,7 +501,7 @@ adds unnecessary steady database traffic before measurements justify it.
 transcript content, and a transactional outbox, but no supported client process
 boundary or outbox consumer. The retired ADR-0019 protocol was never implemented
 or distilled and carries no authority. The owner predecided the version-one
-transport, framing, and trust posture in the 2026-07-23 session.
+transport, framing, and trust posture on 2026-07-23.
 
 **Decision.** Version one is a Unix domain stream socket at the required
 `SIGNALBOX_SOCKET_PATH`, with owner-only permissions, versioned JSON-lines, and

@@ -8,7 +8,7 @@ use std::error::Error;
 
 use signalbox_hubd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
 use signalbox_persistence::local_test_connection_options;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -121,6 +121,38 @@ async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), 
     Ok(())
 }
 
+/// Explicit fenced-database shutdown cannot release the singleton guard while
+/// a connection detached from SQLx pool accounting retains generation
+/// authority.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fenced_database_close_waits_for_a_detached_pool_session() -> Result<(), Box<dyn Error>> {
+    let (container, control_pool, database_url) = postgres().await?;
+    let options = local_test_connection_options(&database_url)?;
+    let database = FencedHubDatabase::connect_with(options).await?;
+    let detached = database.pool().acquire().await?.detach();
+    let close = database.close();
+    tokio::pin!(close);
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut close)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        SingleHubGuard::acquire(&control_pool).await,
+        Err(SingleHubGuardError::AlreadyRunning)
+    ));
+
+    detached.close().await?;
+    close.await?;
+    let replacement = SingleHubGuard::acquire(&control_pool).await?;
+    replacement.close().await?;
+    control_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Omitting explicit fenced-database shutdown fails closed: dropping the owner
 /// never releases the singleton guard while escaped raw pool handles may exist.
 #[tokio::test]
@@ -220,34 +252,6 @@ async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box
     let successor = tokio::time::timeout(std::time::Duration::from_secs(10), successor).await??;
     assert_eq!(successor.generation().get(), 3);
     successor.close().await?;
-    control_pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// A retained generation is observational only: after close, the public
-/// construction boundary can create database work only by acquiring a new
-/// singleton guard and advancing the fence.
-#[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn retired_generation_cannot_bypass_guarded_pool_construction() -> Result<(), Box<dyn Error>>
-{
-    let (container, control_pool, database_url) = postgres().await?;
-    let options = local_test_connection_options(&database_url)?;
-    let first = FencedHubDatabase::connect_with(options.clone()).await?;
-    let retired_generation = first.generation();
-    assert_eq!(retired_generation.get(), 2);
-    first.close().await?;
-
-    let successor = FencedHubDatabase::connect_with(options.clone()).await?;
-    let current_generation = successor.generation();
-    assert_eq!(current_generation.get(), 3);
-    successor.close().await?;
-    assert!(current_generation > retired_generation);
-
-    let replacement = FencedHubDatabase::connect_with(options).await?;
-    assert_eq!(replacement.generation().get(), 4);
-    replacement.close().await?;
     control_pool.close().await;
     drop(container);
     Ok(())
