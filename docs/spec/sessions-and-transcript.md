@@ -105,9 +105,9 @@ not a historical fact.
 ### Create from an imported frontier
 
 `CreateSessionFromImportedFrontier` is a distinct durable command family
-carrying command identity, one `ImportedConversationId`, one addressable
-`ImportedTranscriptFrontier`, one `ImportedSessionRelationship` (`Resume` or
-`Fork`), and complete unversioned initial defaults. Its structural replay
+carrying command identity, one addressable `ImportedTranscriptFrontier` (which
+owns its `ImportedConversationId`), one `ImportedSessionRelationship` (`Resume`
+or `Fork`), and complete unversioned initial defaults. Its structural replay
 equality excludes only command identity. Separating the family preserves storage
 version 1 and the no-ancestry contract of `CreateSession`.
 
@@ -142,10 +142,10 @@ boundary, and either:
   lost claim race re-inspected against the winner by the shared protocol.
 
 An equal replay returns the recorded created session and ignores unused fresh
-identity candidates. Changed conversation, frontier, relationship, or defaults
-under an already claimed command identity is conflicting reuse. Cross-kind reuse
-follows the owner-global durable-command contract in
-[identity-and-commands](identity-and-commands.md).
+identity candidates. A changed frontier (including its owning conversation),
+relationship, or defaults under an already claimed command identity is
+conflicting reuse. Cross-kind reuse follows the owner-global durable-command
+contract in [identity-and-commands](identity-and-commands.md).
 
 The committing transaction atomically inserts:
 

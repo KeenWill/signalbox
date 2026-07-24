@@ -325,7 +325,6 @@ impl std::hash::Hash for CreateSession {
 #[derive(Clone, Copy, Debug)]
 pub struct CreateSessionFromImportedFrontier {
     command_id: DurableCommandId,
-    imported_conversation: ImportedConversationId,
     imported_frontier: ImportedTranscriptFrontier,
     relationship: ImportedSessionRelationship,
     initial_configuration_defaults: SessionConfigurationDefaults,
@@ -335,14 +334,12 @@ impl CreateSessionFromImportedFrontier {
     /// Creates the complete canonical caller payload.
     pub const fn new(
         command_id: DurableCommandId,
-        imported_conversation: ImportedConversationId,
         imported_frontier: ImportedTranscriptFrontier,
         relationship: ImportedSessionRelationship,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self {
         Self {
             command_id,
-            imported_conversation,
             imported_frontier,
             relationship,
             initial_configuration_defaults,
@@ -356,7 +353,7 @@ impl CreateSessionFromImportedFrontier {
 
     /// Returns the selected immutable imported conversation.
     pub const fn imported_conversation(&self) -> ImportedConversationId {
-        self.imported_conversation
+        self.imported_frontier.conversation()
     }
 
     /// Returns the selected inclusive imported entry boundary.
@@ -383,8 +380,7 @@ impl CreateSessionFromImportedFrontier {
 /// The durable-command comparison payload excludes only command identity.
 impl PartialEq for CreateSessionFromImportedFrontier {
     fn eq(&self, other: &Self) -> bool {
-        self.imported_conversation == other.imported_conversation
-            && self.imported_frontier == other.imported_frontier
+        self.imported_frontier == other.imported_frontier
             && self.relationship == other.relationship
             && self.initial_configuration_defaults == other.initial_configuration_defaults
     }
@@ -394,7 +390,6 @@ impl Eq for CreateSessionFromImportedFrontier {}
 
 impl std::hash::Hash for CreateSessionFromImportedFrontier {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.imported_conversation.hash(state);
         self.imported_frontier.hash(state);
         self.relationship.hash(state);
         self.initial_configuration_defaults.hash(state);
@@ -416,6 +411,16 @@ pub struct ImportedSessionSeed {
 }
 
 impl ImportedSessionSeed {
+    pub(crate) const fn from_validated_parts(
+        session: SessionId,
+        seed_frontier: ContextFrontierId,
+    ) -> Self {
+        Self {
+            session,
+            seed_frontier,
+        }
+    }
+
     /// Returns the imported-seeded session that owns this one-to-one record.
     pub const fn session(&self) -> SessionId {
         self.session
@@ -440,6 +445,18 @@ pub struct InitialSession {
 }
 
 impl InitialSession {
+    pub(crate) const fn from_validated_imported_creation(
+        id: SessionId,
+        provenance: SessionCreationProvenance,
+        configuration_defaults: VersionedSessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            id,
+            provenance,
+            configuration_defaults,
+        }
+    }
+
     /// Returns the hub-minted session identity.
     pub const fn id(&self) -> SessionId {
         self.id
@@ -508,6 +525,18 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) const fn from_validated_imported_reconstitution(
+        id: SessionId,
+        creation_provenance: SessionCreationProvenance,
+        current_configuration_defaults: VersionedSessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            id,
+            creation_provenance,
+            current_configuration_defaults,
+        }
+    }
+
     /// Returns the durable conversation identity.
     pub const fn id(&self) -> SessionId {
         self.id
@@ -1581,7 +1610,6 @@ mod tests {
         );
         let create = CreateSessionFromImportedFrontier::new(
             command_id(3),
-            conversation,
             frontier,
             ImportedSessionRelationship::Resume,
             defaults(4),
@@ -1591,7 +1619,6 @@ mod tests {
             create,
             CreateSessionFromImportedFrontier::new(
                 command_id(5),
-                conversation,
                 frontier,
                 ImportedSessionRelationship::Resume,
                 defaults(4),
@@ -1601,8 +1628,11 @@ mod tests {
             create,
             CreateSessionFromImportedFrontier::new(
                 command_id(3),
-                imported_conversation_id(6),
-                frontier,
+                test_imported_frontier(
+                    imported_conversation_id(6),
+                    imported_transcript_entry_id(2),
+                    ImportedTranscriptPosition::first(),
+                ),
                 ImportedSessionRelationship::Resume,
                 defaults(4),
             )
@@ -1611,7 +1641,6 @@ mod tests {
             create,
             CreateSessionFromImportedFrontier::new(
                 command_id(3),
-                conversation,
                 frontier,
                 ImportedSessionRelationship::Fork,
                 defaults(4),
@@ -1621,7 +1650,6 @@ mod tests {
             create,
             CreateSessionFromImportedFrontier::new(
                 command_id(3),
-                conversation,
                 frontier,
                 ImportedSessionRelationship::Resume,
                 defaults(7),

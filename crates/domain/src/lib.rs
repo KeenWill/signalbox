@@ -14,6 +14,7 @@ mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
 mod imported_conversation;
+mod imported_session;
 mod model_call;
 mod model_execution;
 mod provider_evidence;
@@ -57,6 +58,18 @@ pub use imported_conversation::{
     ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
     ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
     ImportedTranscriptEntryInput, ImportedTranscriptFrontier, ImportedTranscriptPosition,
+};
+pub use imported_session::{
+    CreateSessionFromImportedFrontierAppliedResult,
+    CreateSessionFromImportedFrontierPreparationError,
+    CreateSessionFromImportedFrontierPreparationFailure,
+    CreateSessionFromImportedFrontierReconstitutionError,
+    CreateSessionFromImportedFrontierReconstitutionFailure,
+    CreateSessionFromImportedFrontierReconstitutionInput, ImportedSessionReconstitutionError,
+    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
+    ImportedSessionSeedReconstitutionFailure, ImportedSessionSeedReconstitutionInput,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
