@@ -2427,6 +2427,7 @@ dependencies = [
 name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-runtime",

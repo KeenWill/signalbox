@@ -2815,11 +2815,28 @@ pub enum ModelConversationMessage {
         producing_call: ModelCallId,
         content: AssistantText,
     },
+    AssistantToolUse {
+        source: SemanticTranscriptEntryRef,
+        producing_call: ModelCallId,
+        request: ToolRequest,
+    },
+    ToolResult {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequestId,
+        content: ModelToolResultContent,
+    },
+}
+
+pub enum ModelToolResultContent {
+    Success(ToolResultContent),
+    ExecutionError(ToolExecutionError),
+    Denied { reason: Option<ToolDenialReason> },
+    ClosedByTurnEnd,
 }
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
-    // accessors: request(), credential_reference(), messages()
+    // accessors: request(), credential_reference(), messages(), tools()
 }
 
 pub enum ModelFrontierRenderingError {
@@ -2827,7 +2844,10 @@ pub enum ModelFrontierRenderingError {
         entry: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
     },
-    UnsupportedAssistantToolUse { entry: SemanticTranscriptEntryRef },
+    DuplicateToolEvidence { entry: SemanticTranscriptEntryRef },
+    MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
+    UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
+    UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure
 
@@ -2980,6 +3000,8 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
     fn next_turn_id(&mut self) -> TurnId;
+    fn next_tool_request_id(&mut self) -> ToolRequestId;
+    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId;
 }
 pub struct UuidV7ModelCallExecutionIdGenerator;
 // Default; impl ModelCallExecutionIdGenerator
@@ -3049,7 +3071,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
     >
 {
-    pub const fn new(
+    pub fn new(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -3058,7 +3080,8 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         provider: Provider,
         gate: Gate,
     ) -> Self;
-    pub const fn from_parts(
+    pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
+    pub fn from_parts(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -3066,6 +3089,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
     ) -> Self;
     pub fn into_parts(
@@ -3078,6 +3102,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
+        Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
@@ -3109,6 +3134,312 @@ impl ScriptedModelCallProvider {
     // last_prepared_messages()
 }
 // impl ModelCallProvider
+```
+
+## application: tool_loop
+
+```rust
+pub struct ToolInputSchema { /* private */ }
+impl ToolInputSchema {
+    pub fn try_new(value: String) -> Result<Self, ToolInputSchemaError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum ToolInputSchemaFailure {
+    NotJson,
+    NotObject,
+    OutsideArgumentBound(ToolArgumentsFailure),
+}
+
+pub struct ToolInputSchemaError { /* private */ }
+impl ToolInputSchemaError {
+    pub fn value(&self) -> &str;
+    pub const fn failure(&self) -> ToolInputSchemaFailure;
+    pub fn into_parts(self) -> (String, ToolInputSchemaFailure);
+}
+
+pub struct ToolDefinition { /* private */ }
+impl ToolDefinition {
+    pub const fn new(
+        name: ToolName,
+        description: String,
+        input_schema: ToolInputSchema,
+        permission_default: ToolPermissionDefault,
+        effect_class: ToolEffectClass,
+    ) -> Self;
+    // accessors: name(), description(), input_schema(), permission_default(), effect_class()
+}
+
+pub trait ToolArgumentValidator: Send + Sync {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail>;
+}
+// implemented for matching Fn(&NormalizedToolArguments) -> Result<(), ToolExecutionErrorDetail>
+
+pub struct CompiledTool { /* private */ }
+impl CompiledTool {
+    pub fn new(
+        definition: ToolDefinition,
+        validator: impl ToolArgumentValidator + 'static,
+    ) -> Self;
+    pub const fn definition(&self) -> &ToolDefinition;
+}
+
+pub struct DuplicateToolDefinition { /* private */ }
+impl DuplicateToolDefinition {
+    pub const fn name(&self) -> &ToolName;
+}
+
+pub struct CompiledToolCatalog { /* private */ }
+impl CompiledToolCatalog {
+    pub fn try_new(
+        tools: impl IntoIterator<Item = CompiledTool>,
+    ) -> Result<Self, DuplicateToolDefinition>;
+}
+// Default; impl ToolCatalog
+
+pub trait ToolCatalog: Send + Sync {
+    fn definitions(&self) -> Box<[ToolDefinition]>;
+    fn definition(&self, name: &ToolName) -> Option<ToolDefinition>;
+    fn validate_arguments(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolCatalogValidationFailure>;
+}
+
+pub struct NoToolCatalog;
+// Copy + Default; impl ToolCatalog
+
+pub enum ToolCatalogValidationFailure {
+    UnknownTool,
+    InvalidArguments {
+        detail: Option<ToolExecutionErrorDetail>,
+    },
+}
+
+pub enum ResolvedToolConversationEntry {
+    AssistantToolUse {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+    },
+    ExecutionResult {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+        attempt: EndedToolAttempt,
+    },
+    Denied {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+        approval: ToolApprovalResolution,
+    },
+    Closed {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequest,
+    },
+}
+impl ResolvedToolConversationEntry {
+    pub const fn source(&self) -> SemanticTranscriptEntryRef;
+}
+
+pub struct ToolExecutionInvocation { /* private */ }
+// sealed: ToolExecutionService constructs only from checked request,
+// declaration, and AuthorizedToolAttempt correlations.
+impl ToolExecutionInvocation {
+    // accessors: request(), definition(), correlation()
+    pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
+}
+
+pub enum ToolExecutorEvidence {
+    CompletedText(String),
+    KnownFailed {
+        detail: Option<ToolExecutionErrorDetail>,
+    },
+    Ambiguous,
+}
+
+pub struct CorrelatedToolExecutorEvidence { /* private */ }
+// sealed: ToolExecutionInvocation::bind
+impl CorrelatedToolExecutorEvidence {
+    // accessors: correlation(), evidence()
+}
+
+pub trait ToolExecutor {
+    type Error: ClassifyOperatorFailure;
+    fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> impl Future<Output = Result<CorrelatedToolExecutorEvidence, Self::Error>> + Send;
+}
+
+pub trait ToolApprovalIdGenerator {
+    fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId;
+}
+
+pub trait ToolExecutionIdGenerator {
+    fn next_tool_attempt_id(&mut self) -> ToolAttemptId;
+    fn next_tool_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_tool_context_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_tool_model_call_id(&mut self) -> ModelCallId;
+    fn next_tool_turn_id(&mut self) -> TurnId;
+}
+
+pub struct UuidV7ToolLoopIdGenerator;
+// Copy + Default; impl ToolApprovalIdGenerator + ToolExecutionIdGenerator
+
+pub trait DecideToolRequestTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn decide<NextAttempt>(
+        &mut self,
+        command: DecideToolRequest,
+        next_attempt: NextAttempt,
+    ) -> impl Future<Output = Result<PreparedDecideToolRequest, Self::Error>> + Send
+    where
+        NextAttempt: FnMut() -> TurnAttemptId + Send;
+}
+
+pub struct DecideToolRequestService<Ids, Transaction> { /* private */ }
+impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Ids, Transaction);
+}
+impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransaction>
+    DecideToolRequestService<Ids, Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        command: DecideToolRequest,
+    ) -> Result<PreparedDecideToolRequest, Transaction::Error>;
+}
+
+pub struct ToolContinuationIdentities { /* private */ }
+impl ToolContinuationIdentities {
+    pub fn new(
+        result_entries: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        call: ModelCallId,
+        target_failure: FailedModelCallTurnIdentities,
+        steering_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: result_entries(), result_frontier(), call(), target_failure(),
+    // steering_frontier()
+}
+
+pub enum PrepareToolContinuationOutcome {
+    NoWork,
+    Checkpointed(ModelCallId),
+    TargetUnavailable(Box<FailedModelCallTurn>),
+}
+
+pub trait ToolExecutionTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn load_active_batch(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Option<ToolBatch>, Self::Error>> + Send;
+    fn prepare_next_attempt(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        effect_class: ToolEffectClass,
+    ) -> impl Future<Output = Result<CurrentToolAttempt, Self::Error>> + Send;
+    fn authorize_attempt(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    fn commit_preflight_error(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        error: ToolExecutionError,
+    ) -> impl Future<Output = Result<EndedToolAttempt, Self::Error>> + Send;
+    fn commit_observation(
+        &mut self,
+        observation: CorrelatedToolAttemptObservation,
+    ) -> impl Future<Output = Result<EndedToolAttempt, Self::Error>> + Send;
+    fn classify_crash_loss<NextTurn>(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        failure_identities: FailedModelCallTurnIdentities,
+        next_turn: NextTurn,
+    ) -> impl Future<Output = Result<ToolAttemptCrashOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+    fn prepare_continuation<NextSteering>(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> impl Future<Output = Result<PrepareToolContinuationOutcome, Self::Error>> + Send
+    where
+        NextSteering:
+            FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
+}
+
+pub enum ToolExecutionServiceOutcome {
+    NoWork,
+    AwaitingApproval(ToolRequestId),
+    AwaitingRecovery(ToolAttemptId),
+    AttemptCheckpointed(ToolAttemptId),
+    PreflightFailed(Box<EndedToolAttempt>),
+    ObservationCommitted(Box<EndedToolAttempt>),
+    CrashClassified(Box<ToolAttemptCrashOutcome>),
+    ContinuationCheckpointed(ModelCallId),
+    ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
+}
+
+pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
+    Load(TransactionError),
+    Prepare(TransactionError),
+    Authorize(TransactionError),
+    PreflightCommit(TransactionError),
+    Executor(ExecutorError),
+    ObservationCommit(TransactionError),
+    CrashClassification(TransactionError),
+    Continuation(TransactionError),
+    CatalogDrift,
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure (bounded)
+
+pub struct ToolExecutionService<Ids, Transaction, Catalog, Executor> { /* private */ }
+impl<Ids, Transaction, Catalog, Executor>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor>
+{
+    pub const fn new(
+        ids: Ids,
+        transaction: Transaction,
+        catalog: Catalog,
+        executor: Executor,
+    ) -> Self;
+    pub fn into_parts(self) -> (Ids, Transaction, Catalog, Executor);
+}
+impl<
+        Ids: ToolExecutionIdGenerator + Send,
+        Transaction: ToolExecutionTransaction,
+        Catalog: ToolCatalog,
+        Executor: ToolExecutor,
+    > ToolExecutionService<Ids, Transaction, Catalog, Executor>
+{
+    pub async fn execute(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    >;
+}
 ```
 
 ## application: replace_session_defaults
@@ -3614,7 +3945,8 @@ pub trait ToolExecutionTransaction {
 | **signalbox-domain total**            | **295 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 29 (incl. 7 traits)  |
+| application: model_execution          | 30 (incl. 7 traits)  |
+| application: tool_loop                | 21 (incl. 5 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
@@ -3622,4 +3954,4 @@ pub trait ToolExecutionTransaction {
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
 | application: tool_loop_ports          | 6 (incl. 2 traits)   |
-| **signalbox-application total**       | **82**               |
+| **signalbox-application total**       | **104**              |

@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Decode checked tool schemas at the runtime bridge
+
+**Context.** The application catalog carries provider-neutral JSON Schema as a
+checked canonical string, while the model runtime owns a `serde_json::Value`
+schema field. The provider bridge must cross that representation boundary
+without exposing runtime or serde types to the application API.
+
+**Decision.** Add the already pinned `serde_json` dependency directly to
+`signalbox-model-provider-runtime` and decode each checked application schema
+when preparing the runtime operation. A decode failure is a fail-closed adapter
+defect; serde values remain private to the outward bridge.
+
+**Rejected alternatives.** Put `serde_json::Value` in the application catalog:
+that leaks a codec representation across the application boundary. Reparse in
+each provider adapter: duplicated work and inconsistent failure ownership.
+Hand-write a second JSON representation: unnecessary format code for an existing
+focused dependency.
+
+**Affects.** `crates/model-provider-runtime/Cargo.toml`, its tool-definition
+projection, and the lockfile dependency edge; no new resolved package or public
+serde type is introduced.
+
 ## 2026-07-23 — Bound durable tool execution error details
 
 **Context.** Tool execution errors need an optional operator-safe explanation,

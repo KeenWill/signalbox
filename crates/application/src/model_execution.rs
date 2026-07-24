@@ -6,7 +6,7 @@
 //! terminal observation distinct.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
     future::Future,
@@ -14,19 +14,25 @@ use std::{
 };
 
 use signalbox_domain::{
-    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
-    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    DangerousToolAutoApproval, FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
+    AuthorizedModelCall, CompletedModelCallIdentities, ContextFrontierId,
+    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, InitialToolApproval, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome,
     PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn,
-    StoppedToolRoundModelCallIdentities, ToolRoundModelCallIdentities, TurnAttemptId, TurnId,
-    UserContent,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolApprovalDecision,
+    ToolAttemptEnd, ToolDenialReason, ToolExecutionError, ToolRequest, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolRoundModelCallIdentities, TurnAttemptId,
+    TurnId, UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::{ClassifyOperatorFailure, OperatorFailureClass, ResolvedToolConversationEntry};
+use crate::{
+    ClassifyOperatorFailure, NoToolCatalog, OperatorFailureClass, ResolvedToolConversationEntry,
+    ToolCatalog, ToolDefinition, tool_loop::initial_tool_approval,
+};
 
 /// Non-secret durable name of the credential pinned for one model call.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,6 +74,40 @@ pub enum ModelConversationMessage {
         /// Exact assistant-owned text.
         content: AssistantText,
     },
+    /// One durable assistant tool proposal.
+    AssistantToolUse {
+        /// The source-qualified semantic entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The outcome-authoritative call that proposed the request.
+        producing_call: ModelCallId,
+        /// Immutable request content and hub correlation.
+        request: ToolRequest,
+    },
+    /// One durable result corresponding to an earlier assistant proposal.
+    ToolResult {
+        /// The source-qualified semantic entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The logical request whose provider-visible correlation this resolves.
+        request: ToolRequestId,
+        /// Exact durable result classification and content.
+        content: ModelToolResultContent,
+    },
+}
+
+/// Provider-neutral result content resolved from durable request/attempt facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelToolResultContent {
+    /// Exact admitted executor success content.
+    Success(ToolResultContent),
+    /// Exact terminal executor error evidence.
+    ExecutionError(ToolExecutionError),
+    /// Exact durable owner denial.
+    Denied {
+        /// Optional bounded sanitized owner explanation.
+        reason: Option<ToolDenialReason>,
+    },
+    /// The turn ended before this request received a decision.
+    ClosedByTurnEnd,
 }
 
 fn render_frontier_messages<'a>(
@@ -78,7 +118,16 @@ fn render_frontier_messages<'a>(
         ),
     >,
     mut origin_content: impl FnMut(AcceptedInputId) -> Option<UserContent>,
+    tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
 ) -> Result<Box<[ModelConversationMessage]>, ModelFrontierRenderingError> {
+    let mut resolved_tools = BTreeMap::new();
+    for evidence in tool_entries {
+        if resolved_tools.insert(evidence.source(), evidence).is_some() {
+            return Err(ModelFrontierRenderingError::DuplicateToolEvidence {
+                entry: evidence.source(),
+            });
+        }
+    }
     let mut messages = Vec::new();
     for (source, payload) in entries {
         match payload {
@@ -104,18 +153,149 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 content: value.clone(),
             }),
-            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
-            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
-            | SemanticTranscriptEntryPayload::ToolDenied { .. }
-            | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
-                return Err(ModelFrontierRenderingError::UnsupportedAssistantToolUse {
-                    entry: source,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call,
+                request,
+            } => {
+                let Some(ResolvedToolConversationEntry::AssistantToolUse {
+                    request: record, ..
+                }) = resolved_tools.remove(&source)
+                else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                if record.id() != *request
+                    || record.producing_call() != *producing_call
+                    || record.session() != source.source_session()
+                {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                }
+                messages.push(ModelConversationMessage::AssistantToolUse {
+                    source,
+                    producing_call: *producing_call,
+                    request: record.clone(),
+                });
+            }
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
+                let Some(ResolvedToolConversationEntry::ExecutionResult {
+                    request,
+                    attempt: ended,
+                    ..
+                }) = resolved_tools.remove(&source)
+                else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                if ended.attempt() != *attempt
+                    || ended.request() != request.id()
+                    || ended.session() != source.source_session()
+                    || ended.turn() != request.turn()
+                    || request.session() != source.source_session()
+                {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                }
+                let content = match ended.end() {
+                    ToolAttemptEnd::Completed { result } => {
+                        ModelToolResultContent::Success(result.clone())
+                    }
+                    ToolAttemptEnd::KnownFailed { error } => {
+                        ModelToolResultContent::ExecutionError(error.clone())
+                    }
+                    ToolAttemptEnd::Ambiguous => {
+                        return Err(ModelFrontierRenderingError::UnrenderableToolResult {
+                            entry: source,
+                        });
+                    }
+                };
+                messages.push(ModelConversationMessage::ToolResult {
+                    source,
+                    request: request.id(),
+                    content,
+                });
+            }
+            SemanticTranscriptEntryPayload::ToolDenied { request } => {
+                let Some(ResolvedToolConversationEntry::Denied {
+                    request: record,
+                    approval,
+                    ..
+                }) = resolved_tools.remove(&source)
+                else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                let ToolApprovalDecision::Deny { reason } = approval.decision() else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                if record.id() != *request
+                    || approval.request() != *request
+                    || record.session() != source.source_session()
+                {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                }
+                messages.push(ModelConversationMessage::ToolResult {
+                    source,
+                    request: *request,
+                    content: ModelToolResultContent::Denied {
+                        reason: reason.clone(),
+                    },
+                });
+            }
+            SemanticTranscriptEntryPayload::ToolClosed { request } => {
+                let Some(ResolvedToolConversationEntry::Closed {
+                    request: record, ..
+                }) = resolved_tools.remove(&source)
+                else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                if record.id() != *request || record.session() != source.source_session() {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                            entry: source,
+                        },
+                    );
+                }
+                messages.push(ModelConversationMessage::ToolResult {
+                    source,
+                    request: *request,
+                    content: ModelToolResultContent::ClosedByTurnEnd,
                 });
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
+    }
+    if let Some(entry) = resolved_tools.into_keys().next() {
+        return Err(ModelFrontierRenderingError::UnexpectedToolEvidence { entry });
     }
     Ok(messages.into_boxed_slice())
 }
@@ -126,23 +306,28 @@ pub struct PreparedModelOperation {
     request: PreparedModelCallRequest,
     credential_reference: ModelCallCredentialReference,
     messages: Box<[ModelConversationMessage]>,
+    tools: Box<[ToolDefinition]>,
 }
 
 impl PreparedModelOperation {
     fn render(
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
+        tools: Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
         let messages = render_frontier_messages(
             request
                 .frontier_entries()
                 .map(|entry| (entry.reference(), entry.payload())),
             |accepted_input| request.origin_content(accepted_input).cloned(),
+            tool_entries.iter(),
         )?;
         Ok(Self {
             request,
             credential_reference,
             messages,
+            tools,
         })
     }
 
@@ -160,6 +345,11 @@ impl PreparedModelOperation {
     pub fn messages(&self) -> &[ModelConversationMessage] {
         &self.messages
     }
+
+    /// Borrows the exact model-facing catalog snapshot.
+    pub fn tools(&self) -> &[ToolDefinition] {
+        &self.tools
+    }
 }
 
 /// A checked frontier could not be projected into the current text-only input.
@@ -172,9 +362,24 @@ pub enum ModelFrontierRenderingError {
         /// The accepted input whose content was absent.
         accepted_input: AcceptedInputId,
     },
-    /// Tool-use projection is reserved until the tool decisions land.
-    UnsupportedAssistantToolUse {
-        /// The source-qualified entry that cannot yet be rendered.
+    /// Two storage evidence values claimed the same semantic entry.
+    DuplicateToolEvidence {
+        /// Duplicated source-qualified entry.
+        entry: SemanticTranscriptEntryRef,
+    },
+    /// Reference-only tool history lacks exact correlated durable authority.
+    MissingOrMismatchedToolEvidence {
+        /// Source-qualified entry whose evidence is absent or cross-wired.
+        entry: SemanticTranscriptEntryRef,
+    },
+    /// Durable ambiguity cannot be projected as an ordinary model-visible result.
+    UnrenderableToolResult {
+        /// Source-qualified result entry.
+        entry: SemanticTranscriptEntryRef,
+    },
+    /// Storage supplied evidence not named by the checked frontier.
+    UnexpectedToolEvidence {
+        /// Extra source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
 }
@@ -185,8 +390,17 @@ impl fmt::Display for ModelFrontierRenderingError {
             Self::MissingOriginContent { .. } => {
                 formatter.write_str("model frontier origin content is missing")
             }
-            Self::UnsupportedAssistantToolUse { .. } => {
-                formatter.write_str("model frontier contains unsupported assistant tool use")
+            Self::DuplicateToolEvidence { .. } => {
+                formatter.write_str("model frontier tool evidence is duplicated")
+            }
+            Self::MissingOrMismatchedToolEvidence { .. } => {
+                formatter.write_str("model frontier tool evidence is missing or mismatched")
+            }
+            Self::UnrenderableToolResult { .. } => {
+                formatter.write_str("model frontier contains an unrenderable tool result")
+            }
+            Self::UnexpectedToolEvidence { .. } => {
+                formatter.write_str("model frontier tool evidence is not referenced")
             }
         }
     }
@@ -437,6 +651,8 @@ enum RetainedModelCallExecutionStateKind {
         session: SessionId,
         /// Unchanged correlated observation returned by provider work.
         observation: CorrelatedModelCallTerminalObservation,
+        /// Frozen policy outcomes for each tool proposal, in proposal order.
+        tool_approvals: Box<[InitialToolApproval]>,
     },
 }
 
@@ -489,6 +705,10 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
     /// Generates a distinct reclassified successor-turn candidate.
     fn next_turn_id(&mut self) -> TurnId;
+    /// Generates a distinct logical tool-request candidate.
+    fn next_tool_request_id(&mut self) -> ToolRequestId;
+    /// Generates a distinct same-turn continuation attempt candidate.
+    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId;
 }
 
 /// Production UUIDv7 generator for model-call execution candidates.
@@ -510,6 +730,14 @@ impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
 
     fn next_turn_id(&mut self) -> TurnId {
         TurnId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_tool_request_id(&mut self) -> ToolRequestId {
+        ToolRequestId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -752,6 +980,7 @@ pub struct ModelCallExecutionService<
     observation: Observation,
     provider: Provider,
     gate: Gate,
+    catalog: Arc<dyn ToolCatalog>,
     retained_state: Option<RetainedModelCallExecutionState>,
 }
 
@@ -759,7 +988,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
     ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 {
     /// Composes every purpose-specific effect role.
-    pub const fn new(
+    pub fn new(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -776,13 +1005,20 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             observation,
             provider,
             gate,
+            catalog: Arc::new(NoToolCatalog),
             retained_state: None,
         }
     }
 
+    /// Replaces the empty compatibility catalog with one tool-capable port.
+    pub fn with_tool_catalog(mut self, catalog: impl ToolCatalog + 'static) -> Self {
+        self.catalog = Arc::new(catalog);
+        self
+    }
+
     /// Reconstitutes an explicitly decomposed service without losing evidence.
     #[allow(clippy::too_many_arguments)]
-    pub const fn from_parts(
+    pub fn from_parts(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -790,6 +1026,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
     ) -> Self {
         Self {
@@ -800,11 +1037,16 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             observation,
             provider,
             gate,
+            catalog,
             retained_state,
         }
     }
 
     /// Returns every owned effect role for explicit composition handoff.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple deliberately preserves the service's explicit independently owned composition roles"
+    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -815,6 +1057,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
+        Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
     ) {
         (
@@ -825,6 +1068,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             self.observation,
             self.provider,
             self.gate,
+            self.catalog,
             self.retained_state,
         )
     }
@@ -922,7 +1166,11 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
                         return self
-                            .commit_terminal_observation(retained_session, non_consumption)
+                            .commit_terminal_observation(
+                                retained_session,
+                                non_consumption,
+                                Box::new([]),
+                            )
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
@@ -930,7 +1178,11 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
                         return self
-                            .commit_terminal_observation(retained_session, cancellation)
+                            .commit_terminal_observation(
+                                retained_session,
+                                cancellation,
+                                Box::new([]),
+                            )
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::Cancelled) => {
@@ -950,6 +1202,7 @@ where
                 RetainedModelCallExecutionStateKind::TerminalObservation {
                     session: retained_session,
                     observation: retained,
+                    tool_approvals,
                 } => match self
                     .observation
                     .reread_observation(retained_session, &retained)
@@ -962,7 +1215,7 @@ where
                     }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
-                            .commit_terminal_observation(retained_session, retained)
+                            .commit_terminal_observation(retained_session, retained, tool_approvals)
                             .await;
                     }
                     Err(error) => {
@@ -970,6 +1223,7 @@ where
                             state: RetainedModelCallExecutionStateKind::TerminalObservation {
                                 session: retained_session,
                                 observation: retained.clone(),
+                                tool_approvals,
                             },
                         });
                         return Err(ModelCallExecutionError::ObservationCommit {
@@ -1002,8 +1256,16 @@ where
                 Ok(PrepareModelCallOutcome::Ready {
                     request,
                     credential_reference,
-                    ..
-                }) => break (request, credential_reference),
+                    dangerous_tool_auto_approval,
+                    tool_entries,
+                }) => {
+                    break (
+                        request,
+                        credential_reference,
+                        dangerous_tool_auto_approval,
+                        tool_entries,
+                    );
+                }
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
                     return Ok(ModelCallExecutionOutcome::TargetUnavailable(failed));
                 }
@@ -1017,12 +1279,17 @@ where
             }
         };
 
-        let (prepared, credential_reference) = prepared;
+        let (prepared, credential_reference, dangerous_tool_auto_approval, tool_entries) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let prepared_request = (*prepared).clone();
-        let operation = PreparedModelOperation::render(*prepared, credential_reference)
-            .map_err(ModelCallExecutionError::Render)?;
+        let operation = PreparedModelOperation::render(
+            *prepared,
+            credential_reference,
+            self.catalog.definitions(),
+            &tool_entries,
+        )
+        .map_err(ModelCallExecutionError::Render)?;
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
             .provider
@@ -1074,7 +1341,7 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
                         return self
-                            .commit_terminal_observation(session, non_consumption)
+                            .commit_terminal_observation(session, non_consumption, Box::new([]))
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
@@ -1084,7 +1351,7 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
                         return self
-                            .commit_terminal_observation(session, cancellation)
+                            .commit_terminal_observation(session, cancellation, Box::new([]))
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::Cancelled) => {
@@ -1124,7 +1391,10 @@ where
             .await;
         let observation = observation.map_err(ModelCallExecutionError::Provider)?;
 
-        self.commit_terminal_observation(session, observation).await
+        let tool_approvals =
+            self.tool_approvals(observation.observation(), dangerous_tool_auto_approval);
+        self.commit_terminal_observation(session, observation, tool_approvals)
+            .await
     }
 
     async fn commit_capability_known_failure(
@@ -1178,6 +1448,7 @@ where
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
+        tool_approvals: Box<[InitialToolApproval]>,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1189,7 +1460,8 @@ where
         >,
     > {
         loop {
-            let identities = self.next_terminal_identities(observation.observation());
+            let identities =
+                self.next_terminal_identities(observation.observation(), &tool_approvals);
             let ids = &mut self.ids;
             let next_turn = move |_| ids.next_turn_id();
             match self
@@ -1213,6 +1485,7 @@ where
                         state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
                             observation: observation.clone(),
+                            tool_approvals,
                         },
                     });
                     return Err(ModelCallExecutionError::ObservationCommit {
@@ -1234,8 +1507,9 @@ where
     fn next_terminal_identities(
         &mut self,
         observation: &ModelCallTerminalObservation,
+        tool_approvals: &[InitialToolApproval],
     ) -> ModelCallTerminalIdentityCandidates {
-        ModelCallTerminalIdentityCandidates::Exact(match observation {
+        let exact = match observation {
             ModelCallTerminalObservation::Completed { assistant_text } => {
                 let assistant_entries = (0..assistant_text.len())
                     .map(|_| self.ids.next_semantic_entry_id())
@@ -1246,14 +1520,56 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithTools { .. } => {
-                ModelCallTerminalIdentities::ToolRound(
-                    signalbox_domain::ToolRoundModelCallIdentities::new(
-                        Vec::new(),
+            ModelCallTerminalObservation::CompletedWithTools { response } => {
+                let mut approval_index = 0usize;
+                let mut continuing = Vec::with_capacity(response.parts().len());
+                let mut stopped = Vec::with_capacity(response.parts().len());
+                let mut every_request_approved = true;
+                for part in response.parts() {
+                    let entry = self.ids.next_semantic_entry_id();
+                    match part {
+                        AssistantResponsePart::Text(_) => {
+                            continuing.push(ToolResponsePartIdentity::text(entry));
+                            stopped.push(StoppedToolResponsePartIdentity::text(entry));
+                        }
+                        AssistantResponsePart::ToolCall(_) => {
+                            // A retained-policy count mismatch is an internal
+                            // defect. Confirm is the conservative candidate:
+                            // it cannot grant unattended execution, and the
+                            // domain still rejects it under blanket posture.
+                            let approval = tool_approvals
+                                .get(approval_index)
+                                .copied()
+                                .unwrap_or(InitialToolApproval::Confirm);
+                            approval_index += 1;
+                            every_request_approved &= approval != InitialToolApproval::Confirm;
+                            let request = self.ids.next_tool_request_id();
+                            continuing.push(ToolResponsePartIdentity::tool_call(
+                                entry, request, approval,
+                            ));
+                            stopped.push(StoppedToolResponsePartIdentity::tool_call(
+                                entry,
+                                request,
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                    }
+                }
+                debug_assert_eq!(approval_index, tool_approvals.len());
+                let continuation_attempt =
+                    every_request_approved.then(|| self.ids.next_tool_continuation_attempt_id());
+                return ModelCallTerminalIdentityCandidates::ToolRound {
+                    continuing: ToolRoundModelCallIdentities::new(
+                        continuing,
                         self.ids.next_context_frontier_id(),
-                        None,
+                        continuation_attempt,
                     ),
-                )
+                    stopped: StoppedToolRoundModelCallIdentities::new(
+                        stopped,
+                        self.ids.next_semantic_entry_id(),
+                        self.ids.next_context_frontier_id(),
+                    ),
+                };
             }
             ModelCallTerminalObservation::KnownFailed => {
                 ModelCallTerminalIdentities::Failed(self.next_failed_identities())
@@ -1272,7 +1588,29 @@ where
             ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
-        })
+        };
+        ModelCallTerminalIdentityCandidates::Exact(exact)
+    }
+
+    fn tool_approvals(
+        &self,
+        observation: &ModelCallTerminalObservation,
+        posture: DangerousToolAutoApproval,
+    ) -> Box<[InitialToolApproval]> {
+        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+            return Box::new([]);
+        };
+        response
+            .parts()
+            .iter()
+            .filter_map(|part| match part {
+                AssistantResponsePart::Text(_) => None,
+                AssistantResponsePart::ToolCall(proposal) => {
+                    let definition = self.catalog.definition(proposal.name());
+                    Some(initial_tool_approval(posture, definition.as_ref()))
+                }
+            })
+            .collect()
     }
 }
 
@@ -1489,13 +1827,16 @@ mod tests {
         DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenModelSelection,
         ModelCallExecutionReconstitutionInput, ModelCallOriginContent,
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
-        ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+        ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
         PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
         ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
         SessionInputPosition, SessionReconstitutionInput, SubmitInput,
         SubmitInputReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
-        TranscriptAncestry,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
+        ToolAttemptReconstitutionState, ToolDecisionSource, ToolDispatchGeneration,
+        ToolEffectClass, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ToolResultText, TranscriptAncestry,
     };
     use uuid::Uuid;
 
@@ -1516,6 +1857,50 @@ mod tests {
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
             tool_entries: Box::new([]),
         }
+    }
+
+    fn tool_response() -> ModelCallTerminalObservation {
+        let arguments =
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid");
+        let parts = vec![
+            AssistantResponsePart::Text(
+                AssistantText::try_new(String::from("checking"))
+                    .expect("fixture assistant text is valid"),
+            ),
+            AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+                signalbox_domain::ToolName::try_new(String::from("automatic"))
+                    .expect("fixture tool name is valid"),
+                arguments.clone(),
+            )),
+            AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+                signalbox_domain::ToolName::try_new(String::from("unknown"))
+                    .expect("fixture tool name is valid"),
+                arguments,
+            )),
+        ];
+        ModelCallTerminalObservation::CompletedWithTools {
+            response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
+                .expect("fixture response contains tools"),
+        }
+    }
+
+    /// One request in the canonical model-rendering session, turn, and call.
+    ///
+    /// The request identity derives from the ordinal and is deliberately in a
+    /// different UUID range so an implementation cannot confuse the two.
+    fn model_tool_request(ordinal: u32) -> ToolRequest {
+        ToolRequestReconstitutionInput::new(
+            identity(100 + u128::from(ordinal), ToolRequestId::from_uuid),
+            identity(1, SessionId::from_uuid),
+            identity(2, TurnId::from_uuid),
+            identity(3, ModelCallId::from_uuid),
+            ToolRequestOrdinal::from_u32(ordinal),
+            ToolName::try_new(format!("tool_{ordinal}")).expect("fixture tool name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid"),
+        )
+        .into_request()
     }
 
     fn prepared_fixture() -> (PreparedModelCallRequest, AuthorizedModelCall) {
@@ -1680,6 +2065,8 @@ mod tests {
         entries: VecDeque<SemanticTranscriptEntryId>,
         frontiers: VecDeque<ContextFrontierId>,
         turns: VecDeque<TurnId>,
+        tool_requests: VecDeque<ToolRequestId>,
+        tool_attempts: VecDeque<TurnAttemptId>,
     }
 
     impl FixedIds {
@@ -1696,6 +2083,12 @@ mod tests {
                     .collect(),
                 turns: (50..60)
                     .map(|value| identity(value, TurnId::from_uuid))
+                    .collect(),
+                tool_requests: (60..70)
+                    .map(|value| identity(value, ToolRequestId::from_uuid))
+                    .collect(),
+                tool_attempts: (70..80)
+                    .map(|value| identity(value, TurnAttemptId::from_uuid))
                     .collect(),
             }
         }
@@ -1718,6 +2111,18 @@ mod tests {
 
         fn next_turn_id(&mut self) -> TurnId {
             self.turns.pop_front().expect("fixture turn identity")
+        }
+
+        fn next_tool_request_id(&mut self) -> ToolRequestId {
+            self.tool_requests
+                .pop_front()
+                .expect("fixture tool request identity")
+        }
+
+        fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
+            self.tool_attempts
+                .pop_front()
+                .expect("fixture tool continuation attempt identity")
         }
     }
 
@@ -2112,8 +2517,13 @@ mod tests {
     fn s02_inv015_frontier_rendering_preserves_user_role_order_and_source() {
         let (request, _) = prepared_fixture();
         let credential_reference = credential_reference();
-        let operation = PreparedModelOperation::render(request, credential_reference.clone())
-            .expect("the baseline origin-only frontier renders");
+        let operation = PreparedModelOperation::render(
+            request,
+            credential_reference.clone(),
+            Box::new([]),
+            &[],
+        )
+        .expect("the baseline origin-only frontier renders");
         assert_eq!(operation.credential_reference(), &credential_reference);
         assert_eq!(operation.messages().len(), 1);
         let ModelConversationMessage::User {
@@ -2127,6 +2537,74 @@ mod tests {
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
         assert_eq!(content.text().as_str(), "exact user request");
+    }
+
+    /// S10 / INV-001 / INV-020: one identity is minted per ordered response
+    /// part/request, mixed auto/confirm policy parks without a continuation
+    /// attempt, while the adapter still receives a stopped race closure.
+    #[test]
+    fn s10_inv001_inv020_tool_response_candidates_preserve_order_and_policy() {
+        let schema =
+            crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
+                .expect("fixture schema is valid");
+        let definition = crate::ToolDefinition::new(
+            signalbox_domain::ToolName::try_new(String::from("automatic"))
+                .expect("fixture name is valid"),
+            String::from("Runs automatically."),
+            schema,
+            signalbox_domain::ToolPermissionDefault::Auto,
+            signalbox_domain::ToolEffectClass::EffectFree,
+        );
+        let catalog = crate::CompiledToolCatalog::try_new([crate::CompiledTool::new(
+            definition,
+            |_: &signalbox_domain::NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one tool is unambiguous");
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_tool_catalog(catalog);
+        let observation = tool_response();
+        let approvals = service.tool_approvals(&observation, DangerousToolAutoApproval::Disabled);
+        assert_eq!(
+            approvals.as_ref(),
+            [
+                InitialToolApproval::PolicyAuto,
+                InitialToolApproval::Confirm
+            ]
+        );
+
+        let ModelCallTerminalIdentityCandidates::ToolRound {
+            continuing,
+            stopped: _,
+        } = service.next_terminal_identities(&observation, &approvals)
+        else {
+            panic!("tool response requires both race-safe closures");
+        };
+        assert_eq!(continuing.response_parts().len(), 3);
+        assert_eq!(continuing.continuation_attempt(), None);
+        let requests = continuing
+            .response_parts()
+            .iter()
+            .filter_map(|part| match part {
+                ToolResponsePartIdentity::Text { .. } => None,
+                ToolResponsePartIdentity::ToolCall {
+                    request, approval, ..
+                } => Some((*request, *approval)),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1, InitialToolApproval::PolicyAuto);
+        assert_eq!(requests[1].1, InitialToolApproval::Confirm);
     }
 
     /// S02 / INV-015: mixed semantic content keeps exact role order and
@@ -2214,6 +2692,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |accepted_input| origin_contents.get(&accepted_input).cloned(),
+            [],
         )
         .expect("the admitted mixed text frontier renders");
 
@@ -2325,6 +2804,235 @@ mod tests {
                 accepted_input: current_input,
                 content: current_content,
             }
+        );
+    }
+
+    /// S02 / INV-015: durable request, attempt, and denial authority renders
+    /// reference-only tool semantics into their exact provider-visible roles
+    /// without changing source order.
+    #[test]
+    fn s02_inv015_frontier_rendering_resolves_exact_tool_roles_in_source_order() {
+        let completed_request = model_tool_request(0);
+        let denied_request = model_tool_request(1);
+        let closed_request = model_tool_request(2);
+        let completed_use_source = SemanticTranscriptEntryRef::from_source(
+            completed_request.session(),
+            identity(110, SemanticTranscriptEntryId::from_uuid),
+        );
+        let completed_result_source = SemanticTranscriptEntryRef::from_source(
+            completed_request.session(),
+            identity(111, SemanticTranscriptEntryId::from_uuid),
+        );
+        let denied_use_source = SemanticTranscriptEntryRef::from_source(
+            denied_request.session(),
+            identity(112, SemanticTranscriptEntryId::from_uuid),
+        );
+        let denied_result_source = SemanticTranscriptEntryRef::from_source(
+            denied_request.session(),
+            identity(113, SemanticTranscriptEntryId::from_uuid),
+        );
+        let closed_use_source = SemanticTranscriptEntryRef::from_source(
+            closed_request.session(),
+            identity(114, SemanticTranscriptEntryId::from_uuid),
+        );
+        let closed_result_source = SemanticTranscriptEntryRef::from_source(
+            closed_request.session(),
+            identity(115, SemanticTranscriptEntryId::from_uuid),
+        );
+        let completed_result = ToolResultContent::Text(
+            ToolResultText::try_new(String::from(r#"{"timezone":"UTC"}"#))
+                .expect("fixture result is valid"),
+        );
+        let attempt_id = identity(116, signalbox_domain::ToolAttemptId::from_uuid);
+        let signalbox_domain::ReconstitutedToolAttempt::Ended(completed_attempt) =
+            ToolAttemptReconstitutionInput::new(
+                attempt_id,
+                completed_request.id(),
+                completed_request.session(),
+                completed_request.turn(),
+                identity(117, TurnAttemptId::from_uuid),
+                ToolEffectClass::EffectFree,
+                ToolDispatchGeneration::first(),
+                ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
+                    result: completed_result.clone(),
+                }),
+            )
+            .reconstitute()
+        else {
+            panic!("terminal fixture reconstitutes as ended")
+        };
+        let denial_reason = ToolDenialReason::try_new(String::from("owner declined"))
+            .expect("fixture denial reason is valid");
+        let denial = ToolApprovalResolutionReconstitutionInput::new(
+            denied_request.id(),
+            ToolApprovalDecision::Deny {
+                reason: Some(denial_reason.clone()),
+            },
+            ToolDecisionSource::OwnerCommand,
+        )
+        .reconstitute()
+        .expect("owner denial provenance is implemented");
+        let entries = [
+            (
+                completed_use_source,
+                SemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call: completed_request.producing_call(),
+                    request: completed_request.id(),
+                },
+            ),
+            (
+                completed_result_source,
+                SemanticTranscriptEntryPayload::ToolExecutionResult {
+                    attempt: attempt_id,
+                },
+            ),
+            (
+                denied_use_source,
+                SemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call: denied_request.producing_call(),
+                    request: denied_request.id(),
+                },
+            ),
+            (
+                denied_result_source,
+                SemanticTranscriptEntryPayload::ToolDenied {
+                    request: denied_request.id(),
+                },
+            ),
+            (
+                closed_use_source,
+                SemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call: closed_request.producing_call(),
+                    request: closed_request.id(),
+                },
+            ),
+            (
+                closed_result_source,
+                SemanticTranscriptEntryPayload::ToolClosed {
+                    request: closed_request.id(),
+                },
+            ),
+        ];
+        let evidence = [
+            ResolvedToolConversationEntry::AssistantToolUse {
+                source: completed_use_source,
+                request: completed_request.clone(),
+            },
+            ResolvedToolConversationEntry::ExecutionResult {
+                source: completed_result_source,
+                request: completed_request.clone(),
+                attempt: completed_attempt,
+            },
+            ResolvedToolConversationEntry::AssistantToolUse {
+                source: denied_use_source,
+                request: denied_request.clone(),
+            },
+            ResolvedToolConversationEntry::Denied {
+                source: denied_result_source,
+                request: denied_request.clone(),
+                approval: denial,
+            },
+            ResolvedToolConversationEntry::AssistantToolUse {
+                source: closed_use_source,
+                request: closed_request.clone(),
+            },
+            ResolvedToolConversationEntry::Closed {
+                source: closed_result_source,
+                request: closed_request.clone(),
+            },
+        ];
+
+        let messages = render_frontier_messages(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |_| None,
+            evidence.iter(),
+        )
+        .expect("exact tool evidence renders");
+
+        assert_eq!(
+            messages.as_ref(),
+            [
+                ModelConversationMessage::AssistantToolUse {
+                    source: completed_use_source,
+                    producing_call: completed_request.producing_call(),
+                    request: completed_request.clone(),
+                },
+                ModelConversationMessage::ToolResult {
+                    source: completed_result_source,
+                    request: completed_request.id(),
+                    content: ModelToolResultContent::Success(completed_result),
+                },
+                ModelConversationMessage::AssistantToolUse {
+                    source: denied_use_source,
+                    producing_call: denied_request.producing_call(),
+                    request: denied_request.clone(),
+                },
+                ModelConversationMessage::ToolResult {
+                    source: denied_result_source,
+                    request: denied_request.id(),
+                    content: ModelToolResultContent::Denied {
+                        reason: Some(denial_reason),
+                    },
+                },
+                ModelConversationMessage::AssistantToolUse {
+                    source: closed_use_source,
+                    producing_call: closed_request.producing_call(),
+                    request: closed_request.clone(),
+                },
+                ModelConversationMessage::ToolResult {
+                    source: closed_result_source,
+                    request: closed_request.id(),
+                    content: ModelToolResultContent::ClosedByTurnEnd,
+                },
+            ]
+        );
+    }
+
+    /// S02 / INV-015: a terminal attempt from another turn cannot supply
+    /// authority for a tool-result semantic entry.
+    #[test]
+    fn s02_inv015_frontier_rendering_rejects_cross_turn_tool_result_evidence() {
+        let request = model_tool_request(0);
+        let source = SemanticTranscriptEntryRef::from_source(
+            request.session(),
+            identity(120, SemanticTranscriptEntryId::from_uuid),
+        );
+        let attempt_id = identity(121, signalbox_domain::ToolAttemptId::from_uuid);
+        let signalbox_domain::ReconstitutedToolAttempt::Ended(cross_turn_attempt) =
+            ToolAttemptReconstitutionInput::new(
+                attempt_id,
+                request.id(),
+                request.session(),
+                identity(122, TurnId::from_uuid),
+                identity(123, TurnAttemptId::from_uuid),
+                ToolEffectClass::EffectFree,
+                ToolDispatchGeneration::first(),
+                ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("cross-wired"))
+                            .expect("fixture result is valid"),
+                    ),
+                }),
+            )
+            .reconstitute()
+        else {
+            panic!("terminal fixture reconstitutes as ended")
+        };
+        let payload = SemanticTranscriptEntryPayload::ToolExecutionResult {
+            attempt: attempt_id,
+        };
+        let evidence = ResolvedToolConversationEntry::ExecutionResult {
+            source,
+            request,
+            attempt: cross_turn_attempt,
+        };
+
+        let error = render_frontier_messages([(source, &payload)], |_| None, [&evidence])
+            .expect_err("cross-turn tool evidence must fail closed");
+
+        assert_eq!(
+            error,
+            ModelFrontierRenderingError::MissingOrMismatchedToolEvidence { entry: source }
         );
     }
 
@@ -2461,7 +3169,7 @@ mod tests {
             }) if *retained_session == session && *retained_call == call
         ));
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, retained) =
+        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
             service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
@@ -2475,6 +3183,7 @@ mod tests {
             observation,
             provider,
             gate,
+            catalog,
             retained,
         );
         assert!(matches!(
@@ -2483,7 +3192,7 @@ mod tests {
                 FakeError::Infrastructure
             ))
         ));
-        let (_, prepare, failure, _, _, provider, _, retained) = resumed.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained) = resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 2);
         assert_eq!(failure.reread_calls, 1);
@@ -2537,7 +3246,7 @@ mod tests {
                 .expect("the cancellation reread is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, prepare, failure, _, _, provider, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -2585,7 +3294,7 @@ mod tests {
                 .expect("the authoritative reread proves the closure landed"),
             ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
         );
-        let (_, prepare, failure, _, _, provider, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -2626,7 +3335,7 @@ mod tests {
                 FakeError::IdentityCollision
             ))
         ));
-        let (_, prepare, _, authorization, _, provider, _, retained) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
@@ -2664,7 +3373,7 @@ mod tests {
                 .expect("stale authority is a normal no-send result"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, _, provider, _, retained) = service.into_parts();
+        let (_, _, _, authorization, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
@@ -2702,7 +3411,7 @@ mod tests {
             error,
             ModelCallExecutionError::Provider(ScriptedModelCallError::InteractionOperatorFailure)
         ));
-        let (_, prepare, _, authorization, _, provider, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
@@ -2782,7 +3491,7 @@ mod tests {
             ModelCallExecutionOutcome::ObservationAlreadyCommitted(call)
         );
         assert!(service.retained_observation().is_none());
-        let (_, _, _, authorization, observation, provider, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
         assert_eq!(observation.commit_calls, 2);
@@ -2851,7 +3560,7 @@ mod tests {
             retained.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, _, _, authorization, observation, provider, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 1);
@@ -2900,7 +3609,7 @@ mod tests {
                 .expect("the complete terminal cancellation is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, observation, provider, _, retained) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, retained) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 0);
@@ -2970,7 +3679,7 @@ mod tests {
             }) if *retained_session == session && **prepared == request
         ));
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, retained) =
+        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
             service.into_parts();
         let mut resumed = ModelCallExecutionService::from_parts(
             ids,
@@ -2980,6 +3689,7 @@ mod tests {
             observation,
             provider,
             gate,
+            catalog,
             retained,
         );
         let error = resumed
@@ -2998,7 +3708,7 @@ mod tests {
             retained_observation.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, prepare, _, authorization, observation, provider, _, retained) =
+        let (_, prepare, _, authorization, observation, provider, _, _, retained) =
             resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
@@ -3069,7 +3779,7 @@ mod tests {
             })
         ));
 
-        let (_, prepare, _, authorization, observation, provider, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, observation, provider, _, _, _) = service.into_parts();
         assert_eq!(prepare.calls, 2);
         assert_eq!(authorization.calls, 2);
         assert_eq!(authorization.reread_calls, 2);
@@ -3133,7 +3843,7 @@ mod tests {
                 Err(ModelCallExecutionError::Provider(FakeError::Infrastructure))
             ));
         }
-        let (_, _, _, _, _, provider, _, _) = service.into_parts();
+        let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
         assert_eq!(provider.interaction_count, 1);
     }
 

@@ -12,16 +12,21 @@ use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
-    ModelConversationMessage, OperatorFailureClass, PreparedModelOperation,
+    ModelConversationMessage, ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
-    AssistantText, AuthorizedModelCall, ContextFrontierId, FrozenModelSelection, ModelCallId,
-    ModelCallTerminalObservation, ResolvedProviderTarget, SessionId, TurnAttemptId, TurnId,
+    AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
+    FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
+    ResolvedProviderTarget, SessionId, ToolCallProposal as DomainToolCallProposal,
+    ToolExecutionErrorKind, ToolName as DomainToolName, ToolResultContent,
+    ToolUsingAssistantResponse, TurnAttemptId, TurnId,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, ConversationMessage, CredentialReference, ModelOperation,
-    ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, UnsentCause,
+    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
+    CredentialReference, MessagePart, ModelOperation, ModelRuntime, ModelSettings, Observation,
+    ObservationFact, ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget,
+    ResolvedTarget, TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition,
+    ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
 };
 
 /// One exact provider-model spelling and baseline request limit for a durable
@@ -190,6 +195,10 @@ pub enum RuntimeModelCallProviderError {
     UnsupportedCompletionMaterial,
     /// A runtime text part cannot construct exact domain assistant text.
     InvalidAssistantText,
+    /// A checked application schema could not form a runtime JSON value.
+    InvalidToolSchema,
+    /// Runtime tool material could not form a bounded domain proposal.
+    InvalidToolProposal,
 }
 
 impl fmt::Display for RuntimeModelCallProviderError {
@@ -211,6 +220,8 @@ impl fmt::Display for RuntimeModelCallProviderError {
                 "provider completion contains unsupported assistant material"
             }
             Self::InvalidAssistantText => "provider completion contains invalid assistant text",
+            Self::InvalidToolSchema => "application tool schema is invalid at the runtime bridge",
+            Self::InvalidToolProposal => "provider completion contains an invalid tool proposal",
         })
     }
 }
@@ -329,9 +340,43 @@ where
                 ModelConversationMessage::Assistant { content, .. } => {
                     ConversationMessage::assistant_text(content.as_str())
                 }
+                ModelConversationMessage::AssistantToolUse { request, .. } => ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new(request.id().into_uuid().to_string()),
+                        name: RuntimeToolName::new(request.name().as_str()),
+                        arguments_json: request.arguments().as_str().to_owned(),
+                    })],
+                },
+                ModelConversationMessage::ToolResult {
+                    request, content, ..
+                } => {
+                    let (content, is_error) = render_tool_result(content);
+                    ConversationMessage {
+                        role: ConversationRole::User,
+                        parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                            tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+                            content,
+                            is_error,
+                        })],
+                    }
+                }
             })
             .collect();
-        let runtime_operation = ModelOperation::new(
+        let tools = operation
+            .tools()
+            .iter()
+            .map(|definition| {
+                let schema = serde_json::from_str(definition.input_schema().as_str())
+                    .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
+                Ok(ToolDefinition::with_schema(
+                    definition.name().as_str(),
+                    definition.description(),
+                    schema,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
@@ -339,6 +384,7 @@ where
             messages,
             ModelSettings::new(definition.max_output_tokens()),
         );
+        runtime_operation.tools = tools;
         let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
@@ -441,6 +487,53 @@ fn render_requested_target(selection: FrozenModelSelection) -> String {
     }
 }
 
+fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
+    match content {
+        ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
+            (text.as_str().to_owned(), false)
+        }
+        ModelToolResultContent::ExecutionError(error) => {
+            let kind = match error.kind() {
+                ToolExecutionErrorKind::UnknownTool => "unknown_tool",
+                ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",
+                ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
+                ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
+                ToolExecutionErrorKind::CrashLost => "crash_lost",
+            };
+            (
+                serde_json::json!({
+                    "error": {
+                        "kind": kind,
+                        "detail": error.detail().map(signalbox_domain::ToolExecutionErrorDetail::as_str),
+                    }
+                })
+                .to_string(),
+                true,
+            )
+        }
+        ModelToolResultContent::Denied { reason } => (
+            serde_json::json!({
+                "error": {
+                    "kind": "denied",
+                    "detail": reason.as_ref().map(signalbox_domain::ToolDenialReason::as_str),
+                }
+            })
+            .to_string(),
+            true,
+        ),
+        ModelToolResultContent::ClosedByTurnEnd => (
+            serde_json::json!({
+                "error": {
+                    "kind": "closed_by_turn_end",
+                    "detail": null,
+                }
+            })
+            .to_string(),
+            true,
+        ),
+    }
+}
+
 fn classify_terminal(
     evidence: TerminalEvidence,
     observations: &[Observation<ModelCallId>],
@@ -465,22 +558,58 @@ fn classify_terminal(
 
     match evidence {
         TerminalEvidence::Completed(completion) => {
-            let mut assistant_text = Vec::new();
+            let finish = completion.finish;
+            let mut response_parts = Vec::new();
+            let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
                     AssistantPart::Text(text) if text.is_empty() => {}
-                    AssistantPart::Text(text) => assistant_text.push(
-                        AssistantText::try_new(text)
-                            .map_err(|_| RuntimeModelCallProviderError::InvalidAssistantText)?,
-                    ),
-                    AssistantPart::Thinking { .. }
-                    | AssistantPart::RedactedThinking { .. }
-                    | AssistantPart::ToolCall(_) => {
+                    AssistantPart::Text(text) => {
+                        response_parts.push(AssistantResponsePart::Text(
+                            AssistantText::try_new(text)
+                                .map_err(|_| RuntimeModelCallProviderError::InvalidAssistantText)?,
+                        ));
+                    }
+                    AssistantPart::ToolCall(proposal) => {
+                        tool_count += 1;
+                        let name = DomainToolName::try_new(proposal.name.as_str().to_owned())
+                            .map_err(|_| RuntimeModelCallProviderError::InvalidToolProposal)?;
+                        let arguments = NormalizedToolArguments::try_from_provider_text(
+                            proposal.arguments_json,
+                        )
+                        .map_err(|_| RuntimeModelCallProviderError::InvalidToolProposal)?;
+                        response_parts.push(AssistantResponsePart::ToolCall(
+                            DomainToolCallProposal::new(name, arguments),
+                        ));
+                    }
+                    AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {
                         return Err(RuntimeModelCallProviderError::UnsupportedCompletionMaterial);
                     }
                 }
             }
-            Ok(ModelCallTerminalObservation::Completed { assistant_text })
+            if tool_count == 0 {
+                if matches!(finish, CompletionFinish::ToolUse) {
+                    return Err(RuntimeModelCallProviderError::InvalidToolProposal);
+                }
+                Ok(ModelCallTerminalObservation::Completed {
+                    assistant_text: response_parts
+                        .into_iter()
+                        .map(|part| match part {
+                            AssistantResponsePart::Text(text) => text,
+                            AssistantResponsePart::ToolCall(_) => {
+                                unreachable!("zero tool count excludes tool parts")
+                            }
+                        })
+                        .collect(),
+                })
+            } else {
+                if !matches!(finish, CompletionFinish::ToolUse) {
+                    return Err(RuntimeModelCallProviderError::InvalidToolProposal);
+                }
+                let response = ToolUsingAssistantResponse::try_from_parts(response_parts)
+                    .map_err(|_| RuntimeModelCallProviderError::InvalidToolProposal)?;
+                Ok(ModelCallTerminalObservation::CompletedWithTools { response })
+            }
         }
         TerminalEvidence::Refused(_) => Ok(ModelCallTerminalObservation::Refused),
         TerminalEvidence::ProviderError(_)
@@ -518,8 +647,8 @@ mod tests {
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact,
         ObservationSink, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
-        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, TransportFacts,
-        UnsentCause,
+        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
+        ToolCallProposal, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
@@ -544,6 +673,24 @@ mod tests {
             reported_model: Some(ProviderReportedModel::new(model)),
             finish: CompletionFinish::EndTurn,
             content,
+            usage: TokenUsage::unreported(),
+        })
+    }
+
+    fn tool_completion(model: &str) -> TerminalEvidence {
+        TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new(model)),
+            finish: CompletionFinish::ToolUse,
+            content: vec![
+                AssistantPart::Text(String::from("checking")),
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("provider-call-opaque"),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from(r#"{ "timezone": "UTC" }"#),
+                }),
+            ],
             usage: TokenUsage::unreported(),
         })
     }
@@ -725,6 +872,29 @@ mod tests {
                 ],
             }
         );
+    }
+
+    /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,
+    /// normalized domain proposals without retaining provider identifiers.
+    #[test]
+    fn s10_inv002_inv005_tool_completion_crosses_as_provider_neutral_proposals() {
+        let observation = classify_terminal(tool_completion("model-exact"), &[], "model-exact")
+            .expect("tool-use completion is supported");
+        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+            panic!("tool-use finish produces a same-turn tool round");
+        };
+        assert_eq!(response.parts().len(), 2);
+        assert!(matches!(
+            &response.parts()[0],
+            signalbox_domain::AssistantResponsePart::Text(text)
+                if text.as_str() == "checking"
+        ));
+        assert!(matches!(
+            &response.parts()[1],
+            signalbox_domain::AssistantResponsePart::ToolCall(proposal)
+                if proposal.name().as_str() == "current_time"
+                    && proposal.arguments().as_str() == r#"{"timezone":"UTC"}"#
+        ));
     }
 
     /// INV-014: either early or terminal provider-model mismatch prevents
