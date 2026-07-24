@@ -618,8 +618,40 @@ where
                 catalog,
                 executor,
             );
+            let mut run_tools = true;
+            let mut return_if_tools_absent = false;
 
             loop {
+                if run_tools {
+                    let tool_outcome = tools
+                        .execute(session, turn)
+                        .await
+                        .map_err(PostgresProviderToolLoopExecutionError::Tool)?;
+                    match tool_outcome {
+                        ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+                        | ToolExecutionServiceOutcome::PreflightFailed(_)
+                        | ToolExecutionServiceOutcome::ObservationCommitted(_)
+                        | ToolExecutionServiceOutcome::CrashClassified(_) => {
+                            return_if_tools_absent = true;
+                            continue;
+                        }
+                        ToolExecutionServiceOutcome::ContinuationCheckpointed(_) => {
+                            run_tools = false;
+                        }
+                        ToolExecutionServiceOutcome::NoWork => {
+                            if return_if_tools_absent {
+                                return Ok(());
+                            }
+                            run_tools = false;
+                        }
+                        ToolExecutionServiceOutcome::AwaitingApproval(_)
+                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let model_outcome = match model.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if model.retained_state().is_some() => {
@@ -636,35 +668,18 @@ where
                     }
                 };
                 match model_outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::Checkpointed(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
                         return Ok(());
                     }
-                    ModelCallExecutionOutcome::NoWork
-                    | ModelCallExecutionOutcome::ObservationCommitted(_)
-                    | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {}
-                }
-
-                loop {
-                    let tool_outcome = tools
-                        .execute(session, turn)
-                        .await
-                        .map_err(PostgresProviderToolLoopExecutionError::Tool)?;
-                    match tool_outcome {
-                        ToolExecutionServiceOutcome::AttemptCheckpointed(_)
-                        | ToolExecutionServiceOutcome::PreflightFailed(_)
-                        | ToolExecutionServiceOutcome::ObservationCommitted(_)
-                        | ToolExecutionServiceOutcome::CrashClassified(_) => continue,
-                        ToolExecutionServiceOutcome::ContinuationCheckpointed(_) => break,
-                        ToolExecutionServiceOutcome::NoWork
-                        | ToolExecutionServiceOutcome::AwaitingApproval(_)
-                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
-                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
-                            return Ok(());
-                        }
+                    ModelCallExecutionOutcome::NoWork => return Ok(()),
+                    ModelCallExecutionOutcome::ObservationCommitted(_)
+                    | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {
+                        run_tools = true;
+                        return_if_tools_absent = true;
                     }
                 }
             }
