@@ -63,6 +63,16 @@ pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
 
+Prefix reservation across concurrent stacks: the bottom pull request of any
+stack that will add migrations declares a reserved prefix block — a date plus a
+slot range — in its description, and sibling stacks pick disjoint blocks. Once a
+stack holds a reserved block, renumbering its migrations after a base merges is
+forbidden as long as the reserved prefix still exceeds the highest prefix on
+`main`; the ordering guarantee — a strictly greater prefix than the stack's
+ultimate `main`-merge target — is checked against that target, never against the
+immediate parent branch. Why: parallel migration-bearing stacks would otherwise
+collide on the next free prefix and churn-renumber each time a sibling merges.
+
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
