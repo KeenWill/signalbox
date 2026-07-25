@@ -27,9 +27,9 @@ use crate::{
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
-    SessionInputPosition, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
-    derive_accepted_input_total_order,
+    SessionInputPosition, ToolApprovalDecision, ToolApprovalResolution, ToolRequestId,
+    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnDisposition, TurnId,
+    UnstoppedAttemptDisposition, derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -154,6 +154,7 @@ pub struct FailedTurnExecutionReconstitutionInput {
     attempt_end: TerminalAttemptEndReconstitutionInput,
     ended_call: Option<crate::ModelCallId>,
     terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
+    terminal_tool_denials: Vec<ToolApprovalResolution>,
 }
 
 impl FailedTurnExecutionReconstitutionInput {
@@ -169,6 +170,7 @@ impl FailedTurnExecutionReconstitutionInput {
             attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(attempt_disposition),
             ended_call: None,
             terminal_tool_attempts: Vec::new(),
+            terminal_tool_denials: Vec::new(),
         }
     }
 
@@ -185,6 +187,7 @@ impl FailedTurnExecutionReconstitutionInput {
             attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(attempt_disposition),
             ended_call: Some(ended_call),
             terminal_tool_attempts: Vec::new(),
+            terminal_tool_denials: Vec::new(),
         }
     }
 
@@ -204,6 +207,7 @@ impl FailedTurnExecutionReconstitutionInput {
             ),
             ended_call: None,
             terminal_tool_attempts: Vec::new(),
+            terminal_tool_denials: Vec::new(),
         }
     }
 
@@ -224,6 +228,7 @@ impl FailedTurnExecutionReconstitutionInput {
             ),
             ended_call: Some(ended_call),
             terminal_tool_attempts: Vec::new(),
+            terminal_tool_denials: Vec::new(),
         }
     }
 
@@ -234,6 +239,16 @@ impl FailedTurnExecutionReconstitutionInput {
         terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
     ) -> Self {
         self.terminal_tool_attempts = terminal_tool_attempts;
+        self
+    }
+
+    /// Supplies the complete owner-sourced denial resolutions backing every
+    /// `ToolDenied` entry in a writer-produced tool-result suffix.
+    pub fn with_terminal_tool_denials(
+        mut self,
+        terminal_tool_denials: Vec<ToolApprovalResolution>,
+    ) -> Self {
+        self.terminal_tool_denials = terminal_tool_denials;
         self
     }
 
@@ -260,6 +275,11 @@ impl FailedTurnExecutionReconstitutionInput {
     /// Borrows every terminal tool attempt supplied for result correlation.
     pub fn terminal_tool_attempts(&self) -> &[crate::EndedToolAttempt] {
         &self.terminal_tool_attempts
+    }
+
+    /// Borrows every owner denial resolution supplied for result correlation.
+    pub fn terminal_tool_denials(&self) -> &[ToolApprovalResolution] {
+        &self.terminal_tool_denials
     }
 }
 
@@ -313,6 +333,7 @@ pub struct CancelledTurnExecutionReconstitutionInput {
     ended_call: Option<crate::ModelCallId>,
     interrupt: AppliedInterruptCommandResult,
     terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
+    terminal_tool_denials: Vec<ToolApprovalResolution>,
 }
 
 impl CancelledTurnExecutionReconstitutionInput {
@@ -332,6 +353,7 @@ impl CancelledTurnExecutionReconstitutionInput {
             ended_call,
             interrupt,
             terminal_tool_attempts: Vec::new(),
+            terminal_tool_denials: Vec::new(),
         }
     }
 
@@ -345,9 +367,24 @@ impl CancelledTurnExecutionReconstitutionInput {
         self
     }
 
+    /// Supplies the complete owner-sourced denial resolutions backing every
+    /// `ToolDenied` entry in a writer-produced tool-result suffix.
+    pub fn with_terminal_tool_denials(
+        mut self,
+        terminal_tool_denials: Vec<ToolApprovalResolution>,
+    ) -> Self {
+        self.terminal_tool_denials = terminal_tool_denials;
+        self
+    }
+
     /// Borrows every terminal tool attempt supplied for result correlation.
     pub fn terminal_tool_attempts(&self) -> &[crate::EndedToolAttempt] {
         &self.terminal_tool_attempts
+    }
+
+    /// Borrows every owner denial resolution supplied for result correlation.
+    pub fn terminal_tool_denials(&self) -> &[ToolApprovalResolution] {
+        &self.terminal_tool_denials
     }
 }
 
@@ -3943,6 +3980,7 @@ fn reconstitute_inner(
                                 &terminal,
                                 failed_entry,
                                 execution.terminal_tool_attempts(),
+                                execution.terminal_tool_denials(),
                                 &model_calls,
                                 &assistant_by_call,
                                 &snapshots,
@@ -4310,6 +4348,7 @@ fn reconstitute_inner(
                         &terminal,
                         cancellation_entry,
                         terminal_execution.terminal_tool_attempts(),
+                        terminal_execution.terminal_tool_denials(),
                         &model_calls,
                         &assistant_by_call,
                         &snapshots,
@@ -5206,6 +5245,7 @@ fn tool_round_terminal_matches(
     terminal: &ResolvedContextFrontierSnapshot,
     terminal_marker: SemanticTranscriptEntryRef,
     terminal_tool_attempts: &[crate::EndedToolAttempt],
+    terminal_tool_denials: &[ToolApprovalResolution],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -5217,6 +5257,15 @@ fn tool_round_terminal_matches(
     };
     if *last != terminal_marker {
         return false;
+    }
+
+    let mut denied_requests = BTreeSet::new();
+    for resolution in terminal_tool_denials {
+        if !matches!(resolution.decision(), ToolApprovalDecision::Deny { .. })
+            || !denied_requests.insert(resolution.request())
+        {
+            return false;
+        }
     }
 
     model_calls
@@ -5283,6 +5332,7 @@ fn tool_round_terminal_matches(
                 }
             }
             let mut observed_attempts = BTreeSet::new();
+            let mut observed_denials = BTreeSet::new();
             let results_match = result_suffix.iter().zip(requests).all(|(entry, request)| {
                 match semantic_entries
                     .get(entry)
@@ -5294,14 +5344,20 @@ fn tool_round_terminal_matches(
                                 .get(attempt)
                                 .is_some_and(|ended| ended.request() == request)
                     }
-                    Some(
-                        SemanticTranscriptEntryPayload::ToolDenied { request: actual }
-                        | SemanticTranscriptEntryPayload::ToolClosed { request: actual },
-                    ) => *actual == request,
+                    Some(SemanticTranscriptEntryPayload::ToolDenied { request: actual }) => {
+                        *actual == request
+                            && denied_requests.contains(actual)
+                            && observed_denials.insert(*actual)
+                    }
+                    Some(SemanticTranscriptEntryPayload::ToolClosed { request: actual }) => {
+                        *actual == request
+                    }
                     _ => false,
                 }
             });
-            results_match && observed_attempts.len() == attempts_by_id.len()
+            results_match
+                && observed_attempts.len() == attempts_by_id.len()
+                && observed_denials.len() == denied_requests.len()
         })
         .count()
         == 1
@@ -5890,6 +5946,15 @@ mod tests {
 
     fn semantic_entry(seed: u128) -> SemanticEntryFixture {
         SemanticEntryFixture { seed }
+    }
+
+    fn owner_denial(request: ToolRequestId) -> ToolApprovalResolution {
+        ToolApprovalResolutionReconstitutionInput::owner_fixture(
+            request,
+            ToolApprovalDecision::Deny { reason: None },
+        )
+        .reconstitute()
+        .expect("the owner denial fixture is valid")
     }
 
     impl SemanticEntryFixture {
@@ -7299,7 +7364,8 @@ mod tests {
                     ),
                     None,
                     interrupt,
-                ),
+                )
+                .with_terminal_tool_denials(vec![owner_denial(request)]),
                 terminal_frontier: terminal_frontier.id(),
             },
         );
@@ -7373,6 +7439,46 @@ mod tests {
                 starting_frontier.id(),
                 ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
             )],
+        );
+
+        let denial_evidence = |denials: Vec<ToolApprovalResolution>| {
+            let mut hostile = input.clone();
+            let AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                terminal_execution,
+                ..
+            } = &mut hostile.turns[0].state
+            else {
+                panic!("fixture is a cancelled terminal");
+            };
+            terminal_execution.terminal_tool_denials = denials;
+            hostile
+        };
+        assert_eq!(
+            denial_evidence(Vec::new())
+                .reconstitute()
+                .expect_err("a terminal denial entry requires its exact owner resolution")
+                .failure()
+                .to_owned(),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+                turn: cancelled.turn(),
+            }
+        );
+        assert_eq!(
+            denial_evidence(vec![
+                ToolApprovalResolutionReconstitutionInput::owner_fixture(
+                    request,
+                    ToolApprovalDecision::Approve,
+                )
+                .reconstitute()
+                .expect("the mismatching approval fixture is valid"),
+            ])
+            .reconstitute()
+            .expect_err("approval authority cannot back a denial entry")
+            .failure()
+            .to_owned(),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+                turn: cancelled.turn(),
+            }
         );
 
         let projection = input
