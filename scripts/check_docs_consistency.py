@@ -39,11 +39,17 @@ SPEC_DIR = Path("docs/spec")
 ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$")
 SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-REFERENCE_DEFINITION = re.compile(
-    r"(?m)^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:\r?\n[ \t]+)?"
-    r"(?:<([^>\n]*)>|(\S+))"
+HEADING_CONTAINER = re.compile(
+    r"^ {0,3}(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+)"
 )
-REFERENCE_LINK = re.compile(r"\[([^\]\n]+)\]\[([^\]\n]*)\]")
+REFERENCE_LABEL = r"(?:\\[^\r\n]|[^\]\\\r\n])+"
+REFERENCE_DEFINITION = re.compile(
+    rf"(?m)^ {{0,3}}\[({REFERENCE_LABEL})\]:[ \t]*"
+    r"(?:\r?\n[ \t]+)?(?:<([^>\n]*)>|(\S+))"
+)
+REFERENCE_LINK = re.compile(
+    rf"\[({REFERENCE_LABEL})\]\[((?:\\[^\r\n]|[^\]\\\r\n])*)\]"
+)
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])(?P<spacing>[ \t]+)"
 )
@@ -163,8 +169,20 @@ def inline_code_ranges(text: str) -> list[tuple[int, int]]:
         while run_end < len(text) and text[run_end] == "`":
             run_end += 1
         delimiter = text[index:run_end]
-        closing = text.find(delimiter, run_end)
-        if closing == -1:
+        closing: int | None = None
+        candidate = run_end
+        while True:
+            candidate = text.find("`", candidate)
+            if candidate == -1:
+                break
+            candidate_end = candidate
+            while candidate_end < len(text) and text[candidate_end] == "`":
+                candidate_end += 1
+            if candidate_end - candidate == len(delimiter):
+                closing = candidate
+                break
+            candidate = candidate_end
+        if closing is None:
             index = run_end
             continue
         end = closing + len(delimiter)
@@ -524,10 +542,19 @@ def github_slug(text: str) -> str:
     return "".join(characters)
 
 
+def strip_heading_containers(line: str) -> str:
+    """Remove block-quote/list prefixes that can contain a Markdown heading."""
+    while True:
+        match = HEADING_CONTAINER.match(line)
+        if match is None:
+            return line
+        line = line[match.end() :]
+
+
 @lru_cache(maxsize=None)
 def heading_anchors(path: Path) -> frozenset[str]:
     text = mask_block_content(path.read_text(encoding="utf-8"))
-    lines = text.splitlines()
+    lines = [strip_heading_containers(line) for line in text.splitlines()]
     headings: list[str] = []
     for index, line in enumerate(lines):
         match = ATX_HEADING.match(line)
@@ -858,8 +885,9 @@ def check_decision_order(root: Path) -> list[Violation]:
 
 def check_spec_verification_references(root: Path) -> list[Violation]:
     violations: list[Violation] = []
+    specification_index = (root / SPEC_DIR / "README.md").resolve()
     for source in sorted((root / SPEC_DIR).rglob("*.md")):
-        if source.name == "README.md":
+        if source.resolve() == specification_index:
             continue
         text = mask_block_content(source.read_text(encoding="utf-8"))
         source_label = repository_path(root, source)

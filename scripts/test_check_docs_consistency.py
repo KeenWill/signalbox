@@ -219,6 +219,35 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("escapes the repository", failures[0].message)
 
+    def test_escaped_reference_label_target_is_checked(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[broken\\]]: missing.md\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
+
+    def test_longer_backtick_run_does_not_close_inline_code(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "``code ``` [Missing](missing.md) `\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
+
     def test_reference_style_heading_uses_its_visible_label(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -230,6 +259,23 @@ class DocsConsistencyTests(unittest.TestCase):
             "Verified through PR #12 (`agent/example`).\n\n"
             "## [Reference heading][heading-label]\n\n"
             "[heading-label]: https://example.com/heading\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_headings_inside_markdown_containers_have_anchors(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Quoted](docs/spec/example.md#quoted-heading)\n"
+            "[Listed](docs/spec/example.md#listed-heading)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "> ## Quoted heading\n\n"
+            "- ## Listed heading\n",
             encoding="utf-8",
         )
 
@@ -424,6 +470,24 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
+
+    def test_nested_spec_readme_requires_verification_reference(self) -> None:
+        nested = self.root / "docs/spec/providers"
+        nested.mkdir()
+        (nested / "README.md").write_text(
+            "# Provider subsystem\n", encoding="utf-8"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["spec-verification"],
+        )
+        self.assertEqual(
+            failures[0].path,
+            "docs/spec/providers/README.md",
+        )
 
     def test_github_slug_preserves_expected_house_shapes(self) -> None:
         self.assertEqual(
