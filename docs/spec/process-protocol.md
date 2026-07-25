@@ -266,13 +266,17 @@ exact capacity choice is recorded in the
 
 An import `source` is the complete exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
-There is no independent source-size admission rule in this slice: the existing 8
-MiB encoded-frame limit determines whether one complete request can cross the
+The server validates canonical padding and trailing bits in the same decode that
+constructs the source bytes under the existing inbound-frame permit; validation
+does not construct a second full-size canonical encoding. There is no
+independent source-size admission rule in this slice: the existing 8 MiB
+encoded-frame limit determines whether one complete request can cross the
 boundary. Before socket I/O, the terminal's bounded reader takes at most one
 byte beyond three quarters of the frame cap, the greatest decoded byte count
 that base64 could possibly fit. It rejects a source reaching that extra byte;
-exact request encoding remains authoritative for smaller inputs. The source path
-is client-local and never appears in the request.
+exact request encoding happens before socket I/O and remains authoritative for
+smaller inputs. The source path is client-local and never appears in the
+request.
 
 ## Server messages
 

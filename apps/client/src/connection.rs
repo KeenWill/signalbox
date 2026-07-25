@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use signalbox_process_protocol::{
-    ClientFrame, ClientRequest, ErrorCode, MAX_FRAME_BYTES, ProtocolVersion, RequestId,
-    ServerFrame, ServerMessage, decode_server_line, encode_client_line,
+    ClientFrame, ClientRequest, ErrorCode, FrameEncodeError, MAX_FRAME_BYTES, ProtocolVersion,
+    RequestId, ServerFrame, ServerMessage, decode_server_line, encode_client_line,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -77,6 +77,13 @@ impl Connection {
         request: ClientRequest,
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
+        let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Five, request_id, request)
+            .map_err(FrameEncodeError::Validation)?;
+        let encoded = encode_client_line(&frame).map_err(|error| match error {
+            FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
+            error => ClientError::Encode(error),
+        })?;
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
@@ -85,9 +92,6 @@ impl Connection {
             reader: BufReader::new(reader),
             writer,
         };
-        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Five, request_id, request)
-            .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
-        let encoded = encode_client_line(&frame)?;
         connection
             .writer
             .write_all(&encoded)

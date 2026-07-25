@@ -461,16 +461,27 @@ impl<'de> Deserialize<'de> for ConversationImportSource {
     where
         DeserializerT: Deserializer<'de>,
     {
-        let encoded = String::deserialize(deserializer)?;
-        let decoded = STANDARD_BASE64
-            .decode(&encoded)
-            .map_err(|_| serde::de::Error::custom("import source is not canonical base64"))?;
-        if STANDARD_BASE64.encode(&decoded) != encoded {
-            return Err(serde::de::Error::custom(
-                "import source is not canonical base64",
-            ));
+        struct ConversationImportSourceVisitor;
+
+        impl Visitor<'_> for ConversationImportSourceVisitor {
+            type Value = ConversationImportSource;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("canonical padded base64")
+            }
+
+            fn visit_str<ErrorT>(self, encoded: &str) -> Result<Self::Value, ErrorT>
+            where
+                ErrorT: serde::de::Error,
+            {
+                let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
+                    serde::de::Error::custom("import source is not canonical base64")
+                })?;
+                Ok(ConversationImportSource(decoded))
+            }
         }
-        Ok(Self(decoded))
+
+        deserializer.deserialize_str(ConversationImportSourceVisitor)
     }
 }
 
@@ -3599,6 +3610,12 @@ mod tests {
     fn inv033_version_five_import_source_requires_canonical_padded_base64() {
         assert_client_malformed(
             r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AB=="}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA==="}}"#,
         );
     }
 

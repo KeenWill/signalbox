@@ -33,7 +33,9 @@ independent source-size policy or migration is added. Bound the client read at
 one byte beyond the maximum decoded payload the frame could possibly carry. Hubd
 retains queued decoded sources under the aggregate inbound-frame budget, admits
 one expanded import aggregate and store operation at a time, and runs the
-service away from asynchronous runtime workers.
+service away from asynchronous runtime workers. Decode canonical base64 once
+under the existing inbound-frame permit; do not allocate a second full-size
+canonical encoding for validation.
 
 **Rejected alternatives.** Sending a filesystem path would make the daemon
 interpret client filesystem context and add path encoding and access semantics

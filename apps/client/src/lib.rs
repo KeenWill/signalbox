@@ -1158,6 +1158,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_source_at_the_reader_bound_is_encoded_before_connecting()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source_path = directory.path().join("boundary.jsonl");
+        let source_file = std::fs::File::create(&source_path)?;
+        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES)?)?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+
+        let exit = run(
+            [
+                OsString::from("--socket"),
+                OsString::from("/does/not/exist/hub.sock"),
+                OsString::from("import"),
+                OsString::from("--format"),
+                OsString::from("claude-code"),
+                source_path.into_os_string(),
+            ],
+            None,
+            &mut input,
+            &mut output,
+            &mut error,
+        )
+        .await;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8_lossy(&error)
+                .contains("conversation import source cannot fit within the process frame bound")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn create_connection_failure_is_definitely_uncommitted() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let mut client = ProcessClient::new(directory.path().join("missing.sock"));

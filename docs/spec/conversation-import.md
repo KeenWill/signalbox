@@ -289,12 +289,14 @@ adds no independent source-size admission rule. The client reads through that
 transport bound rather than allocating from the file's declared size: it stops
 after one byte beyond the greatest raw byte count that padded base64 could
 possibly fit, then rejects that impossible payload before socket I/O. Exact
-encoded-frame construction remains the final fit check. A file-read failure
-happens before the request and is reported without its path. Invalid base64 is a
-malformed frame. A selected converter's content-silent conversion failure is an
-`invalid_request`; database failure is conservatively `commit_ambiguous`, so the
-operator may retry the exact format and source bytes; integrity failure is
-`internal`.
+encoded-frame construction also happens before socket I/O and remains the final
+fit check. A file-read failure happens before the request and is reported
+without its path. The server decodes and validates canonical base64 once under
+the existing inbound-frame permit without constructing a second full-size
+canonical encoding. Invalid base64 is a malformed frame. A selected converter's
+content-silent conversion failure is an `invalid_request`; database failure is
+conservatively `commit_ambiguous`, so the operator may retry the exact format
+and source bytes; integrity failure is `internal`.
 
 Hubd selects the fixed converter, supplies UUIDv7 conversation and entry
 candidates, and invokes `ImportConversationService` against the append-only
@@ -306,8 +308,8 @@ exact snapshot returns
 returns `conversation_import_already_imported { imported_conversation_id }`
 naming the existing identity. The terminal prints these as distinct `inserted`
 and `already_imported` outcomes with that identity. Neither outcome creates or
-seeds a session, and changed bytes continue to create a new exact snapshot under
-the identity model above.
+seeds a session, and changed raw-record content or order continues to create a
+new exact snapshot under the identity model above.
 
 ## Claude Code session JSONL versions 1 and 2
 
