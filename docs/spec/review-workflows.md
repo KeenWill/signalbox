@@ -25,7 +25,7 @@ aggregate.
 run and target; and a `ReviewFindingRef` binds a finding to all three ancestors.
 Child records carry those complete references. Why: complete typed ownership
 facts make a cross-wired target/run/pass/finding combination unconstructible in
-normal domain use and rejectable during reconstitution (INV-001, INV-002).
+normal domain use and rejectable during reconstitution (INV-002).
 
 Key-like values preserve their exact UTF-8 content without trimming or
 normalization. Construction rejects empty values, U+0000, and values longer than
@@ -40,7 +40,8 @@ relational checks.
 A `ReviewTarget` is one immutable snapshot:
 
 - an opaque code-host provider key and repository key;
-- either a positive change-request number or a commit subject;
+- either a positive change-request number with an exact base revision, or a
+  commit subject;
 - an exact head revision and optional exact base revision; and
 - an optional parent target naming the immediately preceding stack node.
 
@@ -54,10 +55,11 @@ read-only review, judgment, deduplication, external publication, finding repair,
 and stack propagation. Policy is immutable run input rather than process
 configuration: it carries an ordinal version plus minimum judge and publication
 confidence values. Confidence is an exact integer count of basis points from
-zero through 10,000. Version one fixes 7,000 as the minimum judge confidence and
-8,000 as the minimum publication confidence; construction rejects a publication
-minimum below the judge minimum. A later policy version changes only later runs.
-Why: stored exact policy data makes the reason for unattended judgment and
+zero through 10,000. Version one's exact thresholds and ordering are fixed by
+the
+[basis-point policy decision](../decisions.md#2026-07-25--store-review-confidence-as-versioned-basis-point-policy);
+construction enforces that ordering. A later policy version changes only later
+runs. Why: stored exact policy data makes the reason for unattended judgment and
 publication reconstructible without depending on the executing binary's
 defaults.
 
@@ -72,8 +74,10 @@ canonically cancelled pass. Terminal states do not return to running.
 ## Passes use session evidence
 
 One `ReviewPass` names its exact run, pass kind, session, and accepted input.
-The session and accepted input are mandatory even while the pass is queued. A
-pass is therefore recorded only after its orchestration input has been durably
+The closed pass kinds are external-context import, read-only review, judgment,
+deduplication, external publication, finding repair, and stack propagation. The
+session and accepted input are mandatory even while the pass is queued. A pass
+is therefore recorded only after its orchestration input has been durably
 accepted; an optional session identifier is not a substitute for execution
 evidence. The accepted input must belong to the pass session; construction,
 persistence, and reconstitution reject a cross-wired pair even when no turn has
@@ -87,6 +91,10 @@ Pass state is:
 - `Failed { turn }`;
 - `Blocked { turn }`; or
 - `Cancelled { turn? }`.
+
+`Queued` is initial. It may become `Running` or cancel without a turn. `Running`
+may become succeeded, failed, blocked, or cancelled while retaining its exact
+turn. No terminal state transitions again, and no other edge is permitted.
 
 Every named turn belongs to the pass's accepted input and session. A successful
 frontier belongs to that same session and includes the pass turn's terminal
@@ -103,10 +111,12 @@ session transcript is the evidence of record.
 
 A `ReviewFinding` is immutable proposed content owned by one producing pass. It
 stores an exact file path, an optional closed positive line range and diff side,
-title, body, severity, confidence, category, and optional recommended fix. Its
-current status is derived from an append-only ordered event history rather than
-a freely writable status field. Severity is the closed vocabulary `Info`, `Low`,
-`Medium`, `High`, or `Critical`.
+title, body, severity, confidence, category, and optional recommended fix. A
+diff side is admitted only when the finding's target snapshot carries an exact
+base revision; a file-relative line range needs no base. Its current status is
+derived from an append-only ordered event history rather than a freely writable
+status field. Severity is the closed vocabulary `Info`, `Low`, `Medium`, `High`,
+or `Critical`.
 
 The initial state is `Open`. The nine-state machine is:
 
@@ -131,7 +141,7 @@ carries its owning finding reference, a contiguous one-based ordinal, and a
 same-target pass reference. Reconstitution validates the complete history and
 fails closed on a foreign owner, gaps, illegal edges, self-reference,
 foreign-run finding references, or a publication event whose external link is
-not associated with that finding.
+not an attached link associated with that finding.
 
 ## External links and posting reservations
 
@@ -144,12 +154,13 @@ association, provider, or object kind conflicts.
 External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
 attachment containing the exact external object identifier and the producing
-pass. The identifier is an opaque canonical provider-wide key. An adapter
-qualifies a repository-scoped host identifier with the canonical repository key
-before constructing it. The store uniquely admits one attached
-provider/kind/object identity and one attachment per reservation. A reservation
-without an attachment is explicitly pending; it is never interpreted as proof
-that the external effect did not occur and is not automatically retried
+pass. The producing pass must belong to the target carried by the reservation's
+target, run, or finding association. The identifier is an opaque canonical
+provider-wide key. An adapter qualifies a repository-scoped host identifier with
+the canonical repository key before constructing it. The store uniquely admits
+one attached provider/kind/object identity and one attachment per reservation. A
+reservation without an attachment is explicitly pending; it is never interpreted
+as proof that the external effect did not occur and is not automatically retried
 (INV-025, INV-026). Read-only import may reserve and attach in one local
 transaction because it issues no external write.
 

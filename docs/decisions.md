@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Freeze comparison revisions for diff-relative review
+
+**Context.** A change-request number and head revision do not identify one
+reproducible diff when the host's base advances. Likewise, a finding's old/new
+diff side has no stable meaning unless its target records the comparison
+revision.
+
+**Decision.** Every change-request target snapshot carries an exact base
+revision. A commit target may omit its base only when its findings are
+file-relative; any finding with a diff side requires the target's exact base.
+The target's head and base remain opaque revision keys supplied by the code-host
+adapter.
+
+**Rejected alternatives.** Resolving the current host base while loading old
+workflow state makes findings time-dependent. Requiring a base for every
+standalone commit rejects useful file-relative review. Persisting a derived
+patch duplicates repository content and introduces another authority.
+
+**Affects.** `ReviewTarget`, diff-relative `ReviewFinding` construction and
+reconstitution, the
+[review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy),
+and the `2026072602xx` persistence slice.
+
 ## 2026-07-25 — Correlate review lifecycle projections with canonical evidence
 
 **Context.** A review run, pass, and finding-event history each project evidence
