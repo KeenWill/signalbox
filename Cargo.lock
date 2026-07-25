@@ -2737,6 +2737,7 @@ dependencies = [
 name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
+ "expect-test",
  "rust_decimal",
  "serde_json",
  "signalbox-application",
