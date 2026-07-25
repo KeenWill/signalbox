@@ -145,10 +145,11 @@ Representation rules, all enforced in the schema:
   trusts durable rows as evidence, so the schema itself must forbid rewriting
   them (INV-006, INV-007).
 - The current `session_metadata` root remains mutable by complete replacement
-  but rejects deletion. Once a session has a recorded metadata write, root
-  absence can therefore never be reinterpreted as the initial unwritten state.
-  The current root, tag, and attribute tables also reject `TRUNCATE`; complete
-  replacement through the adapter is their only admitted bulk mutation.
+  but rejects deletion and any change to its `session_id`. Once a session has a
+  recorded metadata write, root absence can therefore never be reinterpreted as
+  the initial unwritten state, and the mutable fields cannot move to another
+  session. The current root, tag, and attribute tables also reject `TRUNCATE`;
+  complete replacement through the adapter is their only admitted bulk mutation.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -181,9 +182,11 @@ Representation rules, all enforced in the schema:
   inside a transaction while every commit boundary sees the complete shape: each
   claimed registry row has exactly one typed command record, each
   `submit_input_command` terminal result correlates with exactly its committed
-  effects, each imported-conversation and context-frontier header has complete
-  contiguous ordered membership, each imported-frontier session names its exact
-  aggregate, boundary, and relationship and has exactly one immutable
+  effects, each applied metadata replacement receipt has a conditional foreign
+  key to the retained current root for its exact target while a rejection has no
+  such proof, each imported-conversation and context-frontier header has
+  complete contiguous ordered membership, each imported-frontier session names
+  its exact aggregate, boundary, and relationship and has exactly one immutable
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
@@ -306,12 +309,15 @@ Locks per transaction, in acquisition order:
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
   serializes metadata writers without conflicting with the `KEY SHARE` lock
-  taken by foreign-key checks. The unseen handler already owns its
-  `durable_command` claim from insertion before this session lock; each nonempty
-  receipt satellite later reacquires that same row through its trigger before
-  the typed parent seals the receipt. A point read and each opened streaming
-  list page use one read-only repeatable-read transaction, so their root and
-  satellite values come from one database snapshot.
+  taken by foreign-key checks. After the lock is acquired, a separate statement
+  samples PostgreSQL statement time at microsecond precision; that exact value
+  is written to both the current root and the applied receipt. The unseen
+  handler already owns its `durable_command` claim from insertion before this
+  session lock; each nonempty receipt satellite later reacquires that same row
+  through its trigger before the typed parent seals the receipt. A point read
+  and each opened streaming list page use one read-only repeatable-read
+  transaction, so their root and satellite values come from one database
+  snapshot.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
@@ -376,18 +382,19 @@ semantics are owned by
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
-or dropped on load. A metadata list load validates the complete stored content,
-including attributes that its public summary deliberately omits, before it
-constructs the summary. Load paths do not panic on durable data; checked
-interrupt application produces the exact cancellation-requested or
-reconciliation-required transition, while a projection that cannot support that
-transition fails closed as typed corruption. Startup recovery operates only on
-successfully reconstituted projections (INV-034), and a successful
-reconstitution does not waive the guarded compare-and-set when a later
-transaction commits: every guarded write that matches zero rows is either benign
-staleness (reload and rederive) or, where the transaction's own premises made a
-match mandatory, corruption. Why: the dangerous corruption cases are rows that
-look individually valid while their cross-record correlations are not, so
+or dropped on load. An applied metadata receipt load also validates the stored
+current-root proof against both the command target and result target. A metadata
+list load validates the complete stored content, including attributes that its
+public summary deliberately omits, before it constructs the summary. Load paths
+do not panic on durable data; checked interrupt application produces the exact
+cancellation-requested or reconciliation-required transition, while a projection
+that cannot support that transition fails closed as typed corruption. Startup
+recovery operates only on successfully reconstituted projections (INV-034), and
+a successful reconstitution does not waive the guarded compare-and-set when a
+later transaction commits: every guarded write that matches zero rows is either
+benign staleness (reload and rederive) or, where the transaction's own premises
+made a match mandatory, corruption. Why: the dangerous corruption cases are rows
+that look individually valid while their cross-record correlations are not, so
 authority comes only from complete validated projections, never from raw
 identifiers.
 

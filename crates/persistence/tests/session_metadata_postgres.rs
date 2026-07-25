@@ -5,6 +5,8 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{error::Error, sync::Arc};
 
 use signalbox_domain::{
@@ -26,6 +28,8 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
+
+use support::blocked_backends_reached;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_metadata";
@@ -136,6 +140,17 @@ fn assert_check_violation(error: &sqlx::Error) {
     );
 }
 
+#[track_caller]
+fn assert_foreign_key_violation(error: &sqlx::Error) {
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+}
+
 /// INV-002: a created session with no metadata write has the canonical
 /// unwritten snapshot.
 #[tokio::test(flavor = "multi_thread")]
@@ -243,6 +258,93 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
             .expect("session remains present")
             .content(),
         &first_content
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: a blocked writer samples one post-lock statement timestamp and
+/// records that exact value in both current state and its durable receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_metadata_writer_stamp_is_sampled_after_lock_and_shared()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+
+    let mut held_lock = pool.begin().await?;
+    let _: Uuid = sqlx::query_scalar(
+        "SELECT session_id
+           FROM session
+          WHERE session_id = $1
+            FOR NO KEY UPDATE",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .fetch_one(&mut *held_lock)
+    .await?;
+
+    let pending = tokio::spawn({
+        let repository = SessionMetadataRepository::new(pool.clone());
+        async move {
+            repository
+                .handle(replacement(
+                    0x902,
+                    0x701,
+                    metadata(Some("post-lock"), &[], &[], false),
+                ))
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the metadata writer must wait for the held session lock"
+    );
+    let post_wait_lower_bound: i64 = sqlx::query_scalar(
+        "SELECT floor(
+            extract(epoch FROM statement_timestamp()) * 1000000
+         )::bigint",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    held_lock.commit().await?;
+    let outcome = pending.await??;
+    let ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
+        applied,
+    )) = outcome
+    else {
+        panic!("the released metadata writer must apply");
+    };
+    let updated_at = applied
+        .snapshot()
+        .last_writer()
+        .expect("an applied write carries its writer")
+        .updated_at()
+        .as_unix_micros();
+    assert!(
+        updated_at >= u64::try_from(post_wait_lower_bound)?,
+        "the writer timestamp must be sampled after the lock wait"
+    );
+
+    let stored_times_match: bool = sqlx::query_scalar(
+        "SELECT current.updated_at = receipt.result_updated_at
+           FROM session_metadata AS current
+           JOIN replace_session_metadata_command AS receipt
+             ON receipt.result_applied_session_id = current.session_id
+          WHERE current.session_id = $1
+            AND receipt.command_id = $2",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .bind(Uuid::from_u128(0x902))
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stored_times_match,
+        "current state and the receipt must retain the exact same timestamp"
     );
 
     pool.close().await;
@@ -500,6 +602,61 @@ async fn inv002_written_metadata_root_rejects_delete() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+/// INV-002: a mutable root cannot change its owning session even when it has no
+/// tag or attribute children.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_metadata_root_rejects_identity_change_without_satellites()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    create_repository.handle(creation(0x801, 0x701)).await?;
+    create_repository.handle(creation(0x802, 0x702)).await?;
+    sqlx::query(
+        "INSERT INTO session_metadata
+            (session_id, title, archived, updated_at, actor_kind)
+         VALUES ($1, 'root-only', false, statement_timestamp(), 'owner')",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .execute(&pool)
+    .await?;
+
+    let moved_root = sqlx::query(
+        "UPDATE session_metadata
+            SET session_id = $2
+          WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .bind(Uuid::from_u128(0x702))
+    .execute(&pool)
+    .await
+    .expect_err("a metadata root cannot move to another session");
+    assert_check_violation(&moved_root);
+
+    let repository = SessionMetadataRepository::new(pool.clone());
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x701))
+            .await?
+            .expect("source session remains readable")
+            .content()
+            .title(),
+        Some("root-only")
+    );
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x702))
+            .await?
+            .expect("target session remains readable")
+            .last_writer(),
+        None
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-005: sealed receipt satellites cannot gain either kind of late member.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -550,10 +707,12 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, replacement_archived, result_kind,
-             result_session_id, result_updated_at, result_actor_kind)
+             result_session_id, result_applied_session_id,
+             result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, transaction_timestamp(), NULL)",
+             'owner', false, 'applied', $2, $2,
+             statement_timestamp(), NULL)",
     )
     .bind(Uuid::from_u128(0x907))
     .bind(Uuid::from_u128(0x701))
@@ -561,6 +720,50 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
     .await
     .expect_err("an applied receipt must name its result actor");
     assert_check_violation(&missing_applied_actor);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: an applied receipt must name a retained current metadata root for
+/// its exact target session.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x908))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, replacement_archived, result_kind,
+             result_session_id, result_applied_session_id,
+             result_updated_at, result_actor_kind)
+         VALUES
+            ($1, 'replace_session_metadata', 1, $2,
+             'owner', false, 'applied', $2, $2,
+             statement_timestamp(), 'owner')",
+    )
+    .bind(Uuid::from_u128(0x908))
+    .bind(Uuid::from_u128(0x701))
+    .execute(&mut *transaction)
+    .await?;
+    let missing_root = transaction
+        .commit()
+        .await
+        .expect_err("an applied receipt must retain its current metadata root");
+    assert_foreign_key_violation(&missing_root);
 
     pool.close().await;
     drop(container);

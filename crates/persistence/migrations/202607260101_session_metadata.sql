@@ -83,6 +83,26 @@ BEFORE DELETE ON session_metadata
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE FUNCTION reject_session_metadata_identity_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.session_id IS DISTINCT FROM OLD.session_id THEN
+        RAISE EXCEPTION
+            'session metadata identity is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_metadata_identity_is_immutable
+BEFORE UPDATE ON session_metadata
+FOR EACH ROW
+EXECUTE FUNCTION reject_session_metadata_identity_change();
+
 CREATE TABLE session_metadata_tag (
     session_id uuid NOT NULL,
     tag text NOT NULL,
@@ -132,6 +152,7 @@ CREATE TABLE replace_session_metadata_command (
     result_kind text NOT NULL,
     rejection_kind text,
     result_session_id uuid NOT NULL,
+    result_applied_session_id uuid,
     result_updated_at timestamptz,
     result_actor_kind text,
     result_actor_turn_id uuid,
@@ -208,6 +229,8 @@ CREATE TABLE replace_session_metadata_command (
             (
                 result_kind = 'applied'
                 AND rejection_kind IS NULL
+                AND result_applied_session_id IS NOT NULL
+                AND result_applied_session_id = session_id
                 AND result_updated_at IS NOT NULL
                 AND result_actor_kind IS NOT NULL
                 AND result_actor_kind = actor_kind
@@ -218,6 +241,7 @@ CREATE TABLE replace_session_metadata_command (
             OR (
                 result_kind = 'rejected'
                 AND rejection_kind = 'session_not_found'
+                AND result_applied_session_id IS NULL
                 AND result_updated_at IS NULL
                 AND result_actor_kind IS NULL
                 AND result_actor_turn_id IS NULL
@@ -231,6 +255,12 @@ CREATE TABLE replace_session_metadata_command (
             command_kind,
             storage_version
         )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT replace_session_metadata_command_applied_session_fk
+        FOREIGN KEY (result_applied_session_id)
+        REFERENCES session_metadata (session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED

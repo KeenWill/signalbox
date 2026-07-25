@@ -71,7 +71,7 @@ pub enum SessionMetadataCorruption {
     InvalidDefaultsVersion(PositiveOrdinalMappingError),
     /// A stored metadata string collection violates the domain boundary.
     InvalidContent(SessionMetadataContentError),
-    /// A stored transaction timestamp is not a nonnegative integral u64 value.
+    /// A stored database timestamp is not a nonnegative integral u64 value.
     InvalidUpdatedAt,
     /// Complete receipt values fail domain-owned correlation.
     Domain(ReplaceSessionMetadataReconstitutionFailure),
@@ -186,7 +186,8 @@ impl SessionMetadataRepository {
     ///
     /// Owner-global registry inspection is the first durable read. An unseen
     /// command serializes with other metadata writers by locking the session
-    /// row before it reads the transaction timestamp and replaces satellites.
+    /// row before a separate statement samples its timestamp and replaces
+    /// satellites.
     pub async fn handle(
         &self,
         command: ReplaceSessionMetadata,
@@ -232,17 +233,21 @@ impl SessionMetadataRepository {
                 .await?
                 .is_some();
 
-        let prepared = if session_exists {
-            let updated_at = transaction_timestamp(&mut transaction).await?;
+        let updated_at = if session_exists {
+            Some(replacement_statement_timestamp(&mut transaction).await?)
+        } else {
+            None
+        };
+        let prepared = if let Some(updated_at) = updated_at {
             command.prepare_applied(updated_at)
         } else {
             command.prepare_session_not_found()
         };
 
-        if matches!(prepared.result(), ReplaceSessionMetadataResult::Applied(_)) {
-            replace_current_snapshot(&mut transaction, prepared.command()).await?;
+        if let Some(updated_at) = updated_at {
+            replace_current_snapshot(&mut transaction, prepared.command(), updated_at).await?;
         }
-        insert_typed_record(&mut transaction, &prepared).await?;
+        insert_typed_record(&mut transaction, &prepared, updated_at).await?;
         let result = prepared.result().clone();
 
         match transaction.commit().await {
@@ -622,12 +627,12 @@ async fn existing_or_conflicting(
     })
 }
 
-async fn transaction_timestamp(
+async fn replacement_statement_timestamp(
     connection: &mut PgConnection,
 ) -> Result<SessionMetadataUpdatedAt, SessionMetadataRepositoryError> {
     let value: Decimal = sqlx::query_scalar(
         "SELECT floor(
-            extract(epoch FROM transaction_timestamp()) * 1000000
+            extract(epoch FROM statement_timestamp()) * 1000000
          )::numeric(20, 0)",
     )
     .fetch_one(&mut *connection)
@@ -638,6 +643,7 @@ async fn transaction_timestamp(
 async fn replace_current_snapshot(
     connection: &mut PgConnection,
     command: &ReplaceSessionMetadata,
+    updated_at: SessionMetadataUpdatedAt,
 ) -> Result<(), SessionMetadataRepositoryError> {
     let actor = encode_actor(command.actor());
     sqlx::query(
@@ -645,7 +651,7 @@ async fn replace_current_snapshot(
             (session_id, title, archived, updated_at, actor_kind,
              actor_turn_id, actor_tool_request_id)
          VALUES
-            ($1, $2, $3, transaction_timestamp(), $4, $5, $6)
+            ($1, $2, $3, to_timestamp($4::numeric / 1000000), $5, $6, $7)
          ON CONFLICT (session_id) DO UPDATE
          SET title = EXCLUDED.title,
              archived = EXCLUDED.archived,
@@ -657,6 +663,7 @@ async fn replace_current_snapshot(
     .bind(session_id_to_uuid(command.session()))
     .bind(command.replacement().title())
     .bind(command.replacement().archived())
+    .bind(Decimal::from(updated_at.as_unix_micros()))
     .bind(actor.kind)
     .bind(actor.turn)
     .bind(actor.tool_request)
@@ -697,6 +704,7 @@ async fn replace_current_snapshot(
 async fn insert_typed_record(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedReplaceSessionMetadata,
+    updated_at: Option<SessionMetadataUpdatedAt>,
 ) -> Result<(), SessionMetadataRepositoryError> {
     let command = prepared.command();
     let actor = encode_actor(command.actor());
@@ -737,14 +745,19 @@ async fn insert_typed_record(
              actor_kind, actor_turn_id, actor_tool_request_id,
              replacement_title, replacement_archived,
              result_kind, rejection_kind, result_session_id,
-             result_updated_at, result_actor_kind,
+             result_applied_session_id, result_updated_at, result_actor_kind,
              result_actor_turn_id, result_actor_tool_request_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-             CASE WHEN $13 THEN transaction_timestamp() ELSE NULL END,
-             CASE WHEN $13 THEN $5 ELSE NULL END,
-             CASE WHEN $13 THEN $6 ELSE NULL END,
-             CASE WHEN $13 THEN $7 ELSE NULL END)",
+             CASE WHEN $13::numeric IS NOT NULL THEN $4 ELSE NULL END,
+             CASE
+                 WHEN $13::numeric IS NOT NULL
+                 THEN to_timestamp($13::numeric / 1000000)
+                 ELSE NULL
+             END,
+             CASE WHEN $13::numeric IS NOT NULL THEN $5 ELSE NULL END,
+             CASE WHEN $13::numeric IS NOT NULL THEN $6 ELSE NULL END,
+             CASE WHEN $13::numeric IS NOT NULL THEN $7 ELSE NULL END)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(REPLACE_SESSION_METADATA_KIND)
@@ -758,7 +771,7 @@ async fn insert_typed_record(
     .bind(result_kind)
     .bind(rejection_kind)
     .bind(session_id_to_uuid(command.session()))
-    .bind(applied)
+    .bind(updated_at.map(|value| Decimal::from(value.as_unix_micros())))
     .execute(&mut *connection)
     .await?;
 
@@ -785,6 +798,7 @@ async fn load_command_from_connection(
             typed.result_kind,
             typed.rejection_kind,
             typed.result_session_id,
+            typed.result_applied_session_id,
             floor(
                 extract(epoch FROM typed.result_updated_at) * 1000000
             )::numeric(20, 0) AS result_updated_at_unix_micros,
@@ -857,6 +871,7 @@ fn decode_command(
     let result_kind: String = required(row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
     let result_session = session_id_from_uuid(required(row, "result_session_id")?);
+    let result_applied_session: Option<Uuid> = row.try_get("result_applied_session_id")?;
     let result_updated_at: Option<Decimal> = row.try_get("result_updated_at_unix_micros")?;
     let result_actor_kind: Option<String> = row.try_get("result_actor_kind")?;
     let result_actor_turn: Option<Uuid> = row.try_get("result_actor_turn_id")?;
@@ -864,6 +879,15 @@ fn decode_command(
 
     let input = match (result_kind.as_str(), rejection_kind.as_deref()) {
         (APPLIED, None) => {
+            let applied_session = session_id_from_uuid(result_applied_session.ok_or(
+                SessionMetadataCorruption::Missing("applied result session proof"),
+            )?);
+            if applied_session != session || applied_session != result_session {
+                return Err(SessionMetadataCorruption::Inconsistent(
+                    "applied result session proof",
+                )
+                .into());
+            }
             let updated_at = decode_updated_at(result_updated_at.ok_or(
                 SessionMetadataCorruption::Missing("result updated timestamp"),
             )?)?;
@@ -882,6 +906,7 @@ fn decode_command(
         }
         (REJECTED, Some(SESSION_NOT_FOUND)) => {
             if result_updated_at.is_some()
+                || result_applied_session.is_some()
                 || result_actor_kind.is_some()
                 || result_actor_turn.is_some()
                 || result_actor_tool.is_some()
