@@ -564,7 +564,11 @@ impl ReviewRun {
         policy: ReviewPolicy,
         state: ReviewRunState,
     ) -> Result<Self, ReviewRunTransitionError> {
-        validate_run_state(reference, state)?;
+        validate_run_state(reference, state).map_err(|failure| ReviewRunTransitionError {
+            current: state,
+            next: state,
+            failure,
+        })?;
         Ok(Self {
             reference,
             workflow,
@@ -575,7 +579,11 @@ impl ReviewRun {
 
     /// Applies one permitted state transition.
     pub fn transition(mut self, next: ReviewRunState) -> Result<Self, ReviewRunTransitionError> {
-        validate_run_state(self.reference, next)?;
+        validate_run_state(self.reference, next).map_err(|failure| ReviewRunTransitionError {
+            current: self.state,
+            next,
+            failure,
+        })?;
         let permitted = match (self.state, next) {
             (ReviewRunState::Queued, ReviewRunState::Running { .. }) => true,
             (ReviewRunState::Queued, ReviewRunState::Cancelled { last_pass: None }) => true,
@@ -636,15 +644,11 @@ impl ReviewRun {
 fn validate_run_state(
     reference: ReviewRunRef,
     state: ReviewRunState,
-) -> Result<(), ReviewRunTransitionError> {
+) -> Result<(), ReviewRunTransitionFailure> {
     if let Some(pass) = state.pass()
         && pass.run() != reference
     {
-        return Err(ReviewRunTransitionError {
-            current: state,
-            next: state,
-            failure: ReviewRunTransitionFailure::ForeignPass,
-        });
+        return Err(ReviewRunTransitionFailure::ForeignPass);
     }
     Ok(())
 }
@@ -1776,19 +1780,22 @@ mod tests {
         let reference = run_ref();
         let active = pass_ref(3);
         let foreign = ReviewPassRef::new(ReviewRunRef::new(target_id(1), run_id(99)), pass_id(3));
-        let cross_wired = ReviewRun::new(
+        let queued = ReviewRun::new(
             reference,
             ReviewWorkflowKind::ReadOnlyReview,
             ReviewPolicy::version_one(),
-        )
-        .transition(ReviewRunState::Running {
+        );
+        let requested = ReviewRunState::Running {
             active_pass: foreign,
-        })
-        .expect_err("foreign pass must fail closed");
+        };
+        let cross_wired = queued
+            .transition(requested)
+            .expect_err("foreign pass must fail closed");
         assert_eq!(
             cross_wired.failure(),
             ReviewRunTransitionFailure::ForeignPass
         );
+        assert_eq!(cross_wired.states(), (ReviewRunState::Queued, requested));
 
         let running = ReviewPass::new(
             active,
