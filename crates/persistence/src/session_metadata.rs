@@ -869,7 +869,7 @@ fn decode_command(
     require_supported_version(row, "typed_version")?;
 
     let session = session_id_from_uuid(required(row, "session_id")?);
-    let actor = decode_actor(
+    let command_actor = decode_actor(
         required(row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
@@ -882,7 +882,7 @@ fn decode_command(
         required(row, "replacement_attribute_values")?,
         required(row, "replacement_archived")?,
     )?;
-    let command = ReplaceSessionMetadata::new(command_id, session, actor, content);
+    let command = ReplaceSessionMetadata::new(command_id, session, content);
     let result_kind: String = required(row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
     let result_session = session_id_from_uuid(required(row, "result_session_id")?);
@@ -914,6 +914,7 @@ fn decode_command(
             )?;
             ReplaceSessionMetadataReconstitutionInput::applied(
                 command,
+                command_actor,
                 result_session,
                 updated_at,
                 result_actor,
@@ -932,6 +933,7 @@ fn decode_command(
             }
             ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
                 command,
+                command_actor,
                 result_session,
             )
         }

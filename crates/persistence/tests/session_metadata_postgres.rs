@@ -11,9 +11,10 @@ use std::{error::Error, sync::Arc};
 
 use signalbox_domain::{
     Actor, CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionMetadataContent, TranscriptAncestry,
+    PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataReconstitutionFailure,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionMetadataContent, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -103,12 +104,7 @@ fn replacement(
     session_value: u128,
     content: SessionMetadataContent,
 ) -> ReplaceSessionMetadata {
-    ReplaceSessionMetadata::new(
-        command(command_value),
-        session(session_value),
-        Actor::Owner,
-        content,
-    )
+    ReplaceSessionMetadata::new(command(command_value), session(session_value), content)
 }
 
 async fn collect_page(
@@ -178,6 +174,100 @@ async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Bo
         ))
     ));
     assert_eq!(repository.handle(absent).await?, absent_outcome);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: an applied receipt with a non-owner stored command actor fails
+/// closed during repository reconstitution.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_applied_metadata_receipt_rejects_non_owner_command_actor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0x902,
+            0x701,
+            metadata(Some("applied"), &[], &[], false),
+        ))
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE replace_session_metadata_command
+         DISABLE TRIGGER replace_session_metadata_command_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE replace_session_metadata_command
+            SET actor_kind = 'recovery',
+                result_actor_kind = 'recovery'
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x902))
+    .execute(&pool)
+    .await?;
+
+    assert!(matches!(
+        repository.load_command(command(0x902)).await,
+        Err(SessionMetadataRepositoryError::Corruption(
+            SessionMetadataCorruption::Domain(
+                ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
+            )
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: a rejected receipt with a non-owner stored command actor fails
+/// closed during repository reconstitution.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_rejected_metadata_receipt_rejects_non_owner_command_actor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0x901,
+            0x799,
+            metadata(Some("rejected"), &[], &[], false),
+        ))
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE replace_session_metadata_command
+         DISABLE TRIGGER replace_session_metadata_command_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE replace_session_metadata_command
+            SET actor_kind = 'recovery'
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x901))
+    .execute(&pool)
+    .await?;
+
+    assert!(matches!(
+        repository.load_command(command(0x901)).await,
+        Err(SessionMetadataRepositoryError::Corruption(
+            SessionMetadataCorruption::Domain(
+                ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
+            )
+        ))
+    ));
 
     pool.close().await;
     drop(container);
