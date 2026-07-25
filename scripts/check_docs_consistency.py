@@ -52,7 +52,9 @@ RAW_HTML_LITERAL_OPEN = re.compile(
     re.IGNORECASE,
 )
 RAW_HTML_TEXT_OPEN = re.compile(
-    r"^ {0,3}<(?P<tag>script|style|textarea)(?:[ \t\r\n>]|$)",
+    r"^ {0,3}<(?P<tag>"
+    r"iframe|noembed|noframes|script|style|textarea|title|xmp"
+    r")(?:[ \t\r\n>]|$)",
     re.IGNORECASE,
 )
 RAW_HTML_BLOCK_TAG = re.compile(
@@ -82,7 +84,7 @@ RAW_HTML_COMPLETE_TAG = re.compile(
     re.VERBOSE,
 )
 EXPLICIT_ANCHOR = re.compile(
-    r"<a\b[^>]*\b(?:name|id)[ \t]*=[ \t]*"
+    r"<a(?![A-Za-z0-9-])[^>]*[ \t\r\n](?:name|id)[ \t\r\n]*=[ \t\r\n]*"
     r'(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))',
     re.IGNORECASE,
 )
@@ -109,11 +111,17 @@ PR_TOKEN = re.compile(
     r"`([^\s`]+)`"
     r"\)"
 )
+INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
+CLAUSE_BOUNDARY = (
+    r"\n[ \t]*\n"
+    rf"|[.!?][ \t\r\n]+{INLINE_MARKUP_OPENERS}(?-i:[A-Z])"
+    r"|;"
+)
 VERIFICATION_LEAD = re.compile(
     r"\bverified\b"
-    r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])|;).)*?"
+    rf"(?:(?!{CLAUSE_BOUNDARY}).)*?"
     r"\b(?:against|through)\b"
-    r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])|;).)*?"
+    rf"(?:(?!{CLAUSE_BOUNDARY}).)*?"
     r"(?P<pr>\bPR[ \t]*#)",
     re.IGNORECASE | re.DOTALL,
 )
@@ -124,6 +132,11 @@ VERIFICATION_NEGATION = re.compile(
     r"|\b[A-Za-z]+n['’]t(?:[ \t]+\w+){0,3}[ \t]+)$",
     re.IGNORECASE,
 )
+EMPHASIS_DELIMITER = re.compile(r"[*_~]+")
+THEMATIC_BREAK = re.compile(
+    r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
+)
+DECISION_ENTRY_HEADING = re.compile(r"^ {0,3}##(?!#)(?:[ \t]+|$)(?P<title>.*)$")
 TEST_GROUP = re.compile(
     r"\btests?[ \t]+"
     r"(?P<names>"
@@ -366,6 +379,37 @@ def mask_fenced_code(text: str) -> str:
     return "".join(buffer)
 
 
+@lru_cache(maxsize=8)
+def block_boundaries(text: str) -> tuple[int, ...]:
+    """Return offsets at which inline parsing cannot continue.
+
+    A code span is inline content of one leaf block, so it can never span a
+    blank line or reach across an ATX heading, which always interrupts a
+    paragraph. Both edges of such a line are boundaries.
+    """
+    boundaries: list[int] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        content = strip_block_quote_containers(line.rstrip("\r\n"))
+        if not content.strip() or ATX_HEADING.match(content):
+            boundaries.append(offset)
+            boundaries.append(offset + len(line))
+        offset += len(line)
+    return tuple(boundaries)
+
+
+def block_limit(text: str, offset: int) -> int:
+    """Return the first offset after ``offset`` that inline parsing cannot cross."""
+    return next(
+        (
+            boundary
+            for boundary in block_boundaries(text)
+            if boundary > offset
+        ),
+        len(text),
+    )
+
+
 def inline_code_ranges(text: str) -> list[tuple[int, int]]:
     """Return complete inline-code ranges while preserving source offsets."""
     ranges: list[tuple[int, int]] = []
@@ -378,11 +422,12 @@ def inline_code_ranges(text: str) -> list[tuple[int, int]]:
         while run_end < len(text) and text[run_end] == "`":
             run_end += 1
         delimiter = text[index:run_end]
+        limit = block_limit(text, index)
         closing: int | None = None
         candidate = run_end
         while True:
             candidate = text.find("`", candidate)
-            if candidate == -1:
+            if candidate == -1 or candidate >= limit:
                 break
             candidate_end = candidate
             while candidate_end < len(text) and text[candidate_end] == "`":
@@ -522,11 +567,21 @@ def indentation_columns(prefix: str) -> int:
     return columns
 
 
+def opens_paragraph(content: str) -> bool:
+    """Return whether a non-blank line leaves a paragraph open to continue."""
+    stripped = content.lstrip(" \t")
+    return not (
+        ATX_HEADING.match(stripped)
+        or THEMATIC_BREAK.match(stripped)
+        or SETEXT_HEADING.match(stripped)
+    )
+
+
 def mask_indented_code(text: str) -> str:
     """Replace CommonMark-style indented code blocks, preserving offsets."""
     buffer = list(text)
     offset = 0
-    previous_blank = True
+    paragraph_open = False
     in_code = False
     list_content_column: int | None = None
 
@@ -535,7 +590,7 @@ def mask_indented_code(text: str) -> str:
         if not content.strip():
             if in_code:
                 mask_range(buffer, offset, offset + len(line))
-            previous_blank = True
+            paragraph_open = False
             offset += len(line)
             continue
 
@@ -555,7 +610,7 @@ def mask_indented_code(text: str) -> str:
                 marker.group("indent") + marker.group(0)[len(marker.group("indent")) :]
             )
             in_code = False
-            previous_blank = False
+            paragraph_open = True
             offset += len(line)
             continue
 
@@ -565,15 +620,13 @@ def mask_indented_code(text: str) -> str:
             in_code = False
 
         indented = relative >= 4
-        if in_code and indented:
-            mask_range(buffer, offset, offset + len(line))
-        elif previous_blank and indented:
+        if indented and (in_code or not paragraph_open):
             in_code = True
             mask_range(buffer, offset, offset + len(line))
         else:
             in_code = False
+            paragraph_open = opens_paragraph(content)
 
-        previous_blank = False
         offset += len(line)
     return "".join(buffer)
 
@@ -1357,6 +1410,7 @@ def check_decision_order(root: Path) -> list[Violation]:
             and line.strip()
             and ATX_HEADING.match(line) is None
             and LIST_ITEM.match(line) is None
+            and BLOCK_QUOTE_CONTAINER.match(line) is None
             and re.match(r"^ {0,3}-+[ \t]*$", lines[number])
         ):
             entries += 1
@@ -1370,10 +1424,11 @@ def check_decision_order(root: Path) -> list[Violation]:
                 )
             )
             continue
-        if not re.match(r"^##(?!#)(?:[ \t]|$)", line):
+        heading = DECISION_ENTRY_HEADING.match(line)
+        if heading is None:
             continue
         entries += 1
-        title = line[2:].strip()
+        title = heading.group("title").strip()
         match = DECISION_HEADING.fullmatch(title)
         if not match:
             violations.append(
@@ -1423,8 +1478,13 @@ def check_decision_order(root: Path) -> list[Violation]:
 
 
 def verification_is_negated(text: str, offset: int) -> bool:
-    """Recognize nearby plain-language negation of ``verified``."""
-    return VERIFICATION_NEGATION.search(text[:offset]) is not None
+    """Recognize nearby plain-language negation of ``verified``.
+
+    Emphasis delimiters are removed first so that rendered negations such as
+    ``**not** verified`` read the same as their plain-text form.
+    """
+    preceding = EMPHASIS_DELIMITER.sub("", text[:offset])
+    return VERIFICATION_NEGATION.search(preceding) is not None
 
 
 def check_spec_verification_references(root: Path) -> list[Violation]:

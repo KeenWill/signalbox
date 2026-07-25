@@ -585,6 +585,67 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_indented_code_after_a_heading_does_not_expose_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "## Sample\n"
+            "    [Heading sample](missing-heading.md)\n\n"
+            "---\n"
+            "    [Break sample](missing-break.md)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_indented_line_after_a_paragraph_still_exposes_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "Continuing prose.\n"
+            "    [Lazy continuation](missing-continuation.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["relative-link"])
+        self.assertIn("missing-continuation.md", failures[0].message)
+
+    def test_code_span_does_not_pair_across_a_block_boundary(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "One paragraph with a stray ` delimiter.\n\n"
+            "[Paragraph sample](missing-paragraph.md)\n\n"
+            "Another paragraph with a stray ` delimiter.\n\n"
+            "Prose before a heading with a stray ` delimiter.\n"
+            "# Heading with a stray ` delimiter\n"
+            "[Heading sample](missing-across-heading.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link", "relative-link"],
+        )
+        self.assertEqual(
+            failure_messages(failures),
+            [
+                "target does not exist: `missing-paragraph.md`",
+                "target does not exist: `missing-across-heading.md`",
+            ],
+        )
+
+    def test_code_span_still_spans_lines_inside_one_paragraph(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "A wrapped code span `[Masked](missing-masked.md)\n"
+            "continues here` and closes.\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_raw_html_blocks_do_not_expose_links(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -792,6 +853,65 @@ class DocsConsistencyTests(unittest.TestCase):
             ],
         )
 
+    def test_additional_raw_text_html_contents_do_not_define_anchors(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Title](docs/spec/example.md#title-phantom)\n"
+            "[Iframe](docs/spec/example.md#iframe-phantom)\n"
+            "[Noframes](docs/spec/example.md#noframes-phantom)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "<title>\n"
+            '<a id="title-phantom"></a>\n'
+            "</title>\n\n"
+            "<iframe>\n"
+            '<a id="iframe-phantom"></a>\n'
+            "</iframe>\n\n"
+            "<noframes>\n"
+            '<a id="noframes-phantom"></a>\n'
+            "</noframes>\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link", "relative-link", "relative-link"],
+        )
+        self.assertEqual(
+            failure_messages(failures),
+            [
+                "anchor `#title-phantom` does not exist in "
+                "`docs/spec/example.md`",
+                "anchor `#iframe-phantom` does not exist in "
+                "`docs/spec/example.md`",
+                "anchor `#noframes-phantom` does not exist in "
+                "`docs/spec/example.md`",
+            ],
+        )
+
+    def test_hyphenated_attribute_does_not_define_an_anchor(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Data](docs/spec/example.md#data-phantom)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            '<a data-id="data-phantom">text</a>\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["relative-link"])
+        self.assertIn("anchor `#data-phantom` does not exist", failures[0].message)
+
     def test_heading_autolink_contributes_its_visible_text(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -880,6 +1000,49 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_thematic_break_after_block_quote_is_not_a_decision_entry(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-25 — Entry\n\n"
+            "> A quoted remark.\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_indented_atx_decision_heading_is_validated(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-24 — Old\n\n"
+            "  ## 2026-07-30 — Indented newer entry\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["decision-order"])
+        self.assertIn(
+            "entry date 2026-07-30 is newer than the preceding 2026-07-24",
+            failures[0].message,
+        )
+
+    def test_indented_malformed_decision_heading_is_reported(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-24 — Old\n\n"
+            "   ## Untitled entry\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["decision-order"])
+        self.assertIn(
+            "entry heading must be `## YYYY-MM-DD — <title>`",
+            failures[0].message,
+        )
 
     def test_missing_and_malformed_verification_refs_are_reported(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
@@ -1096,6 +1259,42 @@ class DocsConsistencyTests(unittest.TestCase):
             "# Example\n\n"
             "This page cannot be verified against implementation through "
             "PR #12 (`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_emphasized_negation_does_not_satisfy_page(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "This page is **not** verified against implementation through "
+            "PR #12 (`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_verification_clause_stops_at_markup_sentence_start(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "The checksum is verified. [Historical context](../decisions.md) "
+            "describes a change made through PR #12 (`agent/example`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
             encoding="utf-8",
