@@ -2343,6 +2343,18 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ToolAttemptEnd::KnownFailed { error }
             if error.kind() == ToolExecutionErrorKind::InvalidArguments
     ));
+    let issuing_attempt_state: String = sqlx::query_scalar(
+        "SELECT state_kind
+           FROM turn_attempt
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(schema_continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        issuing_attempt_state, "running",
+        "preflight terminal evidence makes the result projection continuation-eligible"
+    );
     let mut completed_attempt_recovery_ids = FixedStartupScanIds::new([], []);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())

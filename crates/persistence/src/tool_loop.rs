@@ -541,6 +541,7 @@ impl PostgresToolLoopRepository {
             if current.session() != session || current.turn() != turn {
                 return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
             }
+            mark_issuing_turn_attempt_running(&mut transaction, &current).await?;
             let ended = current.end_preflight_error(error).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("invalid tool preflight result")
             })?;

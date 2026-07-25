@@ -2630,6 +2630,22 @@ mod tests {
         }
     }
 
+    fn current_turn_tool_rounds(round_count: u128) -> Vec<ModelConversationMessage> {
+        (0..round_count)
+            .map(|round| model_tool_use_message(1_000 + round, 2, 2_000 + round, 0))
+            .collect()
+    }
+
+    fn one_current_batch_with_inherited_tool_history() -> Vec<ModelConversationMessage> {
+        (0..32_u32)
+            .map(|ordinal| model_tool_use_message(3_000 + u128::from(ordinal), 2, 4_000, ordinal))
+            .chain(
+                (0..32_u128)
+                    .map(|round| model_tool_use_message(5_000 + round, 99, 6_000 + round, 0)),
+            )
+            .collect()
+    }
+
     /// The owner-selected rendering decision: origin input becomes a user
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
@@ -2663,21 +2679,16 @@ mod tests {
     #[test]
     fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
         let current_turn = identity(2, TurnId::from_uuid);
-        let mut messages = (0..31_u128)
-            .map(|round| model_tool_use_message(1_000 + round, 2, 2_000 + round, 0))
-            .collect::<Vec<_>>();
-        assert!(!automatic_tool_round_limit_reached(current_turn, &messages));
+        let below_limit = current_turn_tool_rounds(31);
+        assert!(!automatic_tool_round_limit_reached(
+            current_turn,
+            &below_limit
+        ));
 
-        messages.push(model_tool_use_message(1_031, 2, 2_031, 0));
-        assert!(automatic_tool_round_limit_reached(current_turn, &messages));
+        let at_limit = current_turn_tool_rounds(32);
+        assert!(automatic_tool_round_limit_reached(current_turn, &at_limit));
 
-        let one_multi_request_round = (0..32_u32)
-            .map(|ordinal| model_tool_use_message(3_000 + u128::from(ordinal), 2, 4_000, ordinal))
-            .chain(
-                (0..32_u128)
-                    .map(|round| model_tool_use_message(5_000 + round, 99, 6_000 + round, 0)),
-            )
-            .collect::<Vec<_>>();
+        let one_multi_request_round = one_current_batch_with_inherited_tool_history();
         assert!(
             !automatic_tool_round_limit_reached(current_turn, &one_multi_request_round),
             "one current-turn batch and inherited history consume one round"

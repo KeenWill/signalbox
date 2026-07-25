@@ -951,15 +951,23 @@ mod tests {
             signalbox_model_runtime::ConversationRole::Assistant
         );
         assert_eq!(rendered[0].parts.len(), 7);
-        for part in [&rendered[0].parts[2], &rendered[0].parts[4]] {
-            let signalbox_model_runtime::MessagePart::ToolCall(replayed) = part else {
-                panic!("invalid proposal remains in the assistant group");
-            };
-            assert_eq!(
-                replayed.arguments_json,
-                r#"{"signalbox_invalid_arguments":true}"#
-            );
-        }
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_malformed) =
+            &rendered[0].parts[2]
+        else {
+            panic!("malformed proposal remains in the assistant group");
+        };
+        assert_eq!(
+            replayed_malformed.arguments_json,
+            r#"{"signalbox_invalid_arguments":true}"#
+        );
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_scalar) = &rendered[0].parts[4]
+        else {
+            panic!("scalar proposal remains in the assistant group");
+        };
+        assert_eq!(
+            replayed_scalar.arguments_json,
+            r#"{"signalbox_invalid_arguments":true}"#
+        );
         assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
         assert_eq!(scalar.arguments().as_str(), "7");
         let signalbox_model_runtime::MessagePart::ToolCall(replayed_deep) = &rendered[0].parts[5]

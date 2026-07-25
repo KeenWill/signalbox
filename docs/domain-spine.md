@@ -3252,11 +3252,6 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
-    pub fn prepare_cancellation_projection(
-        &self,
-        entry_ids: Vec<SemanticTranscriptEntryId>,
-        result_frontier: ContextFrontierId,
-    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -4302,6 +4297,7 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     AuthorizationReconciliation(TransactionError),
     PreflightCommit(TransactionError),
     Executor(ExecutorError),
+    ExecutorCorrelationMismatch,
     ObservationCommit(TransactionError),
     ObservationReconciliation(TransactionError),
     CrashClassification(TransactionError),
