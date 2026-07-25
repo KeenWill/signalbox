@@ -10,6 +10,35 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Refuse ambient PostgreSQL environment variables in production
+
+**Context.** The specification states that hubd reads exactly four deployment
+values from the process environment, with `DATABASE_URL` as the whole database
+channel. The SQLx driver does not honor that: it builds connection options from
+the libpq-style `PG*` variables first and lets the URL override only what the
+URL states. Anything the URL omits — host, port, user, database, TLS material,
+application name, runtime options — silently comes from the environment, and
+`PGPASSWORD`/`PGPASSFILE` form an undocumented second database-credential
+channel. Only `sslmode` was already neutralized, by forcing `verify-full` after
+parsing.
+
+**Decision.** The production connection path fails closed when any of the
+thirteen consulted variables is present in the environment, whatever its value.
+The error names the offending variables and never their values, and the refusal
+precedes any database contact. The local test connection path keeps SQLx's
+behavior; it never reaches a production cluster.
+
+**Rejected alternatives.** Documenting the fallback set would make the
+environment surface honest while leaving an unmanaged credential channel and a
+connection whose target depends on ambient state. Rebuilding options field by
+field from a self-parsed URL would put a libpq connection-string parser in this
+repository to work around one driver default. Ignoring the variables silently
+would leave an operator who set them without any signal that they did nothing.
+
+**Affects.** `production_connection_options`, hubd's production startup, and the
+process-configuration section of
+[configuration and credentials](spec/configuration-and-credentials.md).
+
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
 **Context.** Metadata list queries admit page sizes from one through one

@@ -26,6 +26,16 @@ environment at startup:
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
 
+`DATABASE_URL` is the whole database configuration channel. The SQLx driver
+would otherwise seed anything the URL omits from the ambient libpq-style `PG*`
+variables — host, port, user, database, TLS material, application name, and
+runtime options, plus `PGPASSWORD` and `PGPASSFILE` as a second credential
+channel — so the production connection path refuses to parse when any of them is
+present in the environment, whatever its value. The refusal names the offending
+variables and never their values, and it happens before any database contact. A
+deployment carries every connection parameter in the URL; the local test
+connection path is unaffected because it never reaches a production cluster.
+
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,
 before any database contact. Startup and shutdown logs carry the phase, an
