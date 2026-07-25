@@ -2,7 +2,8 @@
 
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
-(`agent/review-process-amendments`). This page covers the Postgres
+(`agent/review-process-amendments`); the migration inventory was verified
+through PR #243 (`agent/importer-lineage`). This page covers the Postgres
 representation in `crates/persistence` (source and migrations), migration
 discipline, durable command storage and replay equality, the fail-closed
 reconstitution boundary, the lock protocol, pending-steering durable state, the
