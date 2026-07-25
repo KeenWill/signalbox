@@ -3517,10 +3517,9 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: a posted finding consumes an attached canonical link
-    /// associated with that exact finding.
+    /// INV-040 / INV-041: a pending reservation is not posting evidence.
     #[test]
-    fn inv040_posted_link_rejects_pending_and_foreign_canonical_associations() {
+    fn inv040_posted_link_rejects_pending_reservation() {
         let finding = finding_ref(10);
         let pending = ReviewExternalLink::reserve(
             link_id(30),
@@ -3528,32 +3527,47 @@ mod tests {
             key("code-host"),
             ReviewExternalObjectKind::ReviewComment,
         );
-        let pending_error = ReviewFindingExternalLinkRef::try_new(finding, &pending)
+
+        let error = ReviewFindingExternalLinkRef::try_new(finding, &pending)
             .expect_err("pending reservation is not posting evidence");
+
         assert_eq!(
-            pending_error.failure(),
+            error.failure(),
             ReviewFindingExternalLinkFailure::NotAttached
         );
+    }
 
+    /// INV-040 / INV-041: an attached link canonically associated with another
+    /// finding is not posting evidence for this finding.
+    #[test]
+    fn inv040_posted_link_rejects_foreign_canonical_association() {
+        let finding = finding_ref(10);
         let foreign = attached_finding_link(finding_ref(11), link_id(31));
-        let foreign_error = ReviewFindingExternalLinkRef::try_new(finding, &foreign)
+
+        let error = ReviewFindingExternalLinkRef::try_new(finding, &foreign)
             .expect_err("canonical association belongs to another finding");
+
         assert_eq!(
-            foreign_error.failure(),
+            error.failure(),
             ReviewFindingExternalLinkFailure::ForeignAssociation
         );
         assert_eq!(
-            foreign_error.association(),
+            error.association(),
             ReviewExternalLinkAssociation::Finding(finding_ref(11))
         );
+    }
 
+    /// INV-040 / INV-041: a posted finding consumes an attached canonical link
+    /// associated with that exact finding.
+    #[test]
+    fn inv040_posted_link_accepts_exact_attached_association() {
+        let finding = finding_ref(10);
         let exact = attached_finding_link(finding, link_id(32));
-        assert_eq!(
-            ReviewFindingExternalLinkRef::try_new(finding, &exact)
-                .expect("attached canonical association supports posting")
-                .link(),
-            link_id(32)
-        );
+
+        let posted = ReviewFindingExternalLinkRef::try_new(finding, &exact)
+            .expect("attached canonical association supports posting");
+
+        assert_eq!(posted.link(), link_id(32));
     }
 
     /// INV-040: a terminal finding cannot reopen.
