@@ -5616,6 +5616,7 @@ pub enum ReviewFindingTransitionFailure {
     IncompatibleProducingPassEvidence,
     ForeignEventFinding,
     ForeignEventPass,
+    EventPolicyMismatch,
     IncompatibleEventPassEvidence,
     ForeignReferencedFinding,
     SelfReference,
