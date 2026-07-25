@@ -40,6 +40,8 @@ const CLAUDE_V2_BOUNDARY_LOSSES: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v2-boundary-losses.jsonl");
 const CODEX_V1_TOOL_ROUND: &[u8] =
     include_bytes!("fixtures/importer-conformance/codex-rollout-v1-tool-round.jsonl");
+const CODEX_V1_STRUCTURED_TOOLS: &[u8] =
+    include_bytes!("fixtures/importer-conformance/codex-rollout-v1-structured-tools.jsonl");
 const CLAUDE_V2_DEPTH_128: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v2-depth-128.jsonl");
 const CLAUDE_V2_DEPTH_129: &[u8] =
@@ -219,6 +221,24 @@ fn fixture_text_member<'a>(
         .unwrap_or_else(|| panic!("fixture object must contain {member_name:?}"));
     let ImportedStructuredValue::String(value) = member.value() else {
         panic!("fixture member {member_name:?} must contain text");
+    };
+    value
+}
+
+#[track_caller]
+fn fixture_object_member<'a>(
+    value: &'a ImportedStructuredValue,
+    member_name: &str,
+) -> &'a ImportedStructuredValue {
+    let ImportedStructuredValue::Object(members) = value else {
+        panic!("fixture value containing {member_name:?} must be an object");
+    };
+    let member = members
+        .iter()
+        .find(|member| member.name().as_str() == member_name)
+        .unwrap_or_else(|| panic!("fixture object must contain {member_name:?}"));
+    let value @ ImportedStructuredValue::Object(_) = member.value() else {
+        panic!("fixture member {member_name:?} must contain an object");
     };
     value
 }
@@ -416,6 +436,32 @@ fn s28_fixture_text_member_returns_the_named_fixture_value() {
 }
 
 #[test]
+fn s28_fixture_object_member_returns_the_named_nested_object() {
+    let expected = ImportedStructuredValue::Object(
+        vec![ImportedStructuredObjectMember::new(
+            ImportedText::new(String::from("id")),
+            ImportedStructuredValue::String(ImportedText::new(String::from("nested-value"))),
+        )]
+        .into_boxed_slice(),
+    );
+    let fixture = ImportedStructuredValue::Object(
+        vec![
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("other")),
+                ImportedStructuredValue::String(ImportedText::new(String::from("other-value"))),
+            ),
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("payload")),
+                expected.clone(),
+            ),
+        ]
+        .into_boxed_slice(),
+    );
+
+    assert_eq!(fixture_object_member(&fixture, "payload"), &expected);
+}
+
+#[test]
 fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
     let imported = convert_claude(br#"{"type":"system"}"#);
 
@@ -514,6 +560,61 @@ fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
         ImportedTranscriptContent::Text(_)
     ));
     expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-tool-round.txt"]
+        .assert_eq(&render_conversation(&imported));
+}
+
+/// S28 / INV-038: the Codex era's structured tool vocabulary — tool search
+/// call and output, local shell call, web search call, and the custom tool call
+/// and its output — converts to the pinned golden rendering.
+#[test]
+fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
+    let imported = convert_codex(CODEX_V1_STRUCTURED_TOOLS);
+    let fixture_web_item = fixture_text_member(
+        fixture_object_member(imported.raw_records()[4].normalized(), "payload"),
+        "id",
+    );
+
+    assert_eq!(imported.raw_records().len(), 7);
+    assert_eq!(imported.entries().len(), 7);
+    assert!(matches!(
+        imported.entries()[1].content(),
+        ImportedTranscriptContent::ToolCall {
+            name: ImportedSourceAttestation::NotAttested,
+            ..
+        }
+    ));
+    assert!(matches!(
+        imported.entries()[2].content(),
+        ImportedTranscriptContent::ToolResult { .. }
+    ));
+    assert!(matches!(
+        imported.entries()[3].content(),
+        ImportedTranscriptContent::ToolCall {
+            name: ImportedSourceAttestation::NotAttested,
+            ..
+        }
+    ));
+    let ImportedTranscriptContent::ToolCall { source_call_id, .. } =
+        imported.entries()[4].content()
+    else {
+        panic!("a web search call converts to a tool call");
+    };
+    assert_eq!(
+        source_call_id,
+        &ImportedSourceAttestation::Attested(fixture_web_item.clone())
+    );
+    assert!(matches!(
+        imported.entries()[5].content(),
+        ImportedTranscriptContent::ToolCall {
+            name: ImportedSourceAttestation::Attested(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        imported.entries()[6].content(),
+        ImportedTranscriptContent::ToolResult { .. }
+    ));
+    expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-structured-tools.txt"]
         .assert_eq(&render_conversation(&imported));
 }
 

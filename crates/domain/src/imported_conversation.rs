@@ -3097,6 +3097,197 @@ mod tests {
         );
     }
 
+    /// Reprojects one `response_item` payload through the Codex projection and
+    /// checks that it yields exactly the expected single entry.
+    #[track_caller]
+    fn assert_codex_payload_projects_one_entry(
+        payload: ImportedStructuredValue,
+        expected: ImportedTranscriptContent,
+    ) {
+        let normalized = object_with_members(vec![
+            (
+                "type",
+                ImportedStructuredValue::String(text("response_item")),
+            ),
+            ("payload", payload),
+        ]);
+
+        let projected =
+            projected_entries(ImportedConversationFormat::CodexRolloutJsonlV1, &normalized)
+                .expect("a recognized Codex tool payload reprojects");
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].content, expected);
+        assert_eq!(
+            projected[0].source_speaker,
+            ImportedSourceAttestation::NotAttested
+        );
+    }
+
+    /// S28 / INV-038: the Codex reprojection maps a structured tool call's
+    /// exact input field and fabricates no tool name for it.
+    #[test]
+    fn s28_inv038_codex_reprojection_maps_structured_tool_input_without_a_name() {
+        assert_codex_payload_projects_one_entry(
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("tool_search_call")),
+                ),
+                (
+                    "call_id",
+                    ImportedStructuredValue::String(text("call-search")),
+                ),
+                (
+                    "arguments",
+                    object(("query", ImportedStructuredValue::String(text("read_file")))),
+                ),
+            ]),
+            ImportedTranscriptContent::ToolCall {
+                source_call_id: ImportedSourceAttestation::Attested(text("call-search")),
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(object((
+                    "query",
+                    ImportedStructuredValue::String(text("read_file")),
+                ))),
+                caller: ImportedSourceAttestation::NotAttested,
+            },
+        );
+        assert_codex_payload_projects_one_entry(
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("local_shell_call")),
+                ),
+                (
+                    "call_id",
+                    ImportedStructuredValue::String(text("call-shell")),
+                ),
+                (
+                    "action",
+                    object(("command", ImportedStructuredValue::String(text("list")))),
+                ),
+            ]),
+            ImportedTranscriptContent::ToolCall {
+                source_call_id: ImportedSourceAttestation::Attested(text("call-shell")),
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(object((
+                    "command",
+                    ImportedStructuredValue::String(text("list")),
+                ))),
+                caller: ImportedSourceAttestation::NotAttested,
+            },
+        );
+    }
+
+    /// S28 / INV-038: the Codex reprojection takes a web-search call's identity
+    /// from the item `id`; the payload also states a competing `call_id` the
+    /// mapping must not read.
+    #[test]
+    fn s28_inv038_codex_reprojection_maps_web_search_item_id_as_call_identity() {
+        assert_codex_payload_projects_one_entry(
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("web_search_call")),
+                ),
+                ("id", ImportedStructuredValue::String(text("item-web"))),
+                (
+                    "call_id",
+                    ImportedStructuredValue::String(text("unread-call-id")),
+                ),
+                (
+                    "action",
+                    object(("query", ImportedStructuredValue::String(text("catalog")))),
+                ),
+            ]),
+            ImportedTranscriptContent::ToolCall {
+                source_call_id: ImportedSourceAttestation::Attested(text("item-web")),
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(object((
+                    "query",
+                    ImportedStructuredValue::String(text("catalog")),
+                ))),
+                caller: ImportedSourceAttestation::NotAttested,
+            },
+        );
+    }
+
+    /// S28 / INV-038: the Codex reprojection reads a custom tool call's payload
+    /// from `input` while retaining its exact attested name.
+    #[test]
+    fn s28_inv038_codex_reprojection_maps_custom_tool_call_input_field() {
+        assert_codex_payload_projects_one_entry(
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("custom_tool_call")),
+                ),
+                (
+                    "call_id",
+                    ImportedStructuredValue::String(text("call-custom")),
+                ),
+                ("name", ImportedStructuredValue::String(text("apply_patch"))),
+                (
+                    "input",
+                    ImportedStructuredValue::String(text("*** Begin Patch")),
+                ),
+            ]),
+            ImportedTranscriptContent::ToolCall {
+                source_call_id: ImportedSourceAttestation::Attested(text("call-custom")),
+                name: ImportedSourceAttestation::Attested(text("apply_patch")),
+                input: ImportedSourceAttestation::Attested(ImportedStructuredValue::String(text(
+                    "*** Begin Patch",
+                ))),
+                caller: ImportedSourceAttestation::NotAttested,
+            },
+        );
+    }
+
+    /// S28 / INV-038: the Codex reprojection emits one ordered source result
+    /// block per tool-search element, retaining an object element's exact type
+    /// attestation and leaving a non-object element unattested.
+    #[test]
+    fn s28_inv038_codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
+        assert_codex_payload_projects_one_entry(
+            object_with_members(vec![
+                (
+                    "type",
+                    ImportedStructuredValue::String(text("tool_search_output")),
+                ),
+                (
+                    "call_id",
+                    ImportedStructuredValue::String(text("call-search")),
+                ),
+                (
+                    "tools",
+                    ImportedStructuredValue::Array(
+                        vec![
+                            object(("type", ImportedStructuredValue::String(text("function")))),
+                            ImportedStructuredValue::String(text("bare")),
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                ),
+            ]),
+            ImportedTranscriptContent::ToolResult {
+                source_call_id: ImportedSourceAttestation::Attested(text("call-search")),
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                    vec![
+                        ImportedToolResultBlock::SourceResultBlock {
+                            source_type: ImportedSourceAttestation::Attested(text("function")),
+                        },
+                        ImportedToolResultBlock::SourceResultBlock {
+                            source_type: ImportedSourceAttestation::NotAttested,
+                        },
+                    ]
+                    .into_boxed_slice(),
+                )),
+                is_error: ImportedSourceAttestation::NotAttested,
+            },
+        );
+    }
+
     /// S28 / INV-002 / INV-038: cloning an unvalidated source value is
     /// stack-safe before typed depth rejection.
     #[test]
