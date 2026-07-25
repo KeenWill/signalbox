@@ -3,11 +3,11 @@
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
-converters, and the append-only Postgres import store, verified against the
-implementing stack through PR #243 (`agent/importer-lineage`). Later session
-creation from one imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+converters, the append-only Postgres import store, and the owner-operated
+one-file import surface, verified against the implementing stack through
+`agent/import-surfaces`. Later session creation from one imported frontier is
+owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
+activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -273,6 +273,35 @@ The converter does not read files or choose paths. Its caller supplies bytes, so
 later formats implement the same seam without adding filesystem types to the
 domain or application crates.
 
+## Operational surface
+
+The owner terminal exposes
+`signalbox import --format <claude-code|codex> <file>`. One invocation reads
+exactly the named file as bytes; it performs no directory traversal, neighboring
+file inspection, format detection, watching, or repeated read. The client does
+not transmit or persist the source path. It selects `ClaudeCodeSessionJsonlV2`
+for `claude-code` or `CodexRolloutJsonlV1` for `codex`, then carries the
+complete bytes and explicit selection in one version-five local process request.
+
+The wire encodes the exact bytes as canonical padded base64. The existing 8 MiB
+frame bound determines whether a complete encoded request fits; the importer
+adds no independent source-size admission rule. A file-read failure happens
+before the request and is reported without its path. Invalid base64 is a
+malformed frame. A selected converter's content-silent conversion failure is an
+`invalid_request`; database failure is conservatively `commit_ambiguous`, so the
+operator may retry the exact format and source bytes; integrity failure is
+`internal`.
+
+Hubd selects the fixed converter, supplies UUIDv7 conversation and entry
+candidates, and invokes `ImportConversationService` against the append-only
+Postgres repository. A new exact snapshot returns
+`conversation_import_inserted { imported_conversation_id }`; exact reingestion
+returns `conversation_import_already_imported { imported_conversation_id }`
+naming the existing identity. The terminal prints these as distinct `inserted`
+and `already_imported` outcomes with that identity. Neither outcome creates or
+seeds a session, and changed bytes continue to create a new exact snapshot under
+the identity model above.
+
 ## Claude Code session JSONL versions 1 and 2
 
 `ClaudeCodeJsonlConverter` implements
@@ -524,7 +553,7 @@ so neither private corpus is selected implicitly.
 ## Open edges
 
 - Exact mappings for further source formats and the unimplemented import
-  operational surfaces remain in the
+  discovery, bulk, admission, and raw-access surfaces remain in the
   [conversation-import questions](../open-questions.md#conversation-import).
 - Rich model rendering of imported source events, content absence, tools,
   results, thinking, and media remains in the

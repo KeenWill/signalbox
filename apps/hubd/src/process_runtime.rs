@@ -11,12 +11,16 @@ use std::{
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    InProcessEligibilityNudge, InProcessToolDispatchGate, ListSessionMetadataService,
-    LoadSessionMetadataService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, SessionMetadataListItem, SessionMetadataListQuery,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
-    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    ImportConversationError, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationConverter, InProcessEligibilityNudge, InProcessToolDispatchGate,
+    ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
+    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SessionMetadataListItem,
+    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    SubmitInputTransaction, UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
+use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, DangerousToolAutoApproval,
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
@@ -27,6 +31,10 @@ use signalbox_domain::{
     SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
 };
 use signalbox_persistence::{
+    conversation_import::{
+        ImportedConversationIdentityCollision, ImportedConversationRepository,
+        ImportedConversationRepositoryError,
+    },
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
@@ -44,15 +52,16 @@ use signalbox_persistence::{
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CurrentModelCall, CurrentModelCallState, ErrorCode,
-    ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-    FrameEncodeError, FrameValidationError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
-    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame,
-    ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata, ToolBatchState,
-    TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments, decode_client_line,
-    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    CanonicalU64, CanonicalUuid, ClientRequest, ConversationImportFormat, CurrentModelCall,
+    CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
+    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+    IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind, ImportedSourceSpeaker,
+    ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
+    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
+    SessionMetadata as WireSessionMetadata, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
+    TurnState, content_fragments, decode_client_line, encode_server_line,
+    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -529,7 +538,133 @@ where
             )
             .await
         }
+        ClientRequest::ImportConversation { format, source } => {
+            handle_import_conversation(
+                writer,
+                version,
+                request_id,
+                format,
+                source.into_bytes(),
+                &services.pool,
+            )
+            .await
+        }
     }
+}
+
+async fn handle_import_conversation<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    format: ConversationImportFormat,
+    source: Vec<u8>,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let outcome = match format {
+        ConversationImportFormat::ClaudeCodeSessionJsonlV2 => {
+            execute_import(ClaudeCodeJsonlConverter, &source, pool).await
+        }
+        ConversationImportFormat::CodexRolloutJsonlV1 => {
+            execute_import(CodexRolloutJsonlConverter, &source, pool).await
+        }
+    };
+    drop(source);
+    match outcome {
+        Ok(ImportConversationOutcome::Inserted { conversation }) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::ConversationImportInserted {
+                    imported_conversation_id: wire_uuid(conversation.into_uuid()),
+                },
+            )
+            .await
+        }
+        Ok(ImportConversationOutcome::AlreadyImported { conversation }) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::ConversationImportAlreadyImported {
+                    imported_conversation_id: wire_uuid(conversation.into_uuid()),
+                },
+            )
+            .await
+        }
+        Err(OperationalImportError::InvalidSource) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Err(OperationalImportError::Database) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(OperationalImportError::Internal) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperationalImportError {
+    InvalidSource,
+    Database,
+    Internal,
+}
+
+async fn execute_import<Converter>(
+    converter: Converter,
+    source: &[u8],
+    pool: &PgPool,
+) -> Result<ImportConversationOutcome, OperationalImportError>
+where
+    Converter: ImportedConversationConverter,
+{
+    let mut service = ImportConversationService::new(
+        UuidV7ImportedConversationIdGenerator,
+        converter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    service.execute(source).await.map_err(|error| match error {
+        ImportConversationError::Conversion(_) => OperationalImportError::InvalidSource,
+        ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
+            OperationalImportError::Database
+        }
+        ImportConversationError::Store(
+            ImportedConversationRepositoryError::IdentityCollision(
+                ImportedConversationIdentityCollision::Conversation
+                | ImportedConversationIdentityCollision::TranscriptEntry,
+            )
+            | ImportedConversationRepositoryError::Corruption(_),
+        )
+        | ImportConversationError::ConverterIdentityMismatch { .. }
+        | ImportConversationError::ConverterFormatMismatch { .. }
+        | ImportConversationError::ConverterEntryIdentitySequenceMismatch
+        | ImportConversationError::StoreSourceDigestMismatch { .. }
+        | ImportConversationError::StoreInsertedIdentityMismatch { .. } => {
+            OperationalImportError::Internal
+        }
+    })
 }
 
 async fn handle_create_session<Writer>(
@@ -2504,7 +2639,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4, 5"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",

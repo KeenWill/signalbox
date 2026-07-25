@@ -10,6 +10,7 @@ use std::{
     fmt,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_BASE64};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
@@ -29,6 +30,9 @@ pub const TOOL_LOOP_PROTOCOL_VERSION: u64 = 3;
 /// The session-metadata protocol version.
 pub const SESSION_METADATA_PROTOCOL_VERSION: u64 = 4;
 
+/// The one-source conversation-import protocol version.
+pub const CONVERSATION_IMPORT_PROTOCOL_VERSION: u64 = 5;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -40,6 +44,8 @@ pub enum ProtocolVersion {
     Three,
     /// Session-metadata reads, pages, and replacement vocabulary.
     Four,
+    /// One-source conversation-import vocabulary.
+    Five,
 }
 
 impl ProtocolVersion {
@@ -50,6 +56,7 @@ impl ProtocolVersion {
             Self::Two => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
             Self::Three => TOOL_LOOP_PROTOCOL_VERSION,
             Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
+            Self::Five => CONVERSATION_IMPORT_PROTOCOL_VERSION,
         }
     }
 
@@ -59,6 +66,7 @@ impl ProtocolVersion {
             IMPORTED_TRANSCRIPT_PROTOCOL_VERSION => Some(Self::Two),
             TOOL_LOOP_PROTOCOL_VERSION => Some(Self::Three),
             SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
+            CONVERSATION_IMPORT_PROTOCOL_VERSION => Some(Self::Five),
             _ => None,
         }
     }
@@ -404,6 +412,67 @@ impl fmt::Display for CanonicalValueError {
 }
 
 impl Error for CanonicalValueError {}
+
+/// Exact source format selected for one conversation import.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationImportFormat {
+    /// Claude Code session JSONL under Signalbox converter version two.
+    ClaudeCodeSessionJsonlV2,
+    /// Codex rollout JSONL under Signalbox converter version one.
+    CodexRolloutJsonlV1,
+}
+
+/// Exact caller-supplied source bytes carried as canonical padded base64.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationImportSource(Vec<u8>);
+
+impl ConversationImportSource {
+    /// Wraps one complete source snapshot without interpreting it.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the exact decoded source snapshot.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Transfers ownership of the exact decoded source snapshot.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl Serialize for ConversationImportSource {
+    fn serialize<SerializerT>(
+        &self,
+        serializer: SerializerT,
+    ) -> Result<SerializerT::Ok, SerializerT::Error>
+    where
+        SerializerT: Serializer,
+    {
+        serializer.serialize_str(&STANDARD_BASE64.encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for ConversationImportSource {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let decoded = STANDARD_BASE64
+            .decode(&encoded)
+            .map_err(|_| serde::de::Error::custom("import source is not canonical base64"))?;
+        if STANDARD_BASE64.encode(&decoded) != encoded {
+            return Err(serde::de::Error::custom(
+                "import source is not canonical base64",
+            ));
+        }
+        Ok(Self(decoded))
+    }
+}
 
 fn parse_decimal_u64(value: &str) -> Result<u64, CanonicalValueError> {
     if value.is_empty()
@@ -819,6 +888,13 @@ pub enum ClientRequest {
         /// Complete replacement object.
         metadata: SessionMetadata,
     },
+    /// Import one complete external conversation snapshot.
+    ImportConversation {
+        /// Explicit format-versioned converter selection.
+        format: ConversationImportFormat,
+        /// Exact complete source bytes.
+        source: ConversationImportSource,
+    },
 }
 
 impl ClientRequest {
@@ -827,6 +903,7 @@ impl ClientRequest {
             Self::ListSessionMetadata { .. }
             | Self::ReadSessionMetadata { .. }
             | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
+            Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
             | Self::SubmitInput { .. }
@@ -1868,6 +1945,16 @@ pub enum ServerMessage {
         /// Non-null last replacement writer.
         last_writer: MetadataLastWriter,
     },
+    /// One new immutable imported conversation was inserted.
+    ConversationImportInserted {
+        /// Newly durable imported-conversation identity.
+        imported_conversation_id: CanonicalUuid,
+    },
+    /// The exact imported snapshot was already durable.
+    ConversationImportAlreadyImported {
+        /// Existing durable imported-conversation identity.
+        imported_conversation_id: CanonicalUuid,
+    },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
         /// Selected session.
@@ -1963,6 +2050,10 @@ impl ServerMessage {
             | Self::SessionMetadataPageEnd { .. }
             | Self::SessionMetadata { .. }
             | Self::SessionMetadataReplaced { .. } => SESSION_METADATA_PROTOCOL_VERSION,
+            Self::ConversationImportInserted { .. }
+            | Self::ConversationImportAlreadyImported { .. } => {
+                CONVERSATION_IMPORT_PROTOCOL_VERSION
+            }
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
             | Self::SessionsStart {}
@@ -2228,7 +2319,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, and 4",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, and 5",
             ),
         }
     }
@@ -2437,7 +2528,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3" | "4") {
+    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -2544,6 +2635,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "2" => Some(ProtocolVersion::Two),
         "3" => Some(ProtocolVersion::Three),
         "4" => Some(ProtocolVersion::Four),
+        "5" => Some(ProtocolVersion::Five),
         _ => None,
     }
 }
@@ -2585,17 +2677,18 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor, MetadataLastWriter,
-        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION, ServerFrame, ServerMessage,
-        SessionEvent, SessionMetadata, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
-        TurnState, decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        ConversationImportFormat, ConversationImportSource, CurrentModelCall,
+        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
+        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
+        ProtocolVersion, RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION,
+        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, TranscriptEntry,
+        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -2677,7 +2770,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, and 4")
+                .contains("supported versions are 1, 2, 3, 4, and 5")
         );
     }
 
@@ -2687,7 +2780,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":5,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":6,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -2876,7 +2969,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("5");
+        assert_unsupported_version("6");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -3470,6 +3563,62 @@ mod tests {
             assert_eq!(String::from_utf8(encoded.clone())?, expected);
             assert_eq!(decode_client_line(&encoded)?, frame);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_version_five_import_request_preserves_exact_bytes_and_format()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::ImportConversation {
+            format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+            source: ConversationImportSource::new(vec![0, 255]),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Four,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Five, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":5,\"request_id\":\"1\",\"request\":{\"type\":\"import_conversation\",\
+             \"format\":\"claude_code_session_jsonl_v2\",\"source\":\"AP8=\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_version_five_import_source_requires_canonical_padded_base64() {
+        assert_client_malformed(
+            r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA"}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_version_five_import_outcomes_have_distinct_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::ConversationImportInserted {
+                imported_conversation_id: uuid(2),
+            },
+            r#"{"type":"conversation_import_inserted","imported_conversation_id":"00000000-0000-0000-0000-000000000002"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ConversationImportAlreadyImported {
+                imported_conversation_id: uuid(3),
+            },
+            r#"{"type":"conversation_import_already_imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
         Ok(())
     }
 

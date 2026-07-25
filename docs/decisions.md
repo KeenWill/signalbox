@@ -10,6 +10,38 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Expose one-file conversation import to the owner
+
+**Context.** Conversation conversion and idempotent Postgres ingestion were
+reachable only through tests. The accepted converter seam consumes exact
+caller-supplied bytes and declares a fixed format version, while process
+protocol versions one through four are closed. The commissioned operational
+slice needs one owner-supplied file and a visible inserted-versus-existing
+outcome without selecting directory, watching, bulk, or session-seeding policy.
+
+**Decision.** Add process protocol version five and advance the terminal client
+to it. Add one `import_conversation` request carrying an explicit
+`ClaudeCodeSessionJsonlV2` or `CodexRolloutJsonlV1` selection and the complete
+source bytes as canonical padded base64. The terminal reads exactly one path,
+but the path does not cross the wire; hubd selects the fixed converter and calls
+`ImportConversationService`. Return distinct `conversation_import_inserted` and
+`conversation_import_already_imported` messages, each with the durable
+imported-conversation identity, and print distinct terminal labels. Use the
+small focused `base64` crate, already present transitively, rather than owning a
+wire codec. The existing frame cap remains the only transport bound; no
+independent source-size policy or migration is added.
+
+**Rejected alternatives.** Sending a filesystem path would make the daemon
+interpret client filesystem context and add path encoding and access semantics
+to the wire. Format detection would obscure the converter version the digest
+binds. Adding a directory or bulk verb would decide discovery and failure policy
+outside this slice. Reusing a closed protocol version would reinterpret captured
+frames.
+
+**Affects.** [conversation-import](spec/conversation-import.md),
+[process-protocol](spec/process-protocol.md), `crates/process-protocol`,
+`apps/hubd`, `apps/client`, and their PostgreSQL and boundary tests.
+
 ## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
 
 **Context.** The specification states that hubd reads exactly four deployment

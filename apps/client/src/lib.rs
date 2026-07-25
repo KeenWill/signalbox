@@ -12,9 +12,10 @@ use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
-    ModelCallDisposition, ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent,
-    ToolBatchState, TurnState, decode_server_line, encode_server_line,
+    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
+    ConversationImportSource, ErrorCode, InputContent, ModelCallDisposition, ModelCallState,
+    ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TurnState,
+    decode_server_line, encode_server_line,
 };
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
@@ -73,6 +74,18 @@ async fn execute(
     } else {
         None
     };
+    let import_source = match &arguments.command {
+        Command::Import { path, .. } => Some(
+            tokio::fs::read(path)
+                .await
+                .map_err(ClientError::source_file)?,
+        ),
+        Command::Create { .. }
+        | Command::List
+        | Command::Send { .. }
+        | Command::Transcript { .. }
+        | Command::Follow { .. } => None,
+    };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
     let mut output = Output::new(stdout, stderr, arguments.raw_output);
@@ -105,6 +118,10 @@ async fn execute(
             Ok(())
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
+        Command::Import { format, .. } => {
+            let source = import_source.ok_or(ClientError::Input("import source was not read"))?;
+            import_conversation(&mut client, &mut output, format, source).await
+        }
     }
 }
 
@@ -186,6 +203,40 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn import_conversation(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    format: ConversationImportFormat,
+    source: Vec<u8>,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .mutation_request(ClientRequest::ImportConversation {
+            format,
+            source: ConversationImportSource::new(source),
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => {
+            output.conversation_import_inserted(imported_conversation_id)?;
+            Ok(())
+        }
+        ServerMessage::ConversationImportAlreadyImported {
+            imported_conversation_id,
+        } => {
+            output.conversation_import_already_imported(imported_conversation_id)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("import returned an unexpected response").mutation()),
     }
 }
 
@@ -1020,6 +1071,35 @@ mod tests {
         .await;
         assert_eq!(exit, ExitCode::FAILURE);
         assert!(String::from_utf8_lossy(&error).contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn missing_import_source_fails_before_a_missing_socket_is_opened() {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let exit = run(
+            [
+                OsString::from("--socket"),
+                OsString::from("/does/not/exist/hub.sock"),
+                OsString::from("import"),
+                OsString::from("--format"),
+                OsString::from("claude-code"),
+                OsString::from("/does/not/exist/session.jsonl"),
+            ],
+            None,
+            &mut input,
+            &mut output,
+            &mut error,
+        )
+        .await;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8_lossy(&error)
+                .contains("conversation import source file could not be read")
+        );
     }
 
     #[tokio::test]
