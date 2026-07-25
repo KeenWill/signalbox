@@ -52,9 +52,9 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
     ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorKind, ToolName, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
+    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -926,6 +926,7 @@ struct FixedModelCallExecutionIds {
     calls: VecDeque<ModelCallId>,
     entries: VecDeque<SemanticTranscriptEntryId>,
     frontiers: VecDeque<ContextFrontierId>,
+    next_generated_identity: u128,
     turns: VecDeque<TurnId>,
 }
 
@@ -940,8 +941,15 @@ impl FixedModelCallExecutionIds {
             calls: calls.into_iter().collect(),
             entries: entries.into_iter().collect(),
             frontiers: frontiers.into_iter().collect(),
+            next_generated_identity: 1_u128 << 127,
             turns: turns.into_iter().collect(),
         }
+    }
+
+    fn next_generated_uuid(&mut self) -> Uuid {
+        let identity = self.next_generated_identity;
+        self.next_generated_identity += 1;
+        Uuid::from_u128(identity)
     }
 }
 
@@ -960,6 +968,14 @@ impl ModelCallExecutionIdGenerator for FixedModelCallExecutionIds {
         self.frontiers
             .pop_front()
             .expect("context-frontier identity fixture")
+    }
+
+    fn next_tool_request_id(&mut self) -> ToolRequestId {
+        ToolRequestId::from_uuid(self.next_generated_uuid())
+    }
+
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(self.next_generated_uuid())
     }
 
     fn next_turn_id(&mut self) -> TurnId {
@@ -1847,17 +1863,17 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
            FROM semantic_transcript_entry AS entry
           WHERE entry.source_session_id = $1
             AND (
-                entry.tool_result_request_id = $2
+                entry.tool_result_attempt_id = $2
                 OR entry.cancelled_turn_id = $3
             )",
     )
     .bind(fixture.session.into_uuid())
-    .bind(request.into_uuid())
+    .bind(tool_attempt.into_uuid())
     .bind(fixture.turn.into_uuid())
     .fetch_all(&pool)
     .await?;
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|row| row == "tool_closed_by_turn_end"));
+    assert!(rows.iter().any(|row| row == "tool_execution_result"));
     assert!(rows.iter().any(|row| row == "turn_cancelled"));
     let attempt_end: (String, String) = sqlx::query_as(
         "SELECT terminal_disposition_kind, error_kind
@@ -1897,6 +1913,29 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     assert!(
         cancellation_dispatched,
         "tool-batch cancellation must remain deliverable after its producing call"
+    );
+
+    let follow_up = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "work after cancelled tool round",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 42))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            follow_up,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "writer-produced cancelled tool history must reconstitute before the next submit"
     );
 
     pool.close().await;
@@ -2564,7 +2603,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         [
             "origin_accepted_input",
             "assistant_tool_use",
-            "tool_closed_by_turn_end",
+            "tool_execution_result",
             "turn_failed",
         ]
     );
@@ -2612,8 +2651,11 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         .expect("known tool-crash failure remains process-readable");
     assert!(effect_free_snapshot.entries().iter().any(|entry| matches!(
         entry,
-        ProcessTranscriptEntry::ToolClosed { request, .. }
-            if *request == effect_free_request
+        ProcessTranscriptEntry::ToolExecutionResult {
+            request,
+            attempt,
+            ..
+        } if *request == effect_free_request && *attempt == effect_free_attempt
     )));
     let mut failure_dispatched = false;
     drain_outbox(&pool, |event| {
@@ -2629,6 +2671,29 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     assert!(
         failure_dispatched,
         "known tool-crash failure must not be rejected for earlier call history"
+    );
+
+    let follow_up = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                effect_free_seed + 40,
+                effect_free_seed + 1,
+                "work after failed tool round",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(effect_free_seed + 41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(effect_free_seed + 42))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            follow_up,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "writer-produced failed tool history must reconstitute before the next submit"
     );
 
     pool.close().await;
@@ -14975,6 +15040,39 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
         .fetch_one(&pool)
         .await?,
         Decimal::from(2)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10 / INV-002: storage independently rejects a restored tool response whose
+/// request inventory exceeds the bounded domain vocabulary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv002_tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, 'continuing', $4, 33, 33)",
+    )
+    .bind(Uuid::from_u128(1))
+    .bind(Uuid::from_u128(2))
+    .bind(Uuid::from_u128(3))
+    .bind(Uuid::from_u128(4))
+    .execute(&pool)
+    .await
+    .expect_err("the request-count constraint rejects the thirty-third request");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("tool_round_counts_bounded")
     );
 
     pool.close().await;

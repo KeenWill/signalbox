@@ -13,7 +13,7 @@ use crate::{
     ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
     ToolApprovalResolution, ToolAttemptEnd, ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind,
-    ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    ToolRequest, ToolRequestId, TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
 };
 
 /// Stored active phase for one complete logical tool batch.
@@ -85,6 +85,8 @@ impl ToolBatchReconstitutionInput {
 pub enum ToolBatchReconstitutionFailure {
     /// A producing call cannot yield an empty request batch.
     EmptyRequestBatch,
+    /// A producing call cannot exceed the per-response request bound.
+    TooManyRequests,
     /// A request belongs to a different session, turn, or producing call.
     RequestOwnershipMismatch,
     /// Request identity or ordinal is duplicated or noncontiguous.
@@ -1098,6 +1100,9 @@ fn reconstitute_batch(
             ToolBatchReconstitutionFailure::EmptyRequestBatch,
         ));
     }
+    if input.requests.len() > MAX_TOOL_REQUESTS_PER_RESPONSE {
+        return Err(fail(input, ToolBatchReconstitutionFailure::TooManyRequests));
+    }
     if input.yielded_snapshot.frontier().owning_session() != input.session {
         return Err(fail(
             input,
@@ -1480,6 +1485,36 @@ mod tests {
         assert_eq!(
             error.failure(),
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch
+        );
+    }
+
+    /// S10 / INV-019: reconstitution enforces the same 32-request bound as
+    /// provider-response admission instead of granting authority to oversized
+    /// stored batches.
+    #[test]
+    fn s10_inv019_reconstitution_rejects_oversized_request_batch() {
+        let requests = (0..33)
+            .map(|ordinal| request(u128::from(ordinal) + 10, ordinal))
+            .collect();
+        let input = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            requests,
+            vec![],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+                request: tool_request_id(10),
+            },
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("stored batches above the response bound are rejected");
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::TooManyRequests
         );
     }
 

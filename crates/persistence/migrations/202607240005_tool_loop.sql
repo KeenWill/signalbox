@@ -5,143 +5,25 @@
 -- rounds add their own normalized authority records and are selected by the
 -- same deferred validators only when a turn actually contains a tool round.
 
--- The dangerous blanket posture is versioned session configuration. Existing
--- rows are the fail-closed version-one value; new CreateSession and
--- ReplaceSessionDefaults writes use kind-scoped storage version two.
-ALTER TABLE session_defaults_version
-    ADD COLUMN dangerous_tool_auto_approval text NOT NULL DEFAULT 'disabled';
-
-ALTER TABLE session_defaults_version
-    ADD CONSTRAINT session_defaults_version_tool_auto_approval_closed
-        CHECK (dangerous_tool_auto_approval IN ('disabled', 'approve_all'));
-
+-- Tool-loop-aware command codecs use version two while version-one commands,
+-- including explicit blanket postures admitted by the preceding migration,
+-- remain replayable.
 ALTER TABLE create_session_command
-    ADD COLUMN dangerous_tool_auto_approval text NOT NULL DEFAULT 'disabled',
-    DROP CONSTRAINT create_session_command_storage_version_supported;
-
-ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_storage_version_supported,
     ADD CONSTRAINT create_session_command_storage_version_supported
-        CHECK (storage_version IN (1, 2)),
-    ADD CONSTRAINT create_session_command_tool_auto_approval_closed
-        CHECK (dangerous_tool_auto_approval IN ('disabled', 'approve_all')),
-    ADD CONSTRAINT create_session_command_v1_tool_auto_approval
-        CHECK (
-            storage_version <> 1
-            OR dangerous_tool_auto_approval = 'disabled'
-        );
+        CHECK (storage_version IN (1, 2));
 
 ALTER TABLE replace_session_defaults_command
-    ADD COLUMN dangerous_tool_auto_approval text NOT NULL DEFAULT 'disabled',
-    DROP CONSTRAINT replace_session_defaults_command_storage_version_supported;
-
-ALTER TABLE replace_session_defaults_command
+    DROP CONSTRAINT replace_session_defaults_command_storage_version_supported,
     ADD CONSTRAINT replace_session_defaults_command_storage_version_supported
-        CHECK (storage_version IN (1, 2)),
-    ADD CONSTRAINT replace_session_defaults_command_tool_auto_approval_closed
-        CHECK (dangerous_tool_auto_approval IN ('disabled', 'approve_all')),
-    ADD CONSTRAINT replace_session_defaults_command_v1_tool_auto_approval
-        CHECK (
-            storage_version <> 1
-            OR dangerous_tool_auto_approval = 'disabled'
-        );
+        CHECK (storage_version IN (1, 2));
 
 ALTER TABLE create_session_from_imported_frontier_command
-    ADD COLUMN dangerous_tool_auto_approval text NOT NULL DEFAULT 'disabled',
     DROP CONSTRAINT
-        create_session_from_imported_frontier_command_version_supported;
-
-ALTER TABLE create_session_from_imported_frontier_command
+        create_session_from_imported_frontier_command_version_supported,
     ADD CONSTRAINT
         create_session_from_imported_frontier_command_version_supported
-        CHECK (storage_version IN (1, 2)),
-    ADD CONSTRAINT imported_frontier_command_tool_auto_approval_closed
-        CHECK (dangerous_tool_auto_approval IN ('disabled', 'approve_all')),
-    ADD CONSTRAINT imported_frontier_command_v1_tool_auto_approval
-        CHECK (
-            storage_version <> 1
-            OR dangerous_tool_auto_approval = 'disabled'
-        );
-
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_initial_defaults_fk;
-
-ALTER TABLE create_session_from_imported_frontier_command
-    DROP CONSTRAINT create_session_from_imported_frontier_command_defaults_fk;
-
-ALTER TABLE replace_session_defaults_command
-    DROP CONSTRAINT replace_session_defaults_command_applied_defaults_fk;
-
-ALTER TABLE session_defaults_version
-    DROP CONSTRAINT session_defaults_version_selection_key;
-
-ALTER TABLE session_defaults_version
-    ADD CONSTRAINT session_defaults_version_selection_key
-        UNIQUE (
-            session_id,
-            version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        );
-
-ALTER TABLE create_session_command
-    ADD CONSTRAINT create_session_command_initial_defaults_fk
-        FOREIGN KEY (
-            created_session_id,
-            initial_defaults_version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        )
-        REFERENCES session_defaults_version (
-            session_id,
-            version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        )
-        ON UPDATE RESTRICT
-        ON DELETE RESTRICT;
-
-ALTER TABLE create_session_from_imported_frontier_command
-    ADD CONSTRAINT create_session_from_imported_frontier_command_defaults_fk
-        FOREIGN KEY (
-            created_session_id,
-            initial_defaults_version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        )
-        REFERENCES session_defaults_version (
-            session_id,
-            version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        )
-        ON UPDATE RESTRICT
-        ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED;
-
-ALTER TABLE replace_session_defaults_command
-    ADD CONSTRAINT replace_session_defaults_command_applied_defaults_fk
-        FOREIGN KEY (
-            result_session_id,
-            result_installed_version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        )
-        REFERENCES session_defaults_version (
-            session_id,
-            version,
-            model_selection_kind,
-            model_selection_reference,
-            dangerous_tool_auto_approval
-        )
-        ON UPDATE RESTRICT
-        ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED;
+        CHECK (storage_version IN (1, 2));
 
 ALTER TABLE queued_input_origin
     ADD COLUMN dangerous_tool_auto_approval text;
@@ -400,7 +282,8 @@ CREATE TABLE tool_round (
     CONSTRAINT tool_round_counts_bounded
         CHECK (
             response_part_count BETWEEN 1 AND 4294967295
-            AND request_count BETWEEN 1 AND response_part_count
+            AND request_count BETWEEN 1 AND 32
+            AND request_count <= response_part_count
         ),
     CONSTRAINT tool_round_call_correlation_key
         UNIQUE (producing_model_call_id, turn_id, session_id),
@@ -3409,13 +3292,7 @@ BEGIN
              WHERE attempt_id = entry.tool_result_attempt_id
                AND session_id = entry.source_session_id
                AND state_kind = 'terminal'
-               AND (
-                    terminal_disposition_kind = 'completed'
-                    OR (
-                        terminal_disposition_kind = 'known_failed'
-                        AND error_kind <> 'crash_lost'
-                    )
-               );
+               AND terminal_disposition_kind IN ('completed', 'known_failed');
         WHEN 'tool_denied' THEN
             SELECT request.turn_id
               INTO checked_turn_id

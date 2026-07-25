@@ -1104,6 +1104,94 @@ pub(crate) async fn load_recovery_batch_by_attempt(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
+pub(crate) async fn load_terminal_result_attempts(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    terminal_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<Vec<EndedToolAttempt>, ToolLoopRepositoryError> {
+    let candidate_rounds = sqlx::query(
+        "SELECT round.producing_model_call_id,
+                boundary.member_count AS boundary_member_count,
+                round.request_count
+           FROM tool_round AS round
+           JOIN context_frontier AS boundary
+             ON boundary.owning_session_id = round.session_id
+            AND boundary.context_frontier_id = round.boundary_frontier_id
+           JOIN context_frontier AS terminal
+             ON terminal.owning_session_id = round.session_id
+            AND terminal.context_frontier_id = $3
+          WHERE round.session_id = $1
+            AND round.turn_id = $2
+            AND round.boundary_kind = 'continuing'
+            AND terminal.member_count =
+                    boundary.member_count + round.request_count + 1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS boundary_member
+                  LEFT JOIN context_frontier_member AS terminal_member
+                    ON terminal_member.owning_session_id =
+                            boundary_member.owning_session_id
+                   AND terminal_member.context_frontier_id = $3
+                   AND terminal_member.member_position =
+                            boundary_member.member_position
+                   AND terminal_member.source_session_id =
+                            boundary_member.source_session_id
+                   AND terminal_member.semantic_entry_id =
+                            boundary_member.semantic_entry_id
+                 WHERE boundary_member.owning_session_id = round.session_id
+                   AND boundary_member.context_frontier_id =
+                            round.boundary_frontier_id
+                   AND terminal_member.semantic_entry_id IS NULL
+            )
+          ORDER BY round.producing_model_call_id",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(terminal_frontier.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    let candidate = match candidate_rounds.as_slice() {
+        [] => return Ok(Vec::new()),
+        [candidate] => candidate,
+        [_, ..] => {
+            return Err(ToolLoopCorruption::Inconsistent("terminal tool round identity").into());
+        }
+    };
+    let boundary_member_count: Decimal = required(candidate, "boundary_member_count")?;
+    let request_count: Decimal = required(candidate, "request_count")?;
+    let rows = sqlx::query(
+        "SELECT attempt.*
+           FROM context_frontier_member AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+           JOIN tool_attempt AS attempt
+             ON attempt.attempt_id = entry.tool_result_attempt_id
+          WHERE member.owning_session_id = $1
+            AND member.context_frontier_id = $2
+            AND member.member_position > $3
+            AND member.member_position <= $3 + $4
+            AND entry.payload_kind = 'tool_execution_result'
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(terminal_frontier.into_uuid())
+    .bind(boundary_member_count)
+    .bind(request_count)
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter()
+        .map(decode_attempt)
+        .map(|attempt| match attempt? {
+            ReconstitutedToolAttempt::Ended(ended) => Ok(ended),
+            ReconstitutedToolAttempt::Current(_) => {
+                Err(ToolLoopCorruption::Inconsistent("terminal tool attempt state").into())
+            }
+        })
+        .collect()
+}
+
 async fn load_snapshot(
     connection: &mut PgConnection,
     session: SessionId,

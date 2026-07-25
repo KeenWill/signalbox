@@ -20,7 +20,7 @@ use signalbox_domain::{
     DurableCommandId, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
     PerInputConfigurationChoices, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
+    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
@@ -34,6 +34,7 @@ use signalbox_persistence::{
         ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
         ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
     },
+    session::{SessionRepository, SessionRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
@@ -636,7 +637,7 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::UnsupportedVersion),
+                ProtocolError::unsupported_version(3),
             )
             .await
         }
@@ -779,6 +780,9 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
+    if reject_version_one_imported_ancestry(writer, version, request_id, session, pool).await? {
+        return Ok(());
+    }
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -942,6 +946,18 @@ async fn handle_read_transcript<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    if reject_version_one_imported_ancestry(
+        writer,
+        version,
+        request_id,
+        SessionId::from_uuid(session_id.into_uuid()),
+        pool,
+    )
+    .await?
+    {
+        drop(snapshot_permit);
+        return Ok(());
+    }
     let spool_result = spool_transcript(
         ProcessReadRepository::new(pool.clone()),
         SessionId::from_uuid(session_id.into_uuid()),
@@ -990,6 +1006,12 @@ where
 {
     let mut subscription = updates.subscribe();
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
+    if reject_version_one_imported_ancestry(writer, version, request_id, selected_session, pool)
+        .await?
+    {
+        drop(snapshot_permit);
+        return Ok(());
+    }
     let snapshot_result = run_until_shutdown(
         &mut shutdown,
         spool_transcript(
@@ -1079,7 +1101,7 @@ where
                     writer,
                     version,
                     request_id,
-                    ProtocolError::without_detail(ErrorCode::UnsupportedVersion),
+                    ProtocolError::unsupported_version(message.minimum_protocol_version()),
                 ),
             )
             .await
@@ -1826,6 +1848,62 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+async fn reject_version_one_imported_ancestry<Writer>(
+    writer: &mut Writer,
+    version: u64,
+    request_id: RequestId,
+    session: SessionId,
+    pool: &PgPool,
+) -> Result<bool, ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    if version >= 2 {
+        return Ok(false);
+    }
+    match SessionRepository::new(pool.clone())
+        .load_session(session)
+        .await
+    {
+        Ok(Some(session))
+            if matches!(
+                session.creation_provenance().ancestry(),
+                TranscriptAncestry::ImportedConversation { .. }
+            ) =>
+        {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(2),
+            )
+            .await?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(SessionRepositoryError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await?;
+            Ok(true)
+        }
+        Err(SessionRepositoryError::Corruption(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await?;
+            Ok(true)
+        }
+    }
+}
+
 async fn run_until_shutdown<Output, Operation>(
     shutdown: &mut watch::Receiver<bool>,
     operation: Operation,
@@ -1850,6 +1928,18 @@ struct ProtocolError {
 }
 
 impl ProtocolError {
+    const fn unsupported_version(required_version: u64) -> Self {
+        Self {
+            code: ErrorCode::UnsupportedVersion,
+            message: match required_version {
+                2 => "the selected session requires protocol version 2",
+                3 => "the selected session requires protocol version 3",
+                _ => "the protocol version is unsupported",
+            },
+            detail: ErrorDetail::none(),
+        }
+    }
+
     const fn without_detail(code: ErrorCode) -> Self {
         Self {
             code,
@@ -2354,6 +2444,16 @@ mod tests {
         assert_eq!(
             ProtocolError::mutation_unavailable(true).code,
             ErrorCode::CommitAmbiguous
+        );
+        assert!(
+            ProtocolError::unsupported_version(2)
+                .message
+                .contains("version 2")
+        );
+        assert!(
+            ProtocolError::unsupported_version(3)
+                .message
+                .contains("version 3")
         );
     }
 

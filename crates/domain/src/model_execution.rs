@@ -674,6 +674,10 @@ impl ModelCallExecution {
             session: self.session,
             turn: self.turn,
             attempt: self.current_attempt.id(),
+            dangerous_tool_auto_approval: self
+                .configuration
+                .effective()
+                .dangerous_tool_auto_approval(),
             call: call.clone(),
             frontier_entries: self.frontier_entries.clone(),
             origin_contents,
@@ -1343,6 +1347,7 @@ pub struct PreparedModelCallRequest {
     session: SessionId,
     turn: TurnId,
     attempt: TurnAttemptId,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
     call: CurrentModelCall,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
@@ -1362,6 +1367,11 @@ impl PreparedModelCallRequest {
     /// Returns the exact prepared attempt.
     pub const fn attempt(&self) -> TurnAttemptId {
         self.attempt
+    }
+
+    /// Returns the dangerous blanket-auto posture frozen into this call's turn.
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
+        self.dangerous_tool_auto_approval
     }
 
     /// Borrows the exact prepared call.

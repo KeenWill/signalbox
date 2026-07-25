@@ -5,6 +5,7 @@
 )]
 
 use std::{
+    collections::VecDeque,
     error::Error,
     fs,
     io::{self, ErrorKind},
@@ -13,11 +14,24 @@ use std::{
     time::Duration,
 };
 
-use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
+use signalbox_application::{
+    CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    ImportConversationOutcome, ImportConversationService, ImportedConversationIdGenerator,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+};
+use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_domain::{
+    ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversationId,
+    ImportedSessionRelationship, ImportedTranscriptEntryId, ModelSelectionRequest,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
+};
 use signalbox_hubd::{
     HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
 };
 use signalbox_persistence::{
+    conversation_import::ImportedConversationRepository,
+    create_session_from_imported_frontier::ImportedSessionRepository,
     local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
 };
 use signalbox_process_protocol::{
@@ -135,7 +149,17 @@ impl Connection {
         request_id: u64,
         request: ClientRequest,
     ) -> Result<(), Box<dyn Error>> {
-        let frame = ClientFrame::try_new(RequestId::try_new(request_id)?, request)?;
+        self.request_for_version(3, request_id, request).await
+    }
+
+    async fn request_for_version(
+        &mut self,
+        version: u64,
+        request_id: u64,
+        request: ClientRequest,
+    ) -> Result<(), Box<dyn Error>> {
+        let frame =
+            ClientFrame::try_new_for_version(version, RequestId::try_new(request_id)?, request)?;
         self.writer.write_all(&encode_client_line(&frame)?).await?;
         Ok(())
     }
@@ -155,6 +179,109 @@ impl Connection {
 
 fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
+}
+
+#[derive(Debug)]
+struct FixedImportIds {
+    conversations: VecDeque<ImportedConversationId>,
+    entries: VecDeque<ImportedTranscriptEntryId>,
+}
+
+impl ImportedConversationIdGenerator for FixedImportIds {
+    fn next_conversation_id(&mut self) -> ImportedConversationId {
+        self.conversations
+            .pop_front()
+            .expect("one imported conversation identity is supplied")
+    }
+
+    fn next_entry_id(&mut self) -> ImportedTranscriptEntryId {
+        self.entries
+            .pop_front()
+            .expect("one imported transcript identity is supplied")
+    }
+}
+
+#[derive(Debug)]
+struct FixedImportedSessionIds {
+    sessions: VecDeque<SessionId>,
+    semantic_entries: VecDeque<SemanticTranscriptEntryId>,
+    frontiers: VecDeque<ContextFrontierId>,
+}
+
+impl CreateSessionFromImportedFrontierIdGenerator for FixedImportedSessionIds {
+    fn next_session_id(&mut self) -> SessionId {
+        self.sessions
+            .pop_front()
+            .expect("one imported session identity is supplied")
+    }
+
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        self.semantic_entries
+            .pop_front()
+            .expect("one seed semantic identity is supplied")
+    }
+
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
+        self.frontiers
+            .pop_front()
+            .expect("one seed frontier identity is supplied")
+    }
+}
+
+async fn create_imported_session(pool: &PgPool) -> Result<CanonicalUuid, Box<dyn Error>> {
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x9100));
+    let imported_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x9101));
+    let mut import = ImportConversationService::new(
+        FixedImportIds {
+            conversations: [conversation].into(),
+            entries: [imported_entry].into(),
+        },
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    assert_eq!(
+        import
+            .execute(br#"{"type":"user","message":{"content":"imported user"}}"#)
+            .await?,
+        ImportConversationOutcome::Inserted { conversation }
+    );
+    let (_, _, repository) = import.into_parts();
+    let stored = repository
+        .load(conversation)
+        .await?
+        .expect("the imported conversation is durable");
+    let selected_frontier = stored
+        .frontiers()
+        .next()
+        .expect("the one-entry imported boundary exists");
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0x9200));
+    let mut create = CreateSessionFromImportedFrontierService::new(
+        FixedImportedSessionIds {
+            sessions: [session].into(),
+            semantic_entries: [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                0x9201,
+            ))]
+            .into(),
+            frontiers: [ContextFrontierId::from_uuid(Uuid::from_u128(0x9202))].into(),
+        },
+        ImportedSessionRepository::new(pool.clone()),
+    );
+    let CreateSessionFromImportedFrontierOutcome::Applied(created) = create
+        .execute(CreateSessionFromImportedFrontierRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x9203)),
+            selected_frontier,
+            ImportedSessionRelationship::Resume,
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::from_u128(1)),
+            )),
+        )?)
+        .await?
+    else {
+        return Err(io::Error::other("the imported session fixture was not applied").into());
+    };
+    assert_eq!(created.session(), session);
+    Ok(CanonicalUuid::from_uuid(session.into_uuid()))
 }
 
 struct RunningRuntime {
@@ -329,6 +456,78 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
             code: ErrorCode::InvalidRequest,
             ..
         }
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn version_one_rejects_imported_session_operations_before_mutation_or_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let session_id = create_imported_session(&runtime.pool).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request_for_version(
+            1,
+            1,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("must not be accepted")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let submit = response_within(&mut connection).await?;
+    assert!(matches!(
+        submit.message(),
+        ServerMessage::Error {
+            code: ErrorCode::UnsupportedVersion,
+            message,
+            ..
+        } if message.contains("version 2")
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+               FROM accepted_input
+              WHERE session_id = $1",
+        )
+        .bind(session_id.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?,
+        0,
+        "the compatibility preflight must precede durable input acceptance"
+    );
+
+    connection
+        .request_for_version(1, 2, ClientRequest::ReadTranscript { session_id })
+        .await?;
+    let read = response_within(&mut connection).await?;
+    assert!(matches!(
+        read.message(),
+        ServerMessage::Error {
+            code: ErrorCode::UnsupportedVersion,
+            message,
+            ..
+        } if message.contains("version 2")
+    ));
+
+    connection
+        .request_for_version(1, 3, ClientRequest::FollowSession { session_id })
+        .await?;
+    let follow = response_within(&mut connection).await?;
+    assert!(matches!(
+        follow.message(),
+        ServerMessage::Error {
+            code: ErrorCode::UnsupportedVersion,
+            message,
+            ..
+        } if message.contains("version 2")
     ));
 
     drop(connection);

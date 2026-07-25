@@ -16,18 +16,19 @@ use std::{
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
-    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
-    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    DangerousToolAutoApproval, FailedModelCallTurn, FailedModelCallTurnIdentities,
-    ImportedSourceAttestation, ImportedSpeaker, ImportedText, ImportedTranscriptContent,
-    ImportedTranscriptEntryId, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
+    AuthorizedModelCall, CompletedModelCallIdentities, ContextFrontierId,
+    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker, ImportedText,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn,
-    StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
-    ToolExecutionError, ToolRequest, ToolRequestId, ToolResultContent,
-    ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolApprovalDecision,
+    ToolAttemptEnd, ToolDenialReason, ToolExecutionError, ToolRequest, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnAttemptId, TurnId, UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -690,6 +691,8 @@ enum RetainedModelCallExecutionStateKind {
     TerminalObservation {
         /// Session owning the exact issued call.
         session: SessionId,
+        /// Frozen posture used to derive tool-response identity candidates.
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
         /// Unchanged correlated observation returned by provider work.
         observation: CorrelatedModelCallTerminalObservation,
     },
@@ -742,6 +745,10 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     /// Generates a distinct context-frontier candidate.
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+    /// Generates a distinct logical tool-request candidate.
+    fn next_tool_request_id(&mut self) -> ToolRequestId;
+    /// Generates a distinct continuation turn-attempt candidate.
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId;
     /// Generates a distinct reclassified successor-turn candidate.
     fn next_turn_id(&mut self) -> TurnId;
 }
@@ -761,6 +768,14 @@ impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
 
     fn next_context_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_tool_request_id(&mut self) -> ToolRequestId {
+        ToolRequestId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
 
     fn next_turn_id(&mut self) -> TurnId {
@@ -1180,46 +1195,62 @@ where
                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                     session: retained_session,
                     prepared,
-                } => match self
-                    .authorization
-                    .reread_after_ambiguous_commit(retained_session, &prepared)
-                    .await
-                {
-                    Ok(ModelCallAuthorizationReread::Prepared) => {
-                        session = retained_session;
-                    }
-                    Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
-                        let non_consumption = authorized
-                            .observation_correlation()
-                            .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
-                        return self
-                            .commit_terminal_observation(retained_session, non_consumption)
-                            .await;
-                    }
-                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
-                        let cancellation = stopped
-                            .observation_correlation()
-                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
-                        return self
-                            .commit_terminal_observation(retained_session, cancellation)
-                            .await;
-                    }
-                    Ok(ModelCallAuthorizationReread::Cancelled) => {
-                        return Ok(ModelCallExecutionOutcome::NoWork);
-                    }
-                    Err(error) => {
-                        self.retained_state = Some(RetainedModelCallExecutionState {
+                } => {
+                    let dangerous_tool_auto_approval = prepared.dangerous_tool_auto_approval();
+                    match self
+                        .authorization
+                        .reread_after_ambiguous_commit(retained_session, &prepared)
+                        .await
+                    {
+                        Ok(ModelCallAuthorizationReread::Prepared) => {
+                            session = retained_session;
+                        }
+                        Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
+                            let non_consumption = authorized
+                                .observation_correlation()
+                                .bind_terminal_observation(
+                                    ModelCallTerminalObservation::KnownFailed,
+                                );
+                            return self
+                                .commit_terminal_observation(
+                                    retained_session,
+                                    non_consumption,
+                                    dangerous_tool_auto_approval,
+                                )
+                                .await;
+                        }
+                        Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                            let cancellation = stopped
+                                .observation_correlation()
+                                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                            return self
+                                .commit_terminal_observation(
+                                    retained_session,
+                                    cancellation,
+                                    dangerous_tool_auto_approval,
+                                )
+                                .await;
+                        }
+                        Ok(ModelCallAuthorizationReread::Cancelled) => {
+                            return Ok(ModelCallExecutionOutcome::NoWork);
+                        }
+                        Err(error) => {
+                            self.retained_state = Some(RetainedModelCallExecutionState {
                             state:
                                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                                     session: retained_session,
                                     prepared,
                                 },
                         });
-                        return Err(ModelCallExecutionError::AuthorizationReconciliation(error));
+                            return Err(ModelCallExecutionError::AuthorizationReconciliation(
+                                error,
+                            ));
+                        }
                     }
-                },
+                }
                 RetainedModelCallExecutionStateKind::TerminalObservation {
                     session: retained_session,
+                    dangerous_tool_auto_approval,
                     observation: retained,
                 } => match self
                     .observation
@@ -1233,13 +1264,18 @@ where
                     }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
-                            .commit_terminal_observation(retained_session, retained)
+                            .commit_terminal_observation(
+                                retained_session,
+                                retained,
+                                dangerous_tool_auto_approval,
+                            )
                             .await;
                     }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state: RetainedModelCallExecutionStateKind::TerminalObservation {
                                 session: retained_session,
+                                dangerous_tool_auto_approval,
                                 observation: retained.clone(),
                             },
                         });
@@ -1273,9 +1309,16 @@ where
                 Ok(PrepareModelCallOutcome::Ready {
                     request,
                     credential_reference,
+                    dangerous_tool_auto_approval,
                     tool_entries,
-                    ..
-                }) => break (request, credential_reference, tool_entries),
+                }) => {
+                    break (
+                        request,
+                        credential_reference,
+                        dangerous_tool_auto_approval,
+                        tool_entries,
+                    );
+                }
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
                     return Ok(ModelCallExecutionOutcome::TargetUnavailable(failed));
                 }
@@ -1289,7 +1332,7 @@ where
             }
         };
 
-        let (prepared, credential_reference, tool_entries) = prepared;
+        let (prepared, credential_reference, dangerous_tool_auto_approval, tool_entries) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let turn = prepared.turn();
@@ -1355,7 +1398,11 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
                         return self
-                            .commit_terminal_observation(session, non_consumption)
+                            .commit_terminal_observation(
+                                session,
+                                non_consumption,
+                                dangerous_tool_auto_approval,
+                            )
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
@@ -1365,7 +1412,11 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
                         return self
-                            .commit_terminal_observation(session, cancellation)
+                            .commit_terminal_observation(
+                                session,
+                                cancellation,
+                                dangerous_tool_auto_approval,
+                            )
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::Cancelled) => {
@@ -1405,7 +1456,8 @@ where
             .await;
         let observation = observation.map_err(ModelCallExecutionError::Provider)?;
 
-        self.commit_terminal_observation(session, observation).await
+        self.commit_terminal_observation(session, observation, dangerous_tool_auto_approval)
+            .await
     }
 
     async fn commit_capability_known_failure(
@@ -1459,6 +1511,7 @@ where
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1470,7 +1523,8 @@ where
         >,
     > {
         loop {
-            let identities = self.next_terminal_identities(observation.observation());
+            let identities = self
+                .next_terminal_identities(observation.observation(), dangerous_tool_auto_approval);
             let ids = &mut self.ids;
             let next_turn = move |_| ids.next_turn_id();
             match self
@@ -1493,6 +1547,7 @@ where
                     self.retained_state = Some(RetainedModelCallExecutionState {
                         state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
+                            dangerous_tool_auto_approval,
                             observation: observation.clone(),
                         },
                     });
@@ -1515,7 +1570,15 @@ where
     fn next_terminal_identities(
         &mut self,
         observation: &ModelCallTerminalObservation,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> ModelCallTerminalIdentityCandidates {
+        if let ModelCallTerminalObservation::CompletedWithTools { response } = observation {
+            return generate_tool_round_identity_candidates(
+                &mut self.ids,
+                response,
+                dangerous_tool_auto_approval,
+            );
+        }
         ModelCallTerminalIdentityCandidates::Exact(match observation {
             ModelCallTerminalObservation::Completed { assistant_text } => {
                 let assistant_entries = (0..assistant_text.len())
@@ -1528,13 +1591,7 @@ where
                 ))
             }
             ModelCallTerminalObservation::CompletedWithTools { .. } => {
-                ModelCallTerminalIdentities::ToolRound(
-                    signalbox_domain::ToolRoundModelCallIdentities::new(
-                        Vec::new(),
-                        self.ids.next_context_frontier_id(),
-                        None,
-                    ),
-                )
+                unreachable!("tool rounds carry both lifecycle-dependent identity candidates")
             }
             ModelCallTerminalObservation::KnownFailed => {
                 ModelCallTerminalIdentities::Failed(self.next_failed_identities())
@@ -1554,6 +1611,63 @@ where
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
         })
+    }
+}
+
+fn generate_tool_round_identity_candidates(
+    ids: &mut impl ModelCallExecutionIdGenerator,
+    response: &ToolUsingAssistantResponse,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
+) -> ModelCallTerminalIdentityCandidates {
+    let approval = match dangerous_tool_auto_approval {
+        DangerousToolAutoApproval::Disabled => InitialToolApproval::Confirm,
+        DangerousToolAutoApproval::ApproveAll => InitialToolApproval::SessionBlanket,
+    };
+    let continuing_parts = response
+        .parts()
+        .iter()
+        .map(|part| match part {
+            AssistantResponsePart::Text(_) => {
+                ToolResponsePartIdentity::text(ids.next_semantic_entry_id())
+            }
+            AssistantResponsePart::ToolCall(_) => ToolResponsePartIdentity::tool_call(
+                ids.next_semantic_entry_id(),
+                ids.next_tool_request_id(),
+                approval,
+            ),
+        })
+        .collect();
+    let continuation_attempt = match dangerous_tool_auto_approval {
+        DangerousToolAutoApproval::Disabled => None,
+        DangerousToolAutoApproval::ApproveAll => Some(ids.next_turn_attempt_id()),
+    };
+    let continuing = ToolRoundModelCallIdentities::new(
+        continuing_parts,
+        ids.next_context_frontier_id(),
+        continuation_attempt,
+    );
+    let stopped_parts = response
+        .parts()
+        .iter()
+        .map(|part| match part {
+            AssistantResponsePart::Text(_) => {
+                StoppedToolResponsePartIdentity::text(ids.next_semantic_entry_id())
+            }
+            AssistantResponsePart::ToolCall(_) => StoppedToolResponsePartIdentity::tool_call(
+                ids.next_semantic_entry_id(),
+                ids.next_tool_request_id(),
+                ids.next_semantic_entry_id(),
+            ),
+        })
+        .collect();
+    let stopped = StoppedToolRoundModelCallIdentities::new(
+        stopped_parts,
+        ids.next_semantic_entry_id(),
+        ids.next_context_frontier_id(),
+    );
+    ModelCallTerminalIdentityCandidates::ToolRound {
+        continuing,
+        stopped,
     }
 }
 
@@ -2035,6 +2149,8 @@ mod tests {
         calls: VecDeque<ModelCallId>,
         entries: VecDeque<SemanticTranscriptEntryId>,
         frontiers: VecDeque<ContextFrontierId>,
+        requests: VecDeque<ToolRequestId>,
+        attempts: VecDeque<TurnAttemptId>,
         turns: VecDeque<TurnId>,
     }
 
@@ -2049,6 +2165,12 @@ mod tests {
                     .collect(),
                 frontiers: (40..50)
                     .map(|value| identity(value, ContextFrontierId::from_uuid))
+                    .collect(),
+                requests: (60..70)
+                    .map(|value| identity(value, ToolRequestId::from_uuid))
+                    .collect(),
+                attempts: (70..80)
+                    .map(|value| identity(value, TurnAttemptId::from_uuid))
                     .collect(),
                 turns: (50..60)
                     .map(|value| identity(value, TurnId::from_uuid))
@@ -2072,9 +2194,120 @@ mod tests {
                 .expect("fixture frontier identity")
         }
 
+        fn next_tool_request_id(&mut self) -> ToolRequestId {
+            self.requests.pop_front().expect("fixture request identity")
+        }
+
+        fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
+            self.attempts.pop_front().expect("fixture attempt identity")
+        }
+
         fn next_turn_id(&mut self) -> TurnId {
             self.turns.pop_front().expect("fixture turn identity")
         }
+    }
+
+    fn tool_response_fixture() -> ToolUsingAssistantResponse {
+        ToolUsingAssistantResponse::try_from_parts(vec![
+            AssistantResponsePart::Text(
+                AssistantText::try_new(String::from("before")).expect("fixture text is valid"),
+            ),
+            AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("fixture name is valid"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("fixture arguments are valid"),
+            )),
+            AssistantResponsePart::Text(
+                AssistantText::try_new(String::from("after")).expect("fixture text is valid"),
+            ),
+        ])
+        .expect("fixture response contains one tool proposal")
+    }
+
+    #[test]
+    fn tool_round_identity_candidates_cover_both_lifecycle_outcomes() {
+        let response = tool_response_fixture();
+        let expected_stopped = StoppedToolRoundModelCallIdentities::new(
+            vec![
+                StoppedToolResponsePartIdentity::text(identity(
+                    33,
+                    SemanticTranscriptEntryId::from_uuid,
+                )),
+                StoppedToolResponsePartIdentity::tool_call(
+                    identity(34, SemanticTranscriptEntryId::from_uuid),
+                    identity(61, ToolRequestId::from_uuid),
+                    identity(35, SemanticTranscriptEntryId::from_uuid),
+                ),
+                StoppedToolResponsePartIdentity::text(identity(
+                    36,
+                    SemanticTranscriptEntryId::from_uuid,
+                )),
+            ],
+            identity(37, SemanticTranscriptEntryId::from_uuid),
+            identity(41, ContextFrontierId::from_uuid),
+        );
+
+        let disabled = generate_tool_round_identity_candidates(
+            &mut FixedIds::baseline(),
+            &response,
+            DangerousToolAutoApproval::Disabled,
+        );
+        assert_eq!(
+            disabled,
+            ModelCallTerminalIdentityCandidates::ToolRound {
+                continuing: ToolRoundModelCallIdentities::new(
+                    vec![
+                        ToolResponsePartIdentity::text(identity(
+                            30,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                        ToolResponsePartIdentity::tool_call(
+                            identity(31, SemanticTranscriptEntryId::from_uuid),
+                            identity(60, ToolRequestId::from_uuid),
+                            InitialToolApproval::Confirm,
+                        ),
+                        ToolResponsePartIdentity::text(identity(
+                            32,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                    ],
+                    identity(40, ContextFrontierId::from_uuid),
+                    None,
+                ),
+                stopped: expected_stopped.clone(),
+            }
+        );
+
+        let blanket = generate_tool_round_identity_candidates(
+            &mut FixedIds::baseline(),
+            &response,
+            DangerousToolAutoApproval::ApproveAll,
+        );
+        assert_eq!(
+            blanket,
+            ModelCallTerminalIdentityCandidates::ToolRound {
+                continuing: ToolRoundModelCallIdentities::new(
+                    vec![
+                        ToolResponsePartIdentity::text(identity(
+                            30,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                        ToolResponsePartIdentity::tool_call(
+                            identity(31, SemanticTranscriptEntryId::from_uuid),
+                            identity(60, ToolRequestId::from_uuid),
+                            InitialToolApproval::SessionBlanket,
+                        ),
+                        ToolResponsePartIdentity::text(identity(
+                            32,
+                            SemanticTranscriptEntryId::from_uuid,
+                        )),
+                    ],
+                    identity(40, ContextFrontierId::from_uuid),
+                    Some(identity(70, TurnAttemptId::from_uuid)),
+                ),
+                stopped: expected_stopped,
+            }
+        );
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
