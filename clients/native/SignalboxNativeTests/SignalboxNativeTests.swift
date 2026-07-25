@@ -133,4 +133,76 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(secondCard.status, .waitingForApproval)
         XCTAssertEqual(secondCard.arguments, #"{"cmd":"delete important"}"#)
     }
+
+    func testWebSocketStreamAcknowledgesHeartbeatBeforeYieldingNextFrame() async throws {
+        let heartbeat = """
+        {"kind":"heartbeat","sent_at":"2026-05-10T12:00:00Z"}
+        """
+        let nextFrame = """
+        {"kind":"turn_started","turn_id":"turn-1"}
+        """
+        let transport = StubSignalboxWebSocketTransport(
+            incoming: [.string(heartbeat), .string(nextFrame)]
+        )
+        let stream = SignalboxWebSocketStream(transport: transport)
+
+        var iterator = stream.messages().makeAsyncIterator()
+        let yieldedMessage = try await iterator.next()
+        let message = try XCTUnwrap(yieldedMessage)
+
+        guard case .unknown(let kind, _) = message else {
+            return XCTFail("Expected the frame after the heartbeat")
+        }
+        XCTAssertEqual(kind, "turn_started")
+        let sentMessages = await transport.sentMessages
+        XCTAssertEqual(sentMessages.count, 1)
+        guard case .string(let acknowledgment) = sentMessages[0] else {
+            return XCTFail("Expected a string heartbeat acknowledgment")
+        }
+        let decoded = try SignalboxJSONCoding.decoder().decode(
+            TestHeartbeatAcknowledgment.self,
+            from: Data(acknowledgment.utf8)
+        )
+        XCTAssertEqual(decoded.kind, "heartbeat_ack")
+        XCTAssertEqual(
+            decoded.sentAt,
+            try SignalboxJSONCoding.decoder().decode(Date.self, from: Data(#""2026-05-10T12:00:00Z""#.utf8))
+        )
+    }
+}
+
+private actor StubSignalboxWebSocketTransport: SignalboxWebSocketTransport {
+    private var incoming: [SignalboxWebSocketMessage]
+    private(set) var sentMessages: [SignalboxWebSocketMessage] = []
+
+    init(incoming: [SignalboxWebSocketMessage]) {
+        self.incoming = incoming
+    }
+
+    func receive() async throws -> SignalboxWebSocketMessage {
+        guard !incoming.isEmpty else {
+            throw StubSignalboxWebSocketTransportError.endOfStream
+        }
+        return incoming.removeFirst()
+    }
+
+    func send(_ message: SignalboxWebSocketMessage) async throws {
+        sentMessages.append(message)
+    }
+
+    func cancel() async {}
+}
+
+private enum StubSignalboxWebSocketTransportError: Error {
+    case endOfStream
+}
+
+private struct TestHeartbeatAcknowledgment: Decodable {
+    let kind: String
+    let sentAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case sentAt = "sent_at"
+    }
 }
