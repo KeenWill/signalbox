@@ -878,6 +878,12 @@ impl ModelCallExecution {
     ) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
         if self.current_call.is_some()
             || interrupt.session() != self.session
+            || interrupt.proof().predecessor() != self.turn
+            || interrupt.successor() == self.turn
+            || interrupt.successor_order().priority()
+                != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                    predecessor: self.turn,
+                })
             || result_projection.snapshot().frontier().owning_session() != self.session
             || result_projection.source_frontier() != self.current_snapshot.frontier().snapshot()
             || !self

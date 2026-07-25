@@ -5,11 +5,11 @@ consumes it were verified through PR #177 (`agent/terminal-client`). The
 conversation-import stack adds protocol version two for the conservative
 imported transcript-snapshot projection described here. The tool-loop stack adds
 protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. Versions two and three are protocol
-law ahead of the wire implementation, which currently speaks the single version
-`PROTOCOL_VERSION = 1` with no negotiation. This page is the normative boundary
-between a local client process and `signalbox-hubd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+their closed message vocabularies unchanged. The implementation in this stack
+speaks versions one through three, and its terminal client selects version
+three. This page is the normative boundary between a local client process and
+`signalbox-hubd`; domain values, PostgreSQL records, and wire messages remain
+distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -129,11 +129,14 @@ spellings decode to the same name. A version other than one, two, or three
 produces an `unsupported_version` error naming the supported versions, then the
 server closes the connection. Every response uses the request's admitted
 version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A server error uses `request_id = "0"` only when the
-incoming frame prevents recovery of a valid nonzero identity; zero is never a
-valid client identity or success-response identity. Leading zeroes, a plus sign,
-whitespace, and any spelling other than the shortest ASCII decimal form are
-invalid.
+the pre-admission fallback. A terminal client speaking version two or three
+admits that version-one fallback only for `malformed_frame` or
+`unsupported_version`, then applies the ordinary request-identity check; every
+other response-version mismatch fails locally. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.

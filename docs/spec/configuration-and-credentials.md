@@ -172,12 +172,11 @@ deployment-side rules that code cannot enforce are stated in
   substitution would hide it. A provider rejecting the credential after send is
   ordinary outcome evidence ([model-call-execution](model-call-execution.md)).
 - **Durable references, never values.** Postgres never stores a credential
-  value. Each new model call durably pins its non-secret credential reference at
-  the `Prepared` insert (`model_call.credential_reference`), immutable
-  thereafter under the authorization-facts trigger; the column is nullable only
-  for rows predating the migration. Resuming a stored `Prepared` call
-  re-supplies the stored reference, and a stored call with no reference fails
-  closed as corruption.
+  value. Each model call durably pins its non-secret credential reference at the
+  `Prepared` insert (`model_call.credential_reference`), immutable thereafter
+  under the authorization-facts trigger; the column is total (`NOT NULL` and
+  non-empty), because every insert writes it and no database predates the stack.
+  Resuming a stored `Prepared` call re-supplies the stored reference.
 
 ## Redaction and logs
 
@@ -272,9 +271,6 @@ here because the surviving hub-side mechanics depend on them):
   reconstitution's `CallTargetMismatch` cross-check fails closed only for a
   session with a live stored call; for everything else, not retargeting a
   `selection_id` is deployment discipline.
-- Model calls predating the credential-reference migration carry a NULL stored
-  reference; resuming such a `Prepared` call fails closed as corruption rather
-  than re-deriving the reference from configuration.
 - Multi-provider support and the reference-to-provider-component mapping are
   undecided; today `provider = "anthropic"` and `anthropic-primary` are
   hard-coded.

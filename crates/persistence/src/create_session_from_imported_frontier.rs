@@ -713,11 +713,12 @@ async fn load_creation_from_connection(
     let provenance = decode_stored_provenance(&row, &conversation)?;
     let defaults_session = session_id_from_uuid(required(&row, "defaults_session_id")?);
     let defaults_version = decode_ordinal(&row, "stored_defaults_version")?;
-    let defaults = decode_selection(
+    let defaults = decode_versioned_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
         required(&row, "stored_tool_auto_approval")?,
+        typed_version,
         "stored model selection",
     )?;
     let projection = load_seed_projection(connection, stored_session, &conversation).await?;

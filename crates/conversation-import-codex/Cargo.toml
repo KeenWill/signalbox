@@ -1,5 +1,5 @@
 [package]
-name = "signalbox-conversation-import-claude-code"
+name = "signalbox-conversation-import-codex"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
