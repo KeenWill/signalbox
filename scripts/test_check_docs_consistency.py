@@ -290,6 +290,22 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("`missing.md`", failures[0].message)
 
+    def test_linked_image_destination_is_checked(self) -> None:
+        (self.root / "target.md").write_text("# Target\n", encoding="utf-8")
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[![Badge](missing.png)](target.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["relative-link"],
+        )
+        self.assertIn("`missing.png`", failures[0].message)
+
     def test_container_fenced_code_does_not_expose_links(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -299,6 +315,36 @@ class DocsConsistencyTests(unittest.TestCase):
             "- ~~~\n"
             "  [Listed sample](missing-listed.md)\n"
             "  ~~~\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_block_quote_indented_code_does_not_expose_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "> \n"
+            ">     [Quoted sample](missing-quoted.md)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_raw_html_blocks_do_not_expose_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "<pre>\n[Pre sample](missing-pre.md)\n</pre>\n\n"
+            "<script>\n[Script sample](missing-script.md)\n</script>\n\n"
+            "<style>\n[Style sample](missing-style.md)\n</style>\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_destination_unescapes_all_ascii_punctuation(self) -> None:
+        (self.root / "foo~bar.md").write_text("# Target\n", encoding="utf-8")
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[Target](foo\\~bar.md)\n",
             encoding="utf-8",
         )
 
@@ -563,6 +609,24 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_negated_verification_references_do_not_satisfy_page(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "This page was not verified against PR #12 (`agent/example`).\n\n"
+            "No behavior was verified through PR #13 (`agent/other`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
 
     def test_commented_verification_reference_is_ignored(self) -> None:
         (self.root / "docs/spec/example.md").write_text(

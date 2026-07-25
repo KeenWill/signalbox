@@ -46,6 +46,11 @@ AUTOLINK = re.compile(
 HEADING_CONTAINER = re.compile(
     r"^ {0,3}(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+)"
 )
+BLOCK_QUOTE_CONTAINER = re.compile(r"^ {0,3}>[ \t]?")
+RAW_HTML_BLOCK_OPEN = re.compile(
+    r"^ {0,3}<(?P<tag>pre|script|style)(?:[ \t\r\n>]|$)",
+    re.IGNORECASE,
+)
 REFERENCE_LABEL = r"(?:\\[^\r\n]|[^\]\\\r\n])+"
 REFERENCE_DEFINITION = re.compile(
     rf"(?m)^ {{0,3}}\[({REFERENCE_LABEL})\]:[ \t]*"
@@ -68,6 +73,11 @@ VERIFICATION_LEAD = re.compile(
     r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])).)*?"
     r"(?P<pr>\bPR[ \t]*#)",
     re.IGNORECASE | re.DOTALL,
+)
+VERIFICATION_NEGATION = re.compile(
+    r"(?:\b(?:not|never)(?:[ \t]+\w+){0,3}[ \t]+"
+    r"|\bno(?:[ \t]+\w+){1,5}[ \t]+)$",
+    re.IGNORECASE,
 )
 TEST_GROUP = re.compile(
     r"\btests?[ \t]+"
@@ -132,6 +142,15 @@ def mask_range(buffer: list[str], start: int, end: int) -> None:
     for index in range(start, end):
         if buffer[index] not in "\r\n":
             buffer[index] = " "
+
+
+def strip_block_quote_containers(line: str) -> str:
+    """Remove repeated block-quote prefixes without consuming list markers."""
+    while True:
+        match = BLOCK_QUOTE_CONTAINER.match(line)
+        if match is None:
+            return line
+        line = line[match.end() :]
 
 
 def mask_fenced_code(text: str) -> str:
@@ -234,6 +253,32 @@ def mask_html_comments(text: str) -> str:
     return "".join(buffer)
 
 
+def mask_raw_html_blocks(text: str) -> str:
+    """Replace literal pre/script/style blocks while preserving source lines."""
+    buffer = list(text)
+    offset = 0
+    raw_tag: str | None = None
+    for line in text.splitlines(keepends=True):
+        container_content = strip_heading_containers(line)
+        opening = (
+            RAW_HTML_BLOCK_OPEN.match(container_content)
+            if raw_tag is None
+            else None
+        )
+        if opening is not None:
+            raw_tag = opening.group("tag")
+        if raw_tag is not None:
+            mask_range(buffer, offset, offset + len(line))
+            if re.search(
+                rf"</{re.escape(raw_tag)}[ \t\r\n]*>",
+                container_content,
+                re.IGNORECASE,
+            ):
+                raw_tag = None
+        offset += len(line)
+    return "".join(buffer)
+
+
 def indentation_columns(prefix: str) -> int:
     columns = 0
     for character in prefix:
@@ -250,7 +295,7 @@ def mask_indented_code(text: str) -> str:
     list_content_column: int | None = None
 
     for line in text.splitlines(keepends=True):
-        content = line.rstrip("\r\n")
+        content = strip_block_quote_containers(line.rstrip("\r\n"))
         if not content.strip():
             if in_code:
                 mask_range(buffer, offset, offset + len(line))
@@ -298,8 +343,10 @@ def mask_indented_code(text: str) -> str:
 
 
 def mask_block_content(text: str) -> str:
-    """Mask fenced/indented code and HTML comments in Markdown source."""
-    return mask_indented_code(mask_html_comments(mask_fenced_code(text)))
+    """Mask code and literal HTML content in Markdown source."""
+    return mask_indented_code(
+        mask_raw_html_blocks(mask_html_comments(mask_fenced_code(text)))
+    )
 
 
 def find_closing_bracket(text: str, start: int) -> int | None:
@@ -367,83 +414,117 @@ def find_link_close(text: str, start: int) -> int | None:
     return position if position < len(text) and text[position] == ")" else None
 
 
+def parse_inline_link_at(
+    text: str, index: int
+) -> tuple[MarkdownLink, int] | None:
+    """Parse one inline link or image whose label opens at ``index``."""
+    label_end = find_closing_bracket(text, index)
+    if (
+        label_end is None
+        or label_end + 1 >= len(text)
+        or text[label_end + 1] != "("
+    ):
+        return None
+
+    position = label_end + 2
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position >= len(text):
+        return None
+
+    if text[position] == "<":
+        destination_start = position + 1
+        position = destination_start
+        while position < len(text):
+            if text[position] == "\\":
+                position += 2
+                continue
+            if text[position] == ">":
+                break
+            position += 1
+        if position >= len(text):
+            return None
+        destination = text[destination_start:position]
+        position += 1
+    else:
+        destination_start = position
+        depth = 0
+        while position < len(text):
+            character = text[position]
+            if character == "\\":
+                position += 2
+                continue
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif character.isspace() and depth == 0:
+                break
+            position += 1
+        destination = text[destination_start:position]
+
+    closing = find_link_close(text, position)
+    if closing is None:
+        return None
+    return (
+        MarkdownLink(
+            label=text[index + 1 : label_end],
+            destination=destination,
+            offset=index,
+        ),
+        closing,
+    )
+
+
 def extract_inline_links(text: str) -> list[MarkdownLink]:
-    """Parse inline Markdown link destinations without a Markdown dependency."""
+    """Parse inline link and image destinations without a dependency."""
     links: list[MarkdownLink] = []
+    search_from = 0
+    while True:
+        image_open = text.find("![", search_from)
+        if image_open == -1:
+            break
+        if not is_escaped(text, image_open):
+            parsed = parse_inline_link_at(text, image_open + 1)
+            if parsed is not None:
+                links.append(parsed[0])
+        search_from = image_open + 2
+
     index = 0
     while index < len(text):
         if text[index] != "[" or is_escaped(text, index):
             index += 1
             continue
-        label_end = find_closing_bracket(text, index)
-        if label_end is None or label_end + 1 >= len(text):
+        if (
+            index
+            and text[index - 1] == "!"
+            and not is_escaped(text, index - 1)
+        ):
             index += 1
             continue
-        if text[label_end + 1] != "(":
-            index = label_end + 1
+        parsed = parse_inline_link_at(text, index)
+        if parsed is None:
+            index += 1
             continue
-
-        position = label_end + 2
-        while position < len(text) and text[position].isspace():
-            position += 1
-        if position >= len(text):
-            break
-
-        if text[position] == "<":
-            destination_start = position + 1
-            position = destination_start
-            while position < len(text):
-                if text[position] == "\\":
-                    position += 2
-                    continue
-                if text[position] == ">":
-                    break
-                position += 1
-            if position >= len(text):
-                index = label_end + 1
-                continue
-            destination = text[destination_start:position]
-            position += 1
-        else:
-            destination_start = position
-            depth = 0
-            while position < len(text):
-                character = text[position]
-                if character == "\\":
-                    position += 2
-                    continue
-                if character == "(":
-                    depth += 1
-                elif character == ")":
-                    if depth == 0:
-                        break
-                    depth -= 1
-                elif character.isspace() and depth == 0:
-                    break
-                position += 1
-            destination = text[destination_start:position]
-
-        closing = find_link_close(text, position)
-        if closing is None:
-            index = label_end + 1
-            continue
-        links.append(
-            MarkdownLink(
-                label=text[index + 1 : label_end],
-                destination=destination,
-                offset=index,
-            )
-        )
+        link, closing = parsed
+        links.append(link)
         index = closing + 1
-    return links
+    return sorted(links, key=lambda link: link.offset)
+
+
+def unescape_markdown_punctuation(text: str) -> str:
+    """Remove backslashes that escape CommonMark's ASCII punctuation set."""
+    return re.sub(
+        rf"\\([{re.escape(string.punctuation)}])",
+        r"\1",
+        text,
+    )
 
 
 def normalize_reference_label(label: str) -> str:
-    label = re.sub(
-        rf"\\([{re.escape(string.punctuation)}])",
-        r"\1",
-        label,
-    )
+    label = unescape_markdown_punctuation(label)
     return " ".join(label.split()).casefold()
 
 
@@ -528,7 +609,7 @@ def markdown_sources(root: Path) -> list[Path]:
 
 def split_destination(destination: str) -> tuple[str, str] | None:
     """Return decoded path/fragment for a relative destination, else None."""
-    destination = re.sub(r"\\([\\`*{}\[\]()#+\-.!_>])", r"\1", destination)
+    destination = unescape_markdown_punctuation(destination)
     parsed = urlsplit(destination)
     if parsed.scheme or parsed.netloc or destination.startswith(("/", "//")):
         return None
@@ -924,6 +1005,11 @@ def check_decision_order(root: Path) -> list[Violation]:
     return violations
 
 
+def verification_is_negated(text: str, offset: int) -> bool:
+    """Recognize nearby plain-language negation of ``verified``."""
+    return VERIFICATION_NEGATION.search(text[:offset]) is not None
+
+
 def check_spec_verification_references(root: Path) -> list[Violation]:
     violations: list[Violation] = []
     specification_index = (root / SPEC_DIR / "README.md").resolve()
@@ -940,6 +1026,8 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
             if offset_in_ranges(reference.start(), code_ranges) or offset_in_ranges(
                 candidate_start, code_ranges
             ):
+                continue
+            if verification_is_negated(text, reference.start()):
                 continue
             token = PR_TOKEN.match(text, candidate_start)
             if token is not None:
