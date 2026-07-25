@@ -465,6 +465,19 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_nested_list_continuation_fence_does_not_expose_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "- outer item\n"
+            "  - inner item\n\n"
+            "    ```text\n"
+            "    [Listed sample](missing-listed.md)\n"
+            "    ```\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_ordered_list_closing_fence_stops_masking(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -553,6 +566,14 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_malformed_external_destination_does_not_crash(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[Host](https://[)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_longer_backtick_run_does_not_close_inline_code(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -628,6 +649,23 @@ class DocsConsistencyTests(unittest.TestCase):
             "Verified through PR #12 (`agent/example`).\n\n"
             '<a name="setup"></a>\n\n'
             "<a id='details'></a>\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_block_form_explicit_html_anchor_resolves(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Setup](docs/spec/example.md#setup)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            '<a id="setup">\n'
+            "Setup content\n"
+            "</a>\n",
             encoding="utf-8",
         )
 
@@ -898,6 +936,27 @@ class DocsConsistencyTests(unittest.TestCase):
             "# Example\n\n"
             "This page was not verified against PR #12 (`agent/example`).\n\n"
             "No behavior was verified through PR #13 (`agent/other`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_contracted_negated_verification_references_do_not_satisfy_page(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "This page isn't verified through PR #12 (`agent/example`).\n\n"
+            "It wasn't verified through PR #13 (`agent/other`).\n\n"
+            "It hasn't been verified against PR #14 (`agent/third`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
             encoding="utf-8",

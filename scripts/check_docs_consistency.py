@@ -114,7 +114,8 @@ VERIFICATION_LEAD = re.compile(
 )
 VERIFICATION_NEGATION = re.compile(
     r"(?:\b(?:not|never)(?:[ \t]+\w+){0,3}[ \t]+"
-    r"|\bno(?:[ \t]+\w+){1,5}[ \t]+)$",
+    r"|\bno(?:[ \t]+\w+){1,5}[ \t]+"
+    r"|\b[A-Za-z]+n['’]t(?:[ \t]+\w+){0,3}[ \t]+)$",
     re.IGNORECASE,
 )
 TEST_GROUP = re.compile(
@@ -210,20 +211,43 @@ def mask_reference_container_prefixes(text: str) -> str:
     return "".join(buffer)
 
 
-def strip_fence_opening_containers(line: str) -> tuple[str, int]:
-    """Strip quote/list markers and return the list continuation indentation."""
-    continuation_indent = 0
-    while True:
-        quote = BLOCK_QUOTE_CONTAINER.match(line)
-        if quote is not None:
-            line = line[quote.end() :]
-            continue
-        item = FENCE_LIST_CONTAINER.match(line)
-        if item is not None:
-            continuation_indent += indentation_columns(item.group(0))
-            line = line[item.end() :]
-            continue
-        return line, continuation_indent
+def fence_opening_context(
+    line: str, list_content_columns: list[int]
+) -> tuple[str, int]:
+    """Return fence content after active Markdown quote/list containers."""
+    content = strip_block_quote_containers(line)
+    if not content.strip():
+        return content, list_content_columns[-1] if list_content_columns else 0
+
+    prefix = re.match(r"^[ \t]*", content).group(0)
+    leading = indentation_columns(prefix)
+    while list_content_columns and leading < list_content_columns[-1]:
+        list_content_columns.pop()
+
+    marker = LIST_ITEM.match(content)
+    marker_is_container = marker is not None and (
+        (not list_content_columns and leading <= 3)
+        or (
+            list_content_columns
+            and 0 <= leading - list_content_columns[-1] <= 3
+        )
+    )
+    if marker_is_container:
+        remainder = content
+        content_column = 0
+        while True:
+            marker = LIST_ITEM.match(remainder)
+            if marker is None:
+                break
+            content_column += indentation_columns(marker.group(0))
+            list_content_columns.append(content_column)
+            remainder = remainder[marker.end() :]
+        return remainder, content_column
+
+    if list_content_columns:
+        content_column = list_content_columns[-1]
+        return remove_indentation(content, content_column), content_column
+    return content, 0
 
 
 def remove_indentation(line: str, columns: int) -> str:
@@ -253,10 +277,11 @@ def mask_fenced_code(text: str) -> str:
     fence_char: str | None = None
     fence_length = 0
     fence_container_indent = 0
+    list_content_columns: list[int] = []
     for line in text.splitlines(keepends=True):
         if fence_char is None:
-            container_content, container_indent = strip_fence_opening_containers(
-                line
+            container_content, container_indent = fence_opening_context(
+                line, list_content_columns
             )
             match = FENCE.match(container_content)
         else:
@@ -789,7 +814,10 @@ def markdown_sources(root: Path) -> list[Path]:
 def split_destination(destination: str) -> tuple[str, str] | None:
     """Return decoded path/fragment for a relative destination, else None."""
     destination = html.unescape(unescape_markdown_punctuation(destination))
-    parsed = urlsplit(destination)
+    try:
+        parsed = urlsplit(destination)
+    except ValueError:
+        return None
     if parsed.scheme or parsed.netloc or destination.startswith(("/", "//")):
         return None
     return unquote(parsed.path), unquote(parsed.fragment)
@@ -898,14 +926,16 @@ def strip_heading_containers(line: str) -> str:
 
 @lru_cache(maxsize=None)
 def heading_anchors(path: Path) -> frozenset[str]:
-    text = mask_block_content(path.read_text(encoding="utf-8"))
-    anchor_text = mask_inline_code(text)
+    original = path.read_text(encoding="utf-8")
+    literal_text = mask_html_comments(mask_fenced_code(original))
+    anchor_text = mask_inline_code(mask_indented_code(literal_text))
     explicit_anchors = {
         html.unescape(
             next(value for value in match.groups() if value is not None)
         )
         for match in EXPLICIT_ANCHOR.finditer(anchor_text)
     }
+    text = mask_indented_code(mask_raw_html_blocks(literal_text))
     lines = [strip_heading_containers(line) for line in text.splitlines()]
     headings: list[str] = []
     for index, line in enumerate(lines):
