@@ -22,9 +22,9 @@ use signalbox_application::{
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversationId,
-    ImportedSessionRelationship, ImportedTranscriptEntryId, ModelSelectionRequest,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
+    ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversationFormat,
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
+    ModelSelectionRequest, SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
 };
 use signalbox_hubd::{
     HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
@@ -35,11 +35,11 @@ use signalbox_persistence::{
     local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ErrorCode,
-    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor,
-    ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
-    SessionEvent, SessionMetadata, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_client_line,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
+    ConversationImportSource, ErrorCode, ImportedContentKind, ImportedSourceSpeaker,
+    ImportedSpeaker, InputContent, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
+    RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, TranscriptEntry,
+    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -408,6 +408,120 @@ async fn submit_first_input(
 
 async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box<dyn Error>> {
     timeout(Duration::from_secs(5), connection.response()).await?
+}
+
+/// S28 / INV-038: the owner-visible operation distinguishes first insertion
+/// from exact-snapshot reimport while retaining the winner's identity.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv038_version_five_reports_inserted_then_already_imported()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let source = ConversationImportSource::new(
+        concat!(
+            "{\"sessionId\":\"operational-claude\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+            "{\"sessionId\":\"operational-claude\",\"type\":\"assistant\",",
+            "\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}"
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            1,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+                source: source.clone(),
+            },
+        )
+        .await?;
+    let inserted = response_within(&mut connection).await?;
+    let stored_id: Uuid =
+        sqlx::query_scalar("SELECT imported_conversation_id FROM imported_conversation")
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(
+        inserted.message(),
+        &ServerMessage::ConversationImportInserted {
+            imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+        }
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            2,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
+                source,
+            },
+        )
+        .await?;
+    let already_imported = response_within(&mut connection).await?;
+    assert_eq!(
+        already_imported.message(),
+        &ServerMessage::ConversationImportAlreadyImported {
+            imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+        }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28: the explicit Codex selection reaches the fixed Codex converter rather
+/// than applying format detection or the Claude Code interpretation.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_five_selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let source = ConversationImportSource::new(
+        concat!(
+            "{\"timestamp\":\"2026-07-25T00:00:00Z\",\"type\":\"response_item\",",
+            "\"payload\":{\"type\":\"message\",\"role\":\"user\",",
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"question\"}]}}"
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            1,
+            ClientRequest::ImportConversation {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                source,
+            },
+        )
+        .await?;
+    let inserted = response_within(&mut connection).await?;
+    let stored_id: Uuid =
+        sqlx::query_scalar("SELECT imported_conversation_id FROM imported_conversation")
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(
+        inserted.message(),
+        &ServerMessage::ConversationImportInserted {
+            imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+        }
+    );
+    let stored = ImportedConversationRepository::new(runtime.pool.clone())
+        .load(ImportedConversationId::from_uuid(stored_id))
+        .await?
+        .expect("the successful operation inserted its imported conversation");
+    assert_eq!(
+        stored.format(),
+        ImportedConversationFormat::CodexRolloutJsonlV1
+    );
+
+    drop(connection);
+    runtime.stop().await
 }
 
 #[tokio::test]

@@ -7,6 +7,8 @@ use signalbox_process_protocol::{
 #[derive(Debug)]
 pub(crate) enum ClientError {
     Io(io::Error),
+    SourceFile(io::Error),
+    SourceExceedsFrame,
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
@@ -33,13 +35,17 @@ impl ClientError {
         }
     }
 
+    pub(crate) fn source_file(error: io::Error) -> Self {
+        Self::SourceFile(error)
+    }
+
     pub(crate) fn mutation(self) -> Self {
         match self {
             Self::Remote {
                 code: ErrorCode::CommitAmbiguous,
                 ..
             } => Self::AmbiguousMutation,
-            Self::Remote { .. } => self,
+            Self::Remote { .. } | Self::SourceFile(_) | Self::SourceExceedsFrame => self,
             Self::Io(_)
             | Self::Encode(_)
             | Self::Decode(_)
@@ -59,13 +65,17 @@ impl fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(_) => formatter.write_str("local process communication failed"),
-            Self::Encode(_) => formatter.write_str("the client could not encode its request"),
-            Self::Decode(_) => {
-                formatter.write_str("the server violated the version-one process protocol")
+            Self::SourceFile(_) => {
+                formatter.write_str("the conversation import source file could not be read")
             }
+            Self::SourceExceedsFrame => formatter.write_str(
+                "the conversation import source cannot fit within the process frame bound",
+            ),
+            Self::Encode(_) => formatter.write_str("the client could not encode its request"),
+            Self::Decode(_) => formatter.write_str("the server violated the process protocol"),
             Self::Protocol(message) => write!(
                 formatter,
-                "the server violated the version-one process protocol: {message}"
+                "the server violated the process protocol: {message}"
             ),
             Self::Remote {
                 code,
@@ -84,7 +94,7 @@ impl fmt::Display for ClientError {
             ),
             Self::Input(message) => formatter.write_str(message),
             Self::TurnRecoveryRequired => formatter.write_str(
-                "the submitted turn requires model-call recovery that version one cannot perform",
+                "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
             Self::TurnFailed => formatter.write_str("the submitted turn failed"),
             Self::TurnRefused => formatter.write_str("the submitted turn was refused"),
@@ -99,13 +109,14 @@ impl fmt::Display for ClientError {
 impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io(error) | Self::SourceFile(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::Protocol(_)
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::SourceExceedsFrame
             | Self::TurnRecoveryRequired
             | Self::TurnFailed
             | Self::TurnRefused

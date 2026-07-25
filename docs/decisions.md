@@ -551,6 +551,45 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Expose one-file conversation import to the owner
+
+**Context.** Conversation conversion and idempotent Postgres ingestion were
+reachable only through tests. The accepted converter seam consumes exact
+caller-supplied bytes and declares a fixed format version, while process
+protocol versions one through four are closed. The commissioned operational
+slice needs one owner-supplied file and a visible inserted-versus-existing
+outcome without selecting directory, watching, bulk, or session-seeding policy.
+
+**Decision.** Add process protocol version five and advance the terminal client
+to it. Add one `import_conversation` request carrying an explicit
+`ClaudeCodeSessionJsonlV2` or `CodexRolloutJsonlV1` selection and the complete
+source bytes as canonical padded base64. The terminal reads exactly one path,
+but the path does not cross the wire; hubd selects the fixed converter and calls
+`ImportConversationService`. Return distinct `conversation_import_inserted` and
+`conversation_import_already_imported` messages, each with the durable
+imported-conversation identity, and print distinct terminal labels. Use the
+small focused `base64` crate, already present transitively, rather than owning a
+wire codec. The existing frame cap remains the only transport bound; no
+independent source-size policy or migration is added. Bound the client read at
+one byte beyond the maximum decoded payload the frame could possibly carry. Hubd
+retains queued decoded sources under the aggregate inbound-frame budget, admits
+one expanded import aggregate and store operation at a time, and runs the
+service away from asynchronous runtime workers. Decode canonical base64 once
+under the existing inbound-frame permit; do not allocate a second full-size
+canonical encoding for validation.
+
+**Rejected alternatives.** Sending a filesystem path would make the daemon
+interpret client filesystem context and add path encoding and access semantics
+to the wire. Format detection would obscure the converter version the digest
+binds. Adding a directory or bulk verb would decide discovery and failure policy
+outside this slice. Reusing a closed protocol version would reinterpret captured
+frames. Unbounded concurrent conversion would let owner-local peers multiply
+expanded aggregate and database-pool pressure.
+
+**Affects.** [conversation-import](spec/conversation-import.md),
+[process-protocol](spec/process-protocol.md), `crates/process-protocol`,
+`apps/hubd`, `apps/client`, and their PostgreSQL and boundary tests.
+
 ## 2026-07-25 — Bound isolated PostgreSQL integration concurrency to four tests
 
 **Context.** Across the latest fifteen successful `main` runs after the
