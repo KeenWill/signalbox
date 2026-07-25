@@ -2,13 +2,12 @@
 
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
-(`agent/review-process-amendments`); review-workflow storage was verified
-against the implementing stack rooted at PR #221 (`agent/review-workflow-spec`).
-This page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+(`agent/review-process-amendments`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -50,8 +49,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-six files, `202607180001` through
-`202607260400` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-seven files, `202607180001` through
+`202607270001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -288,7 +287,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Four explicit lock sites live in the
+`crates/persistence/src/lock_inventory.rs`. Two explicit lock sites live in the
 schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -296,9 +295,7 @@ schema instead:
   `accepted_input` insert reaches commit; and
 - the metadata receipt-satellite insert trigger (migration `202607260101`) takes
   `FOR UPDATE` on the already-claimed `durable_command` row before it checks
-  whether the typed receipt parent has sealed the command;
-- review finding events lock their `review_finding` root; and
-- external-link observations lock their `review_external_link` root.
+  whether the typed receipt parent has sealed the command.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
@@ -367,19 +364,6 @@ Locks per transaction, in acquisition order:
   `generation XOR ((1396852273 << 32) OR 1396852273)`, where `1396852273` is
   ASCII `SBF1`, reinterpreted unchanged as a two's-complement signed `i64` for
   PostgreSQL.
-- **Review-workflow transitions**: a run/pass state transition locks its exact
-  `review_run` row `FOR UPDATE` and then its exact `review_pass` row
-  `FOR UPDATE`, validates both projections, and writes both in the same
-  transaction. Deferred relational guards reject a commit containing only one
-  side of the state change. A run-only transition locks only its run row; a
-  pass-only transition locks only its pass row, and neither can commit an
-  inconsistent projection. Explicit-transaction run/pass and finding mutations
-  report a non-definitive commit response as `CommitAmbiguous` rather than as a
-  definitely uncommitted database failure. Finding-event and
-  external-observation inserts take only the corresponding schema-trigger root
-  lock named above before checking the next ordinal. Review workflow operations
-  do not write `turn_lifecycle` and therefore do not enter the session-scheduler
-  lock order.
 
 The guarded hub database keeps its fenced application pool and singleton guard
 behind one shutdown boundary. Graceful shutdown globally closes the pool and

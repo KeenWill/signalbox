@@ -10,27 +10,64 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-25 — Bind finding events to pass results and acyclic references
+## 2026-07-25 — Give each review pass one accepted input
 
-**Context.** A compatible terminal pass does not prove which finding event it
-produced. Duplicate and superseded references also admit a later reverse edge
-unless classification authenticates the referenced finding's state.
+**Context.** A session accepted input executes through one canonical turn.
+Allowing several review passes to name that input lets each pass project a
+different workflow result from the same execution even though session evidence
+commits no such pass inventory.
 
-**Decision.** A finding-event pass result commits to the exact finding, ordinal,
-and event kind. Duplicate and superseded events additionally freeze the
-referenced finding's canonically authenticated status at admission, which must
-be `Open` or `Accepted`. The referenced finding is locked while the event is
-admitted. Because a finding becomes terminal when it acquires a reference, no
-later admitted reference can point back to it.
+**Decision.** One accepted input is owned by at most one review pass.
+Persistence enforces the global identity claim in addition to checking that the
+input belongs to the pass session. Pass admission additionally requires the
+input's canonical scheduling projection to classify it as the origin of its own
+queued turn. Pending or consumed steering is not pass input; a next-safe-point
+input becomes eligible only after canonical reclassification creates its
+successor origin turn. Executable admission coordination remains owned by the
+review-workflow open question.
 
-**Rejected alternatives.** Pass kind and outcome alone do not identify an
-effect. Detecting cycles only while loading allows invalid history to commit.
-Requiring a terminal referenced finding makes canonical and successor selection
-ambiguous and still admits reference chains.
+**Rejected alternatives.** Treating one turn as implicit evidence for several
+passes attributes results the session aggregate never recorded. Adding a
+pass-identity set to session execution moves the review boundary into the
+session model without an orchestration design. Accepting a pending steering
+input admits a pass that has no canonical turn and may instead be consumed by an
+unrelated active turn.
 
-**Affects.** Pass outcomes, finding-event admission and reconstitution, the
+**Affects.** Review-pass construction and persistence, exact turn evidence, the
 [review-workflows specification](spec/review-workflows.md), and the
 `2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind review effects to exact pass results
+
+**Context.** A compatible terminal pass does not prove which findings, finding
+event, attachment, or observation it produced. A finding-event discriminator
+alone also omits reasons and referenced identities that change the event's
+meaning. Duplicate and superseded references admit a later reverse edge unless
+classification authenticates the referenced finding's state.
+
+**Decision.** A terminal pass may bind one absent typed result exactly once in
+the same transaction that admits its effect; a bound result is immutable. A
+read-only result is a canonical identity-ordered inventory of at most 32 exact
+finding references, whose immutable canonical rows supply their content. Event,
+attachment, and observation results commit every meaning-bearing identity,
+ordinal, state, or reason. Because a posted event's pass also produces its
+external attachment, the attachment result optionally commits that complete
+posted event and both records are admitted atomically; a separate finding-event
+result cannot claim the same pass. Duplicate and superseded events freeze the
+referenced finding's canonically authenticated `Open` or `Accepted` status.
+Persistence locks both finding roots in identity order before appending that
+durable admission fact; terminal classification prevents a later reverse edge.
+
+**Rejected alternatives.** Pass kind and outcome alone do not identify an
+effect. Copying finding content into the result creates a second content
+authority. An unbounded finding inventory has no defensive admission budget.
+Splitting one posting pass across independently bindable attachment and event
+results defeats one-result immutability. Detecting reference cycles only while
+loading allows invalid history to commit.
+
+**Affects.** Pass outcomes, finding and external-effect admission,
+reconstitution, the [review-workflows specification](spec/review-workflows.md),
+and the `2026072604xx` persistence slice.
 
 ## 2026-07-25 — Reassociate canonical external objects across target snapshots
 
@@ -40,20 +77,24 @@ from importing an existing review, thread, or comment even though the opaque
 object identity remains canonical.
 
 **Decision.** Adapters continue to construct one canonical provider-wide object
-key. Attachment uniqueness is scoped to the exact target snapshot, so a new
-target may reserve and attach the same object through its own canonically
+key. Attachment uniqueness is scoped to the exact target snapshot. The first
+attachment establishes that object's logical target identity. Another snapshot
+may attach it only when both snapshots are change requests with the same
+canonical provider, repository, and positive change-request number; their frozen
+revisions may differ. Each snapshot uses its own reservation and canonically
 succeeded publication or import pass. One target cannot attach the object
 through two reservations.
 
 **Rejected alternatives.** Global attachment uniqueness strands external state
-on an old snapshot. Reusing the old reservation crosses immutable target
-ancestry. Making the identifier target-relative creates multiple identities for
-one provider object.
+on an old snapshot. Unrestricted per-target uniqueness lets unrelated change
+requests or commits claim one object. Requiring target ancestry confuses review
+stack topology with refresh identity. Reusing the old reservation crosses
+immutable target snapshots. Making the identifier target-relative creates
+multiple identities for one provider object.
 
 **Affects.** External-link attachment persistence, refreshed-target imports, the
 [review-workflows specification](spec/review-workflows.md), and the
-`2026072604xx` persistence slice. This supersedes only the global attachment
-uniqueness chosen in
+`2026072604xx` persistence slice. This refines
 [the earlier identity decision](#2026-07-25--canonicalize-external-review-object-identities-provider-wide);
 provider-wide key canonicalization remains unchanged.
 
@@ -85,9 +126,8 @@ atomically participates in the session command that admitted it, so aggregate
 construction alone cannot guarantee that run/pass projection precedes execution.
 
 **Decision.** This foundation does not schedule or authorize executable review
-work. Application orchestration must later choose and implement a durable hold
-or atomic accepted-input admission and run/pass projection before review inputs
-become executable. That coordination remains an open foundation edge.
+work. The remaining design is owned only by the
+[review-workflow orchestration question](open-questions.md#destination-features-target-model).
 
 **Rejected alternatives.** Claiming the current aggregates prevent execution
 would describe behavior they do not implement. Moving session scheduling into
@@ -145,15 +185,18 @@ parent. The child already freezes its exact comparison revision.
 **Decision.** A parented target requires an exact child base revision, and the
 canonical parent target's head revision must equal that base. Construction,
 reconstitution, and persistence validate identity, scope, and revision
-continuity from the canonical parent snapshot.
+continuity from the canonical parent snapshot. Reconstitution validates the
+complete canonical parent chain and rejects any repeated target identity, so
+parentage always terminates at a root.
 
 **Rejected alternatives.** Scope-only validation admits false stack topology.
 Copying unverified parent scope or revision strings into a detached reference
 does not authenticate the named target. Resolving a moving host branch while
-loading would make old topology time-dependent.
+loading would make old topology time-dependent. Checking only the immediate edge
+admits corrupt cyclic ancestry whose traversal never reaches a stack root.
 
-**Affects.** `ReviewTarget`, stack propagation prerequisites, target
-persistence, and the
+**Affects.** `ReviewTarget`, stack propagation prerequisites, target persistence
+and reconstitution, and the
 [review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy).
 
 ## 2026-07-25 — Bind finding event passes to one frozen policy
@@ -231,10 +274,11 @@ terminal frontier. Leaving external object kind open also permits adapters and
 storage to choose incompatible discriminators.
 
 **Decision.** Finding event kinds admit only their recorded judgment,
-deduplication, publication, or repair pass kinds. A successful pass carries its
-turn's exact canonical terminal frontier. External review objects use the closed
-kind vocabulary change request, commit, review, review thread, inline review
-comment, and general change-request comment.
+deduplication, external-publication or external-context-import, or repair pass
+kinds. A successful pass carries its turn's exact canonical terminal frontier.
+External review objects use the closed kind vocabulary change request, commit,
+review, review thread, inline review comment, and general change-request
+comment.
 
 **Rejected alternatives.** Target-only pass checks authenticate ancestry but not
 responsibility. A containing frontier includes unrelated later transcript
@@ -324,13 +368,16 @@ uniqueness constraint would conflate unrelated objects.
 **Decision.** The code-host adapter supplies each external review object as one
 opaque, canonical provider-wide key. When the host's native identifier is
 repository-scoped, the adapter qualifies it with the canonical repository key
-before constructing the domain value. Persistence uniquely admits the resulting
-provider, object-kind, and object-key tuple.
+before constructing the domain value. A reservation's provider equals the
+canonical provider of its associated target. Persistence admits the resulting
+provider, object-kind, and object-key tuple at most once per exact target
+snapshot.
 
-**Rejected alternatives.** Target-scoped uniqueness permits the same external
-object to be attached again through a later snapshot. Teaching the domain every
-host's identifier grammar couples it to adapter details. Persisting both raw and
-qualified forms creates competing object identities.
+**Rejected alternatives.** Global attachment uniqueness strands an object on an
+older target snapshot. Teaching the domain every host's identifier grammar
+couples it to adapter details. Persisting both raw and qualified forms creates
+competing object identities. Trusting a caller-supplied provider independently
+of the target admits cross-provider posting evidence.
 
 **Affects.** External-link adapters, `ReviewExternalObjectKey`, attachment
 persistence, and the
@@ -371,15 +418,24 @@ used by an old run nor provide one exact relational representation.
 
 **Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
 integer basis-point thresholds from zero through 10,000. Version one fixes
-exactly 7,000 basis points for judgment and exactly 8,000 for unattended
-publication; the publication threshold may not be lower than the judgment
-threshold. Dedupe and judge passes consume the same frozen run policy.
+exactly 7,000 basis points for judgment and exactly 8,000 for publication; the
+publication threshold may not be lower than the judgment threshold. Version one
+is the only supported version; construction and reconstitution reject every
+other ordinal until a later recorded decision adds its exact tuple. Dedupe and
+judge passes consume the same frozen run policy. An `Accepted` event requires
+the finding's confidence to meet the judgment threshold; a `Posted` event
+requires it to meet the publication threshold. This foundation defines no
+threshold override.
 
 **Rejected alternatives.** Process-wide defaults make old decisions depend on
 current configuration. Binary floating point admits storage/JSON comparison
 drift. A per-finding threshold copies policy and permits one run to judge its
-findings under inconsistent gates. Hard-coding policy without storing its
-version prevents intentional later evolution.
+findings under inconsistent gates. Recording thresholds without enforcing them
+turns policy into unauthenticated metadata. A hidden override makes
+reconstitution depend on evidence the aggregate does not carry. Hard-coding
+policy without storing its version prevents intentional later evolution.
+Admitting unknown versions lets binaries assign different semantics to one
+persisted ordinal.
 
 **Affects.** `ReviewPolicy`, `ReviewConfidence`, run persistence, the
 [review-workflows specification](spec/review-workflows.md), and later judgment,
@@ -408,6 +464,60 @@ evidence can justify it.
 external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Adopt house style guide (literal provenance, label discipline)
+
+**Context.** [docs/agents/testing-style.md](agents/testing-style.md) owns how a
+test body reads, but two disciplines that bind production and test code alike
+had no owning document: whether a literal visible at a use site is load-bearing
+or merely needs to exist, and when positional structure — runs of same-typed
+positions, and bare booleans worst of all — must become labeled structure.
+Reviews raised both case by case with no citable rule.
+
+**Decision.** Adopt [docs/style.md](style.md) as a normative companion to the
+testing style guide, owner-approved. It states five principles with a Rust
+mechanics appendix worked against real excerpts from this repository, and cites
+testing style rules as TS-*n* rather than restating them. It binds new and
+modified code; existing code is brought along only when already being changed
+for another reason.
+
+**Rejected alternatives.** Extending the testing style guide would put rules
+that bind production code inside a document scoped to tests. Filing the guide
+under `docs/agents/` would classify a rule binding all code as an agent process
+document. Leaving the discipline implicit keeps review feedback uncitable and
+inconsistent between reviewers.
+
+**Affects.** `docs/style.md`, the normative-surface inventory and style pointer
+in `AGENTS.md`, and review practice for new and modified code.
+
+## 2026-07-25 — Index imported snapshots by attested source session
+
+**Context.** Exact source-content identity correctly makes an appended source a
+new immutable imported conversation, but the header had no queryable evidence
+for grouping snapshots that attest the same external session. Source-session
+text is already extracted independently on every normalized record and may be
+absent, explicit null, conflicting, empty, or contain U+0000.
+
+**Decision.** Add nullable `imported_conversation.source_session_id` evidence.
+On new insertion, store the exact UTF-8 bytes when at least one record attests
+an identifier and all attested identifiers agree; otherwise store `NULL`. Index
+non-null values with a non-unique PostgreSQL hash index for exact-equality
+lineage queries without imposing B-tree entry-size limits. Keep the
+format/converter/source-digest unique constraint and every identity rule
+unchanged. Checked loads reject non-null lineage evidence that disagrees with
+the reconstituted entries; `NULL` remains unknown so the migration does not
+reinterpret older rows. Never derive lineage evidence from filenames or import
+context.
+
+**Rejected alternatives.** Using the source session as identity would collapse
+distinct grown snapshots. A unique lineage index would permit only one snapshot
+per external session. PostgreSQL `text` cannot preserve U+0000, and a direct
+B-tree over unbounded evidence can reject otherwise valid identifiers. Inferring
+missing evidence from a path would turn caller context into false provenance.
+
+**Affects.** Migration `202607270001`, imported-conversation insertion and
+checked loading, synthetic Postgres snapshot-lineage and corruption tests, and
+[conversation-import](spec/conversation-import.md).
 
 ## 2026-07-25 — Route review requests for every path to the owner
 
