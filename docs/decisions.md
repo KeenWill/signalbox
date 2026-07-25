@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Canonicalize external review object identities provider-wide
+
+**Context.** Code hosts do not share one identifier scope. Some external object
+identifiers are provider-wide, while others are meaningful only within a
+repository. Storing an unqualified repository-scoped value under a provider-wide
+uniqueness constraint would conflate unrelated objects.
+
+**Decision.** The code-host adapter supplies each external review object as one
+opaque, canonical provider-wide key. When the host's native identifier is
+repository-scoped, the adapter qualifies it with the canonical repository key
+before constructing the domain value. Persistence uniquely admits the resulting
+provider, object-kind, and object-key tuple.
+
+**Rejected alternatives.** Target-scoped uniqueness permits the same external
+object to be attached again through a later snapshot. Teaching the domain every
+host's identifier grammar couples it to adapter details. Persisting both raw and
+qualified forms creates competing object identities.
+
+**Affects.** External-link adapters, `ReviewExternalObjectKey`, attachment
+persistence, and the
+[review-workflows specification](spec/review-workflows.md#external-links-and-posting-reservations).
+
 ## 2026-07-25 — Put review workflows above evidence-bearing sessions
 
 **Context.** Standing review workflows need durable target, run, pass, finding,
@@ -34,8 +56,8 @@ reopens duplicate effects after a lost acknowledgement. Copying transcripts or
 general artifacts into workflow rows creates competing content authorities.
 
 **Affects.** The new [review-workflows specification](spec/review-workflows.md),
-review-workflow domain aggregates, the `2026072602xx` persistence slice, INV-040
-and INV-041, and the later application/protocol stack.
+review-workflow domain aggregates, the `2026072602xx` persistence slice, its
+review-workflow invariants, and the later application/protocol stack.
 
 ## 2026-07-25 — Store review confidence as versioned basis-point policy
 

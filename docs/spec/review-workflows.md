@@ -25,8 +25,7 @@ aggregate.
 run and target; and a `ReviewFindingRef` binds a finding to all three ancestors.
 Child records carry those complete references. Why: complete typed ownership
 facts make a cross-wired target/run/pass/finding combination unconstructible in
-normal domain use and rejectable during reconstitution (INV-001, INV-002,
-INV-040).
+normal domain use and rejectable during reconstitution (INV-001, INV-002).
 
 Key-like values preserve their exact UTF-8 content without trimming or
 normalization. Construction rejects empty values, U+0000, and values longer than
@@ -74,7 +73,9 @@ One `ReviewPass` names its exact run, pass kind, session, and accepted input.
 The session and accepted input are mandatory even while the pass is queued. A
 pass is therefore recorded only after its orchestration input has been durably
 accepted; an optional session identifier is not a substitute for execution
-evidence (INV-040).
+evidence. The accepted input must belong to the pass session; construction,
+persistence, and reconstitution reject a cross-wired pair even when no turn has
+started.
 
 Pass state is:
 
@@ -98,7 +99,8 @@ A `ReviewFinding` is immutable proposed content owned by one producing pass. It
 stores an exact file path, an optional closed positive line range and diff side,
 title, body, severity, confidence, category, and optional recommended fix. Its
 current status is derived from an append-only ordered event history rather than
-a freely writable status field.
+a freely writable status field. Severity is the closed vocabulary `Info`, `Low`,
+`Medium`, `High`, or `Critical`.
 
 The initial state is `Open`. The nine-state machine is:
 
@@ -122,7 +124,7 @@ Rejected, duplicate, superseded, stale, and fixed are terminal. Every event
 carries a contiguous one-based ordinal and a same-target pass reference.
 Reconstitution validates the complete history and fails closed on gaps, illegal
 edges, self-reference, foreign-run finding references, or a publication event
-whose external link is not associated with that finding (INV-040).
+whose external link is not associated with that finding.
 
 ## External links and posting reservations
 
@@ -135,12 +137,14 @@ association, provider, or object kind conflicts.
 External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
 attachment containing the exact external object identifier and the producing
-pass. The store uniquely admits one attached provider/kind/object identity and
-one attachment per reservation. A reservation without an attachment is
-explicitly pending; it is never interpreted as proof that the external effect
-did not occur and is not automatically retried (INV-025, INV-026, INV-041).
-Read-only import may reserve and attach in one local transaction because it
-issues no external write.
+pass. The identifier is an opaque canonical provider-wide key. An adapter
+qualifies a repository-scoped host identifier with the canonical repository key
+before constructing it. The store uniquely admits one attached
+provider/kind/object identity and one attachment per reservation. A reservation
+without an attachment is explicitly pending; it is never interpreted as proof
+that the external effect did not occur and is not automatically retried
+(INV-025, INV-026). Read-only import may reserve and attach in one local
+transaction because it issues no external write.
 
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with a same-target pass and contiguous ordinal. Observations describe
@@ -160,7 +164,7 @@ discriminators and assembles domain reconstitution inputs; the domain validates
 ownership, state shape, event order, and transitions. A missing referenced
 record, unknown discriminator, incomplete history, or failed domain check is
 reported as corruption rather than normalized into a plausible aggregate
-(INV-002, INV-040, INV-041).
+(INV-002).
 
 The first store surface creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, and appends external
