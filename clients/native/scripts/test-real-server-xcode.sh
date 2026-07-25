@@ -18,6 +18,12 @@ if [[ -z "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]; then
 	exit 2
 fi
 
+# Keep the key out of the environment inherited by the xcodebuild processes
+# below. The UI test receives it through the generated .xctestrun and the 0600
+# .env file written here, so no launched process needs it in its environment.
+REAL_SERVER_API_KEY="$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY"
+unset SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
+
 REAL_SERVER_ENV_PATH="$ROOT/.env"
 REAL_SERVER_ENV_BACKUP=""
 REAL_SERVER_ENV_EXISTED=0
@@ -47,7 +53,7 @@ touch "$REAL_SERVER_ENV_PATH"
 chmod 600 "$REAL_SERVER_ENV_PATH"
 {
 	printf 'SIGNALBOX_NATIVE_REAL_SERVER_URL=%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_URL"
-	printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY"
+	printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=%s\n' "$REAL_SERVER_API_KEY"
 	if [[ -n "${SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID:-}" ]]; then
 		printf 'SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID=%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID"
 	fi
@@ -214,7 +220,7 @@ set_xctestrun_environment() {
 }
 
 set_xctestrun_environment SIGNALBOX_NATIVE_REAL_SERVER_URL "$SIGNALBOX_NATIVE_REAL_SERVER_URL"
-set_xctestrun_environment SIGNALBOX_NATIVE_REAL_SERVER_API_KEY "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY"
+set_xctestrun_environment SIGNALBOX_NATIVE_REAL_SERVER_API_KEY "$REAL_SERVER_API_KEY"
 if [[ -n "${SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID:-}" ]]; then
 	set_xctestrun_environment SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID "$SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID"
 fi

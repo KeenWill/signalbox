@@ -199,6 +199,26 @@ resolved_real_server_api_key() {
 	return 1
 }
 
+# The three helpers below have parenthesised bodies, so they always run in a
+# subshell. Environment-file values loaded inside them stay in that subshell and
+# never become exported state of the shard process, which keeps the real server
+# API key out of every build/test process except the one command that is given
+# it explicitly.
+real_server_api_key_is_available() (
+	load_server_environment_if_present
+	resolved_real_server_api_key >/dev/null
+)
+
+load_and_resolve_real_server_url() (
+	load_server_environment_if_present
+	resolved_real_server_url
+)
+
+load_and_resolve_real_server_api_key() (
+	load_server_environment_if_present
+	resolved_real_server_api_key
+)
+
 assert_xcresult_passed() {
 	local result_bundle_path="$1"
 	local summary
@@ -212,13 +232,10 @@ assert_xcresult_passed() {
 
 run_xcode_shard() {
 	require_tool xcodebuild
-	load_server_environment_if_present
 	local server_url=""
-	local api_key=""
-	if api_key="$(resolved_real_server_api_key)" && server_url="$(resolved_real_server_url)"; then
+	if real_server_api_key_is_available && server_url="$(load_and_resolve_real_server_url)"; then
 		export SIGNALBOX_NATIVE_REAL_SERVER_URL="$server_url"
-		export SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$api_key"
-		echo "==> Real server UI test environment configured for $server_url; API key intentionally not printed."
+		echo "==> Real server URL configured for $server_url; the API key stays scoped to the real-smoke shard."
 	fi
 
 	run_step "Xcode iOS Simulator build" "$PROJECT_ROOT/scripts/build-xcode.sh"
@@ -256,7 +273,6 @@ run_screenshots_shard() {
 
 run_real_smoke_shard() {
 	require_tool xcodebuild
-	load_server_environment_if_present
 
 	local server_url
 	local api_key
@@ -264,8 +280,10 @@ run_real_smoke_shard() {
 	local device_id
 	local destination
 	local xcodebuild_status
-	server_url="$(resolved_real_server_url)"
-	if ! api_key="$(resolved_real_server_api_key)"; then
+	server_url="$(load_and_resolve_real_server_url)"
+	# api_key is a shell-local value that is handed to the single xcodebuild
+	# invocation below through a command-scoped assignment; it is never exported.
+	if ! api_key="$(load_and_resolve_real_server_api_key)"; then
 		echo "Missing real server API key. Set SIGNALBOX_NATIVE_REAL_SERVER_API_KEY or provide clients/native/.env with SIGNALBOX_API_KEY." >&2
 		exit 1
 	fi
