@@ -151,6 +151,6 @@ immutability-trigger bypass in the history.
 Bottom line: one column to fix (`credential_reference` → NOT NULL + CHECK, plus
 deleting its NULL-read branch, dead once the constraint lands), one stale spec
 sentence, and an optional squash that would delete 4 files outright and ~40% of
-the SQL. The nullable-column disease the owner's prior project had is
-essentially absent — every other nullable is a constrained union member, and the
-store never papers over a NULL.
+the SQL. The nullable-column disease this audit hunted for is essentially absent
+— every other nullable is a constrained union member, and the store never papers
+over a NULL.
