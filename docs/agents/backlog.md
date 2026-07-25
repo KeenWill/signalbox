@@ -326,6 +326,11 @@ economy (catalog, permissions, confirm/deny, shared tools, delegation). This
 foundation is the hub-side approval algebra plus the first hub-local tool; the
 client approval surface is a separate later milestone whose UX is settled then.
 
+Cross-reference: the tool registry this foundation establishes is where two
+later per-tool declarations land — admissible execution loci and effect class
+(pure/idempotent/side-effecting) — recorded as owner direction in the runner
+protocol and placement entry below.
+
 ## Durable approval waits [blocked-on: tool loop design pass] [size: M]
 
 Owns: a waiting-for-confirmation turn state, dedupe-keyed resume commands in the
@@ -462,6 +467,11 @@ freshness/TTL policies; the plugin isolation runtime; goal-mode-as-plugin (the
 goal-mode entry above stays the owning entry for that); per-session pipeline
 overrides; cache-aware stage placement.
 
+Cross-reference: runner loss or replacement extends the session frontier with an
+injected message naming the new machine, working directory, and tool list — an
+injection this pipeline composes, recorded as owner direction in the runner
+protocol and placement entry below.
+
 ## Durable session tasks [blocked-on: owner design pass] [size: M]
 
 Owns: task satellite store, protocol additions, later model-callable task tools.
@@ -479,7 +489,7 @@ Owns: execution placement and sandboxing for tool execution. Collides-with: tool
 loop and runner-protocol machinery. A first restricted placement for tool
 execution per the target model's execution-isolation target.
 
-## Runner protocol and placement [blocked-on: runner capability/auth decisions] [size: XL]
+## Runner protocol and placement [blocked-on: owner commission call (capability, placement, and auth kernel decided 2026-07-25; design pass unblocked)] [size: XL]
 
 Owns: runner registry, outbound runner connection protocol, dispatch fencing
 completion, placement. Collides-with: tool loop machinery. Carries the remote
@@ -499,6 +509,56 @@ first-class protocol flows, runner identity is not machine-pinned, and
 authentication must work for a runner that did not exist minutes earlier — which
 sharpens the standing design-runner-authentication-in-from-day-one caution.
 Everything else stays with the design pass.
+
+Owner direction, 2026-07-25 (second pass — placement, dispatch, effect classes;
+orientation only, same standing caveat): placement is a registry property. Each
+tool declares a non-empty set of admissible loci — Daemon (signalboxd-local; the
+locus name deliberately avoids legacy hub naming), Runner (with a selector), or
+both — and where both are admissible the session's attached runner is preferred,
+falling back to the daemon. Declarations are static per tool; per-call dynamic
+placement is a later upgrade. An MCP-bridged locus is reserved vocabulary for a
+future pass, not designed here. Dispatch topology: a runner initiates one held
+outbound connection (a WebSocket-shaped streaming channel) over which the daemon
+streams leased work, and runners never accept inbound connections. That channel
+is transport, never truth — lease and claim state is durable in the store, and a
+reconnecting runner re-syncs from durable state.
+
+Effect class is a required declaration on every tool, with no default: pure,
+idempotent, or side-effecting (pure implies idempotent; idempotent means
+state-changing but safely retryable). The retry law follows from it — pure and
+idempotent tools may be re-leased after a lost lease, while a side-effecting
+tool's lost attempt is crash-classified into typed evidence through the existing
+physical-attempt machinery and is never silently re-dispatched. A
+runner-advertised tool carrying no daemon-side effect declaration is treated as
+side-effecting.
+
+Runner tool catalogs are advertised, never trusted. Approval defaults, effect
+class, and placement admissibility for runner tools come from a daemon-side
+owner-editable catalog — configuration validated into typed domain at load,
+following the model-catalog TOML precedent — and the advertisement is compared
+against that catalog; an advertised tool with no daemon-side declaration is
+excluded, or fails closed to confirmation. A runner never widens its own
+approval surface, and the no-permission-downgrade-on-re-registration point above
+stands. Credential doctrine for the first slice: a tool declaring credential
+access is Daemon-only, and signalboxd hands no credentials over the runner
+protocol — INV-035 read as placement law. Runners may hold their own ambient
+machine or environment credentials, which sit outside this model;
+credential-scoped runner classes are a recorded deferred extension.
+
+Runner identity and session placement, kernel only (the design pass owns the
+rest): runner identity is logical — enrollment-based, not hardware-fingerprinted
+— yet a session may target either a capability class or a specific runner
+identity, both first-class at session creation (the owner's new-session flow:
+pick a machine or a class, optionally a working directory, with a default
+workdir for ephemeral runners). Once a session executes on a runner it is pinned
+there, because workspace state makes silent cross-runner rescheduling incorrect;
+there is no automatic migration. Runner loss or replacement is an explicit event
+that extends the session frontier — the model is told the new machine,
+directory, and tool list through an injected message, composing with the
+context-assembly direction above. Recovery flows, lease-affinity interaction,
+and workspace lifecycle all need the design pass. MCP — a daemon-side client for
+centralized servers, runner-side hosting for sandboxed execution — stays
+deferred to its own pass, flagged soon by owner priority.
 
 ## Delegation and child sessions [blocked-on: delegation cause decision; tool loop; selectable transcript-frontier decision (fork selection)] [size: L]
 
