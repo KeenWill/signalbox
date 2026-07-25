@@ -4,12 +4,10 @@
 //! raw JSONL record, and emits source-neutral imported entries. It performs no
 //! filesystem access and creates no native Signalbox session.
 
-mod json;
-
 use std::{error::Error, fmt};
 
-use json::{JsonFailure, parse_record};
 use signalbox_application::ImportedConversationConverter;
+use signalbox_conversation_import_json::{JsonFailure, parse_record};
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedMediaSource, ImportedMessageContentAbsence,

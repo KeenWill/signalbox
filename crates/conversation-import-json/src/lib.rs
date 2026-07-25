@@ -1,15 +1,25 @@
+//! Lossless JSON parsing shared by source-format edge converters.
+//!
+//! The parser preserves object member order, duplicate member names, and exact
+//! JSON number spellings in Signalbox's source-neutral structured-value
+//! algebra.
+
 use std::{error::Error, fmt, str};
 
 use signalbox_domain::{
     ImportedJsonNumber, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
 };
 
-pub(super) const MAX_CONTAINER_DEPTH: usize = 128;
+const MAX_CONTAINER_DEPTH: usize = 128;
 
+/// Content-silent reason one JSON record could not be normalized.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum JsonFailure {
+pub enum JsonFailure {
+    /// The record is not valid UTF-8.
     InvalidUtf8,
+    /// The record is not valid JSON.
     Syntax,
+    /// The record exceeds the maximum structured-value depth.
     DepthExceeded,
 }
 
@@ -25,7 +35,8 @@ impl fmt::Display for JsonFailure {
 
 impl Error for JsonFailure {}
 
-pub(super) fn parse_record(source: &[u8]) -> Result<ImportedStructuredValue, JsonFailure> {
+/// Parses one complete JSON record without discarding source structure.
+pub fn parse_record(source: &[u8]) -> Result<ImportedStructuredValue, JsonFailure> {
     let source = str::from_utf8(source).map_err(|_| JsonFailure::InvalidUtf8)?;
     let mut parser = Parser {
         source,

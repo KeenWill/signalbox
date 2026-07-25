@@ -92,6 +92,7 @@ pub enum Actor {
 pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
     ClaudeCodeSessionJsonlV2,
+    CodexRolloutJsonlV1,
 }
 
 pub struct ImportedRawRecordHash(/* private [u8; 32] */);
