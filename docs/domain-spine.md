@@ -2815,6 +2815,7 @@ impl NormalizedToolArguments {
 pub enum ToolArgumentsFailure {
     TooLarge { bytes: usize },
     CanonicalTooLarge { bytes: usize },
+    ContainsNull,
     CanonicalizationFailed,
     StoredKindMismatch,
     StoredJsonNotCanonical,

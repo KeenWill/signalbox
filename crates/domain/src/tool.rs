@@ -130,6 +130,12 @@ impl NormalizedToolArguments {
                 value,
             });
         }
+        if value.contains('\0') {
+            return Err(ToolArgumentsError {
+                failure: ToolArgumentsFailure::ContainsNull,
+                value,
+            });
+        }
 
         if !is_complete_json(&value) {
             return Ok(Self {
@@ -249,6 +255,8 @@ pub enum ToolArgumentsFailure {
         /// The canonical UTF-8 byte count.
         bytes: usize,
     },
+    /// Provider text contained U+0000, which cannot enter durable text.
+    ContainsNull,
     /// Serialization of an already-decoded JSON value unexpectedly failed.
     CanonicalizationFailed,
     /// The stored tag disagreed with whether the text decodes as JSON.
@@ -1224,6 +1232,18 @@ mod tests {
 
         assert_eq!(normalized.kind(), ToolArgumentsKind::Undecodable);
         assert_eq!(normalized.as_str(), provider_text);
+    }
+
+    /// S10 / INV-005 / INV-019: literal U+0000 cannot enter the durable text
+    /// vocabulary even when the remaining provider text is undecodable JSON.
+    #[test]
+    fn s10_inv005_inv019_arguments_reject_literal_null() {
+        let value = String::from("{\"timezone\":\0");
+        let error = NormalizedToolArguments::try_from_provider_text(value.clone())
+            .expect_err("PostgreSQL text cannot preserve a literal null");
+
+        assert_eq!(error.value(), value);
+        assert_eq!(error.failure(), ToolArgumentsFailure::ContainsNull);
     }
 
     /// S10 / INV-005: reconstitution rejects a competing noncanonical JSON
