@@ -680,28 +680,40 @@ impl ProcessTranscriptReader {
             self.turns_complete = true;
             let session = self.session;
             let latest_frontier = self.latest_frontier;
-            self.entry_count = Some(
-                load_transcript_entry_count(self.transaction_mut()?, session, latest_frontier)
-                    .await?,
-            );
+            self.entry_count = Some(match latest_frontier {
+                Some(frontier) => {
+                    open_transcript_entry_cursor(self.transaction_mut()?, session, frontier).await?
+                }
+                None => 0,
+            });
         }
 
         let entry_count = self
             .entry_count
             .ok_or(ProcessReadCorruption::Missing("transcript entry count"))?;
-        if self.next_entry_index < entry_count {
+        if self.latest_frontier.is_some() {
             let entry_index = self.next_entry_index;
-            let session = self.session;
-            let frontier = self.latest_frontier.ok_or(ProcessReadCorruption::Missing(
-                "context frontier for transcript entries",
-            ))?;
-            let entry =
-                load_transcript_entry(self.transaction_mut()?, session, frontier, entry_index)
-                    .await?;
-            self.next_entry_index = self.next_entry_index.checked_add(1).ok_or(
-                ProcessReadCorruption::InvalidOrdinal("transcript entry index"),
-            )?;
-            return Ok(Some(ProcessTranscriptItem::Entry(entry)));
+            if let Some(entry) =
+                fetch_next_transcript_entry(self.transaction_mut()?, entry_index, entry_count)
+                    .await?
+            {
+                if entry_index >= entry_count {
+                    return Err(ProcessReadCorruption::Inconsistent(
+                        "context frontier declared membership",
+                    )
+                    .into());
+                }
+                self.next_entry_index = self.next_entry_index.checked_add(1).ok_or(
+                    ProcessReadCorruption::InvalidOrdinal("transcript entry index"),
+                )?;
+                return Ok(Some(ProcessTranscriptItem::Entry(entry)));
+            }
+        }
+        if self.next_entry_index != entry_count {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "context frontier declared membership",
+            )
+            .into());
         }
 
         let transaction = self
@@ -1743,7 +1755,12 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     disposition: match disposition {
                         "known_failed" => ProcessFailedModelCallDisposition::KnownFailed,
                         "cancelled" => ProcessFailedModelCallDisposition::Cancelled,
-                        _ => unreachable!("the pattern closes failed call dispositions"),
+                        _ => {
+                            return Err(ProcessReadCorruption::Inconsistent(
+                                "failed terminal model call disposition",
+                            )
+                            .into());
+                        }
                     },
                 }),
             },
@@ -1865,14 +1882,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     })
 }
 
-async fn load_transcript_entry_count(
+async fn open_transcript_entry_cursor(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
-    frontier: Option<ContextFrontierId>,
+    frontier: ContextFrontierId,
 ) -> Result<u64, ProcessReadError> {
-    let Some(frontier) = frontier else {
-        return Ok(0);
-    };
     let stored_member_count: Option<Decimal> = sqlx::query_scalar(
         "SELECT member_count
            FROM context_frontier
@@ -1887,38 +1901,12 @@ async fn load_transcript_entry_count(
         stored_member_count.ok_or(ProcessReadCorruption::Missing("context frontier"))?,
         "context frontier member count",
     )?;
-    let actual_count: i64 = sqlx::query_scalar(
-        "SELECT count(*)
-           FROM resolve_context_frontier_members($1, $2)",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(frontier.into_uuid())
-    .fetch_one(&mut **transaction)
-    .await?;
-    let actual_count = u64::try_from(actual_count)
-        .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript entry count"))?;
-    if actual_count != member_count {
-        return Err(
-            ProcessReadCorruption::Inconsistent("context frontier declared membership").into(),
-        );
-    }
-    Ok(member_count)
-}
-
-async fn load_transcript_entry(
-    transaction: &mut Transaction<'static, Postgres>,
-    session: SessionId,
-    frontier: ContextFrontierId,
-    entry_index: u64,
-) -> Result<ProcessTranscriptEntry, ProcessReadError> {
-    let member_position =
-        entry_index
-            .checked_add(1)
-            .ok_or(ProcessReadCorruption::InvalidOrdinal(
-                "frontier member position",
-            ))?;
-    let row = sqlx::query(
-        "SELECT
+    // The transaction-scoped cursor retains this query's execution state, so
+    // every later FETCH advances the same single recursive chain resolution.
+    sqlx::query(
+        "DECLARE signalbox_process_transcript_entries NO SCROLL CURSOR FOR
+         SELECT
+            member.actual_member_count,
             member.member_position,
             member.source_session_id,
             member.semantic_entry_id,
@@ -1949,7 +1937,12 @@ async fn load_transcript_entry(
             result_attempt.error_detail AS result_error_detail,
             transcript_approval.decision_kind AS transcript_decision_kind,
             transcript_approval.denial_reason AS transcript_denial_reason
-           FROM resolve_context_frontier_members($1, $2) AS member
+           FROM (
+                SELECT
+                    resolved.*,
+                    count(*) OVER () AS actual_member_count
+                  FROM resolve_context_frontier_members($1, $2) AS resolved
+           ) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
@@ -1976,14 +1969,41 @@ async fn load_transcript_entry(
                     entry.imported_conversation_id
             AND imported.imported_transcript_entry_id =
                     entry.imported_transcript_entry_id
-          WHERE member.member_position = $3",
+          ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
     .bind(frontier.into_uuid())
-    .bind(Decimal::from(member_position))
-    .fetch_optional(&mut **transaction)
+    .execute(&mut **transaction)
     .await?;
-    let row = row.ok_or(ProcessReadCorruption::Missing("context frontier member"))?;
+    Ok(member_count)
+}
+
+async fn fetch_next_transcript_entry(
+    transaction: &mut Transaction<'static, Postgres>,
+    entry_index: u64,
+    expected_entry_count: u64,
+) -> Result<Option<ProcessTranscriptEntry>, ProcessReadError> {
+    let row = sqlx::query("FETCH NEXT FROM signalbox_process_transcript_entries")
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let actual_entry_count: i64 = required(&row, "actual_member_count")?;
+    if u64::try_from(actual_entry_count)
+        .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript entry count"))?
+        != expected_entry_count
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("context frontier declared membership").into(),
+        );
+    }
+    let member_position =
+        entry_index
+            .checked_add(1)
+            .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                "frontier member position",
+            ))?;
     let stored_position = decode_positive(
         required(&row, "member_position")?,
         "frontier member position",
@@ -1993,7 +2013,7 @@ async fn load_transcript_entry(
             ProcessReadCorruption::Inconsistent("context frontier contiguous membership").into(),
         );
     }
-    decode_transcript_entry(&row, entry_index)
+    decode_transcript_entry(&row, entry_index).map(Some)
 }
 
 fn decode_transcript_entry(

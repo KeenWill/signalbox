@@ -63,6 +63,40 @@ one finished and awaiting owner merge:
   time; resolve a replied thread when a later fix commit or rebase outdates it.
   A final sweep before declaring the pull request finished confirms no
   unresolved outdated thread remains.
+- A review request is posted only once CI is green on the exact head it names,
+  and that head SHA is named in the request. A wave's fixes are never pushed
+  while a requested review on a prior head is still in flight; let the in-flight
+  review land, push the fixes for its accepted findings, then complete its
+  disposition (replies naming the pushed fixing commits) before requesting the
+  next wave against the new head. A pull request whose diff touches only files
+  that already opened with the non-authoritative-planning banner on its base
+  branch (for example [`docs/agents/backlog.md`](docs/agents/backlog.md)) and
+  that still open with it at the pull request's head, or that it adds as new
+  files opening with that banner, gets no review request at all: those files
+  decide nothing and are reviewed for nothing. Stamping the banner onto a file
+  that already existed without one — or removing it from a file that carried it
+  — is a reclassification, not an exemption: either pull request is requested
+  and reviewed like any other.
+- Before the first review request, run the pre-push self-review checklist over
+  the pull request's own diff — the first-wave findings agents can catch
+  themselves:
+  - grep the whole body of every test the diff adds or modifies — under
+    `#[test]`, `#[tokio::test]`, or any other test attribute, including the
+    lines the diff itself leaves untouched — for `for`/`while` loops and
+    `if`/`match` conditionals, and unroll or split them per
+    `docs/agents/testing-style.md` rule 2 before pushing;
+  - confirm each added assertion compares against a fixture accessor, not a
+    literal re-encoding a value the fixture already states (rule 6);
+  - confirm every new INV-tagged test is bound from the enforcement column of
+    [`docs/invariants.md`](docs/invariants.md) — bindings are by file and INV
+    tag (rule 17), so add a citation in the same diff only when the test's file
+    is not already cited for that tag;
+  - re-verify any count or inventory the diff states against the current head;
+  - when the diff changes what a `docs/spec/` page states as implemented
+    behavior, re-verify that behavior against the head and advance the page's
+    verified-against-ref line; a wording, link, or formatting edit that changes
+    no stated behavior leaves the reference alone, since the reference records
+    verification against code and not the fact of an edit.
 - External reviews are re-requested after a change that could alter what a
   reviewer already approved — code, tests, normative documentation or
   specifications, contract-bearing comments, or claims in the description — not
@@ -80,12 +114,24 @@ one finished and awaiting owner merge:
   whether or not any fix commit results; a quiet wave, whose review pass returns
   no actionable findings or whose findings are all declined, produces no
   accepted finding and concludes the loop: the pull request is finished and
-  awaits owner merge. After five waves on one pull request, stop and escalate to
-  the owner regardless of hit rate, reporting the wave history in one line. A
-  re-report of an already-fixed finding made against a stale head is declined by
-  standing policy, naming the fixing commit. When more than half of a wave's
-  accepted findings are defects in code the previous wave's fixes introduced,
-  stop and escalate to the owner instead of continuing the loop.
+  awaits owner merge. The wave-cap ladder governs a loop that will not quiet: at
+  wave five, stop and escalate to the owner regardless of hit rate, reporting in
+  one line the per-wave history goal mode already requires. The owner may
+  authorize exactly one extension of up to three further waves; after that
+  extension is spent the loop hard-stops. Past the hard stop no further review
+  is requested, and any new auto-pass finding is closed in-thread with the named
+  disposition "Escalated without disposition" rather than fixed or argued. When
+  a pull request's open-thread count exceeds roughly fifty, a wave's replies may
+  batch, but a reply-and-resolve sweep across every open thread is mandatory
+  before the pull request is declared finished. A re-report of an already-fixed
+  finding made against a stale head is declined by standing policy, naming the
+  fixing commit; a finding materially identical to one dispositioned in a prior
+  wave is a re-raise, declined by the same standing policy with a link to the
+  prior thread. Neither standing decline applies to a finding that reproduces on
+  the current head: a defect reintroduced by a later wave's edits is live and is
+  dispositioned on its merits. When more than half of a wave's accepted findings
+  are defects in code the previous wave's fixes introduced, stop and escalate to
+  the owner instead of continuing the loop.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
