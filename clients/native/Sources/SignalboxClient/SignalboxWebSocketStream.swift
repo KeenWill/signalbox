@@ -3,57 +3,267 @@ import Foundation
 import SignalboxModels
 #endif
 
-public final class SignalboxWebSocketStream: Sendable {
-    private let url: URL
+public enum SignalboxWebSocketMessage: Equatable, Sendable {
+    case data(Data)
+    case string(String)
+}
 
-    public init(url: URL) {
-        self.url = url
+public protocol SignalboxWebSocketTransport: Sendable {
+    func receive() async throws -> SignalboxWebSocketMessage
+    func send(_ message: SignalboxWebSocketMessage) async throws
+    func cancel() async
+}
+
+protocol SignalboxWebSocketScheduledAction: Sendable {
+    func cancel()
+}
+
+protocol SignalboxWebSocketWatchdogScheduler: Sendable {
+    func schedule(
+        after duration: Duration,
+        action: @escaping @Sendable () async -> Void
+    ) -> any SignalboxWebSocketScheduledAction
+}
+
+public struct URLSessionSignalboxWebSocketTransport: SignalboxWebSocketTransport, Sendable {
+    private let driver: URLSessionSignalboxWebSocketDriver
+
+    public init(url: URL, session: URLSession = .shared) {
+        self.driver = URLSessionSignalboxWebSocketDriver(
+            task: session.webSocketTask(with: url)
+        )
+    }
+
+    public func receive() async throws -> SignalboxWebSocketMessage {
+        try await driver.receive()
+    }
+
+    public func send(_ message: SignalboxWebSocketMessage) async throws {
+        try await driver.send(message)
+    }
+
+    public func cancel() async {
+        await driver.cancel()
+    }
+}
+
+private actor URLSessionSignalboxWebSocketDriver {
+    private let task: URLSessionWebSocketTask
+    private var started = false
+
+    init(task: URLSessionWebSocketTask) {
+        self.task = task
+    }
+
+    func receive() async throws -> SignalboxWebSocketMessage {
+        startIfNeeded()
+        switch try await task.receive() {
+        case .data(let data):
+            return .data(data)
+        case .string(let string):
+            return .string(string)
+        @unknown default:
+            throw SignalboxWebSocketStreamError.unsupportedMessage
+        }
+    }
+
+    func send(_ message: SignalboxWebSocketMessage) async throws {
+        startIfNeeded()
+        switch message {
+        case .data(let data):
+            try await task.send(.data(data))
+        case .string(let string):
+            try await task.send(.string(string))
+        }
+    }
+
+    func cancel() {
+        task.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func startIfNeeded() {
+        guard !started else {
+            return
+        }
+        started = true
+        task.resume()
+    }
+}
+
+public enum SignalboxWebSocketStreamError: LocalizedError, Equatable {
+    case connectionTimedOut
+    case connectionWentQuiet
+    case unsupportedMessage
+
+    public var errorDescription: String? {
+        switch self {
+        case .connectionTimedOut:
+            return "The server connection did not receive a heartbeat in time."
+        case .connectionWentQuiet:
+            return "The server connection stopped receiving heartbeats."
+        case .unsupportedMessage:
+            return "The server sent an unsupported WebSocket message."
+        }
+    }
+}
+
+public final class SignalboxWebSocketStream: Sendable {
+    public static let defaultHeartbeatTimeout: Duration = .seconds(45)
+
+    private let transportFactory: @Sendable () -> any SignalboxWebSocketTransport
+    private let heartbeatTimeout: Duration
+    private let watchdogScheduler: any SignalboxWebSocketWatchdogScheduler
+
+    public convenience init(
+        url: URL,
+        heartbeatTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout
+    ) {
+        self.init(
+            transportFactory: {
+                URLSessionSignalboxWebSocketTransport(url: url)
+            },
+            heartbeatTimeout: heartbeatTimeout
+        )
+    }
+
+    public init(
+        transportFactory: @escaping @Sendable () -> any SignalboxWebSocketTransport,
+        heartbeatTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout
+    ) {
+        self.transportFactory = transportFactory
+        self.heartbeatTimeout = heartbeatTimeout
+        self.watchdogScheduler = TaskSignalboxWebSocketWatchdogScheduler()
+    }
+
+    init(
+        transportFactory: @escaping @Sendable () -> any SignalboxWebSocketTransport,
+        heartbeatTimeout: Duration,
+        watchdogScheduler: any SignalboxWebSocketWatchdogScheduler
+    ) {
+        self.transportFactory = transportFactory
+        self.heartbeatTimeout = heartbeatTimeout
+        self.watchdogScheduler = watchdogScheduler
     }
 
     public func messages() -> AsyncThrowingStream<SignalboxServerMessage, Error> {
         AsyncThrowingStream { continuation in
-            let task = URLSession.shared.webSocketTask(with: url)
-            task.resume()
-
+            let transport = transportFactory()
+            let watchdog = SignalboxHeartbeatWatchdog(
+                timeout: heartbeatTimeout,
+                scheduler: watchdogScheduler
+            )
+            let timeoutAction: @Sendable (SignalboxWebSocketStreamError) async -> Void = { error in
+                continuation.finish(throwing: error)
+                await transport.cancel()
+            }
             let receiveTask = Task {
+                await watchdog.arm {
+                    await timeoutAction(.connectionTimedOut)
+                }
                 do {
                     while !Task.isCancelled {
-                        let message = try await task.receive()
+                        let message = try await transport.receive()
                         let data: Data
                         switch message {
                         case .data(let receivedData):
                             data = receivedData
                         case .string(let string):
                             data = Data(string.utf8)
-                        @unknown default:
+                        }
+                        let decoded: SignalboxServerMessage
+                        do {
+                            decoded = try SignalboxJSONCoding.decoder().decode(SignalboxServerMessage.self, from: data)
+                        } catch {
+                            continuation.yield(.diagnostic(SignalboxDecodingDiagnostic(error: error)))
                             continue
                         }
-                        let decoded = try SignalboxJSONCoding.decoder().decode(SignalboxServerMessage.self, from: data)
                         if case .heartbeat(let sentAt) = decoded {
-                            try await sendHeartbeatAck(sentAt: sentAt, task: task)
+                            try await sendHeartbeatAck(sentAt: sentAt, transport: transport)
+                            await watchdog.arm {
+                                await timeoutAction(.connectionWentQuiet)
+                            }
                             continue
                         }
                         continuation.yield(decoded)
                     }
                 } catch {
+                    await watchdog.cancel()
                     continuation.finish(throwing: error)
                 }
             }
 
             continuation.onTermination = { _ in
                 receiveTask.cancel()
-                task.cancel(with: .goingAway, reason: nil)
+                Task {
+                    await watchdog.cancel()
+                    await transport.cancel()
+                }
             }
         }
     }
 
-    private func sendHeartbeatAck(sentAt: Date, task: URLSessionWebSocketTask) async throws {
+    private func sendHeartbeatAck(
+        sentAt: Date,
+        transport: any SignalboxWebSocketTransport
+    ) async throws {
         let payload = SignalboxHeartbeatAck(kind: "heartbeat_ack", sentAt: sentAt)
         let data = try SignalboxJSONCoding.encoder().encode(payload)
         guard let string = String(data: data, encoding: .utf8) else {
             return
         }
-        try await task.send(.string(string))
+        try await transport.send(.string(string))
+    }
+}
+
+private actor SignalboxHeartbeatWatchdog {
+    private let timeout: Duration
+    private let scheduler: any SignalboxWebSocketWatchdogScheduler
+    private var scheduledAction: (any SignalboxWebSocketScheduledAction)?
+
+    init(
+        timeout: Duration,
+        scheduler: any SignalboxWebSocketWatchdogScheduler
+    ) {
+        self.timeout = timeout
+        self.scheduler = scheduler
+    }
+
+    func arm(onTimeout: @escaping @Sendable () async -> Void) {
+        scheduledAction?.cancel()
+        scheduledAction = scheduler.schedule(after: timeout, action: onTimeout)
+    }
+
+    func cancel() {
+        scheduledAction?.cancel()
+        scheduledAction = nil
+    }
+}
+
+private struct TaskSignalboxWebSocketWatchdogScheduler: SignalboxWebSocketWatchdogScheduler {
+    func schedule(
+        after duration: Duration,
+        action: @escaping @Sendable () async -> Void
+    ) -> any SignalboxWebSocketScheduledAction {
+        let task = Task {
+            do {
+                try await Task.sleep(for: duration)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            await action()
+        }
+        return TaskSignalboxWebSocketScheduledAction(task: task)
+    }
+}
+
+private struct TaskSignalboxWebSocketScheduledAction: SignalboxWebSocketScheduledAction {
+    let task: Task<Void, Never>
+
+    func cancel() {
+        task.cancel()
     }
 }
 

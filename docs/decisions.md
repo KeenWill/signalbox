@@ -10,6 +10,52 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
+
+**Context.** The native client holds an API credential, and an error-path test
+can prove that today's surfaced errors omit one synthetic credential but cannot
+prevent a future shipping source from logging credentials or surrounding request
+state. The existing privacy scan is the native client's automated gate for
+prohibited data-collection and disclosure mechanisms.
+
+**Decision.** Make the native privacy scan reject direct Swift logging
+primitives and standard instance logging methods anywhere under shipping
+`Sources`. Exercise the instance-method detector with a synthetic fixture every
+time the scan runs so changes to the expression cannot silently reopen that
+path. Keep credentials out of diagnostic output instead of attempting to redact
+them after logging.
+
+**Rejected alternatives.** Manual review alone does not continuously enforce the
+rule. Searching for current credential variable names misses aliases and future
+names. An allow-list makes the protection depend on reviewers proving that every
+permitted call can never receive credential-bearing data.
+
+**Affects.** `clients/native/scripts/check-privacy.sh` and future additions to
+the native client's shipping Swift sources.
+
+## 2026-07-25 — Bound native-client heartbeat silence to 45 seconds
+
+**Context.** The native client acknowledges server heartbeat frames, but an open
+WebSocket that stops delivering frames can otherwise remain connected
+indefinitely. The stream needs a finite quiet deadline that tolerates ordinary
+scheduling and network jitter while still correcting stale connection state.
+
+**Decision.** Start a 45-second liveness deadline when the WebSocket connection
+attempt begins. Before the first acknowledged heartbeat, expiry surfaces a
+connection-timeout error. Restart the deadline after each acknowledged
+heartbeat; a later expiry surfaces a connection-quiet error. Both failures close
+the transport. Keep the deadline injectable so tests can exercise the watchdog
+without wall-clock delays.
+
+**Rejected alternatives.** Relying on platform request timeouts does not detect
+an already-open but silent WebSocket. Waiting indefinitely preserves stale
+connected state. A much shorter fixed deadline raises false disconnect risk
+without a recorded server heartbeat cadence that justifies it.
+
+**Affects.** The native client's `SignalboxWebSocketStream` liveness behavior
+and its unit-test seam; the wire protocol and heartbeat acknowledgment remain
+unchanged.
+
 ## 2026-07-25 — Run Swift client CI on the wired unit-test bundle
 
 **Context.** The native-client snapshot import deferred Swift CI wholesale,
