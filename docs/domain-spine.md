@@ -5072,26 +5072,64 @@ pub enum ReviewPassState {
     Blocked { turn: TurnId },
     Cancelled { turn: Option<TurnId> },
 }
+pub struct ReviewPassTurnEvidence { /* canonical turn ownership + frontier */ }
+impl ReviewPassTurnEvidence {
+    pub const fn new(
+        turn: TurnId,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        terminal_frontier: Option<ContextFrontierId>,
+    ) -> Self;
+    // accessors: turn(), session(), accepted_input(), terminal_frontier()
+}
+pub struct ReviewPassReconstitutionInput { /* pass row + canonical evidence */ }
+impl ReviewPassReconstitutionInput {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        accepted_input_session: SessionId,
+        state: ReviewPassState,
+        turn_evidence: Option<ReviewPassTurnEvidence>,
+    ) -> Self;
+    // accessors: reference(), kind(), session(), accepted_input(),
+    // accepted_input_session(), state(), turn_evidence()
+}
 pub struct ReviewPass { /* reference + session input + state */ }
+pub struct ReviewPassConstructionError { /* rejected session association */ }
+impl ReviewPassConstructionError {
+    // accessors: reference(), kind(), sessions(), accepted_input()
+}
+pub enum ReviewPassReconstitutionFailure {
+    AcceptedInputSessionMismatch,
+    MissingTurnEvidence,
+    UnexpectedTurnEvidence,
+    TurnMismatch,
+    TurnSessionMismatch,
+    TurnAcceptedInputMismatch,
+    OutputFrontierMismatch,
+}
+pub struct ReviewPassReconstitutionError { /* input + failure */ }
+impl ReviewPassReconstitutionError {
+    // accessors: failure(), input(), into_input()
+}
 pub enum ReviewPassTransitionFailure {
     InvalidTransition,
     TurnChanged,
 }
 pub struct ReviewPassTransitionError { /* current + next + failure */ }
 impl ReviewPass {
-    pub const fn new(
+    pub fn try_new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
         session: SessionId,
         accepted_input: AcceptedInputId,
-    ) -> Self;
-    pub const fn reconstitute(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        session: SessionId,
-        accepted_input: AcceptedInputId,
-        state: ReviewPassState,
-    ) -> Self;
+        accepted_input_session: SessionId,
+    ) -> Result<Self, ReviewPassConstructionError>;
+    pub fn try_reconstitute(
+        input: ReviewPassReconstitutionInput,
+    ) -> Result<Self, ReviewPassReconstitutionError>;
     pub fn transition(self, next: ReviewPassState)
         -> Result<Self, ReviewPassTransitionError>;
     // accessors: reference(), kind(), session(), accepted_input(), state()
@@ -5155,8 +5193,19 @@ impl ReviewFindingProposal {
     // accessors: reference(), producing_pass(), content()
 }
 pub struct ReviewFindingExternalLinkRef { /* finding + link */ }
+pub enum ReviewFindingExternalLinkFailure {
+    ForeignAssociation,
+    NotAttached,
+}
+pub struct ReviewFindingExternalLinkError { /* canonical association + failure */ }
+impl ReviewFindingExternalLinkError {
+    // accessors: finding(), link(), association(), failure()
+}
 impl ReviewFindingExternalLinkRef {
-    pub const fn new(finding: ReviewFindingRef, link: ReviewExternalLinkId) -> Self;
+    pub fn try_new(
+        finding: ReviewFindingRef,
+        link: &ReviewExternalLink,
+    ) -> Result<Self, ReviewFindingExternalLinkError>;
     // accessors: finding(), link()
 }
 
@@ -5310,8 +5359,8 @@ pub enum ReviewExternalLinkTransitionError {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 49                   |
-| **signalbox-domain total**                         | **404 (+1 free fn)** |
+| domain: review_workflow                            | 56                   |
+| **signalbox-domain total**                         | **411 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
