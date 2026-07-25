@@ -1734,8 +1734,12 @@ impl FailedTurnExecutionReconstitutionInput {
         self,
         terminal_tool_attempts: Vec<EndedToolAttempt>,
     ) -> Self;
+    pub fn with_terminal_tool_denials(
+        self,
+        terminal_tool_denials: Vec<ToolApprovalResolution>,
+    ) -> Self;
     // accessors: owning_turn(), ended_attempt(), attempt_end(), ended_call(),
-    // terminal_tool_attempts()
+    // terminal_tool_attempts(), terminal_tool_denials()
 }
 
 pub struct TerminalAttemptEndReconstitutionInput { /* private */ }
@@ -1761,7 +1765,11 @@ impl CancelledTurnExecutionReconstitutionInput {
         self,
         terminal_tool_attempts: Vec<EndedToolAttempt>,
     ) -> Self;
-    // accessor: terminal_tool_attempts()
+    pub fn with_terminal_tool_denials(
+        self,
+        terminal_tool_denials: Vec<ToolApprovalResolution>,
+    ) -> Self;
+    // accessors: terminal_tool_attempts(), terminal_tool_denials()
 }
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }

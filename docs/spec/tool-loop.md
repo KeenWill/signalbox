@@ -326,12 +326,15 @@ slot indefinitely.
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
 that did not complete ordinary execution as `ToolClosed` in proposal order, then
-appends the proof-bearing terminal marker. A prepared or effect-free crash loss
-that fails the turn uses that same proposal-ordered materialization before
-`TurnFailed`; the crash-lost `KnownFailed` attempt becomes
-`ToolExecutionResult`, while every other request without an ordinary result
-becomes `ToolClosed`. A request can therefore never remain an open logical
-dependency behind a terminal turn (INV-006).
+appends the proof-bearing terminal marker. The consumed result projection is
+bound to the interrupted turn: reusing this turn's current frontier identity is
+not sufficient, and a projection prepared for another turn cannot terminalize
+this turn with foreign request results even when the yielded source frontier
+matches. A prepared or effect-free crash loss that fails the turn uses that same
+proposal-ordered materialization before `TurnFailed`; the crash-lost
+`KnownFailed` attempt becomes `ToolExecutionResult`, while every other request
+without an ordinary result becomes `ToolClosed`. A request can therefore never
+remain an open logical dependency behind a terminal turn (INV-006).
 
 ## Approval waits and restart
 
