@@ -332,6 +332,29 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(sentMessages.count, 1)
     }
 
+    func testWebSocketStreamDistinguishesInitialLivenessTimeout() async throws {
+        let transport = QuietSignalboxWebSocketTransport(heartbeat: nil)
+        let stream = SignalboxWebSocketStream(
+            transportFactory: { transport },
+            heartbeatTimeout: .milliseconds(25)
+        )
+
+        var iterator = stream.messages().makeAsyncIterator()
+
+        do {
+            _ = try await iterator.next()
+            XCTFail("Expected an initial liveness timeout")
+        } catch let error as SignalboxWebSocketStreamError {
+            XCTAssertEqual(error, .connectionTimedOut)
+            XCTAssertEqual(
+                error.errorDescription,
+                "The server connection did not receive a heartbeat in time."
+            )
+        }
+        let sentMessages = await transport.sentMessages
+        XCTAssertTrue(sentMessages.isEmpty)
+    }
+
     func testListEventsPreservesPageWhenKnownEventFieldsEvolve() async throws {
         let transport = MockSignalboxHTTPTransport()
         await transport.setJSONResponse(
@@ -663,7 +686,7 @@ private actor QuietSignalboxWebSocketTransport: SignalboxWebSocketTransport {
     private var heartbeat: SignalboxWebSocketMessage?
     private(set) var sentMessages: [SignalboxWebSocketMessage] = []
 
-    init(heartbeat: SignalboxWebSocketMessage) {
+    init(heartbeat: SignalboxWebSocketMessage?) {
         self.heartbeat = heartbeat
     }
 

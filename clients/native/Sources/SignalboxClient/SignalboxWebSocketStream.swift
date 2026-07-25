@@ -80,11 +80,14 @@ private actor URLSessionSignalboxWebSocketDriver {
 }
 
 public enum SignalboxWebSocketStreamError: LocalizedError, Equatable {
+    case connectionTimedOut
     case connectionWentQuiet
     case unsupportedMessage
 
     public var errorDescription: String? {
         switch self {
+        case .connectionTimedOut:
+            return "The server connection did not receive a heartbeat in time."
         case .connectionWentQuiet:
             return "The server connection stopped receiving heartbeats."
         case .unsupportedMessage:
@@ -123,12 +126,14 @@ public final class SignalboxWebSocketStream: Sendable {
         AsyncThrowingStream { continuation in
             let transport = transportFactory()
             let watchdog = SignalboxHeartbeatWatchdog(timeout: heartbeatTimeout)
-            let timeoutAction: @Sendable () async -> Void = {
-                continuation.finish(throwing: SignalboxWebSocketStreamError.connectionWentQuiet)
+            let timeoutAction: @Sendable (SignalboxWebSocketStreamError) async -> Void = { error in
+                continuation.finish(throwing: error)
                 await transport.cancel()
             }
             let receiveTask = Task {
-                await watchdog.arm(onTimeout: timeoutAction)
+                await watchdog.arm {
+                    await timeoutAction(.connectionTimedOut)
+                }
                 do {
                     while !Task.isCancelled {
                         let message = try await transport.receive()
@@ -148,7 +153,9 @@ public final class SignalboxWebSocketStream: Sendable {
                         }
                         if case .heartbeat(let sentAt) = decoded {
                             try await sendHeartbeatAck(sentAt: sentAt, transport: transport)
-                            await watchdog.arm(onTimeout: timeoutAction)
+                            await watchdog.arm {
+                                await timeoutAction(.connectionWentQuiet)
+                            }
                             continue
                         }
                         continuation.yield(decoded)
