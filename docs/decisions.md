@@ -10,6 +10,26 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Bound native-client heartbeat silence to 45 seconds
+
+**Context.** The native client acknowledges server heartbeat frames, but an open
+WebSocket that stops delivering frames can otherwise remain connected
+indefinitely. The stream needs a finite quiet deadline that tolerates ordinary
+scheduling and network jitter while still correcting stale connection state.
+
+**Decision.** Start a 45-second quiet deadline when the WebSocket connects and
+restart it after each acknowledged heartbeat. If the deadline expires, surface a
+connection-quiet error and close the transport. Keep the deadline injectable so
+tests can exercise the watchdog without wall-clock delays.
+
+**Rejected alternatives.** Relying on platform request timeouts does not detect
+an already-open but silent WebSocket. Waiting indefinitely preserves stale
+connected state. A much shorter fixed deadline raises false disconnect risk
+without a recorded server heartbeat cadence that justifies it.
+
+**Affects.** The native client's `HubWebSocketStream` liveness behavior and its
+unit-test seam; the wire protocol and heartbeat acknowledgment remain unchanged.
+
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
 **Context.** Metadata list queries admit page sizes from one through one
