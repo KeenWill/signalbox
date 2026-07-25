@@ -10,6 +10,38 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Share immutable context-frontier prefixes
+
+**Context.** Complete membership rows and independently materialized domain
+snapshots repeated every retained prefix. An append-one history therefore stored
+and loaded a quadratic number of references, and scheduling reconstitution
+rebuilt the same ordered prefixes at hundreds of entries. The accepted frontier
+semantics already permit parent-plus-append storage when every identity resolves
+to the same exact sequence.
+
+**Decision.** Store each frontier header with an optional same-session prefix
+and only its absolute-position suffix rows; resolve and validate the complete
+ordered-distinct sequence through the immutable prefix chain. Scheduling loads
+the union of required chains and each delta once. Domain snapshots use `rpds`
+persistent vectors, ordered sets, and ordered maps so append derivation shares
+prefix content and indexes while preserving all public equality, iteration,
+rejection, and fail-closed reconstitution behavior.
+
+**Rejected alternatives.** An additional member-table index cannot remove rows
+that encode the repeated prefixes. Inferring every frontier from one maximum
+snapshot loses exact per-identity corruption checks. Digests or serialized
+arrays weaken relational completeness and foreign-key enforcement. A custom
+persistent tree would add local unsafe or balancing machinery already provided
+by a focused MIT-licensed crate.
+
+**Affects.** Migration `202607260300`, persistence frontier writes and
+scheduling reads, domain frontier materialization, the public domain spine, and
+the implemented frontier sections of
+[persistence-protocol](spec/persistence-protocol.md) and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Every
+existing composite frontier identity and complete resolved sequence is
+unchanged.
+
 ## 2026-07-24 — Preserve accepted IANA time-zone identifiers
 
 **Context.** Jiff's IANA lookup accepts aliases, but the lookup result does not

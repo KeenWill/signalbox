@@ -301,23 +301,9 @@ questions below remain open.
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) fixes
   evidence-bearing active-turn reconstitution with session-scoped acceptance
   tails. Streaming checkpoints, dispatch-generation placement, archival form,
-  and exact cancellation-delivery records remain open. The
-  [first physical frontier-layout choice](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
-  materializes complete ordered membership while preserving the accepted
-  frontier semantics' freedom for a later semantics-preserving migration. Those
-  remaining questions block only their corresponding adapter slices; the generic
-  scaffold and first typed command family are not blocked. (S03, S04, S17, S25,
-  S27)
-- **Submit-path scaling: scheduling projection and frontier storage.** The
-  [first frontier layout](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
-  materializes complete membership per snapshot and the submit path loads the
-  complete scheduling projection, content included per submission, inside the
-  session lock, degrading at hundreds of turns per session. A completeness
-  representation that bounds scheduling reads, plus a prefix-sharing or delta
-  layout the accepted frontier semantics permit, remains concretely undesigned.
-  The
-  [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
-  owns its accepted scheduling disposition. (S03, S04, S17)
+  and exact cancellation-delivery records remain open. Those remaining questions
+  block only their corresponding adapter slices; the generic scaffold and first
+  typed command family are not blocked. (S03, S04, S17, S25, S27)
 - **Update-event retention, pruning, and multiple hub processes.** Version one
   is owned by [process-protocol](spec/process-protocol.md). A pruning watermark,
   follower retention guarantees, and any later multiple-hub shared-fan-out

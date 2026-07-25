@@ -823,7 +823,7 @@ impl ModelCallExecution {
                 },
                 self.current_attempt,
                 ended_call,
-                self.current_snapshot,
+                CancellationFrontierSource::new(self.current_snapshot, &[]),
                 proof,
                 identities,
                 reclassified_pending_steering,
@@ -899,7 +899,7 @@ impl ModelCallExecution {
             &self.active_turn,
             &identities.pending_steering_reclassifications,
         )?;
-        let (result_entries, result_snapshot) = result_projection.into_parts();
+        let (result_entries, _result_snapshot) = result_projection.into_parts();
         let mut cancelled = close_cancelled_turn(
             ModelCallTurnScope {
                 session: self.session,
@@ -907,7 +907,7 @@ impl ModelCallExecution {
             },
             self.current_attempt,
             None,
-            result_snapshot,
+            CancellationFrontierSource::new(self.current_snapshot, &result_entries),
             interrupt.proof(),
             identities,
             reclassified_pending_steering,
@@ -1731,7 +1731,7 @@ fn apply_terminal_observation(
                     scope,
                     attempt,
                     Some(ended_call),
-                    source,
+                    CancellationFrontierSource::new(source, &[]),
                     proof,
                     identities,
                     reclassified_pending_steering,
@@ -4037,12 +4037,13 @@ pub(crate) fn apply_interrupt_to_executing_tool_batch(
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
+    let source_snapshot = batch.yielded_snapshot().clone();
     let result_projection = batch
         .prepare_cancellation_projection(result_entries, result_frontier)
         .map_err(|_| ModelCallClosureError::InterruptCorrelationMismatch)?;
     let reclassified_pending_steering =
         reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
-    let (tool_result_entries, result_snapshot) = result_projection.into_parts();
+    let (tool_result_entries, _result_snapshot) = result_projection.into_parts();
     let mut cancelled = close_cancelled_turn(
         ModelCallTurnScope {
             session: active_turn.session(),
@@ -4050,7 +4051,7 @@ pub(crate) fn apply_interrupt_to_executing_tool_batch(
         },
         current_attempt.clone(),
         None,
-        result_snapshot,
+        CancellationFrontierSource::new(source_snapshot, &tool_result_entries),
         proof,
         identities,
         reclassified_pending_steering,
@@ -4210,11 +4211,28 @@ fn assemble_failed_turn(
     })
 }
 
+struct CancellationFrontierSource<'a> {
+    snapshot: ResolvedContextFrontierSnapshot,
+    entries_before_cancellation: &'a [SemanticTranscriptEntry],
+}
+
+impl<'a> CancellationFrontierSource<'a> {
+    fn new(
+        snapshot: ResolvedContextFrontierSnapshot,
+        entries_before_cancellation: &'a [SemanticTranscriptEntry],
+    ) -> Self {
+        Self {
+            snapshot,
+            entries_before_cancellation,
+        }
+    }
+}
+
 fn close_cancelled_turn(
     scope: ModelCallTurnScope,
     attempt: CurrentTurnAttempt,
     call: Option<EndedModelCall>,
-    source: ResolvedContextFrontierSnapshot,
+    source: CancellationFrontierSource<'_>,
     proof: AppliedInterruptProof,
     identities: CancelledModelCallTurnIdentities,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
@@ -4231,11 +4249,15 @@ fn close_cancelled_turn(
         session,
         SemanticTranscriptEntryPayload::TurnCancelled { turn },
     );
+    let appended_entries = source
+        .entries_before_cancellation
+        .iter()
+        .map(SemanticTranscriptEntry::reference)
+        .chain(std::iter::once(cancellation_entry.reference()))
+        .collect();
     let terminal_snapshot = source
-        .derive_appending_candidate(
-            identities.terminal_frontier,
-            vec![cancellation_entry.reference()],
-        )
+        .snapshot
+        .derive_appending_candidate(identities.terminal_frontier, appended_entries)
         .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
     Ok(CancelledModelCallTurn {
         session,
@@ -6079,6 +6101,7 @@ mod tests {
     fn s07_inv029_tool_cancellation_accepts_same_turn_projection() {
         let execution = active_execution();
         let expected_turn = execution.turn();
+        let expected_prefix = execution.current_snapshot.frontier();
         let request = batch_request(41, &execution);
         let projection = ToolBatchReconstitutionInput::new(
             execution.session(),
@@ -6113,6 +6136,21 @@ mod tests {
             .expect("a turn-bound same-frontier projection terminalizes this turn");
         assert_eq!(cancelled.turn(), expected_turn);
         assert_eq!(cancelled.tool_result_entries().len(), 1);
+        assert_eq!(
+            cancelled.terminal_snapshot().immediate_semantic_prefix(),
+            Some(expected_prefix)
+        );
+        assert_eq!(
+            cancelled
+                .terminal_snapshot()
+                .appended_entries()
+                .map(|entry| entry.entry())
+                .collect::<Vec<_>>(),
+            vec![
+                semantic_transcript_entry_id(42),
+                semantic_transcript_entry_id(44)
+            ]
+        );
     }
 
     /// S07 / INV-006 / INV-029 / INV-037: a prepared but unsent call closes

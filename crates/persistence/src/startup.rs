@@ -649,21 +649,39 @@ async fn insert_prepared_failure(
 
     let member_count = u64::try_from(terminal_snapshot.entry_count())
         .map_err(|_| StartupScanCorruption::Inconsistent("terminal frontier member count"))?;
+    let appended_entry_count = terminal_snapshot.appended_entries().len();
+    let prefix_member_count = terminal_snapshot
+        .entry_count()
+        .checked_sub(appended_entry_count)
+        .ok_or(StartupScanCorruption::Inconsistent(
+            "terminal frontier prefix member count",
+        ))?;
     sqlx::query(
         "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id, member_count)
-         VALUES ($1, $2, $3)",
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(session_id_to_uuid(session))
     .bind(terminal_snapshot.frontier().snapshot().into_uuid())
+    .bind(
+        terminal_snapshot
+            .immediate_semantic_prefix()
+            .map(|prefix| prefix.snapshot().into_uuid()),
+    )
     .bind(Decimal::from(member_count))
     .execute(&mut *connection)
     .await?;
-    for (index, entry) in terminal_snapshot.ordered_entries().enumerate() {
-        let position = u64::try_from(index + 1)
-            .map_err(|_| StartupScanCorruption::Inconsistent("terminal member position"))?;
+    for (index, entry) in terminal_snapshot.appended_entries().enumerate() {
+        let position = prefix_member_count
+            .checked_add(index)
+            .and_then(|index| index.checked_add(1))
+            .and_then(|position| u64::try_from(position).ok())
+            .ok_or(StartupScanCorruption::Inconsistent(
+                "terminal member position",
+            ))?;
         sqlx::query(
-            "INSERT INTO context_frontier_member
+            "INSERT INTO context_frontier_delta
                 (owning_session_id, context_frontier_id, member_position,
                  source_session_id, semantic_entry_id)
              VALUES ($1, $2, $3, $4, $5)",

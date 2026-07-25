@@ -2496,46 +2496,82 @@ pub(crate) async fn load_scheduling_projection(
 
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
-        "SELECT context_frontier_id, member_count
-           FROM context_frontier
-          WHERE owning_session_id = $1
-            AND context_frontier_id = ANY($2)
-          ORDER BY context_frontier_id",
+        "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
+            SELECT required.context_frontier_id
+              FROM UNNEST($2::uuid[]) AS required(context_frontier_id)
+            UNION
+            SELECT frontier.prefix_context_frontier_id
+              FROM frontier_ids
+              JOIN context_frontier AS frontier
+                ON frontier.owning_session_id = $1
+               AND frontier.context_frontier_id =
+                       frontier_ids.context_frontier_id
+             WHERE frontier.prefix_context_frontier_id IS NOT NULL
+        )
+        SELECT
+            frontier.context_frontier_id,
+            frontier.prefix_context_frontier_id,
+            frontier.member_count,
+            delta.member_position,
+            delta.source_session_id,
+            delta.semantic_entry_id
+          FROM frontier_ids
+          JOIN context_frontier AS frontier
+            ON frontier.owning_session_id = $1
+           AND frontier.context_frontier_id =
+                   frontier_ids.context_frontier_id
+          LEFT JOIN context_frontier_delta AS delta
+            ON delta.owning_session_id = frontier.owning_session_id
+           AND delta.context_frontier_id =
+                   frontier.context_frontier_id
+         ORDER BY frontier.context_frontier_id, delta.member_position",
     )
     .bind(session_id_to_uuid(session_id))
     .bind(&required_frontier_ids)
     .fetch_all(&mut *connection)
     .await?;
-    let member_rows = sqlx::query(
-        "SELECT
-            context_frontier_id,
-            member_position,
-            source_session_id,
-            semantic_entry_id
-           FROM context_frontier_member
-          WHERE owning_session_id = $1
-            AND context_frontier_id = ANY($2)
-          ORDER BY context_frontier_id, member_position",
-    )
-    .bind(session_id_to_uuid(session_id))
-    .bind(&required_frontier_ids)
-    .fetch_all(&mut *connection)
-    .await?;
-    let mut members_by_frontier =
-        BTreeMap::<Uuid, Vec<(Decimal, SessionId, SemanticTranscriptEntryId)>>::new();
+    struct StoredFrontierDelta {
+        prefix: Option<Uuid>,
+        declared_count: Decimal,
+        members: Vec<(Decimal, SessionId, SemanticTranscriptEntryId)>,
+    }
+    let mut stored_frontiers = BTreeMap::<Uuid, StoredFrontierDelta>::new();
     let mut required_semantic_entries = BTreeSet::new();
-    for member_row in member_rows {
-        let source_session = required(&member_row, "source_session_id")?;
-        let semantic_entry = required(&member_row, "semantic_entry_id")?;
-        required_semantic_entries.insert((source_session, semantic_entry));
-        members_by_frontier
-            .entry(required(&member_row, "context_frontier_id")?)
-            .or_default()
-            .push((
-                required(&member_row, "member_position")?,
-                session_id_from_uuid(source_session),
-                SemanticTranscriptEntryId::from_uuid(semantic_entry),
-            ));
+    for row in frontier_rows {
+        let frontier: Uuid = required(&row, "context_frontier_id")?;
+        let prefix: Option<Uuid> = row.try_get("prefix_context_frontier_id")?;
+        let declared_count: Decimal = required(&row, "member_count")?;
+        let position: Option<Decimal> = row.try_get("member_position")?;
+        let source_session: Option<Uuid> = row.try_get("source_session_id")?;
+        let semantic_entry: Option<Uuid> = row.try_get("semantic_entry_id")?;
+        let stored = stored_frontiers
+            .entry(frontier)
+            .or_insert_with(|| StoredFrontierDelta {
+                prefix,
+                declared_count,
+                members: Vec::new(),
+            });
+        if stored.prefix != prefix || stored.declared_count != declared_count {
+            return Err(
+                SubmitInputCorruption::Inconsistent("context frontier repeated header").into(),
+            );
+        }
+        match (position, source_session, semantic_entry) {
+            (Some(position), Some(source_session), Some(semantic_entry)) => {
+                required_semantic_entries.insert((source_session, semantic_entry));
+                stored.members.push((
+                    position,
+                    session_id_from_uuid(source_session),
+                    SemanticTranscriptEntryId::from_uuid(semantic_entry),
+                ));
+            }
+            (None, None, None) => {}
+            _ => {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("context frontier delta row").into(),
+                );
+            }
+        }
     }
 
     let semantic_source_sessions = required_semantic_entries
@@ -2812,60 +2848,105 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("context frontier semantic entry").into());
     }
 
-    let mut snapshots = Vec::with_capacity(frontier_rows.len());
-    for frontier_row in frontier_rows {
-        let frontier_uuid: Uuid = required(&frontier_row, "context_frontier_id")?;
-        let declared_count: Decimal = required(&frontier_row, "member_count")?;
-        let member_rows = members_by_frontier
-            .remove(&frontier_uuid)
-            .unwrap_or_default();
+    if required_frontier_ids
+        .iter()
+        .any(|frontier| !stored_frontiers.contains_key(frontier))
+    {
+        return Err(SubmitInputCorruption::Missing("scheduling context frontier").into());
+    }
+    let mut children = BTreeMap::<Uuid, Vec<Uuid>>::new();
+    let mut ready = VecDeque::new();
+    for (frontier, stored) in &stored_frontiers {
+        if let Some(prefix) = stored.prefix {
+            if !stored_frontiers.contains_key(&prefix) {
+                return Err(SubmitInputCorruption::Missing("context frontier prefix").into());
+            }
+            children.entry(prefix).or_default().push(*frontier);
+        } else {
+            ready.push_back(*frontier);
+        }
+    }
+    let mut reconstructed = BTreeMap::<Uuid, ResolvedContextFrontierReconstitutionInput>::new();
+    while let Some(frontier) = ready.pop_front() {
+        let stored = &stored_frontiers[&frontier];
+        let prefix = stored
+            .prefix
+            .map(|prefix| {
+                reconstructed
+                    .get(&prefix)
+                    .cloned()
+                    .ok_or(SubmitInputCorruption::Missing(
+                        "reconstructed context frontier prefix",
+                    ))
+            })
+            .transpose()?;
+        let prefix_member_count = prefix.as_ref().map_or(0, |prefix| prefix.entry_count());
+        let actual_count = prefix_member_count
+            .checked_add(stored.members.len())
+            .ok_or(SubmitInputCorruption::Inconsistent(
+                "context frontier declared membership",
+            ))?;
         #[expect(
             clippy::expect_used,
             reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
         )]
-        let actual_count = u64::try_from(member_rows.len())
+        let actual_count = u64::try_from(actual_count)
             .expect("PostgreSQL result cardinality fits the u64 schema bound");
-        if declared_count != Decimal::from(actual_count) {
+        if stored.declared_count != Decimal::from(actual_count) {
             return Err(SubmitInputCorruption::Inconsistent(
                 "context frontier declared membership",
             )
             .into());
         }
-        let mut members = Vec::with_capacity(member_rows.len());
-        for (index, (position, source_session, semantic_entry)) in
-            member_rows.into_iter().enumerate()
+        let mut members = Vec::with_capacity(stored.members.len());
+        for (index, (position, source_session, semantic_entry)) in stored.members.iter().enumerate()
         {
             #[expect(
                 clippy::expect_used,
                 reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
             )]
-            let expected_position = u64::try_from(index + 1)
+            let expected_position = u64::try_from(prefix_member_count + index + 1)
                 .expect("PostgreSQL result cardinality fits the u64 schema bound");
-            if position != Decimal::from(expected_position) {
+            if *position != Decimal::from(expected_position) {
                 return Err(SubmitInputCorruption::Inconsistent(
                     "context frontier contiguous membership",
                 )
                 .into());
             }
             members.push(SemanticTranscriptEntryRef::from_source(
-                source_session,
-                semantic_entry,
+                *source_session,
+                *semantic_entry,
             ));
         }
-        snapshots.push(ResolvedContextFrontierReconstitutionInput::new(
-            session_id,
-            ContextFrontierId::from_uuid(frontier_uuid),
-            members,
-        ));
+        let input = match prefix {
+            None => ResolvedContextFrontierReconstitutionInput::new(
+                session_id,
+                ContextFrontierId::from_uuid(frontier),
+                members,
+            ),
+            Some(prefix) => {
+                prefix.derive_appending(ContextFrontierId::from_uuid(frontier), members)
+            }
+        };
+        reconstructed.insert(frontier, input);
+        if let Some(successors) = children.get(&frontier) {
+            ready.extend(successors.iter().copied());
+        }
     }
-    if !members_by_frontier.is_empty() {
-        return Err(
-            SubmitInputCorruption::Inconsistent("context frontier member without header").into(),
-        );
+    if reconstructed.len() != stored_frontiers.len() {
+        return Err(SubmitInputCorruption::Inconsistent("context frontier prefix cycle").into());
     }
-    if snapshots.len() != required_frontiers.len() {
-        return Err(SubmitInputCorruption::Missing("scheduling context frontier").into());
-    }
+    let snapshots = required_frontier_ids
+        .iter()
+        .map(|frontier| {
+            reconstructed
+                .get(frontier)
+                .cloned()
+                .ok_or(SubmitInputCorruption::Missing(
+                    "reconstructed scheduling context frontier",
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut input = AcceptedInputSchedulingReconstitutionInput::new(
         session,
