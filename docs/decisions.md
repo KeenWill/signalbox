@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Adopt house style guide (literal provenance, label discipline)
+
+**Context.** [docs/agents/testing-style.md](agents/testing-style.md) owns how a
+test body reads, but two disciplines that bind production and test code alike
+had no owning document: whether a literal visible at a use site is load-bearing
+or merely needs to exist, and when positional structure — runs of same-typed
+positions, and bare booleans worst of all — must become labeled structure.
+Reviews raised both case by case with no citable rule.
+
+**Decision.** Adopt [docs/style.md](style.md) as a normative companion to the
+testing style guide, owner-approved. It states five principles with a Rust
+mechanics appendix worked against real excerpts from this repository, and cites
+testing style rules as TS-*n* rather than restating them. It binds new and
+modified code; existing code is brought along only when already being changed
+for another reason.
+
+**Rejected alternatives.** Extending the testing style guide would put rules
+that bind production code inside a document scoped to tests. Filing the guide
+under `docs/agents/` would classify a rule binding all code as an agent process
+document. Leaving the discipline implicit keeps review feedback uncitable and
+inconsistent between reviewers.
+
+**Affects.** `docs/style.md`, the normative-surface inventory and style pointer
+in `AGENTS.md`, and review practice for new and modified code.
+
 ## 2026-07-25 — Index imported snapshots by attested source session
 
 **Context.** Exact source-content identity correctly makes an appended source a
