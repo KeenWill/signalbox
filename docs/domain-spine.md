@@ -5011,7 +5011,7 @@ impl ReviewTarget {
 
 pub struct ReviewRunRef { /* target + run */ }
 pub struct ReviewPassRef { /* run ref + pass */ }
-pub struct ReviewFindingRef { /* run ref + finding */ }
+pub struct ReviewFindingRef { /* producing pass ref + finding */ }
 impl ReviewRunRef {
     pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
     // accessors: target(), run()
@@ -5021,8 +5021,8 @@ impl ReviewPassRef {
     // accessors: run(), pass(), target()
 }
 impl ReviewFindingRef {
-    pub const fn new(run: ReviewRunRef, finding: ReviewFindingId) -> Self;
-    // accessors: run(), finding(), target()
+    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
+    // accessors: pass(), run(), finding(), target()
 }
 
 pub enum ReviewWorkflowKind {
@@ -5281,9 +5281,10 @@ impl ReviewFindingEvent {
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassRef,
+        pass_kind: ReviewPassKind,
         kind: ReviewFindingEventKind,
     ) -> Self;
-    // accessors: finding(), ordinal(), pass(), kind()
+    // accessors: finding(), ordinal(), pass(), pass_kind(), kind()
 }
 pub enum ReviewFindingStatus {
     Open,
@@ -5313,6 +5314,7 @@ pub enum ReviewFindingTransitionFailure {
     ForeignProducingPass,
     ForeignEventFinding,
     ForeignEventPass,
+    IncompatibleEventPassKind,
     ForeignReferencedFinding,
     SelfReference,
     ForeignExternalLink,
@@ -5340,10 +5342,14 @@ pub enum ReviewExternalObjectKind {
     ReviewComment,
     ChangeRequestComment,
 }
-pub struct ReviewExternalLinkAttachment { /* pass + external object key */ }
+pub struct ReviewExternalLinkAttachment { /* link + pass + external object key */ }
 impl ReviewExternalLinkAttachment {
-    pub const fn new(pass: ReviewPassRef, external_object: ReviewKey) -> Self;
-    // accessors: pass(), external_object()
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassRef,
+        external_object: ReviewKey,
+    ) -> Self;
+    // accessors: link(), pass(), external_object()
 }
 pub enum ReviewExternalObjectState {
     Current,
@@ -5385,6 +5391,7 @@ impl ReviewExternalLink {
 }
 pub enum ReviewExternalLinkTransitionError {
     AlreadyAttached,
+    ForeignAttachmentLink,
     ForeignObservationLink,
     ForeignPass,
     NotAttached,

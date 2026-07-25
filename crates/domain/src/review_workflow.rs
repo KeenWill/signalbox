@@ -464,22 +464,27 @@ impl ReviewPassRef {
     }
 }
 
-/// A finding reference carrying complete target/run ancestry.
+/// A finding reference carrying complete target/run/producing-pass ancestry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReviewFindingRef {
-    run: ReviewRunRef,
+    pass: ReviewPassRef,
     finding: ReviewFindingId,
 }
 
 impl ReviewFindingRef {
-    /// Binds one finding identity to its exact run.
-    pub const fn new(run: ReviewRunRef, finding: ReviewFindingId) -> Self {
-        Self { run, finding }
+    /// Binds one finding identity to its exact producing pass.
+    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self {
+        Self { pass, finding }
+    }
+
+    /// Returns the producing-pass reference.
+    pub const fn pass(self) -> ReviewPassRef {
+        self.pass
     }
 
     /// Returns the run reference.
     pub const fn run(self) -> ReviewRunRef {
-        self.run
+        self.pass.run()
     }
 
     /// Returns the finding identity.
@@ -489,7 +494,7 @@ impl ReviewFindingRef {
 
     /// Returns the target identity.
     pub const fn target(self) -> ReviewTargetId {
-        self.run.target()
+        self.pass.target()
     }
 }
 
@@ -1620,7 +1625,7 @@ impl ReviewFindingProposal {
                 ReviewFindingTransitionFailure::MissingDiffBase,
             ));
         }
-        if producing_pass.run() != reference.run() {
+        if producing_pass != reference.pass() {
             return Err(ReviewFindingTransitionError::proposal(
                 ReviewFindingTransitionFailure::ForeignProducingPass,
             ));
@@ -1657,6 +1662,7 @@ pub struct ReviewFindingExternalLinkRef {
 
 impl ReviewFindingExternalLinkRef {
     /// Derives a finding-bound reference from one attached canonical link.
+    #[allow(clippy::result_large_err)]
     pub fn try_new(
         finding: ReviewFindingRef,
         link: &ReviewExternalLink,
@@ -1775,6 +1781,7 @@ pub struct ReviewFindingEvent {
     finding: ReviewFindingRef,
     ordinal: ReviewEventOrdinal,
     pass: ReviewPassRef,
+    pass_kind: ReviewPassKind,
     kind: ReviewFindingEventKind,
 }
 
@@ -1784,12 +1791,14 @@ impl ReviewFindingEvent {
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassRef,
+        pass_kind: ReviewPassKind,
         kind: ReviewFindingEventKind,
     ) -> Self {
         Self {
             finding,
             ordinal,
             pass,
+            pass_kind,
             kind,
         }
     }
@@ -1807,6 +1816,11 @@ impl ReviewFindingEvent {
     /// Returns the producing pass.
     pub const fn pass(&self) -> ReviewPassRef {
         self.pass
+    }
+
+    /// Returns the canonical producing-pass kind.
+    pub const fn pass_kind(&self) -> ReviewPassKind {
+        self.pass_kind
     }
 
     /// Borrows the event kind and evidence.
@@ -1893,6 +1907,12 @@ impl ReviewFinding {
             return Err(ReviewFindingTransitionError {
                 event: Some(Box::new(event)),
                 failure: ReviewFindingTransitionFailure::ForeignEventPass,
+            });
+        }
+        if !finding_event_matches_pass_kind(&event.kind, event.pass_kind) {
+            return Err(ReviewFindingTransitionError {
+                event: Some(Box::new(event)),
+                failure: ReviewFindingTransitionFailure::IncompatibleEventPassKind,
             });
         }
         validate_finding_reference(&self.proposal, &event)?;
@@ -1990,6 +2010,31 @@ fn finding_transition(
     }
 }
 
+fn finding_event_matches_pass_kind(
+    event: &ReviewFindingEventKind,
+    pass_kind: ReviewPassKind,
+) -> bool {
+    matches!(
+        (event, pass_kind),
+        (
+            ReviewFindingEventKind::Accepted
+                | ReviewFindingEventKind::Rejected { .. }
+                | ReviewFindingEventKind::Stale,
+            ReviewPassKind::Judge
+        ) | (
+            ReviewFindingEventKind::Duplicate { .. } | ReviewFindingEventKind::Superseded { .. },
+            ReviewPassKind::Dedupe
+        ) | (
+            ReviewFindingEventKind::Posted { .. },
+            ReviewPassKind::Publish
+        ) | (ReviewFindingEventKind::Fixed, ReviewPassKind::Fix)
+            | (
+                ReviewFindingEventKind::BlockedWithReason { .. },
+                ReviewPassKind::Publish | ReviewPassKind::Fix
+            )
+    )
+}
+
 /// Why a finding proposal, event, or complete history is invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewFindingTransitionFailure {
@@ -2003,6 +2048,8 @@ pub enum ReviewFindingTransitionFailure {
     ForeignEventFinding,
     /// An event pass belongs to another target.
     ForeignEventPass,
+    /// The event kind cannot be produced by the canonical pass kind.
+    IncompatibleEventPassKind,
     /// A duplicate or successor finding belongs to another run.
     ForeignReferencedFinding,
     /// A finding names itself as its canonical or successor finding.
@@ -2102,17 +2149,28 @@ pub enum ReviewExternalObjectKind {
 /// One immutable external-object attachment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkAttachment {
+    link: ReviewExternalLinkId,
     pass: ReviewPassRef,
     external_object: ReviewKey,
 }
 
 impl ReviewExternalLinkAttachment {
     /// Constructs attachment evidence.
-    pub const fn new(pass: ReviewPassRef, external_object: ReviewKey) -> Self {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassRef,
+        external_object: ReviewKey,
+    ) -> Self {
         Self {
+            link,
             pass,
             external_object,
         }
+    }
+
+    /// Returns the owning external-link reservation.
+    pub const fn link(&self) -> ReviewExternalLinkId {
+        self.link
     }
 
     /// Returns the producing pass.
@@ -2239,6 +2297,9 @@ impl ReviewExternalLink {
         if self.attachment.is_some() {
             return Err(ReviewExternalLinkTransitionError::AlreadyAttached);
         }
+        if attachment.link != self.id {
+            return Err(ReviewExternalLinkTransitionError::ForeignAttachmentLink);
+        }
         if attachment.pass.target() != self.association.target() {
             return Err(ReviewExternalLinkTransitionError::ForeignPass);
         }
@@ -2307,6 +2368,8 @@ impl ReviewExternalLink {
 pub enum ReviewExternalLinkTransitionError {
     /// A second attachment was attempted.
     AlreadyAttached,
+    /// An attachment belongs to another external-link reservation.
+    ForeignAttachmentLink,
     /// An observation belongs to another external-link reservation.
     ForeignObservationLink,
     /// Attachment or observation evidence belongs to another target.
@@ -2385,7 +2448,7 @@ mod tests {
     }
 
     fn finding_ref(value: u128) -> ReviewFindingRef {
-        ReviewFindingRef::new(run_ref(), finding_id(value))
+        ReviewFindingRef::new(pass_ref(3), finding_id(value))
     }
 
     fn target_with_base() -> ReviewTarget {
@@ -2452,6 +2515,7 @@ mod tests {
             ReviewExternalObjectKind::ReviewComment,
         )
         .attach(ReviewExternalLinkAttachment::new(
+            link,
             pass_ref(20),
             key("external-comment-42"),
         ))
@@ -2651,12 +2715,13 @@ mod tests {
     fn inv001_review_references_preserve_typed_identity_ancestry() {
         let run = ReviewRunRef::new(target_id(1), run_id(2));
         let pass = ReviewPassRef::new(run, pass_id(3));
-        let finding = ReviewFindingRef::new(run, finding_id(4));
+        let finding = ReviewFindingRef::new(pass, finding_id(4));
 
         assert_eq!(run.target(), target_id(1));
         assert_eq!(run.run(), run_id(2));
         assert_eq!(pass.run(), run);
         assert_eq!(pass.pass(), pass_id(3));
+        assert_eq!(finding.pass(), pass);
         assert_eq!(finding.run(), run);
         assert_eq!(finding.finding(), finding_id(4));
     }
@@ -2691,6 +2756,24 @@ mod tests {
         .expect("file-relative finding needs no comparison revision");
         assert_eq!(proposal.reference(), finding_ref(10));
         assert_eq!(proposal.content().location().diff_side(), None);
+    }
+
+    /// INV-040: a finding reference authenticates its exact producing pass, not
+    /// merely another pass in the same run.
+    #[test]
+    fn inv040_finding_reference_rejects_cross_wired_producing_pass() {
+        let target = target_with_base();
+        let error = ReviewFindingProposal::try_new(
+            finding_ref(10),
+            pass_ref(4),
+            &target,
+            finding_content(Some(ReviewFindingDiffSide::Right)),
+        )
+        .expect_err("finding reference must name its exact producing pass");
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::ForeignProducingPass
+        );
     }
 
     /// INV-040: run transitions reject a pass owned by another run.
@@ -3125,6 +3208,7 @@ mod tests {
                 finding_ref(10),
                 ReviewEventOrdinal::one(),
                 pass_ref(20),
+                ReviewPassKind::Judge,
                 ReviewFindingEventKind::Accepted,
             ))
             .expect("open finding may be accepted")
@@ -3132,6 +3216,7 @@ mod tests {
                 finding_ref(10),
                 ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
                 pass_ref(21),
+                ReviewPassKind::Publish,
                 ReviewFindingEventKind::Posted {
                     link: finding_link_ref(finding_ref(10), link_id(30)),
                 },
@@ -3141,6 +3226,7 @@ mod tests {
                 finding_ref(10),
                 ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
                 pass_ref(22),
+                ReviewPassKind::Fix,
                 ReviewFindingEventKind::Fixed,
             ))
             .expect("posted finding may be fixed");
@@ -3151,6 +3237,7 @@ mod tests {
                 finding_ref(10),
                 ReviewEventOrdinal::try_new(4).expect("positive ordinal"),
                 pass_ref(23),
+                ReviewPassKind::Judge,
                 ReviewFindingEventKind::Accepted,
             ))
             .expect_err("fixed finding is terminal");
@@ -3170,6 +3257,7 @@ mod tests {
                 finding_ref(10),
                 ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
                 pass_ref(20),
+                ReviewPassKind::Judge,
                 ReviewFindingEventKind::Accepted,
             ))
             .expect_err("history must begin at ordinal one");
@@ -3189,6 +3277,7 @@ mod tests {
             finding_ref(11),
             ReviewEventOrdinal::one(),
             pass_ref(20),
+            ReviewPassKind::Judge,
             ReviewFindingEventKind::Accepted,
         );
         let error = ReviewFinding::new(proposal())
@@ -3197,6 +3286,27 @@ mod tests {
         assert_eq!(
             error.failure(),
             ReviewFindingTransitionFailure::ForeignEventFinding
+        );
+        assert_eq!(error.event(), Some(&event));
+    }
+
+    /// INV-040: a same-target pass cannot produce an event outside its closed
+    /// pass-kind responsibility.
+    #[test]
+    fn inv040_finding_history_rejects_incompatible_event_pass_kind() {
+        let event = ReviewFindingEvent::new(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            pass_ref(20),
+            ReviewPassKind::Publish,
+            ReviewFindingEventKind::Accepted,
+        );
+        let error = ReviewFinding::new(proposal())
+            .apply(event.clone())
+            .expect_err("publication pass cannot accept a finding");
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::IncompatibleEventPassKind
         );
         assert_eq!(error.event(), Some(&event));
     }
@@ -3248,6 +3358,7 @@ mod tests {
 
         let attached = pending
             .attach(ReviewExternalLinkAttachment::new(
+                link_id(30),
                 pass_ref(20),
                 key("external-comment-42"),
             ))
@@ -3276,6 +3387,7 @@ mod tests {
             ReviewExternalObjectKind::ReviewComment,
         )
         .attach(ReviewExternalLinkAttachment::new(
+            link_id(30),
             pass_ref(20),
             key("external-comment-42"),
         ))
@@ -3291,6 +3403,29 @@ mod tests {
         assert_eq!(
             error,
             ReviewExternalLinkTransitionError::ForeignObservationLink
+        );
+    }
+
+    /// INV-041: an attachment from another same-target reservation cannot be
+    /// attributed to the loaded aggregate.
+    #[test]
+    fn inv041_external_link_rejects_foreign_attachment_owner() {
+        let pending = ReviewExternalLink::reserve(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding_ref(10)),
+            key("code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        );
+        let error = pending
+            .attach(ReviewExternalLinkAttachment::new(
+                link_id(31),
+                pass_ref(20),
+                key("external-comment-42"),
+            ))
+            .expect_err("attachment owner must match the aggregate link");
+        assert_eq!(
+            error,
+            ReviewExternalLinkTransitionError::ForeignAttachmentLink
         );
     }
 
