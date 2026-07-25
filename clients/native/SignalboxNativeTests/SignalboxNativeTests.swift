@@ -16,7 +16,7 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertTrue(monitor.contains { $0.status.state == .failed })
     }
 
-    func testSettingsRejectsInvalidServerURL() {
+    func testSettingsRejectsInvalidServerURL() throws {
         let settings = SignalboxSettingsViewModel(
             keychain: KeychainSecretStore(
                 service: "co.rdwd.SignalboxNativeTests.invalid-url",
@@ -27,9 +27,7 @@ final class SignalboxNativeTests: XCTestCase {
         settings.serverURLText = "not a url"
         settings.apiKey = "key"
 
-        guard case .failure = settings.configurationResult() else {
-            return XCTFail("Expected invalid URL failure")
-        }
+        try requireFailure(settings.configurationResult())
     }
 
     func testSettingsKeychainUsesInjectedIdentity() throws {
@@ -72,12 +70,11 @@ final class SignalboxNativeTests: XCTestCase {
         )
         let client = SignalboxAPIClient(configuration: configuration, transport: transport)
 
-        do {
+        let error = try await requireSignalboxClientError {
             _ = try await client.listTemplates()
-            XCTFail("Expected a service-unavailable error")
-        } catch let error as SignalboxClientError {
-            XCTAssertFalse(error.localizedDescription.contains(configuredCredential))
         }
+
+        XCTAssertFalse(error.localizedDescription.contains(configuredCredential))
     }
 
     func testApprovalCardsShowTheirMatchedConcurrentToolCallActions() throws {
@@ -86,6 +83,8 @@ final class SignalboxNativeTests: XCTestCase {
         let secondCallID = SignalboxToolCallID(rawValue: "call-B")
         let firstInvocationID = SignalboxToolInvocationID(rawValue: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         let secondInvocationID = SignalboxToolInvocationID(rawValue: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        let firstArguments = #"{"cmd":"ls"}"#
+        let secondArguments = #"{"cmd":"delete important"}"#
         let timestamp = try XCTUnwrap(
             SignalboxJSONCoding.decoder().decode(Date.self, from: Data(#""2026-05-10T12:00:00Z""#.utf8))
         )
@@ -101,7 +100,7 @@ final class SignalboxNativeTests: XCTestCase {
                                 SignalboxFunctionCallContent(
                                     kind: "function_call",
                                     name: "bash",
-                                    arguments: #"{"cmd":"ls"}"#,
+                                    arguments: firstArguments,
                                     callID: firstCallID
                                 )
                             ),
@@ -109,7 +108,7 @@ final class SignalboxNativeTests: XCTestCase {
                                 SignalboxFunctionCallContent(
                                     kind: "function_call",
                                     name: "bash",
-                                    arguments: #"{"cmd":"delete important"}"#,
+                                    arguments: secondArguments,
                                     callID: secondCallID
                                 )
                             ),
@@ -173,25 +172,28 @@ final class SignalboxNativeTests: XCTestCase {
         let timeline = SignalboxEventNormalizer.normalize([callEvent, firstInvocation, secondInvocation])
 
         XCTAssertEqual(timeline.count, 2)
-        guard case .tool(let firstCard) = timeline[0],
-              case .tool(let secondCard) = timeline[1]
-        else {
-            return XCTFail("Expected two approval cards")
-        }
+        let firstCard = try requireToolCard(timeline[0])
+        let secondCard = try requireToolCard(timeline[1])
         XCTAssertEqual(firstCard.invocationID, firstInvocationID)
         XCTAssertEqual(firstCard.status, .waitingForApproval)
-        XCTAssertEqual(firstCard.arguments, #"{"cmd":"ls"}"#)
+        XCTAssertEqual(firstCard.arguments, firstArguments)
         XCTAssertEqual(secondCard.invocationID, secondInvocationID)
         XCTAssertEqual(secondCard.status, .waitingForApproval)
-        XCTAssertEqual(secondCard.arguments, #"{"cmd":"delete important"}"#)
+        XCTAssertEqual(secondCard.arguments, secondArguments)
     }
 
     func testWebSocketStreamAcknowledgesHeartbeatBeforeYieldingNextFrame() async throws {
+        let heartbeatSentAt = "2026-05-10T12:00:00Z"
+        let expectedSentAt = try SignalboxJSONCoding.decoder().decode(
+            Date.self,
+            from: Data("\"\(heartbeatSentAt)\"".utf8)
+        )
         let heartbeat = """
-        {"kind":"heartbeat","sent_at":"2026-05-10T12:00:00Z"}
+        {"kind":"heartbeat","sent_at":"\(heartbeatSentAt)"}
         """
+        let nextFrameKind = "turn_started"
         let nextFrame = """
-        {"kind":"turn_started","turn_id":"turn-1"}
+        {"kind":"\(nextFrameKind)","turn_id":"turn-1"}
         """
         let transport = StubSignalboxWebSocketTransport(
             incoming: [.string(heartbeat), .string(nextFrame)]
@@ -202,32 +204,27 @@ final class SignalboxNativeTests: XCTestCase {
         let yieldedMessage = try await iterator.next()
         let message = try XCTUnwrap(yieldedMessage)
 
-        guard case .unknown(let kind, _, _) = message else {
-            return XCTFail("Expected the frame after the heartbeat")
-        }
-        XCTAssertEqual(kind, "turn_started")
+        let (kind, _) = try requireUnknownServerMessage(message)
+        XCTAssertEqual(kind, nextFrameKind)
         let sentMessages = await transport.sentMessages
         XCTAssertEqual(sentMessages.count, 1)
-        guard case .string(let acknowledgment) = sentMessages[0] else {
-            return XCTFail("Expected a string heartbeat acknowledgment")
-        }
+        let acknowledgment = try requireStringWebSocketMessage(sentMessages[0])
         let decoded = try SignalboxJSONCoding.decoder().decode(
             TestHeartbeatAcknowledgment.self,
             from: Data(acknowledgment.utf8)
         )
         XCTAssertEqual(decoded.kind, "heartbeat_ack")
-        XCTAssertEqual(
-            decoded.sentAt,
-            try SignalboxJSONCoding.decoder().decode(Date.self, from: Data(#""2026-05-10T12:00:00Z""#.utf8))
-        )
+        XCTAssertEqual(decoded.sentAt, expectedSentAt)
     }
 
     func testWebSocketStreamCreatesTransportLazilyForEachMessagesCall() async throws {
+        let firstFrameKind = "turn_started"
+        let secondFrameKind = "turn_completed"
         let firstTransport = StubSignalboxWebSocketTransport(
-            incoming: [.string(#"{"kind":"turn_started"}"#)]
+            incoming: [.string(#"{"kind":"\#(firstFrameKind)"}"#)]
         )
         let secondTransport = StubSignalboxWebSocketTransport(
-            incoming: [.string(#"{"kind":"turn_completed"}"#)]
+            incoming: [.string(#"{"kind":"\#(secondFrameKind)"}"#)]
         )
         let factory = StubSignalboxWebSocketTransportFactory(
             transports: [firstTransport, secondTransport]
@@ -241,26 +238,26 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(factory.createdTransportCount, 1)
         let firstYield = try await firstIterator.next()
         let firstMessage = try XCTUnwrap(firstYield)
-        guard case .unknown(let firstKind, _, _) = firstMessage else {
-            return XCTFail("Expected the first transport's frame")
-        }
-        XCTAssertEqual(firstKind, "turn_started")
+        let (firstKind, _) = try requireUnknownServerMessage(firstMessage)
+        XCTAssertEqual(firstKind, firstFrameKind)
 
         var secondIterator = stream.messages().makeAsyncIterator()
         XCTAssertEqual(factory.createdTransportCount, 2)
         let secondYield = try await secondIterator.next()
         let secondMessage = try XCTUnwrap(secondYield)
-        guard case .unknown(let secondKind, _, _) = secondMessage else {
-            return XCTFail("Expected the second transport's frame")
-        }
-        XCTAssertEqual(secondKind, "turn_completed")
+        let (secondKind, _) = try requireUnknownServerMessage(secondMessage)
+        XCTAssertEqual(secondKind, secondFrameKind)
     }
 
     func testWebSocketStreamContinuesAfterUndecodableFrame() async throws {
+        let evolvedFrameKind = "event_appended"
+        let followingFrameKind = "turn_started"
         let transport = StubSignalboxWebSocketTransport(
             incoming: [
-                .string(#"{"kind":"event_appended","event_id":"not-an-integer","event":{}}"#),
-                .string(#"{"kind":"turn_started","turn_id":"turn-1"}"#),
+                .string(
+                    #"{"kind":"\#(evolvedFrameKind)","event_id":"not-an-integer","event":{}}"#
+                ),
+                .string(#"{"kind":"\#(followingFrameKind)","turn_id":"turn-1"}"#),
             ]
         )
         let stream = SignalboxWebSocketStream(transportFactory: { transport })
@@ -271,23 +268,20 @@ final class SignalboxNativeTests: XCTestCase {
         let secondYield = try await iterator.next()
         let secondMessage = try XCTUnwrap(secondYield)
 
-        guard case .unknown(let firstKind, _, let diagnostic) = firstMessage else {
-            return XCTFail("Expected the evolved known frame to use the unknown-frame path")
-        }
-        XCTAssertEqual(firstKind, "event_appended")
+        let (firstKind, diagnostic) = try requireUnknownServerMessage(firstMessage)
+        XCTAssertEqual(firstKind, evolvedFrameKind)
         XCTAssertEqual(diagnostic?.message, "Unexpected field type at event_id.")
-        guard case .unknown(let secondKind, _, let secondDiagnostic) = secondMessage else {
-            return XCTFail("Expected the frame after the decode failure")
-        }
-        XCTAssertEqual(secondKind, "turn_started")
+        let (secondKind, secondDiagnostic) = try requireUnknownServerMessage(secondMessage)
+        XCTAssertEqual(secondKind, followingFrameKind)
         XCTAssertNil(secondDiagnostic)
     }
 
     func testWebSocketStreamSurfacesMalformedPayloadAndContinues() async throws {
+        let followingFrameKind = "turn_started"
         let transport = StubSignalboxWebSocketTransport(
             incoming: [
                 .string("not-json"),
-                .string(#"{"kind":"turn_started","turn_id":"turn-1"}"#),
+                .string(#"{"kind":"\#(followingFrameKind)","turn_id":"turn-1"}"#),
             ]
         )
         let stream = SignalboxWebSocketStream(transportFactory: { transport })
@@ -298,14 +292,10 @@ final class SignalboxNativeTests: XCTestCase {
         let secondYield = try await iterator.next()
         let secondMessage = try XCTUnwrap(secondYield)
 
-        guard case .diagnostic(let diagnostic) = firstMessage else {
-            return XCTFail("Expected a surfaced payload diagnostic")
-        }
+        let diagnostic = try requireDecodingDiagnostic(firstMessage)
         XCTAssertEqual(diagnostic.message, "Invalid field value at the payload.")
-        guard case .unknown(let kind, _, let secondDiagnostic) = secondMessage else {
-            return XCTFail("Expected the frame after the malformed payload")
-        }
-        XCTAssertEqual(kind, "turn_started")
+        let (kind, secondDiagnostic) = try requireUnknownServerMessage(secondMessage)
+        XCTAssertEqual(kind, followingFrameKind)
         XCTAssertNil(secondDiagnostic)
     }
 
@@ -314,48 +304,63 @@ final class SignalboxNativeTests: XCTestCase {
         {"kind":"heartbeat","sent_at":"2026-05-10T12:00:00Z"}
         """
         let transport = QuietSignalboxWebSocketTransport(heartbeat: .string(heartbeat))
+        let scheduler = ControlledSignalboxWebSocketWatchdogScheduler()
         let stream = SignalboxWebSocketStream(
             transportFactory: { transport },
-            heartbeatTimeout: .milliseconds(25)
+            heartbeatTimeout: .seconds(45),
+            watchdogScheduler: scheduler
         )
 
-        var iterator = stream.messages().makeAsyncIterator()
-
-        do {
-            _ = try await iterator.next()
-            XCTFail("Expected a quiet-connection failure")
-        } catch let error as SignalboxWebSocketStreamError {
-            XCTAssertEqual(error, .connectionWentQuiet)
-            XCTAssertEqual(error.errorDescription, "The server connection stopped receiving heartbeats.")
+        let messages = stream.messages()
+        let nextMessage = Task {
+            var iterator = messages.makeAsyncIterator()
+            return try await iterator.next()
         }
+
+        await transport.waitForSentMessageCount(1)
+        await scheduler.waitForScheduleCount(2)
+        await scheduler.fireLatest()
+        let error = try await requireWebSocketStreamError(nextMessage)
+
+        XCTAssertEqual(error, .connectionWentQuiet)
+        XCTAssertEqual(error.errorDescription, "The server connection stopped receiving heartbeats.")
         let sentMessages = await transport.sentMessages
         XCTAssertEqual(sentMessages.count, 1)
     }
 
     func testWebSocketStreamDistinguishesInitialLivenessTimeout() async throws {
         let transport = QuietSignalboxWebSocketTransport(heartbeat: nil)
+        let scheduler = ControlledSignalboxWebSocketWatchdogScheduler()
         let stream = SignalboxWebSocketStream(
             transportFactory: { transport },
-            heartbeatTimeout: .milliseconds(25)
+            heartbeatTimeout: .seconds(45),
+            watchdogScheduler: scheduler
         )
 
-        var iterator = stream.messages().makeAsyncIterator()
-
-        do {
-            _ = try await iterator.next()
-            XCTFail("Expected an initial liveness timeout")
-        } catch let error as SignalboxWebSocketStreamError {
-            XCTAssertEqual(error, .connectionTimedOut)
-            XCTAssertEqual(
-                error.errorDescription,
-                "The server connection did not receive a heartbeat in time."
-            )
+        let messages = stream.messages()
+        let nextMessage = Task {
+            var iterator = messages.makeAsyncIterator()
+            return try await iterator.next()
         }
+
+        await scheduler.waitForScheduleCount(1)
+        await scheduler.fireLatest()
+        let error = try await requireWebSocketStreamError(nextMessage)
+
+        XCTAssertEqual(error, .connectionTimedOut)
+        XCTAssertEqual(
+            error.errorDescription,
+            "The server connection did not receive a heartbeat in time."
+        )
         let sentMessages = await transport.sentMessages
         XCTAssertTrue(sentMessages.isEmpty)
     }
 
     func testListEventsPreservesPageWhenKnownEventFieldsEvolve() async throws {
+        let preservedEventID = SignalboxEventID(rawValue: 1)
+        let evolvedEventID = SignalboxEventID(rawValue: 2)
+        let preservedEventKind = "future_event"
+        let evolvedEventKind = "message"
         let transport = MockSignalboxHTTPTransport()
         await transport.setJSONResponse(
             path: "/api/v1/sessions/session-1/events",
@@ -363,13 +368,13 @@ final class SignalboxNativeTests: XCTestCase {
             {
               "events": [
                 {
-                  "event_id": 1,
-                  "event": {"kind": "future_event", "field": "preserved"}
+                  "event_id": \(preservedEventID.rawValue),
+                  "event": {"kind": "\(preservedEventKind)", "field": "preserved"}
                 },
                 {
-                  "event_id": 2,
+                  "event_id": \(evolvedEventID.rawValue),
                   "event": {
-                    "kind": "message",
+                    "kind": "\(evolvedEventKind)",
                     "message": {
                       "role": "assistant",
                       "parts": [{"kind": "text", "text": "still loading"}]
@@ -397,20 +402,50 @@ final class SignalboxNativeTests: XCTestCase {
         let events = try await client.listEvents(sessionID: SignalboxSessionID(rawValue: "session-1"))
 
         XCTAssertEqual(events.count, 2)
-        XCTAssertEqual(events[0].eventID, SignalboxEventID(rawValue: 1))
-        guard case .unknown(let preservedUnknown) = events[0].event else {
-            return XCTFail("Expected the unknown event to remain available")
-        }
-        XCTAssertEqual(preservedUnknown.kind, "future_event")
+        XCTAssertEqual(events[0].eventID, preservedEventID)
+        let preservedUnknown = try requireUnknownConversationEvent(events[0].event)
+        XCTAssertEqual(preservedUnknown.kind, preservedEventKind)
         XCTAssertNil(preservedUnknown.decodingDiagnostic)
-        XCTAssertEqual(events[1].eventID, SignalboxEventID(rawValue: 2))
-        guard case .unknown(let evolvedKnownEvent) = events[1].event else {
-            return XCTFail("Expected the evolved event to degrade to an unknown event")
-        }
-        XCTAssertEqual(evolvedKnownEvent.kind, "message")
+        XCTAssertEqual(events[1].eventID, evolvedEventID)
+        let evolvedKnownEvent = try requireUnknownConversationEvent(events[1].event)
+        XCTAssertEqual(evolvedKnownEvent.kind, evolvedEventKind)
         XCTAssertEqual(
             evolvedKnownEvent.decodingDiagnostic?.message,
             "Missing required field at events[1].event.created_from."
+        )
+    }
+
+    func testKnownEventInvalidTimestampDiagnosticIncludesFieldPath() throws {
+        let record = try SignalboxJSONCoding.decoder().decode(
+            SignalboxStoredEvent.self,
+            from: Data(
+                """
+                {
+                  "event_id": 1,
+                  "event": {
+                    "kind": "message",
+                    "message": {
+                      "role": "assistant",
+                      "parts": [{"kind": "text", "text": "visible detail"}]
+                    },
+                    "visible_to_llm": true,
+                    "visible_to_user": true,
+                    "is_streaming": false,
+                    "parent_tool_invocation": null,
+                    "created_at": "not-a-timestamp",
+                    "last_modified_at": "2026-05-10T12:00:00Z",
+                    "created_from": "server"
+                  }
+                }
+                """.utf8
+            )
+        )
+
+        let degradedEvent = try requireUnknownConversationEvent(record.event)
+
+        XCTAssertEqual(
+            degradedEvent.decodingDiagnostic?.message,
+            "Invalid field value at event.created_at."
         )
     }
 
@@ -439,9 +474,7 @@ final class SignalboxNativeTests: XCTestCase {
             )
         )
 
-        guard case .unknown(let degradedEvent) = record.event else {
-            return XCTFail("Expected the evolved known event to degrade")
-        }
+        let degradedEvent = try requireUnknownConversationEvent(record.event)
         XCTAssertEqual(
             degradedEvent.decodingDiagnostic?.message,
             "Missing required field at event.created_from."
@@ -455,19 +488,21 @@ final class SignalboxNativeTests: XCTestCase {
         let session = try XCTUnwrap(sessions.first)
         let service = UnknownFrameSignalboxService()
         let viewModel = SessionDetailViewModel(session: session) { service }
-        let frameHandled = expectation(description: "unknown frame recorded")
-        let observation = viewModel.$unhandledFrameKinds
-            .filter { $0["turn_started"] == 1 }
-            .first()
-            .sink { _ in frameHandled.fulfill() }
+        let observation = observeUnhandledFrame(
+            UnknownFrameSignalboxService.frameKind,
+            on: viewModel
+        )
 
         viewModel.connectStream()
-        await fulfillment(of: [frameHandled], timeout: 1)
+        await fulfillment(of: [observation.expectation], timeout: 1)
 
         XCTAssertTrue(viewModel.events.isEmpty)
         XCTAssertTrue(viewModel.timelineItems.isEmpty)
-        XCTAssertEqual(viewModel.unhandledFrameKinds, ["turn_started": 1])
-        withExtendedLifetime(observation) {}
+        XCTAssertEqual(
+            viewModel.unhandledFrameKinds,
+            [UnknownFrameSignalboxService.frameKind: 1]
+        )
+        withExtendedLifetime(observation.cancellable) {}
     }
 
     func testReconnectRejectsProcessedStaleStreamCompletion() async throws {
@@ -479,31 +514,149 @@ final class SignalboxNativeTests: XCTestCase {
 
         viewModel.connectStream()
         await service.waitForStreamInvocationCount(1)
-        let staleCompletionRejected = expectation(description: "stale completion rejected")
-        let staleCompletionObservation = viewModel.$ignoredStaleStreamCompletionCount
-            .filter { $0 == 1 }
-            .first()
-            .sink { _ in staleCompletionRejected.fulfill() }
+        let staleCompletion = observeStaleCompletionRejection(on: viewModel)
         viewModel.disconnectStream()
         viewModel.connectStream()
         await service.waitForStreamInvocationCount(2)
 
-        await fulfillment(of: [staleCompletionRejected], timeout: 1)
+        await fulfillment(of: [staleCompletion.expectation], timeout: 1)
 
         XCTAssertTrue(viewModel.isStreaming)
         XCTAssertEqual(viewModel.ignoredStaleStreamCompletionCount, 1)
 
-        let currentStreamStopped = expectation(description: "current stream stopped")
-        let currentStreamObservation = viewModel.$isStreaming
-            .filter { !$0 }
-            .first()
-            .sink { _ in currentStreamStopped.fulfill() }
+        let currentStreamStopped = observeCurrentStreamStopped(on: viewModel)
         service.finishStream(at: 1)
-        await fulfillment(of: [currentStreamStopped], timeout: 1)
+        await fulfillment(of: [currentStreamStopped.expectation], timeout: 1)
 
         XCTAssertFalse(viewModel.isStreaming)
-        withExtendedLifetime(staleCompletionObservation) {}
-        withExtendedLifetime(currentStreamObservation) {}
+        withExtendedLifetime(staleCompletion.cancellable) {}
+        withExtendedLifetime(currentStreamStopped.cancellable) {}
+    }
+
+    private func requireFailure<Success, Failure: Error>(
+        _ result: Result<Success, Failure>
+    ) throws {
+        guard case .failure = result else {
+            throw SignalboxNativeTestExpectationError("Expected a failure result")
+        }
+    }
+
+    private func requireSignalboxClientError(
+        _ operation: () async throws -> Void
+    ) async throws -> SignalboxClientError {
+        do {
+            try await operation()
+            throw SignalboxNativeTestExpectationError("Expected a Signalbox client error")
+        } catch let error as SignalboxClientError {
+            return error
+        } catch {
+            throw error
+        }
+    }
+
+    private func requireToolCard(
+        _ item: SignalboxTimelineItem
+    ) throws -> SignalboxToolCard {
+        guard case .tool(let card) = item else {
+            throw SignalboxNativeTestExpectationError("Expected a tool timeline card")
+        }
+        return card
+    }
+
+    private func requireUnknownServerMessage(
+        _ message: SignalboxServerMessage
+    ) throws -> (kind: String, diagnostic: SignalboxDecodingDiagnostic?) {
+        guard case .unknown(let kind, _, let diagnostic) = message else {
+            throw SignalboxNativeTestExpectationError("Expected an unknown server message")
+        }
+        return (kind, diagnostic)
+    }
+
+    private func requireStringWebSocketMessage(
+        _ message: SignalboxWebSocketMessage
+    ) throws -> String {
+        guard case .string(let string) = message else {
+            throw SignalboxNativeTestExpectationError("Expected a string WebSocket message")
+        }
+        return string
+    }
+
+    private func requireDecodingDiagnostic(
+        _ message: SignalboxServerMessage
+    ) throws -> SignalboxDecodingDiagnostic {
+        guard case .diagnostic(let diagnostic) = message else {
+            throw SignalboxNativeTestExpectationError("Expected a decoding diagnostic")
+        }
+        return diagnostic
+    }
+
+    private func requireUnknownConversationEvent(
+        _ event: SignalboxConversationEvent
+    ) throws -> SignalboxUnknownEvent {
+        guard case .unknown(let unknownEvent) = event else {
+            throw SignalboxNativeTestExpectationError("Expected an unknown conversation event")
+        }
+        return unknownEvent
+    }
+
+    private func requireWebSocketStreamError(
+        _ nextMessage: Task<SignalboxServerMessage?, Error>
+    ) async throws -> SignalboxWebSocketStreamError {
+        do {
+            _ = try await nextMessage.value
+            throw SignalboxNativeTestExpectationError("Expected a WebSocket stream error")
+        } catch let error as SignalboxWebSocketStreamError {
+            return error
+        } catch {
+            throw error
+        }
+    }
+
+    private func observeUnhandledFrame(
+        _ kind: String,
+        on viewModel: SessionDetailViewModel
+    ) -> PublishedObservation {
+        let expectation = expectation(description: "unknown frame recorded")
+        let cancellable = viewModel.$unhandledFrameKinds
+            .filter { $0[kind] == 1 }
+            .first()
+            .sink { _ in expectation.fulfill() }
+        return PublishedObservation(expectation: expectation, cancellable: cancellable)
+    }
+
+    private func observeStaleCompletionRejection(
+        on viewModel: SessionDetailViewModel
+    ) -> PublishedObservation {
+        let expectation = expectation(description: "stale completion rejected")
+        let cancellable = viewModel.$ignoredStaleStreamCompletionCount
+            .filter { $0 == 1 }
+            .first()
+            .sink { _ in expectation.fulfill() }
+        return PublishedObservation(expectation: expectation, cancellable: cancellable)
+    }
+
+    private func observeCurrentStreamStopped(
+        on viewModel: SessionDetailViewModel
+    ) -> PublishedObservation {
+        let expectation = expectation(description: "current stream stopped")
+        let cancellable = viewModel.$isStreaming
+            .filter { !$0 }
+            .first()
+            .sink { _ in expectation.fulfill() }
+        return PublishedObservation(expectation: expectation, cancellable: cancellable)
+    }
+}
+
+private struct PublishedObservation {
+    let expectation: XCTestExpectation
+    let cancellable: AnyCancellable
+}
+
+private struct SignalboxNativeTestExpectationError: LocalizedError {
+    let errorDescription: String?
+
+    init(_ description: String) {
+        self.errorDescription = description
     }
 }
 
@@ -553,11 +706,112 @@ private final class StubSignalboxWebSocketTransportFactory: @unchecked Sendable 
     }
 }
 
+private final class ControlledSignalboxWebSocketWatchdogScheduler:
+    @unchecked Sendable,
+    SignalboxWebSocketWatchdogScheduler
+{
+    private struct ScheduledAction {
+        let id: Int
+        let action: @Sendable () async -> Void
+        var isCancelled: Bool
+    }
+
+    private let lock = NSLock()
+    private var nextID = 0
+    private var scheduledActions: [ScheduledAction] = []
+    private var scheduleCountWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    func schedule(
+        after _: Duration,
+        action: @escaping @Sendable () async -> Void
+    ) -> any SignalboxWebSocketScheduledAction {
+        lock.lock()
+        let id = nextID
+        nextID += 1
+        scheduledActions.append(
+            ScheduledAction(id: id, action: action, isCancelled: false)
+        )
+        let scheduleCount = scheduledActions.count
+        let readyWaiters = scheduleCountWaiters
+            .filter { expectedCount, _ in expectedCount <= scheduleCount }
+            .flatMap(\.value)
+        scheduleCountWaiters = scheduleCountWaiters.filter { expectedCount, _ in
+            expectedCount > scheduleCount
+        }
+        lock.unlock()
+        readyWaiters.forEach { $0.resume() }
+        return ControlledSignalboxWebSocketScheduledAction(
+            id: id,
+            scheduler: self
+        )
+    }
+
+    func waitForScheduleCount(_ expectedCount: Int) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if scheduledActions.count >= expectedCount {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                scheduleCountWaiters[expectedCount, default: []].append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func fireLatest() async {
+        let action = takeLatest()
+        await action()
+    }
+
+    private func takeLatest() -> @Sendable () async -> Void {
+        lock.lock()
+        guard let index = scheduledActions.lastIndex(where: { !$0.isCancelled }) else {
+            lock.unlock()
+            preconditionFailure("No live watchdog action is scheduled")
+        }
+        let action = scheduledActions.remove(at: index).action
+        lock.unlock()
+        return action
+    }
+
+    fileprivate func cancel(id: Int) {
+        lock.lock()
+        let index = scheduledActions.firstIndex { $0.id == id }
+        if let index {
+            scheduledActions[index].isCancelled = true
+        }
+        lock.unlock()
+    }
+}
+
+private final class ControlledSignalboxWebSocketScheduledAction:
+    @unchecked Sendable,
+    SignalboxWebSocketScheduledAction
+{
+    private let id: Int
+    private weak var scheduler: ControlledSignalboxWebSocketWatchdogScheduler?
+
+    init(
+        id: Int,
+        scheduler: ControlledSignalboxWebSocketWatchdogScheduler
+    ) {
+        self.id = id
+        self.scheduler = scheduler
+    }
+
+    func cancel() {
+        scheduler?.cancel(id: id)
+    }
+}
+
 private enum StubSignalboxWebSocketTransportError: Error {
     case endOfStream
 }
 
 private final class UnknownFrameSignalboxService: SignalboxClientProtocol, @unchecked Sendable {
+    static let frameKind = "turn_started"
+
     func testConnection() async throws {}
     func listTemplates() async throws -> [SignalboxTemplate] { [] }
     func listRunners() async throws -> [SignalboxRunner] { [] }
@@ -596,7 +850,7 @@ private final class UnknownFrameSignalboxService: SignalboxClientProtocol, @unch
         AsyncThrowingStream { continuation in
             continuation.yield(
                 .unknown(
-                    kind: "turn_started",
+                    kind: Self.frameKind,
                     payload: ["turn_id": .string("turn-1")],
                     decodingDiagnostic: nil
                 )
@@ -685,6 +939,7 @@ private final class ControlledReconnectSignalboxService: SignalboxClientProtocol
 private actor QuietSignalboxWebSocketTransport: SignalboxWebSocketTransport {
     private var heartbeat: SignalboxWebSocketMessage?
     private(set) var sentMessages: [SignalboxWebSocketMessage] = []
+    private var sentMessageWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
 
     init(heartbeat: SignalboxWebSocketMessage?) {
         self.heartbeat = heartbeat
@@ -695,12 +950,30 @@ private actor QuietSignalboxWebSocketTransport: SignalboxWebSocketTransport {
             self.heartbeat = nil
             return heartbeat
         }
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: .seconds(60))
         throw StubSignalboxWebSocketTransportError.endOfStream
     }
 
     func send(_ message: SignalboxWebSocketMessage) async throws {
         sentMessages.append(message)
+        let sentMessageCount = sentMessages.count
+        let readyWaiters = sentMessageWaiters
+            .filter { expectedCount, _ in expectedCount <= sentMessageCount }
+            .flatMap(\.value)
+        sentMessageWaiters = sentMessageWaiters.filter { expectedCount, _ in
+            expectedCount > sentMessageCount
+        }
+        readyWaiters.forEach { $0.resume() }
+    }
+
+    func waitForSentMessageCount(_ expectedCount: Int) async {
+        await withCheckedContinuation { continuation in
+            if sentMessages.count >= expectedCount {
+                continuation.resume()
+            } else {
+                sentMessageWaiters[expectedCount, default: []].append(continuation)
+            }
+        }
     }
 
     func cancel() async {}

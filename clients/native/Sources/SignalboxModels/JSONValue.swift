@@ -68,7 +68,10 @@ public enum SignalboxJSONCoding {
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let rawValue = try container.decode(String.self)
-            return try SignalboxDateParser.parse(rawValue)
+            return try SignalboxDateParser.parse(
+                rawValue,
+                codingPath: decoder.codingPath
+            )
         }
         return decoder
     }
@@ -137,6 +140,13 @@ public enum SignalboxDateParser {
     }
 
     public static func parse(_ rawValue: String) throws -> Date {
+        try parse(rawValue, codingPath: [])
+    }
+
+    static func parse(
+        _ rawValue: String,
+        codingPath: [any CodingKey]
+    ) throws -> Date {
         if let date = fractionalFormatter().date(from: rawValue) {
             return date
         }
@@ -145,7 +155,7 @@ public enum SignalboxDateParser {
         }
         throw DecodingError.dataCorrupted(
             .init(
-                codingPath: [],
+                codingPath: codingPath,
                 debugDescription: "Invalid server timestamp: \(rawValue)"
             )
         )

@@ -14,6 +14,17 @@ public protocol SignalboxWebSocketTransport: Sendable {
     func cancel() async
 }
 
+protocol SignalboxWebSocketScheduledAction: Sendable {
+    func cancel()
+}
+
+protocol SignalboxWebSocketWatchdogScheduler: Sendable {
+    func schedule(
+        after duration: Duration,
+        action: @escaping @Sendable () async -> Void
+    ) -> any SignalboxWebSocketScheduledAction
+}
+
 public struct URLSessionSignalboxWebSocketTransport: SignalboxWebSocketTransport, Sendable {
     private let driver: URLSessionSignalboxWebSocketDriver
 
@@ -101,6 +112,7 @@ public final class SignalboxWebSocketStream: Sendable {
 
     private let transportFactory: @Sendable () -> any SignalboxWebSocketTransport
     private let heartbeatTimeout: Duration
+    private let watchdogScheduler: any SignalboxWebSocketWatchdogScheduler
 
     public convenience init(
         url: URL,
@@ -120,12 +132,26 @@ public final class SignalboxWebSocketStream: Sendable {
     ) {
         self.transportFactory = transportFactory
         self.heartbeatTimeout = heartbeatTimeout
+        self.watchdogScheduler = TaskSignalboxWebSocketWatchdogScheduler()
+    }
+
+    init(
+        transportFactory: @escaping @Sendable () -> any SignalboxWebSocketTransport,
+        heartbeatTimeout: Duration,
+        watchdogScheduler: any SignalboxWebSocketWatchdogScheduler
+    ) {
+        self.transportFactory = transportFactory
+        self.heartbeatTimeout = heartbeatTimeout
+        self.watchdogScheduler = watchdogScheduler
     }
 
     public func messages() -> AsyncThrowingStream<SignalboxServerMessage, Error> {
         AsyncThrowingStream { continuation in
             let transport = transportFactory()
-            let watchdog = SignalboxHeartbeatWatchdog(timeout: heartbeatTimeout)
+            let watchdog = SignalboxHeartbeatWatchdog(
+                timeout: heartbeatTimeout,
+                scheduler: watchdogScheduler
+            )
             let timeoutAction: @Sendable (SignalboxWebSocketStreamError) async -> Void = { error in
                 continuation.finish(throwing: error)
                 await transport.cancel()
@@ -191,27 +217,53 @@ public final class SignalboxWebSocketStream: Sendable {
 
 private actor SignalboxHeartbeatWatchdog {
     private let timeout: Duration
-    private var timeoutTask: Task<Void, Never>?
+    private let scheduler: any SignalboxWebSocketWatchdogScheduler
+    private var scheduledAction: (any SignalboxWebSocketScheduledAction)?
 
-    init(timeout: Duration) {
+    init(
+        timeout: Duration,
+        scheduler: any SignalboxWebSocketWatchdogScheduler
+    ) {
         self.timeout = timeout
+        self.scheduler = scheduler
     }
 
     func arm(onTimeout: @escaping @Sendable () async -> Void) {
-        timeoutTask?.cancel()
-        timeoutTask = Task {
-            do {
-                try await Task.sleep(for: timeout)
-            } catch {
-                return
-            }
-            await onTimeout()
-        }
+        scheduledAction?.cancel()
+        scheduledAction = scheduler.schedule(after: timeout, action: onTimeout)
     }
 
     func cancel() {
-        timeoutTask?.cancel()
-        timeoutTask = nil
+        scheduledAction?.cancel()
+        scheduledAction = nil
+    }
+}
+
+private struct TaskSignalboxWebSocketWatchdogScheduler: SignalboxWebSocketWatchdogScheduler {
+    func schedule(
+        after duration: Duration,
+        action: @escaping @Sendable () async -> Void
+    ) -> any SignalboxWebSocketScheduledAction {
+        let task = Task {
+            do {
+                try await Task.sleep(for: duration)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else {
+                return
+            }
+            await action()
+        }
+        return TaskSignalboxWebSocketScheduledAction(task: task)
+    }
+}
+
+private struct TaskSignalboxWebSocketScheduledAction: SignalboxWebSocketScheduledAction {
+    let task: Task<Void, Never>
+
+    func cancel() {
+        task.cancel()
     }
 }
 
