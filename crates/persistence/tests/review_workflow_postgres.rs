@@ -280,7 +280,7 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
     store
         .insert_run(&ReviewRun::new(
             run,
-            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewWorkflowKind::JudgeFindings,
             ReviewPolicy::version_one(),
         ))
         .await
@@ -289,7 +289,7 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
         .insert_pass(
             &ReviewPass::try_new(
                 pass,
-                ReviewPassKind::ReadOnlyReview,
+                ReviewPassKind::Judge,
                 session,
                 accepted_input,
                 session,
@@ -306,6 +306,29 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
         run,
         pass,
     }
+}
+
+async fn insert_fixture_pass(
+    fixture: &PersistedReviewPassFixture,
+    identity: u128,
+    kind: ReviewPassKind,
+) -> ReviewPassRef {
+    let pass = ReviewPassRef::new(fixture.run, ReviewPassId::from_uuid(uuid(identity)));
+    fixture
+        .store
+        .insert_pass(
+            &ReviewPass::try_new(
+                pass,
+                kind,
+                SessionId::from_uuid(uuid(0x201)),
+                AcceptedInputId::from_uuid(uuid(0x202)),
+                SessionId::from_uuid(uuid(0x201)),
+            )
+            .expect("fixture input belongs to its session"),
+        )
+        .await
+        .expect("additional fixture pass persists");
+    pass
 }
 
 fn assert_sqlstate(error: &sqlx::Error, expected: &str) {
@@ -354,12 +377,12 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     let pass_ref = ReviewPassRef::new(run_ref, ReviewPassId::from_uuid(uuid(0x303)));
     let run = ReviewRun::new(
         run_ref,
-        ReviewWorkflowKind::ReadOnlyReview,
+        ReviewWorkflowKind::JudgeFindings,
         ReviewPolicy::version_one(),
     );
     let pass = ReviewPass::try_new(
         pass_ref,
-        ReviewPassKind::ReadOnlyReview,
+        ReviewPassKind::Judge,
         session,
         accepted_input,
         session,
@@ -408,7 +431,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         Some(running_run)
     );
 
-    let finding_ref = ReviewFindingRef::new(run_ref, ReviewFindingId::from_uuid(uuid(0x304)));
+    let finding_ref = ReviewFindingRef::new(pass_ref, ReviewFindingId::from_uuid(uuid(0x304)));
     let open_finding = finding(finding_ref, pass_ref, &target);
     store
         .insert_finding(&open_finding)
@@ -418,6 +441,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         finding_ref,
         ReviewEventOrdinal::one(),
         pass_ref,
+        ReviewPassKind::Judge,
         ReviewFindingEventKind::Accepted,
     );
     let accepted_finding = open_finding
@@ -464,7 +488,21 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         Err(ReviewWorkflowStoreError::ReservationConflict(_))
     ));
 
-    let attachment = ReviewExternalLinkAttachment::new(pass_ref, key("comment-84"));
+    let publish_pass = ReviewPassRef::new(run_ref, ReviewPassId::from_uuid(uuid(0x306)));
+    store
+        .insert_pass(
+            &ReviewPass::try_new(
+                publish_pass,
+                ReviewPassKind::Publish,
+                session,
+                accepted_input,
+                session,
+            )
+            .expect("accepted input belongs to the fixture session"),
+        )
+        .await
+        .expect("publication pass persists");
+    let attachment = ReviewExternalLinkAttachment::new(link_id, publish_pass, key("comment-84"));
     let attached = reservation
         .clone()
         .attach(attachment.clone())
@@ -479,7 +517,8 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     let posted_event = ReviewFindingEvent::new(
         finding_ref,
         ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
-        pass_ref,
+        publish_pass,
+        ReviewPassKind::Publish,
         ReviewFindingEventKind::Posted {
             link: signalbox_domain::ReviewFindingExternalLinkRef::try_new(finding_ref, &attached)
                 .expect("attached canonical link belongs to the finding"),
@@ -498,7 +537,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     let observation = ReviewExternalLinkObservation::new(
         link_id,
         ReviewEventOrdinal::one(),
-        pass_ref,
+        publish_pass,
         ReviewExternalObjectState::Current,
     );
     let observed = attached
@@ -748,8 +787,8 @@ async fn inv040_pass_projection_rejects_noncanonical_turn_outcome() -> Result<()
 async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
-    let first = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x330)));
-    let second = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x331)));
+    let first = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x330)));
+    let second = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x331)));
     fixture
         .store
         .insert_finding(&finding(first, fixture.pass, &fixture.target_snapshot))
@@ -767,6 +806,7 @@ async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Erro
                 second,
                 ReviewEventOrdinal::one(),
                 fixture.pass,
+                ReviewPassKind::Judge,
                 ReviewFindingEventKind::Accepted,
             ),
         )
@@ -782,6 +822,127 @@ async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Erro
         ReviewFindingTransitionFailure::ForeignEventFinding
     );
 
+    Ok(())
+}
+
+/// INV-040: a referenced finding reconstitutes with its own exact producing
+/// pass even when another finding in the run has a different producer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let canonical_pass = insert_fixture_pass(&fixture, 0x332, ReviewPassKind::ReadOnlyReview).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x333, ReviewPassKind::Dedupe).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x330)));
+    let canonical_ref =
+        ReviewFindingRef::new(canonical_pass, ReviewFindingId::from_uuid(uuid(0x331)));
+    let open = finding(finding_ref, fixture.pass, &fixture.target_snapshot);
+    fixture.store.insert_finding(&open).await?;
+    fixture
+        .store
+        .insert_finding(&finding(
+            canonical_ref,
+            canonical_pass,
+            &fixture.target_snapshot,
+        ))
+        .await?;
+    let event = ReviewFindingEvent::new(
+        finding_ref,
+        ReviewEventOrdinal::one(),
+        dedupe_pass,
+        ReviewPassKind::Dedupe,
+        ReviewFindingEventKind::Duplicate {
+            canonical: canonical_ref,
+        },
+    );
+    let expected = open
+        .apply(event.clone())
+        .expect("dedupe pass may identify the canonical finding");
+    fixture
+        .store
+        .append_finding_event(finding_ref.finding(), event)
+        .await?;
+
+    assert_eq!(
+        fixture.store.load_finding(finding_ref.finding()).await?,
+        Some(expected)
+    );
+    Ok(())
+}
+
+/// INV-040: event compatibility is checked against the canonical persisted
+/// pass kind, not only the kind carried by the in-memory event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let publish_pass = insert_fixture_pass(&fixture, 0x334, ReviewPassKind::Publish).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x335)));
+    fixture
+        .store
+        .insert_finding(&finding(
+            finding_ref,
+            fixture.pass,
+            &fixture.target_snapshot,
+        ))
+        .await?;
+
+    let error = fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            ReviewFindingEvent::new(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                publish_pass,
+                ReviewPassKind::Judge,
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await
+        .expect_err("canonical publication pass cannot accept a finding");
+    let ReviewWorkflowStoreError::Database(error) = error else {
+        panic!("canonical pass-kind mismatch must be a database rejection");
+    };
+    assert_sqlstate(&error, "23514");
+    Ok(())
+}
+
+/// INV-041: an attachment carried through another same-target reservation
+/// fails before persistence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_external_attachment_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let first = ReviewExternalLinkId::from_uuid(uuid(0x336));
+    let second = ReviewExternalLinkId::from_uuid(uuid(0x337));
+    fixture
+        .store
+        .reserve_external_link(ReviewExternalLink::reserve(
+            first,
+            ReviewExternalLinkAssociation::Target(fixture.target),
+            key("example-code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        ))
+        .await?;
+
+    let error = fixture
+        .store
+        .attach_external_link(
+            first,
+            ReviewExternalLinkAttachment::new(second, fixture.pass, key("comment-337")),
+        )
+        .await
+        .expect_err("attachment owner must equal the loaded external link");
+    assert!(matches!(
+        error,
+        ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::ExternalLink(
+            ReviewExternalLinkTransitionError::ForeignAttachmentLink
+        ))
+    ));
     Ok(())
 }
 
@@ -807,7 +968,7 @@ async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<d
         .store
         .attach_external_link(
             first,
-            ReviewExternalLinkAttachment::new(fixture.pass, key("comment-335")),
+            ReviewExternalLinkAttachment::new(first, fixture.pass, key("comment-335")),
         )
         .await?;
     fixture
@@ -823,7 +984,7 @@ async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<d
         .store
         .attach_external_link(
             second,
-            ReviewExternalLinkAttachment::new(fixture.pass, key("comment-336")),
+            ReviewExternalLinkAttachment::new(second, fixture.pass, key("comment-336")),
         )
         .await?;
 
@@ -891,7 +1052,7 @@ async fn inv040_finding_diff_side_requires_target_base() -> Result<(), Box<dyn E
             .expect("fixture input belongs to its session"),
         )
         .await?;
-    let file_relative = ReviewFindingRef::new(run, ReviewFindingId::from_uuid(uuid(0x343)));
+    let file_relative = ReviewFindingRef::new(pass, ReviewFindingId::from_uuid(uuid(0x343)));
     let file_relative = finding_with_side(file_relative, pass, &target, None);
     fixture.store.insert_finding(&file_relative).await?;
     assert_eq!(
@@ -995,12 +1156,13 @@ async fn inv040_pass_insert_requires_queued_state() -> Result<(), Box<dyn Error>
 async fn inv040_finding_insert_requires_open_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
-    let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x306)));
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x306)));
     let accepted = finding(finding_ref, fixture.pass, &fixture.target_snapshot)
         .apply(ReviewFindingEvent::new(
             finding_ref,
             ReviewEventOrdinal::one(),
             fixture.pass,
+            ReviewPassKind::Judge,
             ReviewFindingEventKind::Accepted,
         ))
         .expect("open finding accepts judgment");
@@ -1019,13 +1181,15 @@ async fn inv040_finding_insert_requires_open_state() -> Result<(), Box<dyn Error
 async fn inv041_reservation_insert_requires_pending_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x307));
     let attached = ReviewExternalLink::reserve(
-        ReviewExternalLinkId::from_uuid(uuid(0x307)),
+        link,
         ReviewExternalLinkAssociation::Target(fixture.target),
         key("example-code-host"),
         ReviewExternalObjectKind::ReviewComment,
     )
     .attach(ReviewExternalLinkAttachment::new(
+        link,
         fixture.pass,
         key("comment-85"),
     ))
@@ -1173,7 +1337,7 @@ async fn inv040_schema_requires_rejection_reason() -> Result<(), Box<dyn Error>>
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let reason_finding =
-        ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x604)));
+        ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x604)));
     fixture
         .store
         .insert_finding(&finding(
@@ -1209,7 +1373,7 @@ async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), B
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let posted_finding =
-        ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x605)));
+        ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x605)));
     fixture
         .store
         .insert_finding(&finding(
@@ -1227,6 +1391,7 @@ async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), B
                 posted_finding,
                 ReviewEventOrdinal::one(),
                 fixture.pass,
+                ReviewPassKind::Judge,
                 ReviewFindingEventKind::Accepted,
             ),
         )
@@ -1243,6 +1408,7 @@ async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), B
         ))
         .await
         .expect("pending reservation persists");
+    let publish_pass = insert_fixture_pass(&fixture, 0x608, ReviewPassKind::Publish).await;
     let posted_without_attachment = sqlx::query(
         "INSERT INTO review_finding_event
             (finding_id, event_ordinal, finding_run_id, target_id,
@@ -1254,7 +1420,7 @@ async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), B
     .bind(posted_finding.finding().into_uuid())
     .bind(fixture.run.run().into_uuid())
     .bind(fixture.target.into_uuid())
-    .bind(fixture.pass.pass().into_uuid())
+    .bind(publish_pass.pass().into_uuid())
     .bind(pending_link.into_uuid())
     .execute(&pool)
     .await
@@ -1410,7 +1576,7 @@ async fn inv041_external_link_load_is_one_repeatable_snapshot() -> Result<(), Bo
 async fn inv040_finding_event_serialization_is_fk_compatible() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
-    let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x309)));
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x309)));
     fixture
         .store
         .insert_finding(&finding(
@@ -1464,7 +1630,7 @@ async fn inv040_gapped_finding_history_is_rejected() -> Result<(), Box<dyn Error
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let second_finding_ref =
-        ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x306)));
+        ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x306)));
     fixture
         .store
         .insert_finding(&finding(
@@ -1585,7 +1751,7 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
         .store
         .attach_external_link(
             first_link,
-            ReviewExternalLinkAttachment::new(fixture.pass, key("comment-84")),
+            ReviewExternalLinkAttachment::new(first_link, fixture.pass, key("comment-84")),
         )
         .await
         .expect("first attachment persists");
@@ -1594,7 +1760,7 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
         .store
         .attach_external_link(
             second_link,
-            ReviewExternalLinkAttachment::new(fixture.pass, key("comment-84")),
+            ReviewExternalLinkAttachment::new(second_link, fixture.pass, key("comment-84")),
         )
         .await
         .expect_err("one external object identity cannot attach twice");

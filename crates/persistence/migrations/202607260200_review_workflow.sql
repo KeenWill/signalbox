@@ -829,6 +829,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    event_pass_kind text;
     previous_kind text;
     previous_status text;
     expected_ordinal bigint;
@@ -837,6 +838,44 @@ BEGIN
       FROM review_finding
      WHERE finding_id = NEW.finding_id
      FOR NO KEY UPDATE;
+
+    SELECT pass_kind
+      INTO event_pass_kind
+      FROM review_pass
+     WHERE pass_id = NEW.event_pass_id
+       AND run_id = NEW.event_pass_run_id
+       AND target_id = NEW.target_id;
+
+    IF event_pass_kind IS NULL
+       OR NOT (
+           (
+               NEW.event_kind IN ('accepted', 'rejected', 'stale')
+               AND event_pass_kind = 'judge'
+           )
+           OR (
+               NEW.event_kind IN ('duplicate', 'superseded')
+               AND event_pass_kind = 'dedupe'
+           )
+           OR (
+               NEW.event_kind = 'posted'
+               AND event_pass_kind = 'publish'
+           )
+           OR (
+               NEW.event_kind = 'fixed'
+               AND event_pass_kind = 'fix'
+           )
+           OR (
+               NEW.event_kind = 'blocked_with_reason'
+               AND event_pass_kind IN ('publish', 'fix')
+           )
+       )
+    THEN
+        RAISE EXCEPTION
+            'finding event % is incompatible with pass kind %',
+            NEW.event_kind,
+            event_pass_kind
+            USING ERRCODE = '23514';
+    END IF;
 
     SELECT event_kind
       INTO previous_kind

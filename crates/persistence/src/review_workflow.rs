@@ -387,23 +387,43 @@ impl ReviewWorkflowStore {
             "SELECT event.finding_id, event.event_ordinal,
                     event.finding_run_id, event.target_id,
                     event.event_pass_id, event.event_pass_run_id,
+                    event_pass.pass_kind AS event_pass_kind,
                     event.event_kind, event.reason,
                     event.referenced_finding_id, event.external_link_id,
+                    referenced_finding.producing_pass_id
+                        AS referenced_finding_pass_id,
                     canonical_link.external_link_id AS canonical_link_id,
                     canonical_link.target_id AS link_target_id,
                     canonical_link.association_kind AS link_association_kind,
                     canonical_link.run_id AS link_run_id,
                     canonical_link.finding_id AS link_finding_id,
+                    link_finding.producing_pass_id
+                        AS link_finding_producing_pass_id,
                     canonical_link.provider_key AS link_provider_key,
                     canonical_link.object_kind AS link_object_kind,
+                    attachment.external_link_id
+                        AS attachment_external_link_id,
                     attachment.target_id AS attachment_target_id,
                     attachment.pass_run_id AS attachment_pass_run_id,
                     attachment.pass_id AS attachment_pass_id,
                     attachment.external_object_key
                         AS attachment_external_object_key
                FROM review_finding_event AS event
+               JOIN review_pass AS event_pass
+                 ON event_pass.pass_id = event.event_pass_id
+                AND event_pass.run_id = event.event_pass_run_id
+                AND event_pass.target_id = event.target_id
+               LEFT JOIN review_finding AS referenced_finding
+                 ON referenced_finding.finding_id =
+                    event.referenced_finding_id
+                AND referenced_finding.run_id = event.finding_run_id
+                AND referenced_finding.target_id = event.target_id
                LEFT JOIN review_external_link AS canonical_link
                  ON canonical_link.external_link_id = event.external_link_id
+               LEFT JOIN review_finding AS link_finding
+                 ON link_finding.finding_id = canonical_link.finding_id
+                AND link_finding.run_id = canonical_link.run_id
+                AND link_finding.target_id = canonical_link.target_id
                LEFT JOIN review_external_link_attachment AS attachment
                  ON attachment.external_link_id =
                     canonical_link.external_link_id
@@ -498,7 +518,7 @@ impl ReviewWorkflowStore {
                  provider_key, object_kind, external_object_key)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
-        .bind(link.into_uuid())
+        .bind(attachment.link().into_uuid())
         .bind(next.association().target().into_uuid())
         .bind(attachment.pass().run().run().into_uuid())
         .bind(attachment.pass().pass().into_uuid())
@@ -548,10 +568,17 @@ impl ReviewWorkflowStore {
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
-            "SELECT external_link_id, target_id, association_kind, run_id,
-                    finding_id, provider_key, object_kind
-               FROM review_external_link
-              WHERE external_link_id = $1",
+            "SELECT link.external_link_id, link.target_id,
+                    link.association_kind, link.run_id, link.finding_id,
+                    association_finding.producing_pass_id
+                        AS finding_producing_pass_id,
+                    link.provider_key, link.object_kind
+               FROM review_external_link AS link
+               LEFT JOIN review_finding AS association_finding
+                 ON association_finding.finding_id = link.finding_id
+                AND association_finding.run_id = link.run_id
+                AND association_finding.target_id = link.target_id
+              WHERE link.external_link_id = $1",
         )
         .bind(link.into_uuid())
         .fetch_optional(&mut *transaction)
@@ -562,7 +589,8 @@ impl ReviewWorkflowStore {
         };
         let (id, association, provider, kind) = decode_external_link_root(&row)?;
         let attachment = sqlx::query(
-            "SELECT pass_run_id, pass_id, target_id, external_object_key
+            "SELECT external_link_id, pass_run_id, pass_id, target_id,
+                    external_object_key
                FROM review_external_link_attachment
               WHERE external_link_id = $1",
         )
@@ -945,8 +973,8 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
         target_id(row.try_get("target_id")?),
         run_id(row.try_get("run_id")?),
     );
-    let reference = ReviewFindingRef::new(run, finding_id(row.try_get("finding_id")?));
     let producing_pass = ReviewPassRef::new(run, pass_id(row.try_get("producing_pass_id")?));
+    let reference = ReviewFindingRef::new(producing_pass, finding_id(row.try_get("finding_id")?));
     let line_start: Option<i64> = row.try_get("line_start")?;
     let line_end: Option<i64> = row.try_get("line_end")?;
     let line_range = match (line_start, line_end) {
@@ -1007,27 +1035,45 @@ fn decode_finding_event(
         ReviewRunRef::new(row_target, run_id(row.try_get("event_pass_run_id")?)),
         pass_id(row.try_get("event_pass_id")?),
     );
+    let pass_kind = decode_pass_kind(&row.try_get::<String, _>("event_pass_kind")?)?;
     let kind: String = row.try_get("event_kind")?;
     let reason: Option<String> = row.try_get("reason")?;
     let referenced: Option<Uuid> = row.try_get("referenced_finding_id")?;
+    let referenced_pass: Option<Uuid> = row.try_get("referenced_finding_pass_id")?;
     let external_link: Option<Uuid> = row.try_get("external_link_id")?;
-    let kind = match (kind.as_str(), reason, referenced, external_link) {
-        ("accepted", None, None, None) => ReviewFindingEventKind::Accepted,
-        ("rejected", Some(reason), None, None) => ReviewFindingEventKind::Rejected {
+    let kind = match (
+        kind.as_str(),
+        reason,
+        referenced,
+        referenced_pass,
+        external_link,
+    ) {
+        ("accepted", None, None, None, None) => ReviewFindingEventKind::Accepted,
+        ("rejected", Some(reason), None, None, None) => ReviewFindingEventKind::Rejected {
             reason: review_text(reason, "review_finding_event")?,
         },
-        ("duplicate", None, Some(referenced), None) => ReviewFindingEventKind::Duplicate {
-            canonical: ReviewFindingRef::new(finding.run(), finding_id(referenced)),
-        },
-        ("superseded", None, Some(referenced), None) => ReviewFindingEventKind::Superseded {
-            successor: ReviewFindingRef::new(finding.run(), finding_id(referenced)),
-        },
-        ("stale", None, None, None) => ReviewFindingEventKind::Stale,
-        ("posted", None, None, Some(link)) => ReviewFindingEventKind::Posted {
+        ("duplicate", None, Some(referenced), Some(referenced_pass), None) => {
+            ReviewFindingEventKind::Duplicate {
+                canonical: ReviewFindingRef::new(
+                    ReviewPassRef::new(finding.run(), pass_id(referenced_pass)),
+                    finding_id(referenced),
+                ),
+            }
+        }
+        ("superseded", None, Some(referenced), Some(referenced_pass), None) => {
+            ReviewFindingEventKind::Superseded {
+                successor: ReviewFindingRef::new(
+                    ReviewPassRef::new(finding.run(), pass_id(referenced_pass)),
+                    finding_id(referenced),
+                ),
+            }
+        }
+        ("stale", None, None, None, None) => ReviewFindingEventKind::Stale,
+        ("posted", None, None, None, Some(link)) => ReviewFindingEventKind::Posted {
             link: decode_finding_external_link(row, finding, external_link_id(link))?,
         },
-        ("fixed", None, None, None) => ReviewFindingEventKind::Fixed,
-        ("blocked_with_reason", Some(reason), None, None) => {
+        ("fixed", None, None, None, None) => ReviewFindingEventKind::Fixed,
+        ("blocked_with_reason", Some(reason), None, None, None) => {
             ReviewFindingEventKind::BlockedWithReason {
                 reason: review_text(reason, "review_finding_event")?,
             }
@@ -1047,6 +1093,7 @@ fn decode_finding_event(
         )?)
         .map_err(|_| corruption("review_finding_event", String::from("zero ordinal")))?,
         pass,
+        pass_kind,
         kind,
     ))
 }
@@ -1090,14 +1137,24 @@ fn decode_finding_external_link(
         })?;
     let run = row.try_get::<Option<Uuid>, _>("link_run_id")?;
     let canonical_finding = row.try_get::<Option<Uuid>, _>("link_finding_id")?;
-    let association = match (association_kind.as_str(), run, canonical_finding) {
-        ("target", None, None) => ReviewExternalLinkAssociation::Target(target),
-        ("run", Some(run), None) => {
+    let canonical_finding_pass =
+        row.try_get::<Option<Uuid>, _>("link_finding_producing_pass_id")?;
+    let association = match (
+        association_kind.as_str(),
+        run,
+        canonical_finding,
+        canonical_finding_pass,
+    ) {
+        ("target", None, None, None) => ReviewExternalLinkAssociation::Target(target),
+        ("run", Some(run), None, None) => {
             ReviewExternalLinkAssociation::Run(ReviewRunRef::new(target, run_id(run)))
         }
-        ("finding", Some(run), Some(canonical_finding)) => {
+        ("finding", Some(run), Some(canonical_finding), Some(canonical_finding_pass)) => {
             ReviewExternalLinkAssociation::Finding(ReviewFindingRef::new(
-                ReviewRunRef::new(target, run_id(run)),
+                ReviewPassRef::new(
+                    ReviewRunRef::new(target, run_id(run)),
+                    pass_id(canonical_finding_pass),
+                ),
                 finding_id(canonical_finding),
             ))
         }
@@ -1124,19 +1181,22 @@ fn decode_finding_external_link(
                 String::from("posted event link object kind is missing"),
             )
         })?;
+    let attachment_link = row.try_get::<Option<Uuid>, _>("attachment_external_link_id")?;
     let attachment_target = row.try_get::<Option<Uuid>, _>("attachment_target_id")?;
     let attachment_run = row.try_get::<Option<Uuid>, _>("attachment_pass_run_id")?;
     let attachment_pass = row.try_get::<Option<Uuid>, _>("attachment_pass_id")?;
     let attachment_object = row.try_get::<Option<String>, _>("attachment_external_object_key")?;
     let attachment = match (
+        attachment_link,
         attachment_target,
         attachment_run,
         attachment_pass,
         attachment_object,
     ) {
-        (None, None, None, None) => None,
-        (Some(target), Some(run), Some(pass), Some(object)) => {
+        (None, None, None, None, None) => None,
+        (Some(link), Some(target), Some(run), Some(pass), Some(object)) => {
             Some(ReviewExternalLinkAttachment::new(
+                external_link_id(link),
                 ReviewPassRef::new(
                     ReviewRunRef::new(target_id(target), run_id(run)),
                     pass_id(pass),
@@ -1184,14 +1244,21 @@ fn decode_external_link_root(
     let association_kind: String = row.try_get("association_kind")?;
     let run: Option<Uuid> = row.try_get("run_id")?;
     let finding: Option<Uuid> = row.try_get("finding_id")?;
-    let association = match (association_kind.as_str(), run, finding) {
-        ("target", None, None) => ReviewExternalLinkAssociation::Target(target),
-        ("run", Some(run), None) => {
+    let finding_pass: Option<Uuid> = row.try_get("finding_producing_pass_id")?;
+    let association = match (association_kind.as_str(), run, finding, finding_pass) {
+        ("target", None, None, None) => ReviewExternalLinkAssociation::Target(target),
+        ("run", Some(run), None, None) => {
             ReviewExternalLinkAssociation::Run(ReviewRunRef::new(target, run_id(run)))
         }
-        ("finding", Some(run), Some(finding)) => ReviewExternalLinkAssociation::Finding(
-            ReviewFindingRef::new(ReviewRunRef::new(target, run_id(run)), finding_id(finding)),
-        ),
+        ("finding", Some(run), Some(finding), Some(finding_pass)) => {
+            ReviewExternalLinkAssociation::Finding(ReviewFindingRef::new(
+                ReviewPassRef::new(
+                    ReviewRunRef::new(target, run_id(run)),
+                    pass_id(finding_pass),
+                ),
+                finding_id(finding),
+            ))
+        }
         _ => {
             return Err(corruption(
                 "review_external_link",
@@ -1211,6 +1278,7 @@ fn decode_external_link_attachment(
     row: &PgRow,
 ) -> Result<ReviewExternalLinkAttachment, ReviewWorkflowStoreError> {
     Ok(ReviewExternalLinkAttachment::new(
+        external_link_id(row.try_get("external_link_id")?),
         ReviewPassRef::new(
             ReviewRunRef::new(
                 target_id(row.try_get("target_id")?),
