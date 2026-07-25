@@ -12,6 +12,8 @@ use crate::{
 const REVIEW_KEY_MAXIMUM_BYTES: usize = 1_024;
 const REVIEW_TEXT_MAXIMUM_BYTES: usize = 65_536;
 const REVIEW_CONFIDENCE_MAXIMUM_BASIS_POINTS: u16 = 10_000;
+const REVIEW_POLICY_VERSION_ONE_MINIMUM_JUDGE_BASIS_POINTS: u16 = 7_000;
+const REVIEW_POLICY_VERSION_ONE_MINIMUM_PUBLICATION_BASIS_POINTS: u16 = 8_000;
 
 /// Exact bounded text used for opaque provider, repository, revision, path, and external keys.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -230,13 +232,22 @@ pub struct ReviewPolicy {
 }
 
 impl ReviewPolicy {
-    /// Constructs a policy whose publication threshold is not below its judge threshold.
+    /// Constructs a policy, rejecting unordered thresholds or a noncanonical
+    /// version-one tuple.
     pub const fn try_new(
         version: ReviewPolicyVersion,
         minimum_judge_confidence: ReviewConfidence,
         minimum_publication_confidence: ReviewConfidence,
     ) -> Result<Self, ReviewPolicyError> {
-        if minimum_publication_confidence.basis_points() < minimum_judge_confidence.basis_points() {
+        let is_noncanonical_version_one = version.get() == ReviewPolicyVersion::one().get()
+            && (minimum_judge_confidence.basis_points()
+                != REVIEW_POLICY_VERSION_ONE_MINIMUM_JUDGE_BASIS_POINTS
+                || minimum_publication_confidence.basis_points()
+                    != REVIEW_POLICY_VERSION_ONE_MINIMUM_PUBLICATION_BASIS_POINTS);
+        if is_noncanonical_version_one
+            || minimum_publication_confidence.basis_points()
+                < minimum_judge_confidence.basis_points()
+        {
             Err(ReviewPolicyError {
                 version,
                 minimum_judge_confidence,
@@ -255,8 +266,12 @@ impl ReviewPolicy {
     pub const fn version_one() -> Self {
         Self {
             version: ReviewPolicyVersion::one(),
-            minimum_judge_confidence: ReviewConfidence(7_000),
-            minimum_publication_confidence: ReviewConfidence(8_000),
+            minimum_judge_confidence: ReviewConfidence(
+                REVIEW_POLICY_VERSION_ONE_MINIMUM_JUDGE_BASIS_POINTS,
+            ),
+            minimum_publication_confidence: ReviewConfidence(
+                REVIEW_POLICY_VERSION_ONE_MINIMUM_PUBLICATION_BASIS_POINTS,
+            ),
         }
     }
 
@@ -276,7 +291,7 @@ impl ReviewPolicy {
     }
 }
 
-/// A publication confidence threshold below the judgment threshold.
+/// A noncanonical or unordered review-policy tuple.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReviewPolicyError {
     version: ReviewPolicyVersion,
@@ -1888,55 +1903,97 @@ mod tests {
             ReviewFindingStatus::BlockedWithReason,
         ];
         let events = [
-            ("Accepted", ReviewFindingEventKind::Accepted),
+            (
+                "Accepted",
+                ReviewFindingEventKind::Accepted,
+                ReviewFindingStatus::Accepted,
+            ),
             (
                 "Rejected",
                 ReviewFindingEventKind::Rejected {
                     reason: text("rejected"),
                 },
+                ReviewFindingStatus::Rejected,
             ),
             (
                 "Duplicate",
                 ReviewFindingEventKind::Duplicate {
                     canonical: finding_ref(11),
                 },
+                ReviewFindingStatus::Duplicate,
             ),
             (
                 "Superseded",
                 ReviewFindingEventKind::Superseded {
                     successor: finding_ref(12),
                 },
+                ReviewFindingStatus::Superseded,
             ),
-            ("Stale", ReviewFindingEventKind::Stale),
+            (
+                "Stale",
+                ReviewFindingEventKind::Stale,
+                ReviewFindingStatus::Stale,
+            ),
             (
                 "Posted",
                 ReviewFindingEventKind::Posted {
                     link: ReviewFindingExternalLinkRef::new(finding_ref(10), link_id(30)),
                 },
+                ReviewFindingStatus::Posted,
             ),
-            ("Fixed", ReviewFindingEventKind::Fixed),
+            (
+                "Fixed",
+                ReviewFindingEventKind::Fixed,
+                ReviewFindingStatus::Fixed,
+            ),
             (
                 "BlockedWithReason",
                 ReviewFindingEventKind::BlockedWithReason {
                     reason: text("blocked"),
                 },
+                ReviewFindingStatus::BlockedWithReason,
             ),
         ];
-        let rows = statuses.map(|current| {
-            let permitted_events = events
-                .iter()
-                .filter_map(|(name, event)| finding_transition(current, event).map(|_| *name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            FindingTransitionRow {
-                current: format!("{current:?}"),
-                permitted_events: if permitted_events.is_empty() {
-                    String::from("-")
-                } else {
-                    permitted_events
-                },
-            }
-        });
+        let expected_admission = [
+            [true, true, true, true, true, false, false, false],
+            [false, false, true, true, true, true, true, true],
+            [false; 8],
+            [false; 8],
+            [false; 8],
+            [false; 8],
+            [false, false, false, true, true, false, true, true],
+            [false; 8],
+            [false, false, false, true, true, false, true, false],
+        ];
+        let rows = statuses
+            .into_iter()
+            .enumerate()
+            .map(|(status_index, current)| {
+                let permitted_events = events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(event_index, (name, event, next))| {
+                        let actual = finding_transition(current, event);
+                        let expected =
+                            expected_admission[status_index][event_index].then_some(*next);
+                        assert_eq!(
+                            actual, expected,
+                            "finding edge {current:?} through {name} must match the closed machine"
+                        );
+                        actual.map(|_| *name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                FindingTransitionRow {
+                    current: format!("{current:?}"),
+                    permitted_events: if permitted_events.is_empty() {
+                        String::from("-")
+                    } else {
+                        permitted_events
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
 
         expect![[r#"
             ┌───────────────────┬────────────────────────────────────────────────────────────────┐
@@ -2015,6 +2072,26 @@ mod tests {
             8_001,
             "rejected policy remains inspectable"
         );
+        let noncanonical_version_one = ReviewPolicy::try_new(
+            ReviewPolicyVersion::one(),
+            ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
+            ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+        )
+        .expect_err("version one has one exact threshold tuple");
+        assert_eq!(
+            noncanonical_version_one.into_parts(),
+            (
+                ReviewPolicyVersion::one(),
+                ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
+                ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+            )
+        );
+        ReviewPolicy::try_new(
+            ReviewPolicyVersion::try_new(2).expect("positive version"),
+            ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
+            ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+        )
+        .expect("later versions admit their own ordered threshold tuples");
 
         let too_long = ReviewKey::try_new("a".repeat(REVIEW_KEY_MAXIMUM_BYTES + 1))
             .expect_err("keys are bounded");
