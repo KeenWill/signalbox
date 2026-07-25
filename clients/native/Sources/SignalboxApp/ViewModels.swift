@@ -326,6 +326,7 @@ final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var session: SignalboxSessionMetadata
     @Published private(set) var status: SignalboxSessionStatus = SignalboxSessionStatus(state: .idle)
     @Published private(set) var events: [SignalboxStoredEvent] = []
+    @Published private(set) var timelineItems: [SignalboxTimelineItem] = []
     @Published private(set) var artifacts: [SignalboxArtifact] = []
     @Published private(set) var unhandledFrameKinds: [String: Int] = [:]
     @Published private(set) var latestStreamDiagnostic: String?
@@ -337,6 +338,7 @@ final class SessionDetailViewModel: ObservableObject {
     private var serviceProvider: () -> (any SignalboxClientProtocol)?
     private var streamTask: Task<Void, Never>?
     private var activeStreamID: UUID?
+    private var eventNormalizer = SignalboxIncrementalEventNormalizer()
 
     init(session: SignalboxSessionMetadata, serviceProvider: @escaping () -> (any SignalboxClientProtocol)?) {
         self.session = session
@@ -345,10 +347,6 @@ final class SessionDetailViewModel: ObservableObject {
 
     func setServiceProvider(_ provider: @escaping () -> (any SignalboxClientProtocol)?) {
         self.serviceProvider = provider
-    }
-
-    var timelineItems: [SignalboxTimelineItem] {
-        SignalboxEventNormalizer.normalize(events)
     }
 
     var latestPromptContextArtifact: SignalboxArtifact? {
@@ -370,7 +368,7 @@ final class SessionDetailViewModel: ObservableObject {
         do {
             async let events = service.listEvents(sessionID: session.id)
             async let artifacts = service.listArtifacts(sessionID: session.id)
-            self.events = try await events
+            replaceEvents(with: try await events)
             self.artifacts = try await artifacts
             errorMessage = nil
         } catch {
@@ -442,7 +440,7 @@ final class SessionDetailViewModel: ObservableObject {
         guard let service = serviceProvider() else { return }
         do {
             try await service.confirmInvocation(sessionID: session.id, invocationID: invocationID)
-            events = try await service.listEvents(sessionID: session.id)
+            replaceEvents(with: try await service.listEvents(sessionID: session.id))
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -456,7 +454,7 @@ final class SessionDetailViewModel: ObservableObject {
                 invocationID: invocationID,
                 reason: "Denied from native client."
             )
-            events = try await service.listEvents(sessionID: session.id)
+            replaceEvents(with: try await service.listEvents(sessionID: session.id))
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -474,11 +472,11 @@ final class SessionDetailViewModel: ObservableObject {
         case .streamHello(let hello):
             session = hello.session
             status = hello.status
-            events = hello.events
+            replaceEvents(with: hello.events)
         case .eventAppended(let mutation), .eventUpdated(let mutation):
             upsert(event: SignalboxStoredEvent(eventID: mutation.eventID, event: mutation.event))
         case .eventDeleted(let eventID):
-            events.removeAll { $0.eventID == eventID }
+            removeEvent(withID: eventID)
         case .statusChanged(let status):
             self.status = status
         case .metadataChanged(let metadata):
@@ -540,12 +538,23 @@ final class SessionDetailViewModel: ObservableObject {
     }
 
     private func upsert(event: SignalboxStoredEvent) {
-        if let index = events.firstIndex(where: { $0.eventID == event.eventID }) {
-            events[index] = event
-        } else {
-            events.append(event)
-        }
-        events.sort { $0.eventID < $1.eventID }
+        eventNormalizer.upsert(event)
+        publishNormalizedEvents()
+    }
+
+    private func removeEvent(withID eventID: SignalboxEventID) {
+        eventNormalizer.remove(eventID: eventID)
+        publishNormalizedEvents()
+    }
+
+    private func replaceEvents(with events: [SignalboxStoredEvent]) {
+        eventNormalizer.replaceAll(with: events)
+        publishNormalizedEvents()
+    }
+
+    private func publishNormalizedEvents() {
+        events = eventNormalizer.records
+        timelineItems = eventNormalizer.timelineItems
     }
 }
 

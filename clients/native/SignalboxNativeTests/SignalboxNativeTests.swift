@@ -169,8 +169,23 @@ final class SignalboxNativeTests: XCTestCase {
             )
         )
 
-        let timeline = SignalboxEventNormalizer.normalize([callEvent, firstInvocation, secondInvocation])
+        var incremental = SignalboxIncrementalEventNormalizer()
+        incremental.upsert(callEvent)
+        XCTAssertEqual(
+            incremental.timelineItems,
+            SignalboxEventNormalizer.normalize([callEvent])
+        )
+        incremental.upsert(firstInvocation)
+        XCTAssertEqual(
+            incremental.timelineItems,
+            SignalboxEventNormalizer.normalize([callEvent, firstInvocation])
+        )
+        incremental.upsert(secondInvocation)
+        let timeline = SignalboxEventNormalizer.normalize(
+            [callEvent, firstInvocation, secondInvocation]
+        )
 
+        XCTAssertEqual(incremental.timelineItems, timeline)
         XCTAssertEqual(timeline.count, 2)
         let firstCard = try requireToolCard(timeline[0])
         let secondCard = try requireToolCard(timeline[1])
@@ -180,6 +195,41 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(secondCard.invocationID, secondInvocationID)
         XCTAssertEqual(secondCard.status, .waitingForApproval)
         XCTAssertEqual(secondCard.arguments, secondArguments)
+    }
+
+    func testIncrementalNormalizerMatchesExistingTimelineFixtures() async throws {
+        let service = MockSignalboxService()
+        let activeEvents = try await service.listEvents(
+            sessionID: SignalboxSessionID(rawValue: MockSignalboxFixtures.activeSessionID)
+        )
+        let approvalEvents = try await service.listEvents(
+            sessionID: SignalboxSessionID(rawValue: MockSignalboxFixtures.approvalSessionID)
+        )
+        let failedEvents = try await service.listEvents(
+            sessionID: SignalboxSessionID(rawValue: MockSignalboxFixtures.failedSessionID)
+        )
+
+        assertIncrementalNormalizationMatchesNaive(activeEvents)
+        assertIncrementalNormalizationMatchesNaive(approvalEvents)
+        assertIncrementalNormalizationMatchesNaive(failedEvents)
+    }
+
+    func testIncrementalNormalizerLongSequencePreservesOutputWithinLinearEvaluationBudget() throws {
+        let comparison = try longSequenceNormalizationComparison()
+
+        XCTAssertEqual(comparison.incrementalTimeline, comparison.naiveTimeline)
+        XCTAssertEqual(
+            comparison.incrementalMetrics.recordEvaluationCount,
+            LongSequenceFixture.eventCount
+        )
+        XCTAssertEqual(
+            comparison.naiveMetrics.recordEvaluationCount,
+            LongSequenceFixture.naiveRecordEvaluationCount
+        )
+        XCTAssertLessThan(
+            comparison.incrementalMetrics.recordEvaluationCount,
+            comparison.naiveMetrics.recordEvaluationCount
+        )
     }
 
     func testWebSocketStreamAcknowledgesHeartbeatBeforeYieldingNextFrame() async throws {
@@ -479,7 +529,10 @@ final class SignalboxNativeTests: XCTestCase {
             degradedEvent.decodingDiagnostic?.message,
             "Missing required field at event.created_from."
         )
-        XCTAssertTrue(SignalboxEventNormalizer.normalize([record]).isEmpty)
+        let naiveTimeline = SignalboxEventNormalizer.normalize([record])
+        let incrementalTimeline = SignalboxIncrementalEventNormalizer(records: [record]).timelineItems
+        XCTAssertEqual(incrementalTimeline, naiveTimeline)
+        XCTAssertTrue(naiveTimeline.isEmpty)
     }
 
     func testUnknownStreamFramesDoNotCreateSyntheticEventIDs() async throws {
@@ -561,6 +614,77 @@ final class SignalboxNativeTests: XCTestCase {
             throw SignalboxNativeTestExpectationError("Expected a tool timeline card")
         }
         return card
+    }
+
+    private func assertIncrementalNormalizationMatchesNaive(
+        _ records: [SignalboxStoredEvent],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let incremental = SignalboxIncrementalEventNormalizer(records: records)
+        let naiveTimeline = SignalboxEventNormalizer.normalize(records)
+        XCTAssertEqual(incremental.timelineItems, naiveTimeline, file: file, line: line)
+    }
+
+    private func longSequenceNormalizationComparison() throws -> LongSequenceComparison {
+        let timestamp = try SignalboxJSONCoding.decoder().decode(
+            Date.self,
+            from: Data(LongSequenceFixture.timestampJSON.utf8)
+        )
+        var naiveRecords: [SignalboxStoredEvent] = []
+        var naiveTimeline: [SignalboxTimelineItem] = []
+        var naiveMetrics = SignalboxEventNormalizationMetrics()
+        var incremental = SignalboxIncrementalEventNormalizer()
+
+        for eventID in LongSequenceFixture.eventIDRange {
+            let record = longSequenceRecord(eventID: eventID, timestamp: timestamp)
+            naiveRecords.append(record)
+            naiveTimeline = SignalboxEventNormalizer.normalize(
+                naiveRecords,
+                recording: &naiveMetrics
+            )
+            incremental.upsert(record)
+        }
+
+        return LongSequenceComparison(
+            naiveTimeline: naiveTimeline,
+            incrementalTimeline: incremental.timelineItems,
+            naiveMetrics: naiveMetrics,
+            incrementalMetrics: incremental.metrics
+        )
+    }
+
+    /// A visible user message whose identity and text derive from its event ID.
+    private func longSequenceRecord(
+        eventID: Int,
+        timestamp: Date
+    ) -> SignalboxStoredEvent {
+        SignalboxStoredEvent(
+            eventID: SignalboxEventID(rawValue: eventID),
+            event: .message(
+                SignalboxMessageEvent(
+                    kind: LongSequenceFixture.messageKind,
+                    message: SignalboxMessage(
+                        role: .user,
+                        parts: [
+                            .text(
+                                SignalboxTextContent(
+                                    kind: LongSequenceFixture.textPartKind,
+                                    text: "\(LongSequenceFixture.textPrefix)\(eventID)"
+                                )
+                            ),
+                        ]
+                    ),
+                    visibleToLLM: true,
+                    visibleToUser: true,
+                    isStreaming: false,
+                    parentToolInvocation: nil,
+                    createdAt: timestamp,
+                    lastModifiedAt: timestamp,
+                    createdFrom: LongSequenceFixture.createdFrom
+                )
+            )
+        )
     }
 
     private func requireUnknownServerMessage(
@@ -645,6 +769,32 @@ final class SignalboxNativeTests: XCTestCase {
             .sink { _ in expectation.fulfill() }
         return PublishedObservation(expectation: expectation, cancellable: cancellable)
     }
+}
+
+private enum LongSequenceFixture {
+    /// Hundreds of events make a full-log normalization per append visibly
+    /// quadratic while keeping the test fixture compact.
+    static let eventIDRange = 1...400
+    static let eventCount = eventIDRange.count
+
+    /// One naive normalization after each append evaluates the triangular
+    /// record total through `eventCount`.
+    static let naiveRecordEvaluationCount = 80_200
+
+    /// Arbitrary shared timestamp for every generated message.
+    static let timestampJSON = #""2026-05-10T12:00:00Z""#
+
+    static let messageKind = "message"
+    static let textPartKind = "text"
+    static let textPrefix = "Long-sequence event "
+    static let createdFrom = "test"
+}
+
+private struct LongSequenceComparison {
+    let naiveTimeline: [SignalboxTimelineItem]
+    let incrementalTimeline: [SignalboxTimelineItem]
+    let naiveMetrics: SignalboxEventNormalizationMetrics
+    let incrementalMetrics: SignalboxEventNormalizationMetrics
 }
 
 private struct PublishedObservation {
