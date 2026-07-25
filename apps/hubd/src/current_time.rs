@@ -2,7 +2,11 @@
 
 use std::{error::Error, fmt, future::Future, time::SystemTime};
 
-use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
+use jiff::{
+    Timestamp,
+    fmt::strtime,
+    tz::{self, TimeZone},
+};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     OperatorFailureClass, ToolArgumentValidator, ToolDefinition, ToolExecutionInvocation,
@@ -242,7 +246,17 @@ fn resolve_arguments(
     let serde_json::Value::String(name) = value else {
         return Err(InvalidCurrentTimeArguments);
     };
-    let time_zone = TimeZone::get(&name).map_err(|_| InvalidCurrentTimeArguments)?;
+    let database = tz::db();
+    if matches!(name.as_str(), "localtime" | "posixrules")
+        || !database
+            .available()
+            .any(|available| available.as_str() == name)
+    {
+        return Err(InvalidCurrentTimeArguments);
+    }
+    let time_zone = database
+        .get(&name)
+        .map_err(|_| InvalidCurrentTimeArguments)?;
     if time_zone.is_unknown() {
         return Err(InvalidCurrentTimeArguments);
     }
@@ -669,6 +683,28 @@ mod tests {
             ),
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
+    }
+
+    /// S15: auxiliary TZif paths are not IANA zone or link identifiers.
+    #[test]
+    fn s15_current_time_rejects_auxiliary_zoneinfo_paths() {
+        let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
+            .expect("static current_time tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+
+        for timezone in ["localtime", "posixrules", "posix/UTC", "right/UTC"] {
+            assert!(
+                matches!(
+                    catalog.validate_arguments(
+                        definition.name(),
+                        &arguments(&format!(r#"{{"timezone":"{timezone}"}}"#))
+                    ),
+                    Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+                ),
+                "auxiliary zoneinfo path {timezone} must not enter the IANA contract"
+            );
+        }
     }
 
     /// S15: a present timezone must be a string.
