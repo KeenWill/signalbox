@@ -235,7 +235,8 @@ typed by a `"type"` discriminator; strings parsed in `process_responses_event`:
 
 There is no `[DONE]` sentinel — the terminal marker is the `response.completed`
 event, and a stream that closes without one is treated as an error. A mid-stream
-`rate_limits` event also exists (see §8).
+`codex.rate_limits` event also exists, handled outside `process_responses_event`
+(see §8).
 
 ## 8. Rate-limit signals and error shapes
 
@@ -243,7 +244,10 @@ event, and a stream that closes without one is treated as an error. A mid-stream
   response-header family — `x-codex-primary-used-percent`,
   `x-codex-primary-window-minutes`, `x-codex-primary-reset-at` (plus
   `secondary-*` and `-limit-name` variants) and credits headers — parsed into a
-  `RateLimitSnapshot`; plus the mid-stream `rate_limits` SSE event carrying
+  `RateLimitSnapshot`; plus a mid-stream SSE event whose wire `"type"`
+  discriminator is exactly `codex.rate_limits` (`parse_rate_limit_event` in
+  `codex-api/src/rate_limits.rs` rejects any other spelling; the match site is
+  the WebSocket transport, `endpoint/responses_websocket.rs`), carrying
   primary/secondary windows, `credits`, and `plan_type`.
 - **Error shapes** (`codex-api/src/error.rs`, `sse/responses.rs`): errors
   surface as `response.failed` with `response.error { code, message }`:

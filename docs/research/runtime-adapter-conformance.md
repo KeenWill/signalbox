@@ -137,9 +137,8 @@ unless noted.
 
 01. **`Config` struct** — the exemplar carries `base_url`, an optional
     `connect_timeout`, a required `exchange_timeout`, and `sse_record_limit`,
-    and no credential. Base-URL admission (HTTPS, with the sole plain-HTTP
-    exception for a literal loopback IP host), the required positive
-    whole-exchange timeout and its default, and the positive-limit rules are
+    and no credential. Base-URL admission and its narrow plain-HTTP carve-out,
+    the required whole-exchange timeout and its default, and the limit rules are
     owned by
     [Provider adapters](../spec/runtime-substrate.md#provider-adapters);
     validate them at construction as the exemplar does. Exemplar:
@@ -273,11 +272,19 @@ bounded only by `R: ModelRuntime<ModelCallId>`, contains zero per-provider code,
 and needs no change. What the wiring PR must touch:
 
 1. **`apps/hubd/Cargo.toml`** — add the `signalbox-model-runtime-<provider>`
-   path dependency alongside the Anthropic one.
+   path dependency alongside the Anthropic one, plus the resulting `Cargo.lock`
+   update: the adapter PR already recorded the package there, but this edit adds
+   it to the tracked `signalbox-hubd` dependency list in the lockfile.
 2. **`apps/hubd/src/main.rs`** `run_hub` — the composition root, today hardcoded
    `AnthropicRuntime::new(...)` wrapped by `RuntimeModelCallProvider::new(...)`.
    The Anthropic-specific credential wiring (`ANTHROPIC_CREDENTIAL_REFERENCE`,
-   `FileCredentialAccess`, `ANTHROPIC_API_KEY_FILE`) also needs generalization.
+   `FileCredentialAccess`, `ANTHROPIC_API_KEY_FILE`) also needs generalization —
+   and that generalization reaches into persistence: today
+   `PostgresModelCallRepository` holds a single constructor-wide
+   `ModelCallCredentialReference` and pins it on every prepared call regardless
+   of the resolved target (`crates/persistence/src/model_execution.rs:233`), so
+   a second provider with its own credential needs the durable
+   target-to-credential routing, and its tests, in this PR's scope as well.
 3. **`apps/hubd/src/configuration.rs`** — the provider allow-list gate,
    currently a literal `!= "anthropic"` check →
    `HubModelConfigurationError::UnsupportedProvider`. Must admit the new
