@@ -10,7 +10,7 @@ resolve_script_dir() {
 	fi
 
 	if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
-		local runfiles_dir="$TEST_SRCDIR/$TEST_WORKSPACE/projects/llm_hub_native/scripts/tart"
+		local runfiles_dir="$TEST_SRCDIR/$TEST_WORKSPACE/clients/native/scripts/tart"
 		if [[ -f "$runfiles_dir/run-guest-shard.sh" ]]; then
 			printf '%s\n' "$runfiles_dir"
 			return 0
@@ -29,18 +29,18 @@ test_tart_secret_env_overrides_project_env() (
 	temp_dir="$(mktemp -d)"
 	trap 'rm -rf "$temp_dir"' EXIT
 
-	mkdir -p "$temp_dir/llm_hub"
-	printf 'LLM_HUB_NATIVE_REAL_HUB_API_KEY=stale-project-env\n' >"$temp_dir/llm_hub/.env"
-	printf 'LLM_HUB_NATIVE_REAL_HUB_API_KEY=host-secret-env\n' >"$temp_dir/secret.env"
+	mkdir -p "$temp_dir/signalbox"
+	printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=stale-project-env\n' >"$temp_dir/signalbox/.env"
+	printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=host-secret-env\n' >"$temp_dir/secret.env"
 
 	# shellcheck source=/dev/null
 	source "$SCRIPT_DIR/run-guest-shard.sh"
-	export LLM_HUB_ROOT="$temp_dir/llm_hub"
+	export SERVER_ENV_ROOT="$temp_dir/signalbox"
 	export TART_SECRET_ENV_PATH="$temp_dir/secret.env"
-	unset LLM_HUB_NATIVE_REAL_HUB_API_KEY
+	unset SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
 
-	load_hub_environment_if_present
-	if [[ "${LLM_HUB_NATIVE_REAL_HUB_API_KEY:-}" != "host-secret-env" ]]; then
+	load_server_environment_if_present
+	if [[ "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" != "host-secret-env" ]]; then
 		echo "TART_SECRET_ENV_PATH did not override the project .env API key." >&2
 		return 1
 	fi
@@ -52,9 +52,9 @@ bash -n "$SCRIPT_DIR/run-matrix.sh"
 
 "$SCRIPT_DIR/run-guest-shard.sh" --list >/dev/null
 "$SCRIPT_DIR/run-shard.sh" --print-plan xcode >/dev/null
-secret_plan="$(LLM_HUB_NATIVE_REAL_HUB_API_KEY="$SECRET_PLAN_SENTINEL" "$SCRIPT_DIR/run-shard.sh" --print-plan real-smoke)"
+secret_plan="$(SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$SECRET_PLAN_SENTINEL" "$SCRIPT_DIR/run-shard.sh" --print-plan real-smoke)"
 if [[ "$secret_plan" == *"$SECRET_PLAN_SENTINEL"* ]]; then
-	echo "run-shard.sh --print-plan leaked LLM_HUB_NATIVE_REAL_HUB_API_KEY." >&2
+	echo "run-shard.sh --print-plan leaked SIGNALBOX_NATIVE_REAL_SERVER_API_KEY." >&2
 	exit 1
 fi
 if [[ "$secret_plan" != *"TART_SECRET_ENV_PATH="* ]]; then

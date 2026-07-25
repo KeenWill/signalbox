@@ -27,10 +27,10 @@ REPO_ROOT="$(resolve_repo_root)"
 
 DEFAULT_BASE_IMAGE="ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 DEFAULT_REPO_MOUNT_NAME="mono"
-DEFAULT_SECRET_MOUNT_NAME="llm-hub-native-secrets"
+DEFAULT_SECRET_MOUNT_NAME="signalbox-native-secrets"
 
 TART_BASE_IMAGE="${TART_BASE_IMAGE:-$DEFAULT_BASE_IMAGE}"
-TART_VM_PREFIX="${TART_VM_PREFIX:-llm-hub-native}"
+TART_VM_PREFIX="${TART_VM_PREFIX:-signalbox-native}"
 TART_REPO_MOUNT_NAME="${TART_REPO_MOUNT_NAME:-$DEFAULT_REPO_MOUNT_NAME}"
 TART_SECRET_MOUNT_NAME="${TART_SECRET_MOUNT_NAME:-$DEFAULT_SECRET_MOUNT_NAME}"
 TART_SSH_USERNAME="${TART_SSH_USERNAME:-admin}"
@@ -55,7 +55,7 @@ usage() {
 	cat <<'EOF'
 Usage: run-shard.sh [options] <shard>
 
-Run one LLM Hub Native validation shard in a macOS Tart VM.
+Run one Signalbox Native validation shard in a macOS Tart VM.
 
 Options:
   --base-image IMAGE  Tart image to clone for ephemeral shards.
@@ -67,15 +67,15 @@ Options:
 
 Environment:
   TART_BASE_IMAGE       Default: ghcr.io/cirruslabs/macos-tahoe-xcode:latest
-  TART_VM_PREFIX        Default: llm-hub-native
+  TART_VM_PREFIX        Default: signalbox-native
   TART_VM_CPUS          Default: 4
   TART_VM_MEMORY_MB     Default: 8192
   TART_VM_DISPLAY       Default: 1920x1200
   TART_EXECUTOR         guest-agent or ssh. Default: guest-agent
-  TART_HUB_URL          Hub URL reachable from inside the VM for real-smoke.
+  TART_SERVER_URL          Server URL reachable from inside the VM for real-smoke.
   TART_SECRET_MOUNT_NAME
-                        Default: llm-hub-native-secrets
-  LLM_HUB_NATIVE_REAL_HUB_API_KEY
+                        Default: signalbox-native-secrets
+  SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
                         Mounted into the guest through a temporary env file;
                         never embedded in the Tart command line.
   SCREENSHOT_STATE_NAMES
@@ -149,26 +149,26 @@ require_tool() {
 }
 
 prepare_secret_mount_if_needed() {
-	if [[ -z "${LLM_HUB_NATIVE_REAL_HUB_API_KEY:-}" ]]; then
+	if [[ -z "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]; then
 		return 0
 	fi
-	if [[ "$LLM_HUB_NATIVE_REAL_HUB_API_KEY" == *$'\n'* || "$LLM_HUB_NATIVE_REAL_HUB_API_KEY" == *$'\r'* ]]; then
-		echo "LLM_HUB_NATIVE_REAL_HUB_API_KEY must be a single-line value." >&2
+	if [[ "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY" == *$'\n'* || "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY" == *$'\r'* ]]; then
+		echo "SIGNALBOX_NATIVE_REAL_SERVER_API_KEY must be a single-line value." >&2
 		exit 1
 	fi
 
-	SECRET_ENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llm-hub-native-tart-secrets.XXXXXX")"
+	SECRET_ENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signalbox-native-tart-secrets.XXXXXX")"
 	SECRET_ENV_FILE="$SECRET_ENV_DIR/env"
 	chmod 700 "$SECRET_ENV_DIR"
 	(
 		umask 077
-		printf 'LLM_HUB_NATIVE_REAL_HUB_API_KEY=%s\n' "$LLM_HUB_NATIVE_REAL_HUB_API_KEY" >"$SECRET_ENV_FILE"
+		printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY" >"$SECRET_ENV_FILE"
 	)
-	unset LLM_HUB_NATIVE_REAL_HUB_API_KEY
+	unset SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
 }
 
 secret_mount_requested() {
-	[[ -n "$SECRET_ENV_FILE" || -n "${LLM_HUB_NATIVE_REAL_HUB_API_KEY:-}" ]]
+	[[ -n "$SECRET_ENV_FILE" || -n "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]
 }
 
 ssh_command() {
@@ -260,11 +260,11 @@ wait_for_guest_agent() {
 
 remote_guest_command() {
 	local guest_root="/Volumes/My Shared Files/$TART_REPO_MOUNT_NAME"
-	local guest_script="$guest_root/projects/llm_hub_native/scripts/tart/run-guest-shard.sh"
+	local guest_script="$guest_root/clients/native/scripts/tart/run-guest-shard.sh"
 	local -a environment_arguments=()
 
-	if [[ -n "${TART_HUB_URL:-}" ]]; then
-		environment_arguments+=("TART_HUB_URL=$TART_HUB_URL")
+	if [[ -n "${TART_SERVER_URL:-}" ]]; then
+		environment_arguments+=("TART_SERVER_URL=$TART_SERVER_URL")
 	fi
 	if secret_mount_requested; then
 		environment_arguments+=("TART_SECRET_ENV_PATH=/Volumes/My Shared Files/$TART_SECRET_MOUNT_NAME/env")

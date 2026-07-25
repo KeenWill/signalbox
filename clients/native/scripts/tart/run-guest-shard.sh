@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MONO_GUEST_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-PROJECT_ROOT="$REPO_ROOT/projects/llm_hub_native"
-LLM_HUB_ROOT="$REPO_ROOT/projects/llm_hub"
+PROJECT_ROOT="$REPO_ROOT/clients/native"
+SERVER_ENV_ROOT="$PROJECT_ROOT"
 # shellcheck source=/dev/null
 source "$PROJECT_ROOT/scripts/lib/simulator.sh"
 TART_DERIVED_DATA_ROOT="${TART_DERIVED_DATA_ROOT:-$PROJECT_ROOT/.tart-derived-data}"
@@ -16,7 +16,7 @@ usage() {
 	cat <<'EOF'
 Usage: run-guest-shard.sh <shard>
 
-Run one LLM Hub Native validation shard inside a macOS Tart guest.
+Run one Signalbox Native validation shard inside a macOS Tart guest.
 
 Shards:
   xcode              Xcode iOS Simulator build and unit/UI tests.
@@ -25,18 +25,18 @@ Shards:
   ios-screenshots    iPhone screenshot capture.
   ipados-screenshots iPadOS landscape screenshot capture.
   screenshots        iPhone, iPadOS, and macOS screenshot capture.
-  real-smoke         Real local/remote hub UI smoke test.
+  real-smoke         Real local/remote server UI smoke test.
   privacy            Privacy/no-telemetry scan.
   all                Full single-VM validation pass.
 
 Environment:
   SCREENSHOT_DEVICE_NAMES       Override screenshot device list.
   SCREENSHOT_STATE_NAMES        Limit screenshot states.
-  TART_HUB_URL                  Hub URL reachable from inside the VM.
+  TART_SERVER_URL                  Server URL reachable from inside the VM.
   TART_SECRET_ENV_PATH          Optional mounted dotenv file containing
-                                LLM_HUB_NATIVE_REAL_HUB_API_KEY.
-  LLM_HUB_NATIVE_REAL_HUB_URL   Real-smoke hub URL override.
-  LLM_HUB_NATIVE_REAL_HUB_API_KEY
+                                SIGNALBOX_NATIVE_REAL_SERVER_API_KEY.
+  SIGNALBOX_NATIVE_REAL_SERVER_URL   Real-smoke server URL override.
+  SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
                                 Real-smoke API key override; not printed.
 EOF
 }
@@ -70,8 +70,8 @@ run_step() {
 	"$@"
 }
 
-load_hub_environment_if_present() {
-	load_known_dotenv_keys_if_present "$LLM_HUB_ROOT/.env" preserve
+load_server_environment_if_present() {
+	load_known_dotenv_keys_if_present "$SERVER_ENV_ROOT/.env" preserve
 	if [[ -n "${TART_SECRET_ENV_PATH:-}" ]]; then
 		load_known_dotenv_keys_if_present "$TART_SECRET_ENV_PATH" override
 	fi
@@ -127,24 +127,24 @@ assign_known_dotenv_key() {
 	local assignment_policy="$3"
 
 	case "$key" in
-	HUB_API_KEY)
-		if should_assign_dotenv_key HUB_API_KEY "$assignment_policy"; then
-			export HUB_API_KEY="$value"
+	SIGNALBOX_API_KEY)
+		if should_assign_dotenv_key SIGNALBOX_API_KEY "$assignment_policy"; then
+			export SIGNALBOX_API_KEY="$value"
 		fi
 		;;
-	HUB_TUI_BASE_URL)
-		if should_assign_dotenv_key HUB_TUI_BASE_URL "$assignment_policy"; then
-			export HUB_TUI_BASE_URL="$value"
+	SIGNALBOX_BASE_URL)
+		if should_assign_dotenv_key SIGNALBOX_BASE_URL "$assignment_policy"; then
+			export SIGNALBOX_BASE_URL="$value"
 		fi
 		;;
-	LLM_HUB_NATIVE_REAL_HUB_URL)
-		if should_assign_dotenv_key LLM_HUB_NATIVE_REAL_HUB_URL "$assignment_policy"; then
-			export LLM_HUB_NATIVE_REAL_HUB_URL="$value"
+	SIGNALBOX_NATIVE_REAL_SERVER_URL)
+		if should_assign_dotenv_key SIGNALBOX_NATIVE_REAL_SERVER_URL "$assignment_policy"; then
+			export SIGNALBOX_NATIVE_REAL_SERVER_URL="$value"
 		fi
 		;;
-	LLM_HUB_NATIVE_REAL_HUB_API_KEY)
-		if should_assign_dotenv_key LLM_HUB_NATIVE_REAL_HUB_API_KEY "$assignment_policy"; then
-			export LLM_HUB_NATIVE_REAL_HUB_API_KEY="$value"
+	SIGNALBOX_NATIVE_REAL_SERVER_API_KEY)
+		if should_assign_dotenv_key SIGNALBOX_NATIVE_REAL_SERVER_API_KEY "$assignment_policy"; then
+			export SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$value"
 		fi
 		;;
 	esac
@@ -161,7 +161,7 @@ should_assign_dotenv_key() {
 	[[ -z "${!variable_name+x}" ]]
 }
 
-host_router_hub_url() {
+host_router_server_url() {
 	local router_ip
 	router_ip="$(netstat -nr | awk '/default/{print $2; exit}')"
 	if [[ -z "$router_ip" ]]; then
@@ -171,29 +171,29 @@ host_router_hub_url() {
 	printf 'http://%s:8000\n' "$router_ip"
 }
 
-resolved_real_hub_url() {
-	if [[ -n "${LLM_HUB_NATIVE_REAL_HUB_URL:-}" ]]; then
-		printf '%s\n' "$LLM_HUB_NATIVE_REAL_HUB_URL"
+resolved_real_server_url() {
+	if [[ -n "${SIGNALBOX_NATIVE_REAL_SERVER_URL:-}" ]]; then
+		printf '%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_URL"
 		return 0
 	fi
-	if [[ -n "${TART_HUB_URL:-}" ]]; then
-		printf '%s\n' "$TART_HUB_URL"
+	if [[ -n "${TART_SERVER_URL:-}" ]]; then
+		printf '%s\n' "$TART_SERVER_URL"
 		return 0
 	fi
-	if [[ -n "${HUB_TUI_BASE_URL:-}" && "$HUB_TUI_BASE_URL" != "http://127.0.0.1:"* && "$HUB_TUI_BASE_URL" != "http://localhost:"* ]]; then
-		printf '%s\n' "$HUB_TUI_BASE_URL"
+	if [[ -n "${SIGNALBOX_BASE_URL:-}" && "$SIGNALBOX_BASE_URL" != "http://127.0.0.1:"* && "$SIGNALBOX_BASE_URL" != "http://localhost:"* ]]; then
+		printf '%s\n' "$SIGNALBOX_BASE_URL"
 		return 0
 	fi
-	host_router_hub_url
+	host_router_server_url
 }
 
-resolved_real_hub_api_key() {
-	if [[ -n "${LLM_HUB_NATIVE_REAL_HUB_API_KEY:-}" ]]; then
-		printf '%s\n' "$LLM_HUB_NATIVE_REAL_HUB_API_KEY"
+resolved_real_server_api_key() {
+	if [[ -n "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]; then
+		printf '%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY"
 		return 0
 	fi
-	if [[ -n "${HUB_API_KEY:-}" ]]; then
-		printf '%s\n' "$HUB_API_KEY"
+	if [[ -n "${SIGNALBOX_API_KEY:-}" ]]; then
+		printf '%s\n' "$SIGNALBOX_API_KEY"
 		return 0
 	fi
 	return 1
@@ -212,13 +212,13 @@ assert_xcresult_passed() {
 
 run_xcode_shard() {
 	require_tool xcodebuild
-	load_hub_environment_if_present
-	local hub_url=""
+	load_server_environment_if_present
+	local server_url=""
 	local api_key=""
-	if api_key="$(resolved_real_hub_api_key)" && hub_url="$(resolved_real_hub_url)"; then
-		export LLM_HUB_NATIVE_REAL_HUB_URL="$hub_url"
-		export LLM_HUB_NATIVE_REAL_HUB_API_KEY="$api_key"
-		echo "==> Real hub UI test environment configured for $hub_url; API key intentionally not printed."
+	if api_key="$(resolved_real_server_api_key)" && server_url="$(resolved_real_server_url)"; then
+		export SIGNALBOX_NATIVE_REAL_SERVER_URL="$server_url"
+		export SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$api_key"
+		echo "==> Real server UI test environment configured for $server_url; API key intentionally not printed."
 	fi
 
 	run_step "Xcode iOS Simulator build" "$PROJECT_ROOT/scripts/build-xcode.sh"
@@ -229,7 +229,7 @@ run_bazel_shard() {
 	require_tool bazel
 	run_step "Bazel Apple build" "$PROJECT_ROOT/scripts/build-bazel.sh"
 	run_step "Bazel Apple tests" "$PROJECT_ROOT/scripts/test-bazel.sh"
-	run_step "Bazel screenshot golden test" bazel test --config=apple_host //projects/llm_hub_native:screenshot_golden_test
+	run_step "Bazel screenshot golden test" bazel test --config=apple_host //clients/native:screenshot_golden_test
 }
 
 run_macos_screenshots_shard() {
@@ -256,17 +256,17 @@ run_screenshots_shard() {
 
 run_real_smoke_shard() {
 	require_tool xcodebuild
-	load_hub_environment_if_present
+	load_server_environment_if_present
 
-	local hub_url
+	local server_url
 	local api_key
-	local result_bundle_path="$LLM_HUB_NATIVE_DERIVED_DATA_PATH/Logs/Test/LLMHubNative-RealSmoke.xcresult"
+	local result_bundle_path="$SIGNALBOX_NATIVE_DERIVED_DATA_PATH/Logs/Test/SignalboxNative-RealSmoke.xcresult"
 	local device_id
 	local destination
 	local xcodebuild_status
-	hub_url="$(resolved_real_hub_url)"
-	if ! api_key="$(resolved_real_hub_api_key)"; then
-		echo "Missing real hub API key. Set LLM_HUB_NATIVE_REAL_HUB_API_KEY or provide projects/llm_hub/.env with HUB_API_KEY." >&2
+	server_url="$(resolved_real_server_url)"
+	if ! api_key="$(resolved_real_server_api_key)"; then
+		echo "Missing real server API key. Set SIGNALBOX_NATIVE_REAL_SERVER_API_KEY or provide clients/native/.env with SIGNALBOX_API_KEY." >&2
 		exit 1
 	fi
 	device_id="$(simulator_resolve_iphone_ids "$SIMULATOR_DEFAULT_MIN_IOS_VERSION" | head -n 1)"
@@ -276,23 +276,23 @@ run_real_smoke_shard() {
 	fi
 	destination="$(simulator_xcode_destination_for_id "$device_id")"
 
-	echo "==> Real hub UI smoke against $hub_url"
-	echo "==> Real hub UI smoke simulator: $device_id"
+	echo "==> Real server UI smoke against $server_url"
+	echo "==> Real server UI smoke simulator: $device_id"
 	echo "==> API key loaded for the smoke test; value intentionally not printed."
 	mkdir -p "$(dirname "$result_bundle_path")"
 	rm -rf "$result_bundle_path"
 	set +e
-	LLM_HUB_NATIVE_REAL_HUB_URL="$hub_url" \
-		LLM_HUB_NATIVE_REAL_HUB_API_KEY="$api_key" \
+	SIGNALBOX_NATIVE_REAL_SERVER_URL="$server_url" \
+		SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$api_key" \
 		xcodebuild \
 		-quiet \
-		-project "$PROJECT_ROOT/LLMHubNative.xcodeproj" \
-		-scheme "LLMHubNative" \
+		-project "$PROJECT_ROOT/SignalboxNative.xcodeproj" \
+		-scheme "SignalboxNative" \
 		-configuration "Debug" \
 		-destination "$destination" \
-		-derivedDataPath "$LLM_HUB_NATIVE_DERIVED_DATA_PATH" \
+		-derivedDataPath "$SIGNALBOX_NATIVE_DERIVED_DATA_PATH" \
 		-resultBundlePath "$result_bundle_path" \
-		-only-testing:LLMHubNativeUITests/LLMHubNativeUITests/testRealHubConnectionListsRunnerAndCreatesSessionWhenConfigured \
+		-only-testing:SignalboxNativeUITests/SignalboxNativeUITests/testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured \
 		-parallel-testing-enabled NO \
 		CODE_SIGNING_ALLOWED=YES \
 		CODE_SIGN_IDENTITY=- \
@@ -334,8 +334,8 @@ main() {
 	fi
 
 	cd "$REPO_ROOT"
-	export LLM_HUB_NATIVE_DERIVED_DATA_PATH="$TART_DERIVED_DATA_ROOT/$shard/ios"
-	export LLM_HUB_NATIVE_MACOS_DERIVED_DATA_PATH="$TART_DERIVED_DATA_ROOT/$shard/macos"
+	export SIGNALBOX_NATIVE_DERIVED_DATA_PATH="$TART_DERIVED_DATA_ROOT/$shard/ios"
+	export SIGNALBOX_NATIVE_MACOS_DERIVED_DATA_PATH="$TART_DERIVED_DATA_ROOT/$shard/macos"
 	case "$shard" in
 	xcode) run_xcode_shard ;;
 	bazel) run_bazel_shard ;;
