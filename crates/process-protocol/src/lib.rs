@@ -3544,7 +3544,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_required_tag_deserializer_rejects_member_beyond_bound()
+    fn inv033_metadata_required_tag_deserializer_rejects_member_beyond_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let required_tags = serde_json::to_string(&numbered_metadata_strings(
             MAX_SESSION_METADATA_REQUIRED_TAGS + 1,
@@ -3557,7 +3557,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_required_tag_deserializer_accepts_exact_bound()
+    fn inv033_metadata_required_tag_deserializer_accepts_exact_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let required_tags = serde_json::to_string(&numbered_metadata_strings(
             MAX_SESSION_METADATA_REQUIRED_TAGS,
@@ -3570,7 +3570,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_summary_tag_deserializer_rejects_member_beyond_bound()
+    fn inv033_metadata_summary_tag_deserializer_rejects_member_beyond_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let tags =
             serde_json::to_string(&numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1))?;
@@ -3582,7 +3582,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_summary_tag_deserializer_accepts_exact_bound()
+    fn inv033_metadata_summary_tag_deserializer_accepts_exact_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut exact_tags = numbered_metadata_strings(MAX_SESSION_METADATA_TAGS);
         exact_tags.sort();
@@ -3602,7 +3602,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_capacity_matches_domain_and_frame_headroom()
+    fn inv033_metadata_capacity_matches_domain_and_frame_headroom()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = SessionMetadata::try_new(
             Some("\u{1}".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
@@ -3673,7 +3673,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_filter_capacity_is_enforced_before_mapping()
+    fn inv033_metadata_filter_capacity_is_enforced_before_mapping()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = ClientRequest::ListSessionMetadata {
             required_tags: Vec::new(),
@@ -3723,8 +3723,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata_summary_enforces_aggregate_utf8_capacity() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn inv033_metadata_summary_enforces_aggregate_utf8_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
         let individually_valid_but_oversized = ServerMessage::SessionMetadataSummary {
             session_id: uuid(1),
             defaults_version: CanonicalU64::new(1),
@@ -3753,16 +3753,38 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_nullable_response_members_are_required() {
-        for json in [
+    fn inv033_metadata_summary_requires_nullable_title_member() {
+        assert_server_malformed(
             r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"tags":[],"archived":false,"last_writer":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_summary_requires_nullable_last_writer_member() {
+        assert_server_malformed(
             r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"title":null,"tags":[],"archived":false}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_page_end_requires_nullable_cursor_member() {
+        assert_server_malformed(
             r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_page_end","session_count":"0"}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_point_read_requires_nullable_last_writer_member() {
+        assert_server_malformed(
             r#"{"version":4,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_point_read_requires_nullable_title_member() {
+        assert_server_malformed(
             r#"{"version":4,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"tags":[],"attributes":{},"archived":false},"last_writer":null}}"#,
-        ] {
-            assert_server_malformed(json);
-        }
+        );
     }
 
     #[test]
