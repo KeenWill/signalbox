@@ -44,11 +44,41 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
         let kind = try container.decode(String.self, forKey: .kind)
         switch kind {
         case "message":
-            self = .message(try SignalboxMessageEvent(from: decoder))
+            do {
+                self = .message(try SignalboxMessageEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
         case "tool_invocation":
-            self = .toolInvocation(try SignalboxToolInvocationEvent(from: decoder))
+            do {
+                self = .toolInvocation(try SignalboxToolInvocationEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
         case "turn_failed":
-            self = .turnFailed(try SignalboxTurnFailedEvent(from: decoder))
+            do {
+                self = .turnFailed(try SignalboxTurnFailedEvent(from: decoder))
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
         default:
             self = .unknown(try SignalboxUnknownEvent(kind: kind, decoder: decoder))
         }
@@ -71,22 +101,64 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
 public struct SignalboxUnknownEvent: Codable, Equatable, Sendable {
     public let kind: String
     public let payload: [String: SignalboxJSONValue]
+    public let decodingDiagnostic: SignalboxDecodingDiagnostic?
 
-    public init(kind: String, payload: [String: SignalboxJSONValue]) {
+    public init(
+        kind: String,
+        payload: [String: SignalboxJSONValue],
+        decodingDiagnostic: SignalboxDecodingDiagnostic? = nil
+    ) {
         self.kind = kind
         self.payload = payload
+        self.decodingDiagnostic = decodingDiagnostic
     }
 
-    public init(kind: String, decoder: Decoder) throws {
+    public init(
+        kind: String,
+        decoder: Decoder,
+        decodingDiagnostic: SignalboxDecodingDiagnostic? = nil
+    ) throws {
         let container = try decoder.singleValueContainer()
         self.kind = kind
         self.payload = try container.decode([String: SignalboxJSONValue].self)
+        self.decodingDiagnostic = decodingDiagnostic
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let payload = try container.decode([String: SignalboxJSONValue].self)
+        guard case .string(let kind) = payload["kind"] else {
+            throw DecodingError.keyNotFound(
+                DynamicEventCodingKey("kind"),
+                .init(codingPath: decoder.codingPath, debugDescription: "Unknown event is missing its kind.")
+            )
+        }
+        self.kind = kind
+        self.payload = payload
+        self.decodingDiagnostic = nil
     }
 
     public func encode(to encoder: Encoder) throws {
         var payload = self.payload
         payload["kind"] = .string(kind)
         try payload.encode(to: encoder)
+    }
+}
+
+private struct DynamicEventCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init(_ stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(intValue: Int) {
+        return nil
     }
 }
 
