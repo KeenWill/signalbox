@@ -48,8 +48,10 @@ A `ReviewTarget` is one immutable snapshot:
 Refreshing a moving change request creates another target snapshot. It never
 rewrites the revision under an existing run. A parent is a topology fact for
 that snapshot, not permission to rewrite either branch. It must be a distinct
-target whose canonical provider and repository equal the child snapshot's;
-construction and reconstitution reject self-parent and cross-repository edges.
+target whose canonical provider and repository equal the child snapshot's; its
+canonical head revision must equal the child's exact base revision. Construction
+and reconstitution reject self-parent, base-less parented targets,
+cross-repository edges, and revision-disconnected edges.
 
 Every `ReviewRun` names one target, one closed workflow kind, and one complete
 `ReviewPolicy`. The implemented workflow kinds are external-context import,
@@ -89,8 +91,9 @@ evidence. The accepted input must belong to the pass session; construction,
 persistence, and reconstitution reject a cross-wired pair even when no turn has
 started. A pass may enter `Running` or a post-start terminal state only in the
 same relational transaction that projects its run through the corresponding
-state. A queued pass may be cancelled before start, but no unprojected pass may
-perform work or produce evidence.
+state. A queued pass may be cancelled before start. These aggregates neither
+schedule nor hold the already accepted input; executable admission coordination
+remains part of the deferred application orchestration design.
 
 Pass state is:
 
@@ -105,17 +108,22 @@ Pass state is:
 may become succeeded, failed, blocked, or cancelled while retaining its exact
 turn. No terminal state transitions again, and no other edge is permitted.
 
-Every named turn belongs to the pass's accepted input and session. A successful
-frontier is exactly the pass turn's canonical terminal frontier. A running pass
-names an active turn or monotonically lags that turn's canonical terminal
-outcome until reconciliation updates the pass. Succeeded names a completed turn;
-failed names a failed or refused turn; blocked names a turn requiring
-reconciliation; and cancellation with a turn names a cancelled turn. Persistence
+Every named turn belongs to the pass's accepted input and session. Pass terminal
+state is the durable workflow-operation outcome; turn outcome authenticates the
+execution boundary but does not decide that operation outcome by itself. A
+successful frontier is exactly the pass turn's canonical terminal frontier. A
+running pass names an active turn or monotonically lags that turn's canonical
+terminal outcome until reconciliation updates the pass. Succeeded names a
+completed turn. Failed may name a completed, failed, or refused turn, allowing
+validated malformed workflow output or a definitive operation rejection to fail
+even though session execution completed. Blocked names a turn requiring
+reconciliation, and cancellation with a turn names a cancelled turn. Persistence
 loads those canonical outcomes in addition to enforcing ownership with composite
 foreign keys; domain reconstitution rejects an invalid transition, regressive or
 mismatched terminal outcome, terminal frontier, or cross-wired reference. Passes
 never copy model output, tool results, or transcript content into workflow
-state. The session transcript is the evidence of record.
+state. The session transcript is the execution evidence of record; the pass
+state is the operation outcome of record.
 
 ## Finding machine
 
@@ -163,8 +171,9 @@ names a canonically blocked pass. Reconstitution validates the complete history
 and fails closed on a foreign owner, policy mismatch, gaps, illegal edges,
 incompatible pass kind or outcome, self-reference, foreign-run finding
 references, or a publication event whose external link is not an attached link
-associated with that finding. A posted event's pass is the attachment's exact
-producing pass.
+associated with that finding or whose external object kind is not review,
+review-thread, inline-review-comment, or general change-request-comment. A
+posted event's pass is the attachment's exact producing pass.
 
 ## External links and posting reservations
 
@@ -222,12 +231,16 @@ observations. Workflow-facing process protocol, code-host and workspace
 adapters, pass scheduling, model prompts, automated publication, repair, and
 merge-based propagation remain blocked on the
 [review-workflow orchestration design](../open-questions.md#destination-features-target-model).
+That design must choose durable hold or atomic admission/projection semantics
+before an accepted pass input is executable; this foundation does not claim that
+the ordinary session scheduler supplies that coordination.
 
 ## Open edges
 
 - [Review-workflow orchestration](../open-questions.md#destination-features-target-model)
-  owns application commands, scheduling, adapter seams, workflow-facing
-  protocol, prompt contracts, conflict escalation, and stack propagation.
+  owns application commands, executable input admission, scheduling, adapter
+  seams, workflow-facing protocol, prompt contracts, conflict escalation, and
+  stack propagation.
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
   future aggregate; review workflow rows contain references and evidence, not
   copied general-purpose artifacts.
