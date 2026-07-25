@@ -62,5 +62,10 @@ name = "postgres_integration"
 path = "tests/postgres_integration.rs"
 required-features = ["postgres-integration"]
 
+[[test]]
+name = "session_metadata_postgres"
+path = "tests/session_metadata_postgres.rs"
+required-features = ["postgres-integration"]
+
 [lints]
 workspace = true

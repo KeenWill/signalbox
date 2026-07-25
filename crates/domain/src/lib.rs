@@ -23,6 +23,7 @@ mod replace_session_defaults;
 mod review_workflow;
 mod semantic_entry;
 mod session;
+mod session_metadata;
 mod submit_input;
 mod tool;
 mod tool_attempt;
@@ -151,6 +152,14 @@ pub use session::{
     SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
     SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
     TranscriptFrontier,
+};
+pub use session_metadata::{
+    PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
+    ReplaceSessionMetadataAppliedResult, ReplaceSessionMetadataReconstitutionError,
+    ReplaceSessionMetadataReconstitutionFailure, ReplaceSessionMetadataReconstitutionInput,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
+    ReplaceSessionMetadataSessionNotFound, SessionMetadataContent, SessionMetadataContentError,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
 };
 pub use submit_input::{
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,
