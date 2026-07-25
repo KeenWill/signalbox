@@ -547,6 +547,11 @@ enum RetainedToolExecutionStateKind {
     },
 }
 
+enum UntrustedExecutorFailure<ExecutorError> {
+    Executor(ExecutorError),
+    CorrelationMismatch,
+}
+
 impl fmt::Debug for RetainedToolExecutionState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -615,8 +620,17 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     PreflightCommit(TransactionError),
     /// Executor work produced no trustworthy evidence.
     Executor(ExecutorError),
+    /// Executor work failed and its required crash classification also failed.
+    ExecutorCrashClassification {
+        /// Original executor failure.
+        executor_error: ExecutorError,
+        /// Failure to durably classify the in-flight attempt.
+        classification_error: TransactionError,
+    },
     /// Executor evidence named a dispatch fence other than the invocation.
     ExecutorCorrelationMismatch,
+    /// Cross-wired executor evidence and its required crash classification both failed.
+    ExecutorCorrelationMismatchCrashClassification(TransactionError),
     /// Executor evidence could not commit.
     ObservationCommit(TransactionError),
     /// Retained executor evidence could not be reconciled with durable state.
@@ -658,9 +672,22 @@ where
                 write!(formatter, "tool preflight evidence commit failed: {error}")
             }
             Self::Executor(error) => write!(formatter, "tool executor failed: {error}"),
+            Self::ExecutorCrashClassification {
+                executor_error,
+                classification_error,
+            } => write!(
+                formatter,
+                "tool executor failed ({executor_error}) and crash classification failed: \
+                 {classification_error}"
+            ),
             Self::ExecutorCorrelationMismatch => {
                 formatter.write_str("tool executor evidence carried a different dispatch fence")
             }
+            Self::ExecutorCorrelationMismatchCrashClassification(error) => write!(
+                formatter,
+                "tool executor evidence carried a different dispatch fence and crash \
+                 classification failed: {error}"
+            ),
             Self::ObservationCommit(error) => {
                 write!(formatter, "tool observation commit failed: {error}")
             }
@@ -702,9 +729,14 @@ where
             | Self::ObservationCommit(error)
             | Self::ObservationReconciliation(error)
             | Self::CrashClassification(error)
+            | Self::ExecutorCorrelationMismatchCrashClassification(error)
             | Self::Continuation(error) => error.operator_failure_class(),
             Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
             Self::Executor(error) => error.operator_failure_class(),
+            Self::ExecutorCrashClassification {
+                classification_error,
+                ..
+            } => classification_error.operator_failure_class(),
             Self::ExecutorCorrelationMismatch | Self::CatalogDrift => {
                 OperatorFailureClass::CallerOrHubBug
             }
@@ -1170,30 +1202,75 @@ where
         let evidence = match self.executor.execute(invocation).await {
             Ok(evidence) => evidence,
             Err(error) => {
-                match self
-                    .classify_crash_loss(
-                        expected_correlation.session(),
-                        expected_correlation.turn(),
-                        authorized.attempt().attempt(),
+                return self
+                    .classify_untrusted_executor_failure(
+                        expected_correlation,
                         result_entry_count,
                         dispatch_permit,
+                        UntrustedExecutorFailure::Executor(error),
                     )
-                    .await
-                {
-                    Ok(ToolExecutionServiceOutcome::CrashClassified(_)) => {
-                        return Err(ToolExecutionServiceError::Executor(error));
-                    }
-                    Ok(_) => unreachable!("crash classification has one successful outcome"),
-                    Err(classification_error) => return Err(classification_error),
-                }
+                    .await;
             }
         };
         if evidence.correlation() != expected_correlation {
-            return Err(ToolExecutionServiceError::ExecutorCorrelationMismatch);
+            return self
+                .classify_untrusted_executor_failure(
+                    expected_correlation,
+                    result_entry_count,
+                    dispatch_permit,
+                    UntrustedExecutorFailure::CorrelationMismatch,
+                )
+                .await;
         }
         let observation = admit_executor_evidence(evidence, effect_class);
         self.commit_executor_observation(observation, dispatch_permit)
             .await
+    }
+
+    async fn classify_untrusted_executor_failure(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+        result_entry_count: usize,
+        dispatch_permit: InProcessToolDispatchPermit,
+        failure: UntrustedExecutorFailure<Executor::Error>,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    > {
+        let classification = self
+            .classify_crash_loss(
+                correlation.session(),
+                correlation.turn(),
+                correlation.attempt(),
+                result_entry_count,
+                dispatch_permit,
+            )
+            .await;
+        match (failure, classification) {
+            (
+                UntrustedExecutorFailure::Executor(error),
+                Ok(ToolExecutionServiceOutcome::CrashClassified(_)),
+            ) => Err(ToolExecutionServiceError::Executor(error)),
+            (
+                UntrustedExecutorFailure::CorrelationMismatch,
+                Ok(ToolExecutionServiceOutcome::CrashClassified(_)),
+            ) => Err(ToolExecutionServiceError::ExecutorCorrelationMismatch),
+            (
+                UntrustedExecutorFailure::Executor(executor_error),
+                Err(ToolExecutionServiceError::CrashClassification(classification_error)),
+            ) => Err(ToolExecutionServiceError::ExecutorCrashClassification {
+                executor_error,
+                classification_error,
+            }),
+            (
+                UntrustedExecutorFailure::CorrelationMismatch,
+                Err(ToolExecutionServiceError::CrashClassification(error)),
+            ) => Err(
+                ToolExecutionServiceError::ExecutorCorrelationMismatchCrashClassification(error),
+            ),
+            (_, Ok(_)) => unreachable!("crash classification has one successful outcome"),
+            (_, Err(_)) => unreachable!("crash classification has one failure stage"),
+        }
     }
 
     async fn commit_executor_observation(
@@ -2116,9 +2193,10 @@ mod tests {
 
         assert!(matches!(
             service.execute(batch.session(), batch.turn()).await,
-            Err(ToolExecutionServiceError::CrashClassification(
-                FakeError::Ordinary
-            ))
+            Err(ToolExecutionServiceError::ExecutorCrashClassification {
+                executor_error: FakeError::Ordinary,
+                classification_error: FakeError::Ordinary,
+            })
         ));
         assert!(service.retained_state().is_some());
         assert!(
@@ -2149,10 +2227,11 @@ mod tests {
         );
     }
 
-    /// INV-011: executor evidence from another valid dispatch fence is rejected
-    /// before persistence sees it.
+    /// INV-011 / INV-037: executor evidence from another valid dispatch fence
+    /// crash-classifies the current attempt before releasing its gate and never
+    /// reaches observation commit.
     #[tokio::test]
-    async fn inv011_cross_wired_executor_evidence_never_reaches_commit() {
+    async fn inv011_inv037_cross_wired_evidence_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -2168,7 +2247,7 @@ mod tests {
             commit_failures: 0,
             committed: false,
             load_results: VecDeque::new(),
-            allow_crash_classification: false,
+            allow_crash_classification: true,
         };
         let definition = definition(
             "known",
@@ -2200,19 +2279,29 @@ mod tests {
                 String::from("foreign result"),
             ))),
         };
+        let gate = InProcessToolDispatchGate::default();
         let mut service = ToolExecutionService::new(
             FixedIds::new(),
             transaction,
             catalog,
             executor,
-            InProcessToolDispatchGate::default(),
+            gate.clone(),
         );
 
         assert!(matches!(
             service.execute(batch.session(), batch.turn()).await,
             Err(ToolExecutionServiceError::ExecutorCorrelationMismatch)
         ));
-        assert_eq!(*events.lock().expect("event lock"), ["authorize"]);
+        let _released = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await
+        .expect("durable crash classification releases the interrupt gate");
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "classify"]
+        );
     }
 
     /// INV-011 / INV-037: a prepared execution hint is revalidated after the

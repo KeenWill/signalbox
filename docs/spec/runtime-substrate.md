@@ -61,6 +61,11 @@ colliding with the output contract's name. Why: the contract name is reserved so
 a returned proposal under that name is unambiguously the contracted value, never
 an ordinary tool call.
 
+Provider preparation also fails before any send when its wire representation
+cannot preserve typed conversation-part order. In particular, Chat Completions
+rejects assistant text following a replayed tool call because its assistant
+message shape cannot encode whether that text preceded or followed the call.
+
 Target identity stays three facts (`RequestedTarget`, `ResolvedTarget`,
 `ProviderReportedModel`), but only the first two are operation fields: the
 reported identity cannot exist when the operation is constructed, so it is an
