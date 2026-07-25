@@ -3,8 +3,9 @@
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
-converters, and the append-only Postgres import store. Later session creation
-from one imported frontier is owned by
+converters, and the append-only Postgres import store. It was verified against
+the implementing stack through PR #215 (`agent/conversation-import-codex`).
+Later session creation from one imported frontier is owned by
 [sessions-and-transcript](sessions-and-transcript.md); native turn activation
 and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
