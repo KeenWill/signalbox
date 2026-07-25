@@ -725,7 +725,7 @@ impl SnapshotSelection {
             Self::ToolReconciliation { .. } => Err(ClientError::Protocol(
                 "tool reconciliation reread omitted its exact terminal result suffix",
             )),
-            Self::All => unreachable!("all entries need no selection context"),
+            Self::All => Ok(SnapshotSelectionContext::default()),
         }
     }
 
