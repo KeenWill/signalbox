@@ -10,18 +10,19 @@ use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, ReviewChangeRequestNumber, ReviewConfidence,
     ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
     ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalLinkObservation, ReviewExternalLinkObservationResult, ReviewExternalObjectKind,
-    ReviewExternalObjectState, ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
-    ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId,
-    ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity,
-    ReviewFindingStatus, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
-    ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput, ReviewPassRef,
-    ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewPolicyVersion, ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun,
-    ReviewRunEvidence, ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef, ReviewRunState,
-    ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId,
-    TurnId,
+    ReviewExternalLinkObservation, ReviewExternalLinkObservationResult,
+    ReviewExternalLinkTransitionFailure, ReviewExternalObjectKind, ReviewExternalObjectState,
+    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
+    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventResultKind,
+    ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation,
+    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
+    ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange, ReviewPass,
+    ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+    ReviewPassReconstitutionInput, ReviewPassRef, ReviewPassResult, ReviewPassState,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyVersion,
+    ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence,
+    ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef, ReviewRunState, ReviewTarget,
+    ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -1062,12 +1063,44 @@ impl ReviewWorkflowStore {
         let Some(current) = self.load_external_link(link).await? else {
             return Ok(None);
         };
-        let next = current.observe(observation.clone()).map_err(|error| {
-            ReviewWorkflowStoreError::InvalidTransition(
-                ReviewWorkflowTransitionError::ExternalLink(error),
-            )
-        })?;
+        match current.clone().observe(observation.clone()) {
+            Ok(_) => {}
+            Err(error)
+                if error.failure() == ReviewExternalLinkTransitionFailure::UnchangedObservation =>
+            {
+                // The database lock below decides whether this remains
+                // unchanged after any concurrent observation commits.
+            }
+            Err(error) => {
+                return Err(ReviewWorkflowStoreError::InvalidTransition(
+                    ReviewWorkflowTransitionError::ExternalLink(error),
+                ));
+            }
+        }
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT external_link_id
+               FROM review_external_link
+              WHERE external_link_id = $1
+              FOR NO KEY UPDATE",
+        )
+        .bind(link.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let latest_state = sqlx::query_scalar::<_, String>(
+            "SELECT object_state
+               FROM review_external_link_observation
+              WHERE external_link_id = $1
+              ORDER BY observation_ordinal DESC
+              LIMIT 1",
+        )
+        .bind(link.into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if latest_state.as_deref() == Some(encode_external_object_state(observation.state())) {
+            transaction.commit().await?;
+            return self.load_external_link(link).await;
+        }
         bind_pass_result(&mut transaction, observation.pass_evidence()).await?;
         sqlx::query(
             "INSERT INTO review_external_link_observation
@@ -1077,14 +1110,14 @@ impl ReviewWorkflowStore {
         )
         .bind(observation.link().into_uuid())
         .bind(i64::from(observation.ordinal().get()))
-        .bind(next.association().target().into_uuid())
+        .bind(current.association().target().into_uuid())
         .bind(observation.pass().run().run().into_uuid())
         .bind(observation.pass().pass().into_uuid())
         .bind(encode_external_object_state(observation.state()))
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
-        Ok(Some(next))
+        self.load_external_link(link).await
     }
 
     /// Loads and validates a reservation, optional attachment, and observations.
@@ -2159,18 +2192,60 @@ fn decode_finding_event(
             })?,
         },
         ("stale", None, None, None, None, None) => ReviewFindingEventKind::Stale,
-        ("posted", None, None, None, None, Some(link)) => ReviewFindingEventKind::Posted {
-            link: Box::new(decode_finding_external_link(
+        ("posted", None, None, None, None, Some(link)) => {
+            let canonical = decode_finding_external_link_aggregate(
                 row,
-                finding,
                 external_link_id(link),
                 target_snapshot,
-            )?),
-        },
+            )?;
+            ReviewFindingEventKind::Posted {
+                link: Box::new(
+                    ReviewFindingExternalLinkRef::try_new(finding, &canonical).map_err(
+                        |error| {
+                            corruption(
+                                "review_finding_event",
+                                format!("invalid canonical posted link: {:?}", error.failure()),
+                            )
+                        },
+                    )?,
+                ),
+            }
+        }
         ("fixed", None, None, None, None, None) => ReviewFindingEventKind::Fixed,
-        ("blocked_with_reason", Some(reason), None, None, None, None) => {
+        ("blocked_with_reason", Some(reason), None, None, None, link) => {
+            let link = link
+                .map(|link| {
+                    let canonical = decode_finding_external_link_aggregate(
+                        row,
+                        external_link_id(link),
+                        target_snapshot,
+                    )?;
+                    let reservation = ReviewExternalLink::try_reserve(
+                        canonical.id(),
+                        canonical.association(),
+                        canonical.provider().clone(),
+                        canonical.object_kind(),
+                        target_snapshot,
+                    )
+                    .map_err(|error| {
+                        corruption(
+                            "review_finding_event",
+                            format!("invalid historical publication reservation: {error:?}"),
+                        )
+                    })?;
+                    ReviewFindingPendingExternalLinkRef::try_new(finding, &reservation)
+                        .map(Box::new)
+                        .map_err(|error| {
+                            corruption(
+                                "review_finding_event",
+                                format!("invalid pending publication link: {:?}", error.failure()),
+                            )
+                        })
+                })
+                .transpose()?;
             ReviewFindingEventKind::BlockedWithReason {
                 reason: review_text(reason, "review_finding_event")?,
+                link,
             }
         }
         _ => {
@@ -2193,12 +2268,11 @@ fn decode_finding_event(
     ))
 }
 
-fn decode_finding_external_link(
+fn decode_finding_external_link_aggregate(
     row: &PgRow,
-    finding: ReviewFindingRef,
     event_link: ReviewExternalLinkId,
     target_snapshot: &ReviewTarget,
-) -> Result<ReviewFindingExternalLinkRef, ReviewWorkflowStoreError> {
+) -> Result<ReviewExternalLink, ReviewWorkflowStoreError> {
     let id = row
         .try_get::<Option<Uuid>, _>("canonical_link_id")?
         .map(external_link_id)
@@ -2357,7 +2431,7 @@ fn decode_finding_external_link(
             ));
         }
     };
-    let canonical = ReviewExternalLink::try_reconstitute(
+    ReviewExternalLink::try_reconstitute(
         id,
         association,
         review_key(provider, "review_external_link")?,
@@ -2366,13 +2440,7 @@ fn decode_finding_external_link(
         Vec::new(),
         target_snapshot,
     )
-    .map_err(|error| corruption("review_finding_event", format!("{error:?}")))?;
-    ReviewFindingExternalLinkRef::try_new(finding, &canonical).map_err(|error| {
-        corruption(
-            "review_finding_event",
-            format!("invalid canonical posted link: {:?}", error.failure()),
-        )
-    })
+    .map_err(|error| corruption("review_finding_event", format!("{error:?}")))
 }
 
 fn decode_external_link_root(
@@ -2668,8 +2736,8 @@ fn encode_pass_finding_event<'a>(
         ReviewFindingEventResultKind::Stale => ("stale", None, None, None),
         ReviewFindingEventResultKind::Posted { link } => ("posted", None, None, Some(*link)),
         ReviewFindingEventResultKind::Fixed => ("fixed", None, None, None),
-        ReviewFindingEventResultKind::BlockedWithReason { reason } => {
-            ("blocked_with_reason", Some(reason.as_str()), None, None)
+        ReviewFindingEventResultKind::BlockedWithReason { reason, link } => {
+            ("blocked_with_reason", Some(reason.as_str()), None, *link)
         }
     };
     EncodedPassResult {
@@ -2935,6 +3003,7 @@ fn decode_stored_finding_event(
                 })?,
                 "review_pass",
             )?,
+            link: stored.external_link.map(external_link_id),
         },
         other => {
             return Err(corruption(
@@ -3098,12 +3167,12 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
             external_link: Some(link.link()),
         },
         ReviewFindingEventKind::Fixed => empty("fixed"),
-        ReviewFindingEventKind::BlockedWithReason { reason } => EncodedFindingEvent {
+        ReviewFindingEventKind::BlockedWithReason { reason, link } => EncodedFindingEvent {
             kind: "blocked_with_reason",
             reason: Some(reason.as_str()),
             referenced_finding: None,
             referenced_status: None,
-            external_link: None,
+            external_link: link.as_ref().map(|link| link.link()),
         },
     }
 }
