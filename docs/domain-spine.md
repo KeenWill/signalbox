@@ -3547,6 +3547,8 @@ pub struct SessionMetadataContent { /* private */ }
 impl SessionMetadataContent {
     pub const MAX_TOTAL_UTF8_BYTES: usize;
     pub const MAX_INDEXED_UTF8_BYTES: usize;
+    pub const MAX_TAGS: usize;
+    pub const MAX_ATTRIBUTES: usize;
     pub fn empty() -> Self;
     pub fn try_new(
         title: Option<String>,
@@ -3563,10 +3565,12 @@ impl SessionMetadataContent {
 pub enum SessionMetadataContentError {
     EmptyTitle,
     TitleContainsNul,
+    TooManyTags,
     EmptyTag,
     TagContainsNul,
     TagExceedsIndexedUtf8Bytes,
     DuplicateTag,
+    TooManyAttributes,
     EmptyAttributeKey,
     AttributeKeyContainsNul,
     AttributeKeyExceedsIndexedUtf8Bytes,
@@ -4629,6 +4633,7 @@ impl<Reader: SessionMetadataReader> LoadSessionMetadataService<Reader> {
 
 pub struct SessionMetadataListQuery { /* private */ }
 impl SessionMetadataListQuery {
+    pub const MAX_REQUIRED_TAGS: usize;
     pub fn default_page() -> Self;
     pub fn try_new(
         required_tags: Vec<String>,
@@ -4642,6 +4647,7 @@ impl SessionMetadataListQuery {
 }
 
 pub enum SessionMetadataListQueryError {
+    TooManyRequiredTags,
     EmptyTag,
     TagContainsNul,
     TagExceedsIndexedUtf8Bytes,

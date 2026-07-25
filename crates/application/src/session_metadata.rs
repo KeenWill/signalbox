@@ -181,6 +181,9 @@ pub struct SessionMetadataListQuery {
 }
 
 impl SessionMetadataListQuery {
+    /// Maximum exact required tags in one list filter.
+    pub const MAX_REQUIRED_TAGS: usize = 256;
+
     /// Constructs the ordinary first page of the default interactive view.
     pub fn default_page() -> Self {
         Self {
@@ -200,6 +203,10 @@ impl SessionMetadataListQuery {
         page_size: u64,
         after_session: Option<SessionId>,
     ) -> Result<Self, SessionMetadataListQueryError> {
+        if required_tags.len() > Self::MAX_REQUIRED_TAGS {
+            return Err(SessionMetadataListQueryError::TooManyRequiredTags);
+        }
+
         let mut total_utf8_bytes = 0usize;
         let mut canonical_tags = BTreeSet::new();
         for tag in required_tags {
@@ -274,6 +281,8 @@ impl SessionMetadataListQuery {
 /// Why a metadata list query could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionMetadataListQueryError {
+    /// More required tags were supplied than one filter admits.
+    TooManyRequiredTags,
     /// One required tag was empty.
     EmptyTag,
     /// One required tag contained U+0000.
@@ -669,6 +678,20 @@ mod tests {
 
         assert_eq!(zero, SessionMetadataListQueryError::PageSizeOutOfRange);
         assert_eq!(too_large, SessionMetadataListQueryError::PageSizeOutOfRange);
+    }
+
+    #[test]
+    fn list_query_rejects_required_tag_cardinality_over_bound() {
+        let error = SessionMetadataListQuery::try_new(
+            vec![String::from("tag"); SessionMetadataListQuery::MAX_REQUIRED_TAGS + 1],
+            None,
+            false,
+            50,
+            None,
+        )
+        .expect_err("one required tag above the cardinality bound is rejected");
+
+        assert_eq!(error, SessionMetadataListQueryError::TooManyRequiredTags);
     }
 
     #[test]

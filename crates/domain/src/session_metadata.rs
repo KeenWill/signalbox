@@ -33,6 +33,12 @@ impl SessionMetadataContent {
     /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
     pub const MAX_INDEXED_UTF8_BYTES: usize = 1_024;
 
+    /// Maximum distinct tags in one complete metadata snapshot.
+    pub const MAX_TAGS: usize = 256;
+
+    /// Maximum distinct attributes in one complete metadata snapshot.
+    pub const MAX_ATTRIBUTES: usize = 256;
+
     /// Constructs the canonical empty, non-archived metadata value.
     pub fn empty() -> Self {
         Self {
@@ -53,6 +59,13 @@ impl SessionMetadataContent {
         attributes: Vec<(String, String)>,
         archived: bool,
     ) -> Result<Self, SessionMetadataContentError> {
+        if tags.len() > Self::MAX_TAGS {
+            return Err(SessionMetadataContentError::TooManyTags);
+        }
+        if attributes.len() > Self::MAX_ATTRIBUTES {
+            return Err(SessionMetadataContentError::TooManyAttributes);
+        }
+
         let mut total_utf8_bytes = 0;
         if let Some(value) = title.as_deref() {
             validate_nonempty(value, SessionMetadataContentError::EmptyTitle)?;
@@ -173,6 +186,8 @@ pub enum SessionMetadataContentError {
     EmptyTitle,
     /// A present title contained U+0000.
     TitleContainsNul,
+    /// The caller supplied more tags than one snapshot admits.
+    TooManyTags,
     /// One tag was empty.
     EmptyTag,
     /// One tag contained U+0000.
@@ -181,6 +196,8 @@ pub enum SessionMetadataContentError {
     TagExceedsIndexedUtf8Bytes,
     /// The caller supplied the same exact tag more than once.
     DuplicateTag,
+    /// The caller supplied more attributes than one snapshot admits.
+    TooManyAttributes,
     /// One attribute key was empty.
     EmptyAttributeKey,
     /// One attribute key contained U+0000.
@@ -195,7 +212,7 @@ pub enum SessionMetadataContentError {
     TotalUtf8BytesExceeded,
 }
 
-/// PostgreSQL transaction time at microsecond precision.
+/// Database statement time sampled after the metadata writer lock.
 ///
 /// The integer is nonnegative microseconds since the Unix epoch. It is
 /// server-derived result evidence, not caller intent and not an ordering token
@@ -734,6 +751,32 @@ mod tests {
             first.attributes().collect::<Vec<_>>(),
             [("a", ""), ("z", "last")]
         );
+    }
+
+    #[test]
+    fn metadata_rejects_tag_cardinality_over_bound() {
+        let error = SessionMetadataContent::try_new(
+            None,
+            vec![String::from("tag"); SessionMetadataContent::MAX_TAGS + 1],
+            Vec::new(),
+            false,
+        )
+        .expect_err("one tag above the cardinality bound is rejected");
+
+        assert_eq!(error, SessionMetadataContentError::TooManyTags);
+    }
+
+    #[test]
+    fn metadata_rejects_attribute_cardinality_over_bound() {
+        let error = SessionMetadataContent::try_new(
+            None,
+            Vec::new(),
+            vec![(String::from("key"), String::new()); SessionMetadataContent::MAX_ATTRIBUTES + 1],
+            false,
+        )
+        .expect_err("one attribute above the cardinality bound is rejected");
+
+        assert_eq!(error, SessionMetadataContentError::TooManyAttributes);
     }
 
     #[test]
