@@ -456,7 +456,7 @@ async fn inv040_pass_loader_rejects_cross_wired_canonical_evidence() -> Result<(
 
     sqlx::query(
         "ALTER TABLE review_pass
-         DISABLE TRIGGER review_pass_update_is_guarded",
+         DISABLE TRIGGER review_pass_change_is_guarded",
     )
     .execute(&pool)
     .await?;
@@ -620,6 +620,43 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
 async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
+
+    let direct_cancelled_run = sqlx::query(
+        "INSERT INTO review_run
+            (run_id, target_id, workflow_kind, policy_version,
+             minimum_judge_confidence, minimum_publication_confidence,
+             state_kind, state_pass_id)
+         VALUES (
+             $1, $2, 'read_only_review', 1, 7000, 8000,
+             'cancelled', NULL
+         )",
+    )
+    .bind(uuid(0x607))
+    .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("raw review runs must begin queued");
+    assert_sqlstate(&direct_cancelled_run, "23514");
+
+    let direct_failed_pass = sqlx::query(
+        "INSERT INTO review_pass
+            (pass_id, run_id, target_id, pass_kind, session_id,
+             accepted_input_id, state_kind, turn_id, output_frontier_id)
+         VALUES (
+             $1, $2, $3, 'read_only_review', $4,
+             $5, 'failed', $6, NULL
+         )",
+    )
+    .bind(uuid(0x608))
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(uuid(0x201))
+    .bind(uuid(0x202))
+    .bind(uuid(0x203))
+    .execute(&pool)
+    .await
+    .expect_err("raw review passes must begin queued");
+    assert_sqlstate(&direct_failed_pass, "23514");
 
     let missing_change_request = sqlx::query(
         "INSERT INTO review_target
@@ -859,6 +896,56 @@ async fn inv041_external_link_load_is_one_repeatable_snapshot() -> Result<(), Bo
         .expect("committed external link loads");
     assert!(after_commit.attachment().is_some());
     assert_eq!(after_commit.observations().len(), 1);
+
+    Ok(())
+}
+
+/// INV-040: finding-event serialization remains compatible with the key-share
+/// lock PostgreSQL takes while checking a foreign finding reference.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_event_serialization_is_fk_compatible() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x309)));
+    fixture
+        .store
+        .insert_finding(&finding(finding_ref, fixture.pass))
+        .await
+        .expect("open finding persists");
+
+    let mut foreign_key_reader = pool.begin().await?;
+    sqlx::query(
+        "SELECT finding_id
+           FROM review_finding
+          WHERE finding_id = $1
+          FOR KEY SHARE",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .fetch_one(&mut *foreign_key_reader)
+    .await?;
+
+    let mut appender = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *appender)
+        .await?;
+    sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, external_link_id,
+             external_link_association_kind)
+         VALUES ($1, 1, $2, $3, $4, $2, 'accepted', NULL, NULL, NULL, NULL)",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&mut *appender)
+    .await
+    .expect("event root lock must remain compatible with foreign-key readers");
+    appender.commit().await?;
+    foreign_key_reader.rollback().await?;
 
     Ok(())
 }

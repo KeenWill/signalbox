@@ -261,11 +261,21 @@ ALTER TABLE review_run
     ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
 
-CREATE FUNCTION guard_review_run_update()
+CREATE FUNCTION guard_review_run_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state_kind IS DISTINCT FROM 'queued'
+           OR NEW.state_pass_id IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'review run must begin queued'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF (NEW.run_id, NEW.target_id, NEW.workflow_kind, NEW.policy_version,
         NEW.minimum_judge_confidence, NEW.minimum_publication_confidence)
        IS DISTINCT FROM
@@ -316,16 +326,27 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER review_run_update_is_guarded
-BEFORE UPDATE ON review_run
+CREATE TRIGGER review_run_change_is_guarded
+BEFORE INSERT OR UPDATE ON review_run
 FOR EACH ROW
-EXECUTE FUNCTION guard_review_run_update();
+EXECUTE FUNCTION guard_review_run_change();
 
-CREATE FUNCTION guard_review_pass_update()
+CREATE FUNCTION guard_review_pass_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state_kind IS DISTINCT FROM 'queued'
+           OR NEW.turn_id IS NOT NULL
+           OR NEW.output_frontier_id IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'review pass must begin queued'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF (NEW.pass_id, NEW.run_id, NEW.target_id, NEW.pass_kind,
         NEW.session_id, NEW.accepted_input_id)
        IS DISTINCT FROM
@@ -376,10 +397,10 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER review_pass_update_is_guarded
-BEFORE UPDATE ON review_pass
+CREATE TRIGGER review_pass_change_is_guarded
+BEFORE INSERT OR UPDATE ON review_pass
 FOR EACH ROW
-EXECUTE FUNCTION guard_review_pass_update();
+EXECUTE FUNCTION guard_review_pass_change();
 
 CREATE TRIGGER review_pass_reject_delete
 BEFORE DELETE ON review_pass
@@ -721,7 +742,7 @@ BEGIN
     PERFORM 1
       FROM review_finding
      WHERE finding_id = NEW.finding_id
-     FOR UPDATE;
+     FOR NO KEY UPDATE;
 
     SELECT event_kind
       INTO previous_kind
