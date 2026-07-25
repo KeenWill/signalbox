@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Route review requests for every path to the owner
+
+**Context.** The repository carries no `CODEOWNERS` file, so GitHub attaches no
+reviewer to a new pull request and nothing outside the prose rules resolves who
+owns a path. The 2026-07-17 entry "Merging an ADR pull request is its
+acceptance" lists `CODEOWNERS` among its rejected alternatives, but in the
+narrower sense there declined: mechanical enforcement of record acceptance
+through *required* review.
+
+**Decision.** Add `.github/CODEOWNERS` with the single rule `* @KeenWill`, so
+every path routes to the repository owner. The file is routing and notification
+only: it is not paired with a branch-protection rule that makes owner review a
+merge condition, so it changes who is requested, not what may merge. Merge
+authority is unchanged and stays owned by `AGENTS.md`.
+
+**Rejected alternatives.** Per-directory owner rules restate one owner across a
+path table that can only drift. Pairing the file with required-review branch
+protection is the enforcement the 2026-07-17 entry declined as ceremony for a
+single-owner repository. Leaving the file absent keeps every review request
+manual and leaves tooling with no owner to resolve.
+
+**Affects.** `.github/CODEOWNERS` (new) and pull-request reviewer assignment.
+
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
 **Context.** Metadata list queries admit page sizes from one through one
