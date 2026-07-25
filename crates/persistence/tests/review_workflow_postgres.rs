@@ -624,9 +624,10 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         accepted_input,
     )
     .await;
-    for reference in [pass_ref, judge_pass, publish_pass, import_pass] {
-        start_review_pass(&store, reference, turn).await;
-    }
+    start_review_pass(&store, pass_ref, turn).await;
+    start_review_pass(&store, judge_pass, turn).await;
+    start_review_pass(&store, publish_pass, turn).await;
+    start_review_pass(&store, import_pass, turn).await;
     let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
     let review_evidence = conclude_review_pass(
         &store,
@@ -2542,27 +2543,22 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     .await;
 
     let turn = TurnId::from_uuid(uuid(0x203));
-    for reference in [fixture.pass, judge_pass, attaching_pass, other_publish_pass] {
-        start_review_pass(&fixture.store, reference, turn).await;
-    }
+    start_review_pass(&fixture.store, fixture.pass, turn).await;
+    start_review_pass(&fixture.store, judge_pass, turn).await;
+    start_review_pass(&fixture.store, attaching_pass, turn).await;
+    start_review_pass(&fixture.store, other_publish_pass, turn).await;
     start_review_pass(&fixture.store, blocked_publish_pass, blocked_turn).await;
     let output_frontier = synthetically_terminalize_turn(&pool, turn, "completed").await;
     synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
 
-    let mut succeeded = Vec::new();
-    for reference in [fixture.pass, judge_pass, attaching_pass, other_publish_pass] {
-        succeeded.push(
-            conclude_review_pass(
-                &fixture.store,
-                reference,
-                ReviewPassState::Succeeded {
-                    turn,
-                    output_frontier,
-                },
-            )
-            .await,
-        );
-    }
+    let succeeded = ReviewPassState::Succeeded {
+        turn,
+        output_frontier,
+    };
+    let review_evidence = conclude_review_pass(&fixture.store, fixture.pass, succeeded).await;
+    let judge_evidence = conclude_review_pass(&fixture.store, judge_pass, succeeded).await;
+    let attaching_evidence = conclude_review_pass(&fixture.store, attaching_pass, succeeded).await;
+    conclude_review_pass(&fixture.store, other_publish_pass, succeeded).await;
     let blocked_evidence = conclude_review_pass(
         &fixture.store,
         blocked_publish_pass,
@@ -2575,7 +2571,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .insert_finding(&finding(
             finding_ref,
-            succeeded[0],
+            review_evidence,
             &fixture.target_snapshot,
         ))
         .await?;
@@ -2586,7 +2582,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
             ReviewFindingEvent::new(
                 finding_ref,
                 ReviewEventOrdinal::one(),
-                succeeded[1],
+                judge_evidence,
                 ReviewFindingEventKind::Accepted,
             ),
         )
@@ -2621,7 +2617,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .attach_external_link(
             link,
-            ReviewExternalLinkAttachment::new(link, succeeded[2], key("comment-711")),
+            ReviewExternalLinkAttachment::new(link, attaching_evidence, key("comment-711")),
         )
         .await?
         .expect("publication attachment persists");
@@ -2652,7 +2648,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
             ReviewFindingEvent::new(
                 finding_ref,
                 ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
-                succeeded[2],
+                attaching_evidence,
                 ReviewFindingEventKind::Posted {
                     link: signalbox_domain::ReviewFindingExternalLinkRef::try_new(
                         finding_ref,
