@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Run Docker-backed integration suites concurrently in CI
+
+**Context.** GitHub-hosted Ubuntu runners provide Docker, and Signalbox's
+ignored integration tests start pinned PostgreSQL containers through
+testcontainers. The workflow ran several test binaries sequentially from a
+hand-maintained list, which delayed feedback and omitted a newly added
+import-to-native end-to-end binary.
+
+**Decision.** Run three fail-fast-disabled CI matrix suites concurrently: all
+ignored persistence test targets with the `postgres-integration` feature, all
+ignored hubd test targets, and the explicitly selected offline terminal client
+end-to-end test. Retain one aggregate `postgres-integration` job so the existing
+required-check name remains stable. Package-wide selection makes new persistence
+and hubd integration-test binaries covered by default.
+
+**Rejected alternatives.** Keeping one sequential job preserves redundant
+latency and the omission-prone binary inventory. One workspace-wide ignored test
+command would mix Docker coverage with opt-in real-provider and local-file tests
+whose external inputs are deliberately unavailable in public CI. A
+workflow-managed PostgreSQL service would duplicate the pinned, isolated
+testcontainers lifecycle already owned by each test.
+
+**Affects.** GitHub Actions integration-test coverage, feedback latency,
+required-check compatibility, and Docker-backed PostgreSQL test execution.
+
 ## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
 
 **Context.** The finished-pull-request rules required push-time reviewer
