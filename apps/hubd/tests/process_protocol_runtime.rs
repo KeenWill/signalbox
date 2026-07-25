@@ -442,17 +442,13 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
     runtime.stop().await
 }
 
-/// INV-012 / INV-033: version four maps complete metadata replacement through
-/// durable replay and exposes bounded archive-aware pages without changing the
-/// retained legacy request vocabulary.
+/// INV-033: version four exposes the canonical initial metadata projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_four()
--> Result<(), Box<dyn Error>> {
+async fn s01_inv033_version_four_reads_initial_metadata_projection() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
-    let second_session = create_alias_session(&mut connection).await?;
 
     connection
         .request_version(
@@ -473,6 +469,19 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
             last_writer: None,
         } if *session_id == first_session && metadata == &SessionMetadata::empty()
     ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012: one metadata command identity applies once, replays exactly, and
+/// rejects a structurally different reuse.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_version_four_enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let first_session = create_alias_session(&mut connection).await?;
 
     let replacement_command = command()?;
     let replacement = SessionMetadata::try_new(
@@ -535,6 +544,45 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
             code: ErrorCode::ConflictingReuse,
             ..
         }
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-013: the default metadata list applies exact filters while excluding an
+/// archived match.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv013_metadata_list_applies_default_visibility_filters() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let first_session = create_alias_session(&mut connection).await?;
+    let second_session = create_alias_session(&mut connection).await?;
+    let archived_metadata = SessionMetadata::try_new(
+        Some(String::from("Active archived plan")),
+        vec![String::from("daily")],
+        Vec::new(),
+        true,
+    )?;
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            10,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command()?,
+                session_id: first_session,
+                metadata: archived_metadata,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataReplaced {
+            session_id,
+            metadata,
+            ..
+        } if *session_id == first_session && metadata.archived()
     ));
 
     let second_metadata = SessionMetadata::try_new(
@@ -600,6 +648,18 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
             next_after_session_id: None,
         } if session_count.value() == 1
     ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let first_session = create_alias_session(&mut connection).await?;
+    let second_session = create_alias_session(&mut connection).await?;
 
     connection
         .request_version(
@@ -680,6 +740,41 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
         } if session_count.value() == 1
     ));
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-033: a version-four metadata read returns the complete current wire
+/// projection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv033_version_four_reads_current_metadata_projection() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let first_session = create_alias_session(&mut connection).await?;
+    let replacement = SessionMetadata::try_new(
+        Some(String::from("Current plan")),
+        vec![String::from("daily")],
+        vec![(String::from("run"), String::from("17"))],
+        false,
+    )?;
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            10,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command()?,
+                session_id: first_session,
+                metadata: replacement.clone(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataReplaced { session_id, .. }
+            if *session_id == first_session
+    ));
+
     connection
         .request_version(
             ProtocolVersion::Four,
@@ -700,6 +795,15 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
             && matches!(last_writer.actor(), MetadataActor::Owner {})
     ));
 
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv033_metadata_read_maps_a_missing_session() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
     let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0xdead));
     connection
         .request_version(
@@ -715,6 +819,17 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
             ..
         }
     ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv033_metadata_replace_maps_a_missing_session() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0xdead));
     connection
         .request_version(
             ProtocolVersion::Four,
@@ -736,6 +851,44 @@ async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_fo
             detail.value(),
             Some(RejectionDetail::SessionNotFound { session_id }) if session_id == absent
         )
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-013: replacing an archived snapshot with `archived = false` returns the
+/// same session to the default list.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv013_metadata_restore_returns_session_to_default_list() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let first_session = create_alias_session(&mut connection).await?;
+    let archived = SessionMetadata::try_new(
+        Some(String::from("Archived plan")),
+        vec![String::from("work"), String::from("daily")],
+        vec![(String::from("run"), String::from("17"))],
+        true,
+    )?;
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            10,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command()?,
+                session_id: first_session,
+                metadata: archived,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataReplaced {
+            session_id,
+            metadata,
+            ..
+        } if *session_id == first_session && metadata.archived()
     ));
 
     let restored = SessionMetadata::try_new(

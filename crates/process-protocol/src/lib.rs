@@ -102,6 +102,15 @@ pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
 pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
 
+/// Maximum exact tags in one complete metadata object.
+pub const MAX_SESSION_METADATA_TAGS: usize = 256;
+
+/// Maximum exact attributes in one complete metadata object.
+pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
+
+/// Maximum exact required tags in one metadata-list filter.
+pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
+
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CanonicalUuid(Uuid);
@@ -451,7 +460,7 @@ impl SessionMetadata {
             validate_nonempty_metadata_text(title)?;
             add_metadata_utf8_bytes(&mut total_utf8_bytes, title)?;
         }
-        let tags = canonical_metadata_tags(tags)?;
+        let tags = canonical_metadata_tags(tags, MAX_SESSION_METADATA_TAGS)?;
         for tag in &tags {
             add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)?;
         }
@@ -541,6 +550,9 @@ struct MetadataAttributes(BTreeMap<String, String>);
 
 impl MetadataAttributes {
     fn try_new(values: Vec<(String, String)>) -> Result<Self, CanonicalValueError> {
+        if values.len() > MAX_SESSION_METADATA_ATTRIBUTES {
+            return Err(CanonicalValueError::Metadata);
+        }
         let mut attributes = BTreeMap::new();
         for (key, value) in values {
             validate_nonempty_metadata_text(&key)?;
@@ -569,6 +581,11 @@ impl<'de> Visitor<'de> for MetadataAttributesVisitor {
     {
         let mut attributes = BTreeMap::new();
         while let Some((key, value)) = map.next_entry::<String, String>()? {
+            if attributes.len() == MAX_SESSION_METADATA_ATTRIBUTES {
+                return Err(serde::de::Error::custom(
+                    "too many session metadata attributes",
+                ));
+            }
             validate_nonempty_metadata_text(&key).map_err(serde::de::Error::custom)?;
             validate_indexed_metadata_text(&key).map_err(serde::de::Error::custom)?;
             validate_metadata_text(&value).map_err(serde::de::Error::custom)?;
@@ -624,7 +641,13 @@ fn add_metadata_utf8_bytes(total: &mut usize, value: &str) -> Result<(), Canonic
     }
 }
 
-fn canonical_metadata_tags(values: Vec<String>) -> Result<Vec<String>, CanonicalValueError> {
+fn canonical_metadata_tags(
+    values: Vec<String>,
+    maximum: usize,
+) -> Result<Vec<String>, CanonicalValueError> {
+    if values.len() > maximum {
+        return Err(CanonicalValueError::Metadata);
+    }
     let mut tags = BTreeSet::new();
     for tag in values {
         validate_nonempty_metadata_text(&tag)?;
@@ -656,7 +679,7 @@ pub enum MetadataActor {
     },
 }
 
-/// The transaction time and actor of the most recent metadata replacement.
+/// The post-lock database statement time and actor of the latest replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataLastWriter {
@@ -771,8 +794,9 @@ impl ClientRequest {
             ..
         } = self
         {
-            let canonical_tags = canonical_metadata_tags(required_tags.clone())
-                .map_err(|_| FrameValidationError::MetadataShape)?;
+            let canonical_tags =
+                canonical_metadata_tags(required_tags.clone(), MAX_SESSION_METADATA_REQUIRED_TAGS)
+                    .map_err(|_| FrameValidationError::MetadataShape)?;
             let mut total_utf8_bytes = 0usize;
             for tag in &canonical_tags {
                 add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)
@@ -1910,14 +1934,21 @@ impl ServerMessage {
                 last_writer,
                 ..
             } => {
+                let mut total_utf8_bytes = 0usize;
                 if let Some(title) = title {
                     validate_nonempty_metadata_text(title)
                         .map_err(|_| FrameValidationError::MetadataShape)?;
+                    add_metadata_utf8_bytes(&mut total_utf8_bytes, title)
+                        .map_err(|_| FrameValidationError::MetadataShape)?;
                 }
-                let canonical = canonical_metadata_tags(tags.clone())
+                let canonical = canonical_metadata_tags(tags.clone(), MAX_SESSION_METADATA_TAGS)
                     .map_err(|_| FrameValidationError::MetadataShape)?;
                 if canonical != *tags {
                     return Err(FrameValidationError::MetadataShape);
+                }
+                for tag in tags {
+                    add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)
+                        .map_err(|_| FrameValidationError::MetadataShape)?;
                 }
                 if last_writer.is_none() && (title.is_some() || !tags.is_empty() || *archived) {
                     return Err(FrameValidationError::MetadataShape);
@@ -2508,12 +2539,13 @@ mod tests {
         FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
         FrameEncodeError, FrameValidationError, ImportedContentKind, ImportedSourceSpeaker,
         ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection,
-        PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-        SESSION_METADATA_PROTOCOL_VERSION, ServerFrame, ServerMessage, SessionEvent,
-        SessionMetadata, ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor, MetadataLastWriter,
+        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION, ServerFrame, ServerMessage,
+        SessionEvent, SessionMetadata, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
+        TurnState, decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -2539,6 +2571,17 @@ mod tests {
             ],
             archived,
         )?)
+    }
+
+    fn numbered_metadata_strings(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("value-{index}")).collect()
+    }
+
+    fn numbered_metadata_attributes(count: usize) -> Vec<(String, String)> {
+        numbered_metadata_strings(count)
+            .into_iter()
+            .map(|key| (key, String::new()))
+            .collect()
     }
 
     fn line(json: &str) -> Vec<u8> {
@@ -3428,6 +3471,24 @@ mod tests {
         assert!(
             SessionMetadata::try_new(
                 None,
+                numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1),
+                Vec::new(),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SessionMetadata::try_new(
+                None,
+                Vec::new(),
+                numbered_metadata_attributes(MAX_SESSION_METADATA_ATTRIBUTES + 1),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SessionMetadata::try_new(
+                None,
                 Vec::new(),
                 vec![(
                     "x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1),
@@ -3484,6 +3545,48 @@ mod tests {
         };
         assert_eq!(
             ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_indexed),
+            Err(FrameValidationError::MetadataShape)
+        );
+
+        let over_cardinality = ClientRequest::ListSessionMetadata {
+            required_tags: numbered_metadata_strings(MAX_SESSION_METADATA_REQUIRED_TAGS + 1),
+            title_contains: None,
+            include_archived: false,
+            page_size: CanonicalU64::new(50),
+            after_session_id: None,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_cardinality,),
+            Err(FrameValidationError::MetadataShape)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_summary_enforces_aggregate_utf8_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let individually_valid_but_oversized = ServerMessage::SessionMetadataSummary {
+            session_id: uuid(1),
+            defaults_version: CanonicalU64::new(1),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(2),
+            },
+            dangerous_tool_auto_approval: false,
+            title: Some("x".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
+            tags: vec![String::from("tag")],
+            archived: false,
+            last_writer: Some(MetadataLastWriter::new(
+                CanonicalU64::new(1),
+                MetadataActor::Owner {},
+            )),
+        };
+
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Four,
+                request(1)?,
+                individually_valid_but_oversized,
+            ),
             Err(FrameValidationError::MetadataShape)
         );
         Ok(())

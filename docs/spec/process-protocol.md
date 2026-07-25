@@ -298,11 +298,13 @@ Each summary carries `session_id`, current `defaults_version`,
 `model_selection`, `dangerous_tool_auto_approval`, `title`, sorted `tags`,
 `archived`, and `last_writer`. `dangerous_tool_auto_approval` is a JSON boolean:
 `false` encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags
-are strictly increasing by lexicographic UTF-8 byte sequence. Attributes are
-intentionally absent from the list projection. The end cursor is null when no
-later match existed in the page snapshot; otherwise it equals the last emitted
-session identity. The page sequence is spooled before output and becomes
-authoritative only after its count, ordering, and cursor validate.
+are strictly increasing by lexicographic UTF-8 byte sequence. Each summary
+admits at most 256 tags and applies the metadata object's 262,144-byte aggregate
+UTF-8 bound across its title and tags, not merely to each member independently.
+Attributes are intentionally absent from the list projection. The end cursor is
+null when no later match existed in the page snapshot; otherwise it equals the
+last emitted session identity. The page sequence is spooled before output and
+becomes authoritative only after its count, ordering, and cursor validate.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry
