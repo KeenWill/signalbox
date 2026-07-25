@@ -5337,7 +5337,10 @@ pub enum ReviewFindingEventResultKind {
     Stale,
     Posted { link: ReviewExternalLinkId },
     Fixed,
-    BlockedWithReason { reason: ReviewText },
+    BlockedWithReason {
+        reason: ReviewText,
+        link: Option<ReviewExternalLinkId>,
+    },
 }
 impl ReviewFindingEventResultKind {
     pub const fn event_type(&self) -> ReviewFindingEventType;
@@ -5685,6 +5688,7 @@ pub enum ReviewFindingExternalLinkFailure {
     ForeignAssociation,
     IncompatibleObjectKind,
     NotAttached,
+    AlreadyAttached,
 }
 pub struct ReviewFindingExternalLinkError { /* canonical association + failure */ }
 impl ReviewFindingExternalLinkError {
@@ -5697,6 +5701,14 @@ impl ReviewFindingExternalLinkRef {
     ) -> Result<Self, ReviewFindingExternalLinkError>;
     // accessors: finding(), link(), attachment_pass()
 }
+pub struct ReviewFindingPendingExternalLinkRef { /* finding + pending link */ }
+impl ReviewFindingPendingExternalLinkRef {
+    pub fn try_new(
+        finding: ReviewFindingRef,
+        link: &ReviewExternalLink,
+    ) -> Result<Self, ReviewFindingExternalLinkError>;
+    // accessors: finding(), link()
+}
 
 pub enum ReviewFindingEventKind {
     Accepted,
@@ -5706,7 +5718,10 @@ pub enum ReviewFindingEventKind {
     Stale,
     Posted { link: Box<ReviewFindingExternalLinkRef> },
     Fixed,
-    BlockedWithReason { reason: ReviewText },
+    BlockedWithReason {
+        reason: ReviewText,
+        link: Option<Box<ReviewFindingPendingExternalLinkRef>>,
+    },
 }
 impl ReviewFindingEventKind {
     pub const fn event_type(&self) -> ReviewFindingEventType;
@@ -5869,6 +5884,7 @@ pub enum ReviewExternalLinkTransitionFailure {
     IncompatibleAttachmentRunEvidence,
     IncompatibleObservationPass,
     IncompatibleObservationRunEvidence,
+    UnchangedObservation,
     ConflictingPassEvidence,
     ConflictingRunEvidence,
     NotAttached,
@@ -5905,9 +5921,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 77                   |
+| domain: review_workflow                            | 78                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **447 (+1 free fn)** |
+| **signalbox-domain total**                         | **448 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
