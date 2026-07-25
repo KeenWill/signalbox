@@ -415,6 +415,42 @@ deadlines would add unrelated timing semantics.
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
 
+## 2026-07-24 — Version maximum-fidelity conversion and generic result blocks
+
+**Context.** Maximum-fidelity conversion broadens the original Claude Code
+interpretation so structurally valid source-defined message and result blocks
+are normalized instead of rejected. Reusing converter version 1 would
+reinterpret stored normalized records and violate the fixed-version converter
+contract. Maximum fidelity also adds a generic result-block variant to the
+existing [conversation-import](spec/conversation-import.md) vocabulary.
+Persistence content version 1 already includes the generic message-block tag,
+but its nested result-block tags are closed. Repository validation also needs
+source files without publishing their content.
+
+**Decision.** Preserve the original Claude Code converter-version-1
+interpretation and add converter version 2 for maximum-fidelity normalization;
+the active `ClaudeCodeJsonlConverter` emits version 2. Source digests,
+reconstitution, and persistence map the two converter versions distinctly. Also
+preserve content-encoding version 1 for every existing content shape, including
+generic message blocks. Encode content as version 2 only when it contains a
+generic result block, and reject that new nested tag beneath a version-1 header.
+Committed fixtures are synthetic. Optional local source-file validation is
+path-configured, content-silent, and excluded from ordinary test runs. A private
+repository was consulted only as non-normative provenance.
+
+**Rejected alternatives.** Reusing converter version 1 would make one version
+describe two normalization behaviors. Adding the new nested content tag beneath
+content version 1 would make one encoding version describe two vocabularies.
+Stamping every newly written content value as version 2 would needlessly reduce
+rollback readability for unchanged content. Committing source files or printing
+their transcript data would violate the public-source boundary.
+
+**Affects.** S28; INV-002/INV-038; synthetic and opt-in import tests, the Claude
+Code format enum/projector/store mapping, imported-content adapter encoding, and
+the provenance boundary of the conversation-import stack. Imported-session seed
+ownership remains recorded by
+[the separate seed decision](#2026-07-24--separate-imported-ancestry-from-its-materialized-seed-frontier).
+
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
 **Context.** External AI transcripts need to become durable Signalbox history

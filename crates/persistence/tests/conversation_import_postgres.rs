@@ -24,8 +24,9 @@ use signalbox_domain::{
     ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
     ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSourceAttestation,
     ImportedSourceMetadata, ImportedSpeaker, ImportedStructuredObjectMember,
-    ImportedStructuredValue, ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedStructuredValue, ImportedText, ImportedToolResultBlock, ImportedToolResultValue,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
+    ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
     conversation_import::{
@@ -763,8 +764,10 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
 {
     let (container, pool, database_url) = migrated_postgres().await?;
     let source = concat!(
-        "{\"type\":\"summary\",\"value\":null}\r\n",
-        "{\"type\":\"summary\",\"value\":null}"
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
+        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}\r\n",
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
+        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}"
     );
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
     let repository = ImportedConversationRepository::new(pool.clone());
@@ -794,6 +797,18 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     assert_eq!(stored.raw_records().len(), 2);
     assert_eq!(stored.entries().len(), 2);
     assert_eq!(stored.frontiers().count(), 2);
+    assert!(matches!(
+        stored.entries()[0].content(),
+        ImportedTranscriptContent::ToolResult {
+            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
+            ..
+        } if matches!(
+            blocks.as_ref(),
+            [ImportedToolResultBlock::SourceResultBlock {
+                source_type: ImportedSourceAttestation::Attested(value)
+            }] if value.as_str() == "future-result-kind"
+        )
+    ));
     assert_eq!(
         stored.raw_records()[0].bytes(),
         stored.raw_records()[1].bytes()
@@ -908,7 +923,7 @@ async fn s28_inv038_reingestion_rejects_converter_projection_drift() -> Result<(
     );
     let drifted = ImportedConversation::from_converted_records(
         candidate,
-        ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV2,
         vec![raw],
         vec![projected],
     )
@@ -1269,6 +1284,37 @@ async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Erro
             .as_database_error()
             .and_then(sqlx::error::DatabaseError::constraint),
         Some("imported_raw_source_record_bytes_nonempty")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-038: the schema admits the two implemented converter versions
+/// and rejects every unimplemented version before storing a header.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv038_unknown_converter_version_is_schema_rejected() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x4ff))
+    .bind(vec![0_u8; 32])
+    .execute(&pool)
+    .await
+    .expect_err("an unimplemented converter version must violate the schema");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_conversation_converter_version_supported")
     );
 
     pool.close().await;

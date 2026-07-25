@@ -25,7 +25,8 @@ use crate::{
 
 const STORAGE_VERSION: i16 = 1;
 const CLAUDE_CODE_FORMAT: &str = "claude_code_session_jsonl";
-const CLAUDE_CODE_VERSION: i16 = 1;
+const CLAUDE_CODE_VERSION_ONE: i16 = 1;
+const CLAUDE_CODE_VERSION_TWO: i16 = 2;
 const TRANSCRIPT_ENTRY_IDENTITY_UNIQUE: &str = "imported_transcript_entry_identity_unique";
 
 /// Why a versioned imported domain-algebra encoding is invalid.
@@ -769,7 +770,10 @@ fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConv
 fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
     match format {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
-            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION)
+            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
+        }
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
+            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
         }
     }
 }
@@ -779,8 +783,11 @@ fn decode_format(
     converter_version: i16,
 ) -> Result<ImportedConversationFormat, ImportedConversationRepositoryError> {
     match (format, converter_version) {
-        (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION) => {
+        (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE) => {
             Ok(ImportedConversationFormat::ClaudeCodeSessionJsonlV1)
+        }
+        (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO) => {
+            Ok(ImportedConversationFormat::ClaudeCodeSessionJsonlV2)
         }
         (_, version) if format == CLAUDE_CODE_FORMAT => {
             Err(ImportedConversationCorruption::Unsupported {
@@ -946,9 +953,11 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        EncodedEntry, EncodedRawRecord, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
-        ImportedRawRecordPosition, ImportedRecordEntryPosition, ImportedTranscriptEntryId,
-        ImportedTranscriptPosition, entries_in_key_order, raw_blobs_in_key_order,
+        CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO, EncodedEntry,
+        EncodedRawRecord, ImportedConversationFormat, ImportedRawRecordConversionDigest,
+        ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRecordEntryPosition,
+        ImportedTranscriptEntryId, ImportedTranscriptPosition, decode_format, encode_format,
+        entries_in_key_order, raw_blobs_in_key_order,
     };
 
     fn encoded_raw(key: u8) -> EncodedRawRecord {
@@ -971,6 +980,28 @@ mod tests {
             content: vec![0],
             source: vec![0],
         }
+    }
+
+    #[test]
+    fn s28_inv038_claude_code_converter_versions_have_distinct_storage_mappings() {
+        assert_eq!(
+            encode_format(ImportedConversationFormat::ClaudeCodeSessionJsonlV1),
+            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
+        );
+        assert_eq!(
+            encode_format(ImportedConversationFormat::ClaudeCodeSessionJsonlV2),
+            (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
+        );
+        assert_eq!(
+            decode_format(CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
+                .expect("version one remains readable"),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1
+        );
+        assert_eq!(
+            decode_format(CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_TWO)
+                .expect("version two remains readable"),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+        );
     }
 
     /// S28 / INV-038: shared raw-blob keys are emitted in one deterministic

@@ -91,6 +91,7 @@ pub enum Actor {
 ```rust
 pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
+    ClaudeCodeSessionJsonlV2,
 }
 
 pub struct ImportedRawRecordHash(/* private [u8; 32] */);
@@ -199,6 +200,9 @@ pub enum ImportedToolResultBlock {
     Image(ImportedSourceAttestation<ImportedMediaSource>),
     ToolReference {
         tool_name: ImportedSourceAttestation<ImportedText>,
+    },
+    SourceResultBlock {
+        source_type: ImportedSourceAttestation<ImportedText>,
     },
 }
 
