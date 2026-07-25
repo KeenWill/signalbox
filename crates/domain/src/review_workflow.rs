@@ -628,6 +628,44 @@ impl ReviewRunState {
     }
 }
 
+/// Canonical run facts independently loaded for child and finding claims.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewRunEvidence {
+    reference: ReviewRunRef,
+    workflow: ReviewWorkflowKind,
+    policy: ReviewPolicy,
+}
+
+impl ReviewRunEvidence {
+    /// Supplies one independently stored run reference, workflow, and policy.
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+    ) -> Self {
+        Self {
+            reference,
+            workflow,
+            policy,
+        }
+    }
+
+    /// Returns the canonical run reference.
+    pub const fn reference(self) -> ReviewRunRef {
+        self.reference
+    }
+
+    /// Returns the canonical workflow.
+    pub const fn workflow(self) -> ReviewWorkflowKind {
+        self.workflow
+    }
+
+    /// Returns the complete frozen policy.
+    pub const fn policy(self) -> ReviewPolicy {
+        self.policy
+    }
+}
+
 /// Canonical pass facts independently loaded for review claims and projections.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReviewPassEvidence {
@@ -736,6 +774,7 @@ pub struct ReviewRun {
     workflow: ReviewWorkflowKind,
     policy: ReviewPolicy,
     state: ReviewRunState,
+    recorded_pass: Option<ReviewPassRef>,
 }
 
 impl ReviewRun {
@@ -750,6 +789,7 @@ impl ReviewRun {
             workflow,
             policy,
             state: ReviewRunState::Queued,
+            recorded_pass: None,
         }
     }
 
@@ -773,6 +813,7 @@ impl ReviewRun {
             workflow: input.workflow,
             policy: input.policy,
             state: input.state,
+            recorded_pass: input.pass_evidence.map(ReviewPassEvidence::reference),
         })
     }
 
@@ -798,6 +839,19 @@ impl ReviewRun {
             }),
             failure: ReviewRunTransitionFailure::Evidence(failure),
         })?;
+        let next_recorded_pass = pass_evidence.map(ReviewPassEvidence::reference);
+        if self.recorded_pass.is_some() && self.recorded_pass != next_recorded_pass {
+            return Err(ReviewRunTransitionError {
+                attempt: Box::new(ReviewRunTransitionAttempt {
+                    current: self.state,
+                    next,
+                    pass_evidence,
+                }),
+                failure: ReviewRunTransitionFailure::Evidence(
+                    ReviewRunEvidenceFailure::PassMismatch,
+                ),
+            });
+        }
         let permitted = match (self.state, next) {
             (ReviewRunState::Queued, ReviewRunState::Running { .. }) => true,
             (ReviewRunState::Queued, ReviewRunState::Cancelled { last_pass: None }) => true,
@@ -839,6 +893,7 @@ impl ReviewRun {
             });
         }
         self.state = next;
+        self.recorded_pass = next_recorded_pass;
         Ok(self)
     }
 
@@ -861,6 +916,16 @@ impl ReviewRun {
     pub const fn state(&self) -> ReviewRunState {
         self.state
     }
+
+    /// Returns the pass already recorded for this run, when one exists.
+    pub const fn recorded_pass(&self) -> Option<ReviewPassRef> {
+        self.recorded_pass
+    }
+
+    /// Returns canonical identity, workflow, and policy evidence for this run.
+    pub const fn evidence(&self) -> ReviewRunEvidence {
+        ReviewRunEvidence::new(self.reference, self.workflow, self.policy)
+    }
 }
 
 fn validate_run_state(
@@ -875,29 +940,46 @@ fn validate_run_state(
     {
         return Err(ReviewRunEvidenceFailure::ForeignPass);
     }
-    let Some(pass) = state.pass() else {
-        return if pass_evidence.is_some() {
-            Err(ReviewRunEvidenceFailure::UnexpectedPassEvidence)
-        } else {
+    if let Some(evidence) = pass_evidence {
+        if evidence.reference.run() != reference {
+            return Err(ReviewRunEvidenceFailure::ForeignPass);
+        }
+        if !workflow_matches_pass_kind(workflow, evidence.kind) {
+            return Err(ReviewRunEvidenceFailure::PassKindMismatch);
+        }
+        if evidence.policy != policy {
+            return Err(ReviewRunEvidenceFailure::PassPolicyMismatch);
+        }
+    }
+    match state {
+        ReviewRunState::Queued => match pass_evidence {
+            None => Ok(()),
+            Some(evidence) if evidence.state == ReviewPassState::Queued => Ok(()),
+            Some(_) => Err(ReviewRunEvidenceFailure::PassStateMismatch),
+        },
+        ReviewRunState::Cancelled { last_pass: None } => {
+            if pass_evidence.is_some() {
+                Err(ReviewRunEvidenceFailure::UnexpectedPassEvidence)
+            } else {
+                Ok(())
+            }
+        }
+        _ => {
+            let Some(pass) = state.pass() else {
+                return Err(ReviewRunEvidenceFailure::MissingPassEvidence);
+            };
+            let Some(evidence) = pass_evidence else {
+                return Err(ReviewRunEvidenceFailure::MissingPassEvidence);
+            };
+            if evidence.reference != pass {
+                return Err(ReviewRunEvidenceFailure::PassMismatch);
+            }
+            if !run_state_matches_pass(state, evidence.state) {
+                return Err(ReviewRunEvidenceFailure::PassStateMismatch);
+            }
             Ok(())
-        };
-    };
-    let Some(evidence) = pass_evidence else {
-        return Err(ReviewRunEvidenceFailure::MissingPassEvidence);
-    };
-    if evidence.reference != pass {
-        return Err(ReviewRunEvidenceFailure::PassMismatch);
+        }
     }
-    if !workflow_matches_pass_kind(workflow, evidence.kind) {
-        return Err(ReviewRunEvidenceFailure::PassKindMismatch);
-    }
-    if evidence.policy != policy {
-        return Err(ReviewRunEvidenceFailure::PassPolicyMismatch);
-    }
-    if !run_state_matches_pass(state, evidence.state) {
-        return Err(ReviewRunEvidenceFailure::PassStateMismatch);
-    }
-    Ok(())
 }
 
 fn workflow_matches_pass_kind(workflow: ReviewWorkflowKind, pass: ReviewPassKind) -> bool {
@@ -1264,13 +1346,20 @@ impl ReviewPass {
     pub fn try_new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
-        workflow: ReviewWorkflowKind,
+        run: &mut ReviewRun,
         session: SessionId,
         accepted_input: AcceptedInputId,
         accepted_input_session: SessionId,
     ) -> Result<Self, ReviewPassConstructionError> {
-        let failure = if !workflow_matches_pass_kind(workflow, kind) {
+        let run_evidence = run.evidence();
+        let failure = if reference.run() != run.reference {
+            Some(ReviewPassConstructionFailure::ForeignRun)
+        } else if !workflow_matches_pass_kind(run.workflow, kind) {
             Some(ReviewPassConstructionFailure::RunWorkflowMismatch)
+        } else if run.state != ReviewRunState::Queued {
+            Some(ReviewPassConstructionFailure::RunNotQueued)
+        } else if run.recorded_pass.is_some() {
+            Some(ReviewPassConstructionFailure::RunAlreadyHasPass)
         } else if session != accepted_input_session {
             Some(ReviewPassConstructionFailure::AcceptedInputSessionMismatch)
         } else {
@@ -1280,13 +1369,14 @@ impl ReviewPass {
             return Err(ReviewPassConstructionError {
                 reference,
                 kind,
-                workflow,
+                run_evidence,
                 session,
                 accepted_input,
                 accepted_input_session,
                 failure,
             });
         }
+        run.recorded_pass = Some(reference);
         Ok(Self {
             reference,
             kind,
@@ -1504,8 +1594,14 @@ fn pass_state_matches_turn_outcome(state: ReviewPassState, outcome: ReviewPassTu
 /// Why queued-pass construction was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewPassConstructionFailure {
+    /// The supplied run evidence belongs to another run.
+    ForeignRun,
     /// The pass kind is incompatible with its canonical run workflow.
     RunWorkflowMismatch,
+    /// A pass can be admitted only while its run is queued.
+    RunNotQueued,
+    /// The run already records its one permitted pass.
+    RunAlreadyHasPass,
     /// The accepted input belongs to another session.
     AcceptedInputSessionMismatch,
 }
@@ -1515,7 +1611,7 @@ pub enum ReviewPassConstructionFailure {
 pub struct ReviewPassConstructionError {
     reference: ReviewPassRef,
     kind: ReviewPassKind,
-    workflow: ReviewWorkflowKind,
+    run_evidence: ReviewRunEvidence,
     session: SessionId,
     accepted_input: AcceptedInputId,
     accepted_input_session: SessionId,
@@ -1535,7 +1631,12 @@ impl ReviewPassConstructionError {
 
     /// Returns the canonical parent workflow supplied for the pass.
     pub const fn workflow(self) -> ReviewWorkflowKind {
-        self.workflow
+        self.run_evidence.workflow()
+    }
+
+    /// Returns the independently supplied canonical parent-run evidence.
+    pub const fn run_evidence(self) -> ReviewRunEvidence {
+        self.run_evidence
     }
 
     /// Returns the pass and canonical accepted-input sessions.
@@ -1839,6 +1940,7 @@ impl ReviewFindingProposal {
     pub fn try_new(
         reference: ReviewFindingRef,
         producing_pass: ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
         target: &ReviewTarget,
         content: ReviewFindingContent,
     ) -> Result<Self, ReviewFindingTransitionError> {
@@ -1855,6 +1957,18 @@ impl ReviewFindingProposal {
         if producing_pass.reference() != reference.pass() {
             return Err(ReviewFindingTransitionError::proposal(
                 ReviewFindingTransitionFailure::ForeignProducingPass,
+            ));
+        }
+        if producing_run.reference() != reference.run() {
+            return Err(ReviewFindingTransitionError::proposal(
+                ReviewFindingTransitionFailure::ForeignProducingRun,
+            ));
+        }
+        if producing_run.workflow() != ReviewWorkflowKind::ReadOnlyReview
+            || producing_run.policy() != producing_pass.policy()
+        {
+            return Err(ReviewFindingTransitionError::proposal(
+                ReviewFindingTransitionFailure::IncompatibleProducingRunEvidence,
             ));
         }
         if producing_pass.kind() != ReviewPassKind::ReadOnlyReview
@@ -2170,6 +2284,20 @@ impl ReviewFinding {
                 failure: ReviewFindingTransitionFailure::EventPolicyMismatch,
             });
         }
+        let prior_pass = if self.proposal.producing_pass.reference() == event.pass.reference() {
+            Some(self.proposal.producing_pass)
+        } else {
+            self.events
+                .iter()
+                .find(|previous| previous.pass.reference() == event.pass.reference())
+                .map(|previous| previous.pass)
+        };
+        if prior_pass.is_some_and(|prior| prior != event.pass) {
+            return Err(ReviewFindingTransitionError {
+                event: Some(Box::new(event)),
+                failure: ReviewFindingTransitionFailure::ConflictingPassEvidence,
+            });
+        }
         if !finding_event_matches_pass_evidence(&event.kind, event.pass) {
             return Err(ReviewFindingTransitionError {
                 event: Some(Box::new(event)),
@@ -2342,6 +2470,10 @@ pub enum ReviewFindingTransitionFailure {
     MissingDiffBase,
     /// The producing pass does not belong to the finding's exact run.
     ForeignProducingPass,
+    /// The independently loaded producing run does not own the finding.
+    ForeignProducingRun,
+    /// The producing run's workflow or policy contradicts its pass evidence.
+    IncompatibleProducingRunEvidence,
     /// The producing pass did not canonically succeed as read-only review.
     IncompatibleProducingPassEvidence,
     /// An event belongs to another finding.
@@ -2350,6 +2482,8 @@ pub enum ReviewFindingTransitionFailure {
     ForeignEventPass,
     /// An event pass's run carries a different policy from the finding.
     EventPolicyMismatch,
+    /// One pass identity was supplied with contradictory canonical evidence.
+    ConflictingPassEvidence,
     /// The event kind or outcome cannot be produced by the canonical pass.
     IncompatibleEventPassEvidence,
     /// A duplicate or successor finding belongs to another run.
@@ -2775,6 +2909,14 @@ mod tests {
         ReviewRunRef::new(target_id(1), run_id(2))
     }
 
+    fn run_evidence() -> ReviewRunEvidence {
+        ReviewRunEvidence::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        )
+    }
+
     fn pass_ref(value: u128) -> ReviewPassRef {
         ReviewPassRef::new(run_ref(), pass_id(value))
     }
@@ -2853,6 +2995,7 @@ mod tests {
         ReviewFindingProposal::try_new(
             finding_ref(10),
             succeeded_pass(3, ReviewPassKind::ReadOnlyReview),
+            run_evidence(),
             &target,
             finding_content(Some(ReviewFindingDiffSide::Right)),
         )
@@ -3247,6 +3390,7 @@ mod tests {
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
             succeeded_pass(3, ReviewPassKind::ReadOnlyReview),
+            run_evidence(),
             &target,
             finding_content(Some(ReviewFindingDiffSide::Right)),
         )
@@ -3264,6 +3408,7 @@ mod tests {
         let proposal = ReviewFindingProposal::try_new(
             finding_ref(10),
             succeeded_pass(3, ReviewPassKind::ReadOnlyReview),
+            run_evidence(),
             &target,
             finding_content(None),
         )
@@ -3280,6 +3425,7 @@ mod tests {
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
             succeeded_pass(4, ReviewPassKind::ReadOnlyReview),
+            run_evidence(),
             &target,
             finding_content(Some(ReviewFindingDiffSide::Right)),
         )
@@ -3303,6 +3449,7 @@ mod tests {
                 ReviewPolicy::version_one(),
                 ReviewPassState::Failed { turn: turn_id(6) },
             ),
+            run_evidence(),
             &target,
             finding_content(Some(ReviewFindingDiffSide::Right)),
         )
@@ -3310,6 +3457,32 @@ mod tests {
         assert_eq!(
             error.failure(),
             ReviewFindingTransitionFailure::IncompatibleProducingPassEvidence
+        );
+    }
+
+    /// INV-040: the finding producer's policy must come from its exact
+    /// independently loaded run.
+    #[test]
+    fn inv040_finding_proposal_rejects_foreign_producing_run_policy() {
+        let target = target_with_base();
+        let later_policy = ReviewPolicy::try_new(
+            ReviewPolicyVersion::try_new(2).expect("positive version"),
+            ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
+            ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+        )
+        .expect("later versions admit their own ordered threshold tuples");
+        let error = ReviewFindingProposal::try_new(
+            finding_ref(10),
+            succeeded_pass(3, ReviewPassKind::ReadOnlyReview),
+            ReviewRunEvidence::new(run_ref(), ReviewWorkflowKind::ReadOnlyReview, later_policy),
+            &target,
+            finding_content(Some(ReviewFindingDiffSide::Right)),
+        )
+        .expect_err("finding policy must be authenticated by its producing run");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::IncompatibleProducingRunEvidence
         );
     }
 
@@ -3399,14 +3572,48 @@ mod tests {
         assert_eq!(cancelled.state(), next);
     }
 
+    /// INV-040: pass construction records its identity on the run, so later
+    /// cancellation cannot claim that no pass existed.
+    #[test]
+    fn inv040_queued_run_rejects_passless_cancellation_after_pass_construction() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        );
+        ReviewPass::try_new(
+            pass_ref(3),
+            ReviewPassKind::ReadOnlyReview,
+            &mut run,
+            session_id(4),
+            accepted_input_id(5),
+            session_id(4),
+        )
+        .expect("queued pass belongs to its canonical run");
+        assert_eq!(run.recorded_pass(), Some(pass_ref(3)));
+
+        let error = run
+            .transition(ReviewRunState::Cancelled { last_pass: None }, None)
+            .expect_err("recorded queued pass cannot be discarded by cancellation");
+        assert_eq!(
+            error.failure(),
+            ReviewRunTransitionFailure::Evidence(ReviewRunEvidenceFailure::PassMismatch)
+        );
+    }
+
     /// INV-040: queued pass construction authenticates its accepted-input
     /// session.
     #[test]
     fn inv040_pass_construction_rejects_foreign_accepted_input_session() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        );
         let cross_wired_input = ReviewPass::try_new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
-            ReviewWorkflowKind::ReadOnlyReview,
+            &mut run,
             session_id(4),
             accepted_input_id(5),
             session_id(99),
@@ -3421,10 +3628,15 @@ mod tests {
     /// INV-040: queued-pass construction authenticates its parent workflow.
     #[test]
     fn inv040_pass_construction_rejects_incompatible_run_workflow() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        );
         let error = ReviewPass::try_new(
             pass_ref(3),
             ReviewPassKind::Publish,
-            ReviewWorkflowKind::ReadOnlyReview,
+            &mut run,
             session_id(4),
             accepted_input_id(5),
             session_id(4),
@@ -3436,13 +3648,44 @@ mod tests {
         );
     }
 
+    /// INV-040: queued-pass construction takes workflow evidence only from the
+    /// pass's exact parent run.
+    #[test]
+    fn inv040_pass_construction_rejects_foreign_run_evidence() {
+        let mut foreign_run = ReviewRun::new(
+            ReviewRunRef::new(target_id(1), run_id(99)),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        );
+        let error = ReviewPass::try_new(
+            pass_ref(3),
+            ReviewPassKind::ReadOnlyReview,
+            &mut foreign_run,
+            session_id(4),
+            accepted_input_id(5),
+            session_id(4),
+        )
+        .expect_err("workflow evidence must come from the pass's exact run");
+
+        assert_eq!(error.failure(), ReviewPassConstructionFailure::ForeignRun);
+        assert_eq!(
+            error.run_evidence().reference(),
+            ReviewRunRef::new(target_id(1), run_id(99))
+        );
+    }
+
     /// INV-040: one active pass turn remains fixed through terminalization.
     #[test]
     fn inv040_pass_transition_rejects_changed_turn() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        );
         let running = ReviewPass::try_new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
-            ReviewWorkflowKind::ReadOnlyReview,
+            &mut run,
             session_id(4),
             accepted_input_id(5),
             session_id(4),
@@ -3514,10 +3757,15 @@ mod tests {
     /// active; terminal outcomes cannot lead an unprojected start.
     #[test]
     fn s29_inv040_queued_pass_start_requires_active_turn() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        );
         let queued = ReviewPass::try_new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
-            ReviewWorkflowKind::ReadOnlyReview,
+            &mut run,
             session_id(4),
             accepted_input_id(5),
             session_id(4),
@@ -4253,6 +4501,43 @@ mod tests {
             error.failure(),
             ReviewFindingTransitionFailure::EventPolicyMismatch
         );
+    }
+
+    /// INV-040: one canonical pass identity cannot change outcome evidence
+    /// between events in the same complete finding history.
+    #[test]
+    fn inv040_finding_history_rejects_conflicting_reused_pass_evidence() {
+        let finding = ReviewFinding::new(proposal())
+            .apply(ReviewFindingEvent::new(
+                finding_ref(10),
+                ReviewEventOrdinal::one(),
+                succeeded_pass(20, ReviewPassKind::Judge),
+                ReviewFindingEventKind::Accepted,
+            ))
+            .expect("successful judgment may accept a finding");
+        let event = ReviewFindingEvent::new(
+            finding_ref(10),
+            ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+            ReviewPassEvidence::new(
+                pass_ref(20),
+                ReviewPassKind::Judge,
+                ReviewPolicy::version_one(),
+                ReviewPassState::Succeeded {
+                    turn: turn_id(120),
+                    output_frontier: frontier_id(999),
+                },
+            ),
+            ReviewFindingEventKind::Stale,
+        );
+        let error = finding
+            .apply(event.clone())
+            .expect_err("one pass identity cannot carry contradictory terminal evidence");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::ConflictingPassEvidence
+        );
+        assert_eq!(error.event(), Some(&event));
     }
 
     /// INV-040: a compatible pass kind cannot author a finding event after a

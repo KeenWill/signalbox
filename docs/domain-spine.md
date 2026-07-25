@@ -5325,6 +5325,15 @@ pub enum ReviewRunState {
     Blocked { blocking_pass: ReviewPassRef },
     Cancelled { last_pass: Option<ReviewPassRef> },
 }
+pub struct ReviewRunEvidence { /* canonical run reference + workflow + policy */ }
+impl ReviewRunEvidence {
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+    ) -> Self;
+    // accessors: reference(), workflow(), policy()
+}
 pub struct ReviewPassEvidence { /* canonical pass reference + kind + policy + state */ }
 impl ReviewPassEvidence {
     pub const fn new(
@@ -5346,7 +5355,7 @@ impl ReviewRunReconstitutionInput {
     ) -> Self;
     // accessors: reference(), workflow(), policy(), state(), pass_evidence()
 }
-pub struct ReviewRun { /* reference + kind + policy + state */ }
+pub struct ReviewRun { /* reference + kind + policy + state + recorded pass */ }
 pub enum ReviewRunEvidenceFailure {
     ForeignPass,
     MissingPassEvidence,
@@ -5379,7 +5388,8 @@ impl ReviewRun {
         next: ReviewRunState,
         pass_evidence: Option<ReviewPassEvidence>,
     ) -> Result<Self, ReviewRunTransitionError>;
-    // accessors: reference(), workflow(), policy(), state()
+    // accessors: reference(), workflow(), policy(), state(), recorded_pass(),
+    // evidence()
 }
 impl ReviewRunTransitionError {
     // accessors: failure(), states(), pass_evidence()
@@ -5440,13 +5450,16 @@ impl ReviewPassReconstitutionInput {
 }
 pub struct ReviewPass { /* reference + session input + state */ }
 pub enum ReviewPassConstructionFailure {
+    ForeignRun,
     RunWorkflowMismatch,
+    RunNotQueued,
+    RunAlreadyHasPass,
     AcceptedInputSessionMismatch,
 }
 pub struct ReviewPassConstructionError { /* rejected construction facts */ }
 impl ReviewPassConstructionError {
-    // accessors: reference(), kind(), workflow(), sessions(), accepted_input(),
-    // failure()
+    // accessors: reference(), kind(), workflow(), run_evidence(), sessions(),
+    // accepted_input(), failure()
 }
 pub enum ReviewPassReconstitutionFailure {
     ForeignWorkflowRun,
@@ -5476,7 +5489,7 @@ impl ReviewPass {
     pub fn try_new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
-        workflow: ReviewWorkflowKind,
+        run: &mut ReviewRun,
         session: SessionId,
         accepted_input: AcceptedInputId,
         accepted_input_session: SessionId,
@@ -5545,6 +5558,7 @@ impl ReviewFindingProposal {
     pub fn try_new(
         reference: ReviewFindingRef,
         producing_pass: ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
         target: &ReviewTarget,
         content: ReviewFindingContent,
     ) -> Result<Self, ReviewFindingTransitionError>;
@@ -5614,10 +5628,13 @@ pub enum ReviewFindingTransitionFailure {
     ForeignTarget,
     MissingDiffBase,
     ForeignProducingPass,
+    ForeignProducingRun,
+    IncompatibleProducingRunEvidence,
     IncompatibleProducingPassEvidence,
     ForeignEventFinding,
     ForeignEventPass,
     EventPolicyMismatch,
+    ConflictingPassEvidence,
     IncompatibleEventPassEvidence,
     ForeignReferencedFinding,
     SelfReference,
@@ -5736,9 +5753,9 @@ pub enum ReviewExternalLinkTransitionError {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 63                   |
+| domain: review_workflow                            | 64                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **433 (+1 free fn)** |
+| **signalbox-domain total**                         | **434 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
