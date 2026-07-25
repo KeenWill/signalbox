@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use signalbox_process_protocol::{
-    CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
-    ModelCallState, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+    CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ImportedContentKind,
+    ImportedSourceSpeaker, ImportedSpeaker, ModelCallDisposition, ModelCallState, SessionEvent,
+    TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -401,6 +402,15 @@ impl<'a> Output<'a> {
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
+                    TranscriptTextEntry::Imported {
+                        imported_conversation_id,
+                        imported_entry_id,
+                        source_speaker,
+                    } => format!(
+                        "imported_{} imported_conversation={imported_conversation_id} \
+                         imported_entry={imported_entry_id}",
+                        imported_speaker_label(*source_speaker)
+                    ),
                 };
                 writeln!(
                     self.stdout,
@@ -429,6 +439,20 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::Imported {
+                imported_conversation_id,
+                imported_entry_id,
+                source_speaker,
+                content_kind,
+            }) => writeln!(
+                self.stdout,
+                "imported_{} kind={} imported_conversation={imported_conversation_id} \
+                 imported_entry={imported_entry_id} source={} entry={}",
+                imported_speaker_label(*source_speaker),
+                imported_content_kind(*content_kind),
+                entry.source_session_id,
+                entry.entry_id
+            ),
         }
     }
 
@@ -519,10 +543,38 @@ impl SnapshotSelection {
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::TurnCompleted { .. }
                     | TranscriptEntry::TurnFailed { .. }
-                    | TranscriptEntry::TurnCancelled { .. },
+                    | TranscriptEntry::TurnCancelled { .. }
+                    | TranscriptEntry::Imported { .. },
                 ),
             ) => false,
         }
+    }
+}
+
+const fn imported_speaker_label(source: ImportedSourceSpeaker) -> &'static str {
+    match source {
+        ImportedSourceSpeaker::NotAttested {} => "speaker_unattested",
+        ImportedSourceSpeaker::AttestedAbsent {} => "speaker_absent",
+        ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::User,
+        } => "user",
+        ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::Assistant,
+        } => "assistant",
+    }
+}
+
+const fn imported_content_kind(kind: ImportedContentKind) -> &'static str {
+    match kind {
+        ImportedContentKind::SourceEvent => "source_event",
+        ImportedContentKind::SourceMessageBlock => "source_message_block",
+        ImportedContentKind::Text => "text",
+        ImportedContentKind::ToolCall => "tool_call",
+        ImportedContentKind::ToolResult => "tool_result",
+        ImportedContentKind::Thinking => "thinking",
+        ImportedContentKind::RedactedThinking => "redacted_thinking",
+        ImportedContentKind::Document => "document",
+        ImportedContentKind::MessageContentAbsent => "message_content_absent",
     }
 }
 
@@ -576,8 +628,9 @@ mod tests {
     use expect_test::expect;
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
-        FailedModelCallDisposition, FailedTerminalModelCall, InputContent, ModelCallState,
-        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
+        ImportedSourceSpeaker, ImportedSpeaker, InputContent, ModelCallState, ServerMessage,
+        SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
     };
     use uuid::Uuid;
 
@@ -635,6 +688,79 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         assert!(rendered.contains("state=queued"));
         assert!(rendered.contains("queued owner text"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn s28_imported_snapshot_renders_attested_text() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [
+                ServerMessage::TranscriptTextEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(1),
+                    entry_id: wire_uuid(2),
+                    entry: TranscriptTextEntry::Imported {
+                        imported_conversation_id: wire_uuid(3),
+                        imported_entry_id: wire_uuid(4),
+                        source_speaker: ImportedSourceSpeaker::Attested {
+                            speaker: ImportedSpeaker::User,
+                        },
+                    },
+                },
+                ServerMessage::TranscriptContent {
+                    entry_index: CanonicalU64::new(0),
+                    fragment_index: CanonicalU64::new(0),
+                    final_fragment: true,
+                    content_fragment: ContentFragment::try_new("exact imported text".to_owned())
+                        .expect("short content is valid"),
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("imported snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            imported_user imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000004 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002
+            exact imported text
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn s28_imported_snapshot_renders_conservative_nontext() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: wire_uuid(1),
+                entry_id: wire_uuid(5),
+                entry: TranscriptEntry::Imported {
+                    imported_conversation_id: wire_uuid(3),
+                    imported_entry_id: wire_uuid(6),
+                    source_speaker: ImportedSourceSpeaker::NotAttested {},
+                    content_kind: ImportedContentKind::ToolCall,
+                },
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("imported snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
+        "#]]
+        .assert_eq(&rendered);
         assert!(stderr.is_empty());
     }
 

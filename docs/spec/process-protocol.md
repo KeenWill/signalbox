@@ -5,11 +5,12 @@ consumes it were verified through PR #177 (`agent/terminal-client`). The
 conversation-import stack adds protocol version two for the conservative
 imported transcript-snapshot projection described here. The tool-loop stack adds
 protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. Versions two and three are protocol
-law ahead of the wire implementation, which currently speaks the single version
-`PROTOCOL_VERSION = 1` with no negotiation. This page is the normative boundary
-between a local client process and `signalbox-hubd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+their closed message vocabularies unchanged. Version three is protocol law ahead
+of the wire implementation; the implementation in this stack speaks versions one
+and two, and its terminal client selects `PROTOCOL_VERSION = 2`. This page is
+the normative boundary between a local client process and `signalbox-hubd`;
+domain values, PostgreSQL records, and wire messages remain distinct
+representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -129,7 +130,10 @@ spellings decode to the same name. A version other than one, two, or three
 produces an `unsupported_version` error naming the supported versions, then the
 server closes the connection. Every response uses the request's admitted
 version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A server error uses `request_id = "0"` only when the
+the pre-admission fallback. The version-two terminal client admits that
+version-one fallback only for `malformed_frame` or `unsupported_version`, then
+applies the ordinary request-identity check; every other response-version
+mismatch fails locally. A server error uses `request_id = "0"` only when the
 incoming frame prevents recovery of a valid nonzero identity; zero is never a
 valid client identity or success-response identity. Leading zeroes, a plus sign,
 whitespace, and any spelling other than the shortest ASCII decimal form are
@@ -564,7 +568,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version three; older clients remain
+The `signalbox` binary in this stack uses version two; older clients remain
 supported for representations admitted by their declared version as described
 above. It accepts a global `--socket <path>` override or reads
 `SIGNALBOX_SOCKET_PATH`, and provides:
@@ -593,9 +597,9 @@ printed command identity; `send` then also requires the exact
 `--defaults-version`, and the two flags are rejected unless supplied together.
 The client never silently substitutes a new command identity for an ambiguous
 attempt. It uses a fresh nonzero request identity per connection, renders only
-known version-three messages, and exits nonzero on protocol or application
-errors other than the follow-specific `resync_required` control case, which
-reconnects for a fresh snapshot.
+known version-two messages, and exits nonzero on protocol or application errors
+other than the follow-specific `resync_required` control case, which reconnects
+for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

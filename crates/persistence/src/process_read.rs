@@ -8,12 +8,16 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DirectModelSelection, ModelAlias, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
+    AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
+    ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
+    ModelCallId, SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
-use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
+use crate::{
+    conversation_import_codec::decode_content,
+    mapping::{session_id_from_uuid, session_id_to_uuid},
+};
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
 
@@ -287,6 +291,51 @@ impl ProcessTranscriptTurn {
     }
 }
 
+/// Session ancestry relevant to process-protocol compatibility.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessSessionAncestry {
+    /// Owner-initiated native session.
+    OwnerInitiated,
+    /// Session seeded from one immutable imported frontier.
+    ImportedConversation,
+}
+
+/// Exact source-speaker attestation in the conservative process projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessImportedSourceSpeaker {
+    /// The source omitted the speaker field.
+    NotAttested,
+    /// The source explicitly supplied no speaker.
+    AttestedAbsent,
+    /// The source attested user authorship.
+    User,
+    /// The source attested assistant authorship.
+    Assistant,
+}
+
+/// Conservative imported content kind exposed by the process read boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessImportedContentKind {
+    /// One source event.
+    SourceEvent,
+    /// One source-defined message block.
+    SourceMessageBlock,
+    /// Text whose value is unattested or explicitly absent.
+    Text,
+    /// One tool call.
+    ToolCall,
+    /// One tool result.
+    ToolResult,
+    /// One thinking block.
+    Thinking,
+    /// One redacted-thinking block.
+    RedactedThinking,
+    /// One document block.
+    Document,
+    /// One typed message-content absence.
+    MessageContentAbsent,
+}
+
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
@@ -352,6 +401,40 @@ pub enum ProcessTranscriptEntry {
         entry: SemanticTranscriptEntryId,
         /// Cancelled turn.
         turn: TurnId,
+    },
+    /// Imported text whose value was explicitly source-attested.
+    ImportedText {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the projected semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning imported conversation.
+        imported_conversation: ImportedConversationId,
+        /// Exact imported entry identity.
+        imported_entry: ImportedTranscriptEntryId,
+        /// Exact source-speaker attestation.
+        source_speaker: ProcessImportedSourceSpeaker,
+        /// Exact source-attested text.
+        content: String,
+    },
+    /// Conservative imported entry without rendered text.
+    Imported {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the projected semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning imported conversation.
+        imported_conversation: ImportedConversationId,
+        /// Exact imported entry identity.
+        imported_entry: ImportedTranscriptEntryId,
+        /// Exact source-speaker attestation.
+        source_speaker: ProcessImportedSourceSpeaker,
+        /// Conservative normalized content kind.
+        content_kind: ProcessImportedContentKind,
     },
 }
 
@@ -509,7 +592,7 @@ impl ProcessTranscriptReader {
             if self.turn_count != self.expected_turn_count {
                 return Err(ProcessReadCorruption::Inconsistent("turn acceptance ordering").into());
             }
-            if self.lineage_tip.is_some() != self.latest_frontier.is_some() {
+            if self.lineage_tip.is_some() && self.latest_frontier.is_none() {
                 return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
             }
             self.turns_complete = true;
@@ -679,6 +762,26 @@ impl ProcessReadRepository {
         })
     }
 
+    /// Reads the selected session's immutable ancestry, or `None` when absent.
+    ///
+    /// This narrow read lets a process adapter reject a representation that
+    /// cannot carry imported ancestry before constructing or mutating it.
+    pub async fn session_ancestry(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<Option<ProcessSessionAncestry>, ProcessReadError> {
+        let row = sqlx::query(
+            "SELECT ancestry_kind
+               FROM session
+              WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| decode_process_session_ancestry(&row))
+            .transpose()
+    }
+
     /// Reads one complete transcript snapshot, or `None` only when the session
     /// is absent from the shared transaction snapshot.
     pub async fn read_transcript(
@@ -743,6 +846,10 @@ impl ProcessReadRepository {
             "outbox cursor",
         )?;
         let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
+        // INV-039 remains fail-closed on every transcript open: native lineage
+        // supersedes the seed as the rendered frontier, not as an integrity fact.
+        let imported_seed =
+            load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
         let expected_turn_count =
             load_transcript_turn_count(&mut transaction, requested_session).await?;
         Ok(Some(ProcessTranscriptReader {
@@ -750,7 +857,11 @@ impl ProcessReadRepository {
             session: requested_session,
             cursor,
             lineage_tip,
-            latest_frontier: None,
+            latest_frontier: if lineage_tip.is_none() {
+                imported_seed
+            } else {
+                None
+            },
             expected_turn_count,
             turn_count: 0,
             next_turn_after: None,
@@ -759,6 +870,68 @@ impl ProcessReadRepository {
             next_entry_index: 0,
             summary: None,
         }))
+    }
+}
+
+fn decode_process_session_ancestry(
+    row: &PgRow,
+) -> Result<ProcessSessionAncestry, ProcessReadError> {
+    let ancestry: String = required(row, "ancestry_kind")?;
+    match ancestry.as_str() {
+        "none" => Ok(ProcessSessionAncestry::OwnerInitiated),
+        "imported_conversation" => Ok(ProcessSessionAncestry::ImportedConversation),
+        _ => Err(ProcessReadCorruption::Unsupported {
+            field: "session ancestry kind",
+            value: ancestry,
+        }
+        .into()),
+    }
+}
+
+async fn load_checked_imported_seed_frontier(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    sqlx::query("SELECT assert_imported_session_seed_complete($1)")
+        .bind(session_id_to_uuid(session))
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(map_seed_validation_error)?;
+
+    let row = sqlx::query(
+        "SELECT
+            session_row.ancestry_kind,
+            seed.seed_context_frontier_id
+           FROM session AS session_row
+           LEFT JOIN imported_session_seed AS seed
+             ON seed.session_id = session_row.session_id
+          WHERE session_row.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_one(&mut **transaction)
+    .await?;
+    let ancestry = decode_process_session_ancestry(&row)?;
+    let seed: Option<Uuid> = row.try_get("seed_context_frontier_id")?;
+    match (ancestry, seed) {
+        (ProcessSessionAncestry::OwnerInitiated, None) => Ok(None),
+        (ProcessSessionAncestry::ImportedConversation, Some(frontier)) => {
+            Ok(Some(ContextFrontierId::from_uuid(frontier)))
+        }
+        _ => Err(ProcessReadCorruption::Inconsistent("imported session seed shape").into()),
+    }
+}
+
+fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
+    let is_integrity_failure = error.as_database_error().is_some_and(|database| {
+        matches!(
+            database.code().as_deref(),
+            Some("23000" | "23502" | "23503" | "23505" | "23514")
+        )
+    });
+    if is_integrity_failure {
+        ProcessReadCorruption::Inconsistent("imported session seed").into()
+    } else {
+        error.into()
     }
 }
 
@@ -1455,6 +1628,10 @@ async fn load_transcript_entry(
             entry.assistant_tool_request_id,
             entry.completed_turn_id,
             entry.cancelled_turn_id,
+            entry.imported_conversation_id,
+            entry.imported_transcript_entry_id,
+            imported.source_speaker_kind AS imported_source_speaker_kind,
+            imported.content_encoding AS imported_content_encoding,
             accepted.content_text AS origin_content,
             accepted.origin_turn_id,
             call.turn_id AS assistant_turn_id
@@ -1468,6 +1645,11 @@ async fn load_transcript_entry(
            LEFT JOIN model_call AS call
              ON call.session_id = entry.source_session_id
             AND call.model_call_id = entry.producing_model_call_id
+           LEFT JOIN imported_transcript_entry AS imported
+             ON imported.imported_conversation_id =
+                    entry.imported_conversation_id
+            AND imported.imported_transcript_entry_id =
+                    entry.imported_transcript_entry_id
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
             AND member.member_position = $3",
@@ -1505,9 +1687,66 @@ fn decode_transcript_entry(
     let tool_request: Option<Uuid> = row.try_get("assistant_tool_request_id")?;
     let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
     let cancelled_turn: Option<Uuid> = row.try_get("cancelled_turn_id")?;
+    let imported_conversation: Option<Uuid> = row.try_get("imported_conversation_id")?;
+    let imported_entry: Option<Uuid> = row.try_get("imported_transcript_entry_id")?;
+    let imported_source_speaker: Option<String> = row.try_get("imported_source_speaker_kind")?;
+    let imported_content: Option<Vec<u8>> = row.try_get("imported_content_encoding")?;
     let origin_content: Option<String> = row.try_get("origin_content")?;
     let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
     let assistant_turn: Option<Uuid> = row.try_get("assistant_turn_id")?;
+
+    if payload_kind == "imported_entry" {
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || origin_content.is_some()
+            || origin_turn.is_some()
+            || assistant_turn.is_some()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("imported semantic entry shape").into(),
+            );
+        }
+        let imported_conversation =
+            ImportedConversationId::from_uuid(imported_conversation.ok_or(
+                ProcessReadCorruption::Missing("imported conversation identity"),
+            )?);
+        let imported_entry = ImportedTranscriptEntryId::from_uuid(
+            imported_entry.ok_or(ProcessReadCorruption::Missing("imported entry identity"))?,
+        );
+        let source_speaker = decode_imported_source_speaker(
+            imported_source_speaker
+                .ok_or(ProcessReadCorruption::Missing("imported source speaker"))?,
+        )?;
+        let content = decode_content(
+            imported_content
+                .as_deref()
+                .ok_or(ProcessReadCorruption::Missing("imported content encoding"))?,
+        )
+        .map_err(|_| ProcessReadCorruption::Inconsistent("imported content encoding"))?;
+        return Ok(project_imported_entry(
+            entry_index,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker,
+            content,
+        ));
+    }
+
+    if imported_conversation.is_some()
+        || imported_entry.is_some()
+        || imported_source_speaker.is_some()
+        || imported_content.is_some()
+    {
+        return Err(ProcessReadCorruption::Inconsistent("native semantic entry shape").into());
+    }
 
     let projected = match (
         payload_kind.as_str(),
@@ -1671,6 +1910,75 @@ fn decode_transcript_entry(
         }
     };
     Ok(projected)
+}
+
+fn decode_imported_source_speaker(
+    value: String,
+) -> Result<ProcessImportedSourceSpeaker, ProcessReadError> {
+    match value.as_str() {
+        "not_attested" => Ok(ProcessImportedSourceSpeaker::NotAttested),
+        "attested_absent" => Ok(ProcessImportedSourceSpeaker::AttestedAbsent),
+        "attested_user" => Ok(ProcessImportedSourceSpeaker::User),
+        "attested_assistant" => Ok(ProcessImportedSourceSpeaker::Assistant),
+        _ => Err(ProcessReadCorruption::Unsupported {
+            field: "imported source speaker",
+            value,
+        }
+        .into()),
+    }
+}
+
+fn project_imported_entry(
+    entry_index: u64,
+    source_session: SessionId,
+    entry: SemanticTranscriptEntryId,
+    imported_conversation: ImportedConversationId,
+    imported_entry: ImportedTranscriptEntryId,
+    source_speaker: ProcessImportedSourceSpeaker,
+    content: ImportedTranscriptContent,
+) -> ProcessTranscriptEntry {
+    match content {
+        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(content)) => {
+            ProcessTranscriptEntry::ImportedText {
+                entry_index,
+                source_session,
+                entry,
+                imported_conversation,
+                imported_entry,
+                source_speaker,
+                content: content.into_string(),
+            }
+        }
+        content => ProcessTranscriptEntry::Imported {
+            entry_index,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker,
+            content_kind: match content {
+                ImportedTranscriptContent::SourceEvent { .. } => {
+                    ProcessImportedContentKind::SourceEvent
+                }
+                ImportedTranscriptContent::SourceMessageBlock { .. } => {
+                    ProcessImportedContentKind::SourceMessageBlock
+                }
+                ImportedTranscriptContent::Text(_) => ProcessImportedContentKind::Text,
+                ImportedTranscriptContent::ToolCall { .. } => ProcessImportedContentKind::ToolCall,
+                ImportedTranscriptContent::ToolResult { .. } => {
+                    ProcessImportedContentKind::ToolResult
+                }
+                ImportedTranscriptContent::Thinking { .. } => ProcessImportedContentKind::Thinking,
+                ImportedTranscriptContent::RedactedThinking { .. } => {
+                    ProcessImportedContentKind::RedactedThinking
+                }
+                ImportedTranscriptContent::Document { .. } => ProcessImportedContentKind::Document,
+                ImportedTranscriptContent::MessageContentAbsent(_) => {
+                    ProcessImportedContentKind::MessageContentAbsent
+                }
+            },
+        },
+    }
 }
 
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, ProcessReadError>
