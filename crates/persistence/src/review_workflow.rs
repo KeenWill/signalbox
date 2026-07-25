@@ -137,17 +137,10 @@ impl ReviewWorkflowStore {
         next: ReviewRunState,
     ) -> Result<Option<ReviewRun>, ReviewWorkflowStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT run_id, target_id, workflow_kind, policy_version,
-                    minimum_judge_confidence, minimum_publication_confidence,
-                    state_kind, state_pass_id
-               FROM review_run
-              WHERE run_id = $1
-              FOR UPDATE",
-        )
-        .bind(run.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let row = sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
+            .bind(run.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
             return Ok(None);
@@ -226,16 +219,10 @@ impl ReviewWorkflowStore {
         next: ReviewPassState,
     ) -> Result<Option<ReviewPass>, ReviewWorkflowStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT pass_id, run_id, target_id, pass_kind, session_id,
-                    accepted_input_id, state_kind, turn_id, output_frontier_id
-               FROM review_pass
-              WHERE pass_id = $1
-              FOR UPDATE",
-        )
-        .bind(pass.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let row = sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
+            .bind(pass.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
             return Ok(None);

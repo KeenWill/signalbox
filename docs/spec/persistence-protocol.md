@@ -222,13 +222,15 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. One explicit lock lives in the
-schema instead of the inventory: the deferred pending-steering source-turn
-trigger (migration `202607180005`) takes `FOR UPDATE` on the named
-`turn_lifecycle` row when a pending-steering `accepted_input` insert reaches
-commit. Why: a single reviewed inventory makes lock ordering auditable instead
-of scattered through query strings; the trigger-resident lock is recorded here
-because it fires outside the inventory's view.
+`crates/persistence/src/lock_inventory.rs`. Schema triggers additionally lock
+their append roots: the deferred pending-steering source-turn trigger (migration
+`202607180005`) takes `FOR UPDATE` on the named `turn_lifecycle` row when a
+pending-steering `accepted_input` insert reaches commit; review finding events
+lock their `review_finding` root; and external-link observations lock their
+`review_external_link` root. Why: a single reviewed Rust inventory makes
+application lock ordering auditable instead of scattered through query strings;
+trigger-resident locks are recorded here because they fire outside the
+inventory's view.
 
 Locks per transaction, in acquisition order:
 
@@ -281,6 +283,12 @@ Locks per transaction, in acquisition order:
   `generation XOR ((1396852273 << 32) OR 1396852273)`, where `1396852273` is
   ASCII `SBF1`, reinterpreted unchanged as a two's-complement signed `i64` for
   PostgreSQL.
+- **Review-workflow transitions**: a run transition locks only its exact
+  `review_run` row `FOR UPDATE`; a pass transition locks only its exact
+  `review_pass` row `FOR UPDATE`. Finding-event and external-observation inserts
+  take only the corresponding schema-trigger root lock named above before
+  checking the next ordinal. Review workflow operations do not write
+  `turn_lifecycle` and therefore do not enter the session-scheduler lock order.
 
 The guarded hub database keeps its fenced application pool and singleton guard
 behind one shutdown boundary. Graceful shutdown globally closes the pool and

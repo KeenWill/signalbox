@@ -54,3 +54,18 @@ pub(crate) const HUB_FENCE_GENERATION: &str = "SELECT generation
            FROM hub_fence_state
           WHERE singleton
           FOR UPDATE";
+
+pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
+            run_id, target_id, workflow_kind, policy_version,
+            minimum_judge_confidence, minimum_publication_confidence,
+            state_kind, state_pass_id
+       FROM review_run
+      WHERE run_id = $1
+      FOR UPDATE";
+
+pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
+            pass_id, run_id, target_id, pass_kind, session_id,
+            accepted_input_id, state_kind, turn_id, output_frontier_id
+       FROM review_pass
+      WHERE pass_id = $1
+      FOR UPDATE";
