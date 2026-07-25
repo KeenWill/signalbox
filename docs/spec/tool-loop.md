@@ -232,8 +232,12 @@ If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the dispatch gate and applies the attempt's
 effect-class crash-loss transition before surfacing that failure. A failed
 classification retains the exact attempt identity and permit for another
-classification pass. The durable attempt therefore cannot remain `InFlight`
-after the gate becomes available to an interrupt.
+classification pass, and the returned combined error preserves both the executor
+failure and the classification failure. Evidence carrying a different dispatch
+correlation follows the same classification-before-release path, surfacing the
+correlation mismatch only after closure or together with a failed
+classification. The durable attempt therefore cannot remain `InFlight` after the
+gate becomes available to an interrupt.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
