@@ -15,7 +15,7 @@ const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_NAME_BYTES: usize = 64;
 const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1024;
 const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
-const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
+pub(crate) const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
 
 /// One checked model-facing tool name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

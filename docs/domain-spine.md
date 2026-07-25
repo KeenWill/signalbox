@@ -1716,7 +1716,12 @@ impl FailedTurnExecutionReconstitutionInput {
         interrupt: AppliedInterruptCommandResult,
         ended_call: ModelCallId,
     ) -> Self;
-    // accessors: owning_turn(), ended_attempt(), attempt_end(), ended_call()
+    pub fn with_terminal_tool_attempts(
+        self,
+        terminal_tool_attempts: Vec<EndedToolAttempt>,
+    ) -> Self;
+    // accessors: owning_turn(), ended_attempt(), attempt_end(), ended_call(),
+    // terminal_tool_attempts()
 }
 
 pub struct TerminalAttemptEndReconstitutionInput { /* private */ }
@@ -1738,6 +1743,11 @@ impl CancelledTurnExecutionReconstitutionInput {
         ended_call: Option<ModelCallId>,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub fn with_terminal_tool_attempts(
+        self,
+        terminal_tool_attempts: Vec<EndedToolAttempt>,
+    ) -> Self;
+    // accessor: terminal_tool_attempts()
 }
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
@@ -2525,6 +2535,8 @@ impl PreparedSteeringConsumption {
     // accessors: accepted_input(), semantic_entry()
 }
 pub struct PreparedModelCallRequest { /* private */ }
+// accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
+// call(), frontier_entries(), origin_content()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -3172,6 +3184,7 @@ impl ToolBatchReconstitutionInput {
 }
 pub enum ToolBatchReconstitutionFailure {
     EmptyRequestBatch,
+    TooManyRequests,
     RequestOwnershipMismatch,
     RequestOrderMismatch,
     YieldedSnapshotSessionMismatch,
@@ -3927,6 +3940,8 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_model_call_id(&mut self) -> ModelCallId;
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_tool_request_id(&mut self) -> ToolRequestId;
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId;
     fn next_turn_id(&mut self) -> TurnId;
 }
 pub struct UuidV7ModelCallExecutionIdGenerator;

@@ -153,6 +153,7 @@ pub struct FailedTurnExecutionReconstitutionInput {
     ended_attempt: TurnAttemptId,
     attempt_end: TerminalAttemptEndReconstitutionInput,
     ended_call: Option<crate::ModelCallId>,
+    terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
 }
 
 impl FailedTurnExecutionReconstitutionInput {
@@ -167,6 +168,7 @@ impl FailedTurnExecutionReconstitutionInput {
             ended_attempt,
             attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(attempt_disposition),
             ended_call: None,
+            terminal_tool_attempts: Vec::new(),
         }
     }
 
@@ -182,6 +184,7 @@ impl FailedTurnExecutionReconstitutionInput {
             ended_attempt,
             attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(attempt_disposition),
             ended_call: Some(ended_call),
+            terminal_tool_attempts: Vec::new(),
         }
     }
 
@@ -200,6 +203,7 @@ impl FailedTurnExecutionReconstitutionInput {
                 interrupt,
             ),
             ended_call: None,
+            terminal_tool_attempts: Vec::new(),
         }
     }
 
@@ -219,7 +223,18 @@ impl FailedTurnExecutionReconstitutionInput {
                 interrupt,
             ),
             ended_call: Some(ended_call),
+            terminal_tool_attempts: Vec::new(),
         }
+    }
+
+    /// Supplies the complete independently checked terminal tool-attempt
+    /// inventory referenced by a writer-produced tool-result suffix.
+    pub fn with_terminal_tool_attempts(
+        mut self,
+        terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
+    ) -> Self {
+        self.terminal_tool_attempts = terminal_tool_attempts;
+        self
     }
 
     /// Returns the stored owning turn.
@@ -240,6 +255,11 @@ impl FailedTurnExecutionReconstitutionInput {
     /// Returns the terminal physical call when one existed.
     pub const fn ended_call(&self) -> Option<crate::ModelCallId> {
         self.ended_call
+    }
+
+    /// Borrows every terminal tool attempt supplied for result correlation.
+    pub fn terminal_tool_attempts(&self) -> &[crate::EndedToolAttempt] {
+        &self.terminal_tool_attempts
     }
 }
 
@@ -292,6 +312,7 @@ pub struct CancelledTurnExecutionReconstitutionInput {
     attempt_end: TerminalAttemptEndReconstitutionInput,
     ended_call: Option<crate::ModelCallId>,
     interrupt: AppliedInterruptCommandResult,
+    terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
 }
 
 impl CancelledTurnExecutionReconstitutionInput {
@@ -310,7 +331,23 @@ impl CancelledTurnExecutionReconstitutionInput {
             attempt_end,
             ended_call,
             interrupt,
+            terminal_tool_attempts: Vec::new(),
         }
+    }
+
+    /// Supplies the complete independently checked terminal tool-attempt
+    /// inventory referenced by a writer-produced tool-result suffix.
+    pub fn with_terminal_tool_attempts(
+        mut self,
+        terminal_tool_attempts: Vec<crate::EndedToolAttempt>,
+    ) -> Self {
+        self.terminal_tool_attempts = terminal_tool_attempts;
+        self
+    }
+
+    /// Borrows every terminal tool attempt supplied for result correlation.
+    pub fn terminal_tool_attempts(&self) -> &[crate::EndedToolAttempt] {
+        &self.terminal_tool_attempts
     }
 }
 
@@ -3898,18 +3935,20 @@ fn reconstitute_inner(
                 expected.push(failed_entry);
                 let ordinary_terminal_matches =
                     terminal.ordered_entries().eq(expected.iter().copied());
-                let tool_round_terminal_matches = terminal_execution
-                    .as_ref()
-                    .is_some_and(|execution| execution.ended_call.is_none())
-                    && tool_round_terminal_matches(
-                        turn,
-                        &terminal,
-                        failed_entry,
-                        &model_calls,
-                        &assistant_by_call,
-                        &snapshots,
-                        &semantic_entries,
-                    );
+                let tool_round_terminal_matches =
+                    terminal_execution.as_ref().is_some_and(|execution| {
+                        execution.ended_call.is_none()
+                            && tool_round_terminal_matches(
+                                turn,
+                                &terminal,
+                                failed_entry,
+                                execution.terminal_tool_attempts(),
+                                &model_calls,
+                                &assistant_by_call,
+                                &snapshots,
+                                &semantic_entries,
+                            )
+                    });
                 if !ordinary_terminal_matches && !tool_round_terminal_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -4270,6 +4309,7 @@ fn reconstitute_inner(
                         turn,
                         &terminal,
                         cancellation_entry,
+                        terminal_execution.terminal_tool_attempts(),
                         &model_calls,
                         &assistant_by_call,
                         &snapshots,
@@ -5160,10 +5200,12 @@ fn completed_terminal_matches(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_round_terminal_matches(
     turn: TurnId,
     terminal: &ResolvedContextFrontierSnapshot,
     terminal_marker: SemanticTranscriptEntryRef,
+    terminal_tool_attempts: &[crate::EndedToolAttempt],
     model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
     assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
@@ -5231,14 +5273,26 @@ fn tool_round_terminal_matches(
                 return false;
             }
 
+            let mut attempts_by_id = BTreeMap::new();
+            for attempt in terminal_tool_attempts {
+                if attempt.session() != terminal.frontier().owning_session()
+                    || attempt.turn() != turn
+                    || attempts_by_id.insert(attempt.attempt(), attempt).is_some()
+                {
+                    return false;
+                }
+            }
             let mut observed_attempts = BTreeSet::new();
-            result_suffix.iter().zip(requests).all(|(entry, request)| {
+            let results_match = result_suffix.iter().zip(requests).all(|(entry, request)| {
                 match semantic_entries
                     .get(entry)
                     .map(SemanticTranscriptEntry::payload)
                 {
                     Some(SemanticTranscriptEntryPayload::ToolExecutionResult { attempt }) => {
                         observed_attempts.insert(*attempt)
+                            && attempts_by_id
+                                .get(attempt)
+                                .is_some_and(|ended| ended.request() == request)
                     }
                     Some(
                         SemanticTranscriptEntryPayload::ToolDenied { request: actual }
@@ -5246,7 +5300,8 @@ fn tool_round_terminal_matches(
                     ) => *actual == request,
                     _ => false,
                 }
-            })
+            });
+            results_match && observed_attempts.len() == attempts_by_id.len()
         })
         .count()
         == 1
@@ -5546,6 +5601,7 @@ mod tests {
         ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
         ToolEffectClass, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ToolResultContent, ToolResultText,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
             imported_transcript_entry_id, model_call_id, provider_model_identity,
@@ -7359,16 +7415,39 @@ mod tests {
         let terminal_attempt = turn_attempt_id(52);
         let first_request = tool_request_id(60);
         let second_request = tool_request_id(61);
+        let executed_attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(70),
+            first_request,
+            session.id(),
+            failed.turn(),
+            terminal_attempt,
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(String::from("ok"))
+                        .expect("fixture tool result is valid"),
+                ),
+            }),
+        )
+        .reconstitute()
+        .expect("fixture tool attempt is supported");
+        let crate::ReconstitutedToolAttempt::Ended(executed_attempt) = executed_attempt else {
+            panic!("fixture tool attempt is terminal");
+        };
         let failed_record = failed.record(
             &session,
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: starting_frontier.id(),
-                terminal_execution: Some(FailedTurnExecutionReconstitutionInput::attempt_only(
-                    failed.turn(),
-                    terminal_attempt,
-                    UnstoppedAttemptDisposition::KnownFailure,
-                )),
+                terminal_execution: Some(
+                    FailedTurnExecutionReconstitutionInput::attempt_only(
+                        failed.turn(),
+                        terminal_attempt,
+                        UnstoppedAttemptDisposition::KnownFailure,
+                    )
+                    .with_terminal_tool_attempts(vec![executed_attempt]),
+                ),
                 terminal_frontier: terminal_frontier.id(),
             },
         );
@@ -7447,6 +7526,46 @@ mod tests {
                 starting_frontier.id(),
                 ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
             )],
+        );
+
+        let mismatched_attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(70),
+            second_request,
+            session.id(),
+            failed.turn(),
+            terminal_attempt,
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(String::from("wrong request"))
+                        .expect("fixture tool result is valid"),
+                ),
+            }),
+        )
+        .reconstitute()
+        .expect("fixture tool attempt is supported");
+        let crate::ReconstitutedToolAttempt::Ended(mismatched_attempt) = mismatched_attempt else {
+            panic!("fixture tool attempt is terminal");
+        };
+        let mut mismatched_input = input.clone();
+        let AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+            terminal_execution: Some(execution),
+            ..
+        } = &mut mismatched_input.turns[0].state
+        else {
+            panic!("fixture is a failed terminal");
+        };
+        execution.terminal_tool_attempts = vec![mismatched_attempt];
+        assert_eq!(
+            mismatched_input
+                .reconstitute()
+                .expect_err("a result attempt must execute its paired request")
+                .failure()
+                .to_owned(),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+                turn: failed.turn(),
+            }
         );
 
         let projection = input
