@@ -10,6 +10,53 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Bind finding events to pass results and acyclic references
+
+**Context.** A compatible terminal pass does not prove which finding event it
+produced. Duplicate and superseded references also admit a later reverse edge
+unless classification authenticates the referenced finding's state.
+
+**Decision.** A finding-event pass result commits to the exact finding, ordinal,
+and event kind. Duplicate and superseded events additionally freeze the
+referenced finding's canonically authenticated status at admission, which must
+be `Open` or `Accepted`. The referenced finding is locked while the event is
+admitted. Because a finding becomes terminal when it acquires a reference, no
+later admitted reference can point back to it.
+
+**Rejected alternatives.** Pass kind and outcome alone do not identify an
+effect. Detecting cycles only while loading allows invalid history to commit.
+Requiring a terminal referenced finding makes canonical and successor selection
+ambiguous and still admits reference chains.
+
+**Affects.** Pass outcomes, finding-event admission and reconstitution, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Reassociate canonical external objects across target snapshots
+
+**Context.** A moving change request creates a new immutable review target when
+its head changes. Provider-wide attachment uniqueness prevents that new target
+from importing an existing review, thread, or comment even though the opaque
+object identity remains canonical.
+
+**Decision.** Adapters continue to construct one canonical provider-wide object
+key. Attachment uniqueness is scoped to the exact target snapshot, so a new
+target may reserve and attach the same object through its own canonically
+succeeded publication or import pass. One target cannot attach the object
+through two reservations.
+
+**Rejected alternatives.** Global attachment uniqueness strands external state
+on an old snapshot. Reusing the old reservation crosses immutable target
+ancestry. Making the identifier target-relative creates multiple identities for
+one provider object.
+
+**Affects.** External-link attachment persistence, refreshed-target imports, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice. This supersedes only the global attachment
+uniqueness chosen in
+[the earlier identity decision](#2026-07-25--canonicalize-external-review-object-identities-provider-wide);
+provider-wide key canonicalization remains unchanged.
+
 ## 2026-07-25 — Consume posting attachment evidence once
 
 **Context.** A finding can become blocked after it was posted and later return

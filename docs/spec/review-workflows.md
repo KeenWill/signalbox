@@ -161,24 +161,33 @@ supplies an attached external link not consumed by any earlier posted event for
 that finding. Each posted event consumes its link as publication evidence.
 Rejected, duplicate, superseded, stale, and fixed are terminal. Every event
 carries its owning finding reference, a contiguous one-based ordinal, and a
-same-target pass reference. The event pass's run stores the exact `ReviewPolicy`
-frozen by the finding's producing run, so judgment, deduplication, and every
-later classification remain under one policy even though their one-pass
-workflows use separate run identities. Event and pass kinds are compatible only
-as follows: accepted, rejected, and stale events name a judgment pass; duplicate
-and superseded events name a deduplication pass; posted names an
-external-publication or external-context-import pass; fixed names a
-finding-repair pass; and blocked-with-reason names either an
+same-target pass reference. The event pass's canonical run supplies its workflow
+and the exact `ReviewPolicy` frozen by the finding's producing run, so judgment,
+deduplication, and every later classification remain under one policy even
+though their one-pass workflows use separate run identities. The pass's terminal
+result commits to the event's exact finding, ordinal, and event kind. Event and
+pass kinds are compatible only as follows: accepted, rejected, and stale events
+name a judgment pass; duplicate and superseded events name a deduplication pass;
+posted names an external-publication or external-context-import pass; fixed
+names a finding-repair pass; and blocked-with-reason names either an
 external-publication or finding-repair pass. Every event except
 blocked-with-reason names a canonically succeeded pass; blocked-with-reason
-names a canonically blocked pass. Reconstitution validates the complete history
-and fails closed on a foreign owner, policy mismatch, gaps, illegal edges,
-incompatible pass kind or outcome, self-reference, foreign-run finding
-references, reuse of a link consumed by an earlier posted event, or a
-publication event whose external link is not an attached link associated with
-that finding or whose external object kind is not review, review-thread,
-inline-review-comment, or general change-request-comment. A posted event's pass
-is the attachment's exact producing pass (INV-040).
+names a canonically blocked pass.
+
+Duplicate and superseded events freeze the referenced finding's canonically
+authenticated current status at admission. That status must be `Open` or
+`Accepted`, and the store locks the referenced finding while admitting the
+event. A finding becomes terminal when it acquires either reference, so no later
+reference may point back to it; direct and transitive reference cycles therefore
+fail closed. Reconstitution validates the complete history and fails closed on a
+foreign owner, run-workflow or policy mismatch, gaps, illegal edges,
+incompatible or contradictory pass evidence, an event not named by its pass
+result, self-reference, foreign-run or ineligible finding references, reuse of a
+link consumed by an earlier posted event, or a publication event whose external
+link is not an attached link associated with that finding or whose external
+object kind is not review, review-thread, inline-review-comment, or general
+change-request-comment. A posted event's pass is the attachment's exact
+producing pass (INV-040).
 
 ## External links and posting reservations
 
@@ -194,25 +203,30 @@ External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
 attachment containing the owning reservation identity, the exact external object
 identifier, and the producing pass. The attachment's reservation must equal the
-aggregate root. Its producing pass is canonically succeeded and is either
-external publication or, for the no-write read-only case, external-context
-import; it belongs to the target carried by the reservation's target, run, or
-finding association. Construction and reconstitution reject another same-target
-reservation. The identifier is an opaque canonical provider-wide key. An adapter
-qualifies a repository-scoped host identifier with the canonical repository key
-before constructing it. The store uniquely admits one attached
-provider/kind/object identity and one attachment per reservation. A reservation
-without an attachment is explicitly pending; it is never interpreted as proof
-that the external effect did not occur and is not automatically retried
-(INV-025, INV-026). Read-only import may reserve and attach in one local
-transaction because it issues no external write (INV-041).
+aggregate root. Its producing pass and canonical run evidence must agree and
+prove either succeeded external publication or, for the no-write read-only case,
+succeeded external-context import; the pass belongs to the target carried by the
+reservation's target, run, or finding association. Construction and
+reconstitution reject another same-target reservation. The identifier is an
+opaque canonical provider-wide key. An adapter qualifies a repository-scoped
+host identifier with the canonical repository key before constructing it. The
+store uniquely admits one attachment per reservation and one attached
+provider/kind/object identity per exact target snapshot. A refreshed target may
+attach the same canonical object through its own succeeded import or publication
+pass; it never reuses the old target's reservation. A reservation without an
+attachment is explicitly pending; it is never interpreted as proof that the
+external effect did not occur and is not automatically retried (INV-025,
+INV-026). Read-only import may reserve and attach in one local transaction
+because it issues no external write (INV-041).
 
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with the owning reservation identity, a same-target pass, and a
-contiguous ordinal. The observing pass is a canonically succeeded
-external-context-import pass. Reconstitution rejects another reservation even
-when both share a target. Observations describe the external object's reported
-state; they do not rewrite finding status.
+contiguous ordinal. The observing pass and its canonical run agree on a
+succeeded external-context-import operation. Reconstitution rejects another
+reservation even when both share a target and rejects contradictory evidence
+reused under one pass identity across the attachment or observations.
+Observations describe the external object's reported state; they do not rewrite
+finding status.
 
 ## Store and reconstitution
 

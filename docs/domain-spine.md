@@ -5307,6 +5307,44 @@ impl ReviewFindingRef {
     pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
     // accessors: pass(), run(), finding(), target()
 }
+pub enum ReviewFindingStatus {
+    Open,
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+pub enum ReviewFindingEventType {
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+pub struct ReviewFindingEventResult { /* finding + ordinal + event type */ }
+impl ReviewFindingEventResult {
+    pub const fn new(
+        finding: ReviewFindingRef,
+        ordinal: ReviewEventOrdinal,
+        event_type: ReviewFindingEventType,
+    ) -> Self;
+    // accessors: finding(), ordinal(), event_type()
+}
+pub struct ReviewReferencedFindingEvidence { /* reference + frozen status */ }
+impl ReviewReferencedFindingEvidence {
+    pub const fn new(
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+    ) -> Self;
+    // accessors: reference(), status()
+}
 
 pub enum ReviewWorkflowKind {
     ImportExternalContext,
@@ -5407,9 +5445,16 @@ pub enum ReviewPassKind {
 pub enum ReviewPassState {
     Queued,
     Running { turn: TurnId },
-    Succeeded { turn: TurnId, output_frontier: ContextFrontierId },
+    Succeeded {
+        turn: TurnId,
+        output_frontier: ContextFrontierId,
+        finding_event: Option<ReviewFindingEventResult>,
+    },
     Failed { turn: TurnId },
-    Blocked { turn: TurnId },
+    Blocked {
+        turn: TurnId,
+        finding_event: Option<ReviewFindingEventResult>,
+    },
     Cancelled { turn: Option<TurnId> },
 }
 pub enum ReviewPassTurnOutcome {
@@ -5585,33 +5630,27 @@ impl ReviewFindingExternalLinkRef {
 pub enum ReviewFindingEventKind {
     Accepted,
     Rejected { reason: ReviewText },
-    Duplicate { canonical: ReviewFindingRef },
-    Superseded { successor: ReviewFindingRef },
+    Duplicate { canonical: ReviewReferencedFindingEvidence },
+    Superseded { successor: ReviewReferencedFindingEvidence },
     Stale,
     Posted { link: ReviewFindingExternalLinkRef },
     Fixed,
     BlockedWithReason { reason: ReviewText },
 }
-pub struct ReviewFindingEvent { /* finding + ordinal + pass + kind */ }
+impl ReviewFindingEventKind {
+    pub const fn event_type(&self) -> ReviewFindingEventType;
+}
+pub struct ReviewFindingEvent { /* finding + ordinal + pass + run + kind */ }
 impl ReviewFindingEvent {
     pub const fn new(
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
         kind: ReviewFindingEventKind,
     ) -> Self;
-    // accessors: finding(), ordinal(), pass(), pass_evidence(), kind()
-}
-pub enum ReviewFindingStatus {
-    Open,
-    Accepted,
-    Rejected,
-    Duplicate,
-    Superseded,
-    Stale,
-    Posted,
-    Fixed,
-    BlockedWithReason,
+    // accessors: finding(), ordinal(), pass(), pass_evidence(), run_evidence(),
+    // kind()
 }
 pub struct ReviewFinding { /* proposal + complete event history + derived status */ }
 impl ReviewFinding {
@@ -5633,10 +5672,12 @@ pub enum ReviewFindingTransitionFailure {
     IncompatibleProducingPassEvidence,
     ForeignEventFinding,
     ForeignEventPass,
+    IncompatibleEventRunEvidence,
     EventPolicyMismatch,
     ConflictingPassEvidence,
     IncompatibleEventPassEvidence,
     ForeignReferencedFinding,
+    IneligibleReferencedFinding,
     SelfReference,
     ForeignExternalLink,
     PublicationPassMismatch,
@@ -5665,29 +5706,33 @@ pub enum ReviewExternalObjectKind {
     ReviewComment,
     ChangeRequestComment,
 }
-pub struct ReviewExternalLinkAttachment { /* link + pass + external object key */ }
+pub struct ReviewExternalLinkAttachment { /* link + pass + run + external object key */ }
 impl ReviewExternalLinkAttachment {
     pub const fn new(
         link: ReviewExternalLinkId,
         pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
         external_object: ReviewKey,
     ) -> Self;
-    // accessors: link(), pass(), pass_evidence(), external_object()
+    // accessors: link(), pass(), pass_evidence(), run_evidence(),
+    // external_object()
 }
 pub enum ReviewExternalObjectState {
     Current,
     Outdated,
     Resolved,
 }
-pub struct ReviewExternalLinkObservation { /* link + ordinal + pass + state */ }
+pub struct ReviewExternalLinkObservation { /* link + ordinal + pass + run + state */ }
 impl ReviewExternalLinkObservation {
     pub const fn new(
         link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
         state: ReviewExternalObjectState,
     ) -> Self;
-    // accessors: link(), ordinal(), pass(), pass_evidence(), state()
+    // accessors: link(), ordinal(), pass(), pass_evidence(), run_evidence(),
+    // state()
 }
 pub struct ReviewExternalLink { /* reservation + optional attachment + observations */ }
 impl ReviewExternalLink {
@@ -5718,7 +5763,10 @@ pub enum ReviewExternalLinkTransitionError {
     ForeignObservationLink,
     ForeignPass,
     IncompatibleAttachmentPass,
+    IncompatibleAttachmentRunEvidence,
     IncompatibleObservationPass,
+    IncompatibleObservationRunEvidence,
+    ConflictingPassEvidence,
     NotAttached,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
 }
@@ -5753,9 +5801,9 @@ pub enum ReviewExternalLinkTransitionError {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 64                   |
+| domain: review_workflow                            | 67                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **434 (+1 free fn)** |
+| **signalbox-domain total**                         | **437 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
