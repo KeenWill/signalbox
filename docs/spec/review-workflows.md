@@ -159,11 +159,11 @@ reserves external links, attaches external identifiers, and appends external
 observations. Workflow-facing process protocol, code-host and workspace
 adapters, pass scheduling, model prompts, automated publication, repair, and
 merge-based propagation remain blocked on the
-[review-workflow orchestration design](../open-questions.md#review-workflow-orchestration).
+[review-workflow orchestration design](../open-questions.md#destination-features-target-model).
 
 ## Open edges
 
-- [Review-workflow orchestration](../open-questions.md#review-workflow-orchestration)
+- [Review-workflow orchestration](../open-questions.md#destination-features-target-model)
   owns application commands, scheduling, adapter seams, workflow-facing
   protocol, prompt contracts, conflict escalation, and stack propagation.
 - [Artifacts](../open-questions.md#destination-features-target-model) remain a
