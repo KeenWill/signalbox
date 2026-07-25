@@ -1,4 +1,4 @@
-//! Closed version-one JSON-lines process protocol.
+//! Closed versioned JSON-lines process protocol.
 //!
 //! This crate owns wire representations and frame validation only. Domain,
 //! persistence, and client presentation values remain distinct mappings
@@ -13,8 +13,15 @@ use serde::{
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-/// The only protocol version accepted by this crate.
-pub const PROTOCOL_VERSION: u64 = 1;
+/// The protocol version emitted by the current terminal client.
+pub const PROTOCOL_VERSION: u64 = 3;
+
+/// The oldest protocol version retained for compatibility.
+pub const MIN_PROTOCOL_VERSION: u64 = 1;
+
+const fn supported_version(version: u64) -> bool {
+    version >= MIN_PROTOCOL_VERSION && version <= PROTOCOL_VERSION
+}
 
 /// Maximum encoded frame size, including its final newline.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -394,13 +401,22 @@ pub struct ClientFrame {
 }
 
 impl ClientFrame {
-    /// Constructs a version-one frame with a correlated request identity.
+    /// Constructs a current-version frame with a correlated request identity.
     pub fn try_new(
         request_id: RequestId,
         request: ClientRequest,
     ) -> Result<Self, FrameValidationError> {
+        Self::try_new_for_version(PROTOCOL_VERSION, request_id, request)
+    }
+
+    /// Constructs a frame for one retained protocol version.
+    pub fn try_new_for_version(
+        version: u64,
+        request_id: RequestId,
+        request: ClientRequest,
+    ) -> Result<Self, FrameValidationError> {
         let frame = Self {
-            version: PROTOCOL_VERSION,
+            version,
             request_id,
             request,
         };
@@ -413,18 +429,23 @@ impl ClientFrame {
         self.request_id
     }
 
+    /// Returns the admitted protocol version.
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Borrows the closed request.
     pub const fn request(&self) -> &ClientRequest {
         &self.request
     }
 
     /// Transfers the correlation identity and closed request out of the frame.
-    pub fn into_parts(self) -> (RequestId, ClientRequest) {
-        (self.request_id, self.request)
+    pub fn into_parts(self) -> (u64, RequestId, ClientRequest) {
+        (self.version, self.request_id, self.request)
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
-        if self.version != PROTOCOL_VERSION {
+        if !supported_version(self.version) {
             return Err(FrameValidationError::UnsupportedVersion);
         }
         if !self.request_id.is_correlated() {
@@ -464,7 +485,7 @@ impl<'de> Deserialize<'de> for ClientFrame {
 pub enum ErrorCode {
     /// JSON, UTF-8, framing, field, or size validation failed.
     MalformedFrame,
-    /// Client version is not one.
+    /// Client version is not retained by this implementation.
     UnsupportedVersion,
     /// A boundary value cannot construct the application input.
     InvalidRequest,
@@ -685,6 +706,18 @@ pub enum TurnState {
         /// Ambiguous call awaiting recovery.
         recovery_model_call_id: CanonicalUuid,
     },
+    /// The turn is parked on an owner decision for a tool request.
+    ActiveAwaitingToolApproval {
+        /// Earliest undecided tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The turn is parked on an ambiguous tool attempt.
+    ActiveAwaitingToolRecovery {
+        /// Ended turn attempt that issued the tool effect.
+        ended_attempt_id: CanonicalUuid,
+        /// Ambiguous tool attempt awaiting recovery.
+        recovery_tool_attempt_id: CanonicalUuid,
+    },
     /// The turn terminalized as failed.
     Failed {
         /// Exact terminal frontier.
@@ -722,14 +755,23 @@ pub enum TurnState {
         /// Terminal call, or null when cancellation preceded preparation.
         terminal_model_call_id: Option<CanonicalUuid>,
     },
-    /// The turn terminalized requiring external reconciliation.
+    /// The turn terminalized on an ambiguous model call.
     ReconciliationRequired {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
         /// Authoritative terminal attempt.
         terminal_attempt_id: CanonicalUuid,
-        /// Ambiguous terminal call.
+        /// Exact ambiguous terminal model call.
         terminal_model_call_id: CanonicalUuid,
+    },
+    /// The turn terminalized on an ambiguous tool attempt.
+    ToolReconciliationRequired {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Authoritative terminal turn attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Exact terminal tool attempt.
+        terminal_tool_attempt_id: CanonicalUuid,
     },
 }
 
@@ -748,6 +790,13 @@ enum RawTurnState {
     ActiveAwaitingModelCallRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_model_call_id: CanonicalUuid,
+    },
+    ActiveAwaitingToolApproval {
+        tool_request_id: CanonicalUuid,
+    },
+    ActiveAwaitingToolRecovery {
+        ended_attempt_id: CanonicalUuid,
+        recovery_tool_attempt_id: CanonicalUuid,
     },
     Failed {
         terminal_frontier_id: CanonicalUuid,
@@ -777,6 +826,11 @@ enum RawTurnState {
         terminal_attempt_id: CanonicalUuid,
         terminal_model_call_id: CanonicalUuid,
     },
+    ToolReconciliationRequired {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        terminal_tool_attempt_id: CanonicalUuid,
+    },
 }
 
 impl<'de> Deserialize<'de> for TurnState {
@@ -805,6 +859,16 @@ impl<'de> Deserialize<'de> for TurnState {
             } => Self::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+            },
+            RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
+                Self::ActiveAwaitingToolApproval { tool_request_id }
+            }
+            RawTurnState::ActiveAwaitingToolRecovery {
+                ended_attempt_id,
+                recovery_tool_attempt_id,
+            } => Self::ActiveAwaitingToolRecovery {
+                ended_attempt_id,
+                recovery_tool_attempt_id,
             },
             RawTurnState::Failed {
                 terminal_frontier_id,
@@ -858,12 +922,37 @@ impl<'de> Deserialize<'de> for TurnState {
                 terminal_attempt_id,
                 terminal_model_call_id,
             },
+            RawTurnState::ToolReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_tool_attempt_id,
+            } => Self::ToolReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_tool_attempt_id,
+            },
         };
         Ok(state)
     }
 }
 
 impl TurnState {
+    const fn minimum_protocol_version(&self) -> u64 {
+        match self {
+            Self::ActiveAwaitingToolApproval { .. }
+            | Self::ActiveAwaitingToolRecovery { .. }
+            | Self::ToolReconciliationRequired { .. } => 3,
+            Self::Queued { .. }
+            | Self::ActiveRunning { .. }
+            | Self::ActiveAwaitingModelCallRecovery { .. }
+            | Self::Failed { .. }
+            | Self::Completed { .. }
+            | Self::Refused { .. }
+            | Self::Cancelled { .. }
+            | Self::ReconciliationRequired { .. } => 1,
+        }
+    }
+
     fn validate(&self) -> Result<(), FrameValidationError> {
         if let Self::Failed {
             terminal_attempt_id: None,
@@ -878,9 +967,45 @@ impl TurnState {
 }
 
 /// Non-text semantic transcript entry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// Assistant proposed one durable tool request.
+    AssistantToolUse {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Producing model call.
+        model_call_id: CanonicalUuid,
+        /// Exact logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact checked tool name.
+        tool_name: String,
+        /// Exact normalized or scrubbed-undecodable arguments.
+        arguments: String,
+    },
+    /// One physical tool attempt produced the logical result.
+    ToolExecutionResult {
+        /// Exact logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact physical tool attempt.
+        tool_attempt_id: CanonicalUuid,
+        /// Exact provider-visible result content.
+        content: String,
+    },
+    /// One logical tool request was denied.
+    ToolDenied {
+        /// Exact denied tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact provider-visible denial content.
+        content: String,
+    },
+    /// One logical tool request closed because its turn ended.
+    ToolClosed {
+        /// Exact closed tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact provider-visible terminal-closure content.
+        content: String,
+    },
     /// Explicit completed-turn marker.
     TurnCompleted {
         /// Completed turn.
@@ -896,6 +1021,18 @@ pub enum TranscriptEntry {
         /// Cancelled turn.
         turn_id: CanonicalUuid,
     },
+}
+
+impl TranscriptEntry {
+    const fn minimum_protocol_version(&self) -> u64 {
+        match self {
+            Self::AssistantToolUse { .. }
+            | Self::ToolExecutionResult { .. }
+            | Self::ToolDenied { .. }
+            | Self::ToolClosed { .. } => 3,
+            Self::TurnCompleted { .. } | Self::TurnFailed { .. } | Self::TurnCancelled { .. } => 1,
+        }
+    }
 }
 
 /// Metadata for a text-bearing semantic transcript entry.
@@ -951,6 +1088,27 @@ pub enum ModelCallState {
     },
 }
 
+/// Exact durable state of one tool batch presentation boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolBatchState {
+    /// Assistant tool proposals committed.
+    Proposed {
+        /// Exact frontier containing the assistant tool-use entries.
+        frontier_id: CanonicalUuid,
+    },
+    /// Proposal-ordered logical results committed.
+    ResultsProjected {
+        /// Exact frontier containing the result suffix.
+        frontier_id: CanonicalUuid,
+    },
+    /// One ambiguous physical attempt requires owner recovery.
+    RecoveryRequired {
+        /// Exact ambiguous tool attempt.
+        tool_attempt_id: CanonicalUuid,
+    },
+}
+
 /// Closed durable update event family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -983,6 +1141,15 @@ pub enum SessionEvent {
         model_call_id: CanonicalUuid,
         /// Exact committed state.
         state: ModelCallState,
+    },
+    /// A tool batch crossed one durable presentation boundary.
+    ToolBatchTransition {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Model call that proposed the batch.
+        model_call_id: CanonicalUuid,
+        /// Exact committed batch state.
+        state: ToolBatchState,
     },
     /// Turn completed.
     TurnCompleted {
@@ -1022,18 +1189,44 @@ pub enum SessionEvent {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
     },
-    /// Turn stopped with an ambiguous call requiring reconciliation.
+    /// Turn stopped with an ambiguous model call requiring reconciliation.
     TurnReconciliationRequired {
         /// Reconciliation-required turn.
         turn_id: CanonicalUuid,
-        /// Ambiguous terminal call.
+        /// Exact ambiguous terminal model call.
         model_call_id: CanonicalUuid,
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+    },
+    /// Turn stopped with an ambiguous tool attempt requiring reconciliation.
+    TurnToolReconciliationRequired {
+        /// Reconciliation-required turn.
+        turn_id: CanonicalUuid,
+        /// Exact ambiguous terminal tool attempt.
+        tool_attempt_id: CanonicalUuid,
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
     },
 }
 
-/// Closed version-one server message family.
+impl SessionEvent {
+    const fn minimum_protocol_version(&self) -> u64 {
+        match self {
+            Self::ToolBatchTransition { .. } | Self::TurnToolReconciliationRequired { .. } => 3,
+            Self::SessionCreated {}
+            | Self::InputAccepted { .. }
+            | Self::TurnActivated { .. }
+            | Self::ModelCallTransition { .. }
+            | Self::TurnCompleted { .. }
+            | Self::TurnFailed { .. }
+            | Self::TurnRefused { .. }
+            | Self::TurnCancelled { .. }
+            | Self::TurnReconciliationRequired { .. } => 1,
+        }
+    }
+}
+
+/// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
@@ -1150,6 +1343,28 @@ pub enum ServerMessage {
     },
 }
 
+impl ServerMessage {
+    /// Returns the oldest protocol version whose closed vocabulary contains
+    /// this exact message.
+    pub const fn minimum_protocol_version(&self) -> u64 {
+        match self {
+            Self::TranscriptTurn { state, .. } => state.minimum_protocol_version(),
+            Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
+            Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
+            Self::SessionCreated { .. }
+            | Self::InputSubmitted { .. }
+            | Self::SessionsStart {}
+            | Self::SessionSummary { .. }
+            | Self::SessionsEnd { .. }
+            | Self::TranscriptSnapshotStart { .. }
+            | Self::TranscriptTextEntry { .. }
+            | Self::TranscriptContent { .. }
+            | Self::TranscriptSnapshotEnd { .. }
+            | Self::Error { .. } => 1,
+        }
+    }
+}
+
 fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
     deserializer: DeserializerT,
 ) -> Result<Option<ValueT>, DeserializerT::Error>
@@ -1170,13 +1385,22 @@ pub struct ServerFrame {
 }
 
 impl ServerFrame {
-    /// Constructs a version-one response frame.
+    /// Constructs a current-version response frame.
     pub fn try_new(
         request_id: RequestId,
         message: ServerMessage,
     ) -> Result<Self, FrameValidationError> {
+        Self::try_new_for_version(PROTOCOL_VERSION, request_id, message)
+    }
+
+    /// Constructs a response in the request's admitted protocol version.
+    pub fn try_new_for_version(
+        version: u64,
+        request_id: RequestId,
+        message: ServerMessage,
+    ) -> Result<Self, FrameValidationError> {
         let frame = Self {
-            version: PROTOCOL_VERSION,
+            version,
             request_id,
             message,
         };
@@ -1189,14 +1413,22 @@ impl ServerFrame {
         self.request_id
     }
 
+    /// Returns the response protocol version.
+    pub const fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Borrows the closed server message.
     pub const fn message(&self) -> &ServerMessage {
         &self.message
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
-        if self.version != PROTOCOL_VERSION {
+        if !supported_version(self.version) {
             return Err(FrameValidationError::UnsupportedVersion);
+        }
+        if self.version < self.message.minimum_protocol_version() {
+            return Err(FrameValidationError::MessageRequiresNewerVersion);
         }
         if let ServerMessage::TranscriptTurn { state, .. } = &self.message {
             state.validate()?;
@@ -1253,6 +1485,8 @@ impl<'de> Deserialize<'de> for ServerFrame {
 pub enum FrameValidationError {
     /// In-memory frame used another version.
     UnsupportedVersion,
+    /// A retained old version cannot encode a newer closed message variant.
+    MessageRequiresNewerVersion,
     /// A client request used reserved correlation identity zero.
     UncorrelatedClientRequest,
     /// A success response used reserved correlation identity zero.
@@ -1269,6 +1503,7 @@ impl fmt::Display for FrameValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::UnsupportedVersion => "frame version is unsupported",
+            Self::MessageRequiresNewerVersion => "server message requires a newer protocol version",
             Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
             Self::UncorrelatedSuccess => "successful server message is uncorrelated",
             Self::UncorrelatedApplicationError => "application server error is uncorrelated",
@@ -1326,15 +1561,16 @@ impl fmt::Display for FrameDecodeError {
             FrameDecodeErrorKind::MalformedFrame => {
                 formatter.write_str("process-protocol frame is malformed")
             }
-            FrameDecodeErrorKind::UnsupportedVersion => formatter
-                .write_str("process-protocol version is unsupported; the supported version is 1"),
+            FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
+                "process-protocol version is unsupported; supported versions are 1, 2, and 3",
+            ),
         }
     }
 }
 
 impl Error for FrameDecodeError {}
 
-/// Outgoing frame could not be encoded within the version-one boundary.
+/// Outgoing frame could not be encoded within the admitted version boundary.
 #[derive(Debug)]
 pub enum FrameEncodeError {
     /// In-memory value violated its closed frame shape.
@@ -1535,7 +1771,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if version_spelling != "1" {
+    if !matches!(version_spelling, "1" | "2" | "3") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -1663,8 +1899,8 @@ mod tests {
         FrameEncodeError, FrameValidationError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
         MAX_JSON_CONTAINER_DEPTH, ModelCallDisposition, ModelCallState, ModelSelection,
         PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line,
+        decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -1728,7 +1964,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":2,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":4,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -1740,7 +1976,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_client_request_version_one(
+    fn assert_client_request_current_version(
         request_id: RequestId,
         request: ClientRequest,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1760,7 +1996,7 @@ mod tests {
         let frame = ServerFrame::try_new(request_id, message)?;
         let encoded = encode_server_line(&frame)?;
         let expected = format!(
-            "{{\"version\":1,\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
+            "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
             expected_message_json
         );
         assert_eq!(String::from_utf8(encoded.clone())?, expected);
@@ -1783,7 +2019,8 @@ mod tests {
         let encoded = encode_client_line(&frame)?;
         let decoded = decode_client_line(&encoded)?;
         assert_eq!(decoded, frame);
-        let (decoded_request_id, decoded_request) = decoded.into_parts();
+        let (decoded_version, decoded_request_id, decoded_request) = decoded.into_parts();
+        assert_eq!(decoded_version, PROTOCOL_VERSION);
         assert_eq!(decoded_request_id, request(u64::MAX)?);
         let ClientRequest::SubmitInput { content, .. } = decoded_request else {
             return Err("decoded request changed variant".into());
@@ -1831,7 +2068,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("2");
+        assert_unsupported_version("4");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -2332,20 +2569,20 @@ mod tests {
     }
 
     #[test]
-    fn inv033_all_client_request_variants_encode_with_version_one()
+    fn inv033_all_client_request_variants_encode_with_current_version()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelSelection::Direct {
             selection_id: uuid(3),
         };
-        assert_client_request_version_one(
+        assert_client_request_current_version(
             request(1)?,
             ClientRequest::CreateSession {
                 command_id: command(4)?,
                 initial_model_selection: model,
             },
         )?;
-        assert_client_request_version_one(request(2)?, ClientRequest::ListSessions {})?;
-        assert_client_request_version_one(
+        assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
+        assert_client_request_current_version(
             request(3)?,
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
@@ -2354,18 +2591,64 @@ mod tests {
                 expected_defaults_version: CanonicalU64::new(1),
             },
         )?;
-        assert_client_request_version_one(
+        assert_client_request_current_version(
             request(4)?,
             ClientRequest::ReadTranscript {
                 session_id: uuid(6),
             },
         )?;
-        assert_client_request_version_one(
+        assert_client_request_current_version(
             request(5)?,
             ClientRequest::FollowSession {
                 session_id: uuid(6),
             },
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_retained_versions_keep_model_reconciliation_and_gate_tool_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let model_reconciliation = ServerMessage::TranscriptTurn {
+            turn_id: uuid(3),
+            acceptance_position: CanonicalU64::new(1),
+            state: TurnState::ReconciliationRequired {
+                terminal_frontier_id: uuid(6),
+                terminal_attempt_id: uuid(7),
+                terminal_model_call_id: uuid(8),
+            },
+        };
+        for version in [1, 2] {
+            let frame = ServerFrame::try_new_for_version(
+                version,
+                request(1)?,
+                model_reconciliation.clone(),
+            )?;
+            let encoded = encode_server_line(&frame)?;
+            assert!(
+                String::from_utf8(encoded.clone())?
+                    .starts_with(&format!("{{\"version\":{version},"))
+            );
+            assert_eq!(decode_server_line(&encoded)?, frame);
+        }
+
+        let tool_reconciliation = ServerMessage::TranscriptTurn {
+            turn_id: uuid(3),
+            acceptance_position: CanonicalU64::new(1),
+            state: TurnState::ToolReconciliationRequired {
+                terminal_frontier_id: uuid(6),
+                terminal_attempt_id: uuid(7),
+                terminal_tool_attempt_id: uuid(9),
+            },
+        };
+        for version in [1, 2] {
+            assert_eq!(
+                ServerFrame::try_new_for_version(version, request(2)?, tool_reconciliation.clone(),),
+                Err(FrameValidationError::MessageRequiresNewerVersion)
+            );
+        }
+        let frame = ServerFrame::try_new_for_version(3, request(2)?, tool_reconciliation)?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
         Ok(())
     }
 
@@ -2696,6 +2979,21 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"6","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(31)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(7),
+                session_id: uuid(1),
+                event: SessionEvent::ToolBatchTransition {
+                    turn_id: uuid(3),
+                    model_call_id: uuid(8),
+                    state: ToolBatchState::ResultsProjected {
+                        frontier_id: uuid(6),
+                    },
+                },
+            },
+            r#"{"type":"session_event","cursor":"7","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"tool_batch_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"results_projected","frontier_id":"00000000-0000-0000-0000-000000000006"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(18)?,

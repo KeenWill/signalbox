@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Reuse serde_json for provider-neutral tool-history rendering
+
+**Context.** The model-provider bridge must replay durable tool results as
+bounded JSON error objects and distinguish object-shaped arguments from valid
+JSON scalars or arrays that provider function-call history cannot accept.
+`serde_json` is already pinned and used throughout the model-runtime layer.
+
+**Decision.** Add the existing focused `serde_json` dependency directly to
+`signalbox-model-provider-runtime` for object-shape validation and safe error
+serialization.
+
+**Rejected alternatives.** Hand-escape JSON: it would duplicate a
+security-sensitive codec. Admit non-object function arguments: provider replay
+would remain invalid. Move provider replay shapes into the domain: that would
+cross the runtime boundary.
+
+**Affects.** `crates/model-provider-runtime/Cargo.toml` and its durable
+tool-history translation.
+
 ## 2026-07-24 — Normalize bounded JSON with stack-safe Serde traversal
 
 **Context.** Tool arguments classify every syntactically valid, byte-bounded

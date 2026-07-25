@@ -9,7 +9,7 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ModelAlias, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
+    SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -214,6 +214,18 @@ pub enum ProcessTurnState {
         /// Ambiguous call awaiting recovery.
         recovery_call: ModelCallId,
     },
+    /// The yielded tool batch is parked on an owner decision.
+    ActiveAwaitingToolApproval {
+        /// Earliest undecided tool request.
+        request: ToolRequestId,
+    },
+    /// The yielded tool batch is parked on an ambiguous external effect.
+    ActiveAwaitingToolRecovery {
+        /// Ended turn attempt that issued the tool effect.
+        ended_attempt: TurnAttemptId,
+        /// Ambiguous tool attempt awaiting recovery.
+        recovery_attempt: ToolAttemptId,
+    },
     /// The turn terminalized as failed.
     Failed {
         /// Exact terminal semantic frontier.
@@ -257,9 +269,18 @@ pub enum ProcessTurnState {
         terminal_frontier: ContextFrontierId,
         /// Outcome-authoritative attempt.
         terminal_attempt: TurnAttemptId,
-        /// Ambiguous terminal call.
-        terminal_call: ModelCallId,
+        /// Exact ambiguous terminal operation.
+        operation: ProcessReconciliationOperation,
     },
+}
+
+/// Exact ambiguous operation exposed by a process transcript projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessReconciliationOperation {
+    /// Ambiguous provider call.
+    ModelCall(ModelCallId),
+    /// Ambiguous tool attempt.
+    ToolAttempt(ToolAttemptId),
 }
 
 /// One turn in acceptance order.
@@ -318,6 +339,66 @@ pub enum ProcessTranscriptEntry {
         /// Producing model call.
         model_call: ModelCallId,
         /// Exact committed assistant text.
+        content: String,
+    },
+    /// Assistant tool proposal.
+    AssistantToolUse {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Owning turn.
+        turn: TurnId,
+        /// Producing model call.
+        model_call: ModelCallId,
+        /// Exact logical tool request.
+        request: ToolRequestId,
+        /// Exact stored tool name.
+        name: String,
+        /// Exact stored normalized or scrubbed undecodable arguments.
+        arguments: String,
+    },
+    /// Executed tool result reference.
+    ToolExecutionResult {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact logical tool request.
+        request: ToolRequestId,
+        /// Exact physical tool attempt.
+        attempt: ToolAttemptId,
+        /// Exact provider-visible result content.
+        content: String,
+    },
+    /// Owner or policy denied one tool request.
+    ToolDenied {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact denied request.
+        request: ToolRequestId,
+        /// Exact provider-visible denial content.
+        content: String,
+    },
+    /// The turn ended before one tool request resolved ordinarily.
+    ToolClosed {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Exact closed request.
+        request: ToolRequestId,
+        /// Exact provider-visible terminal-closure content.
         content: String,
     },
     /// Explicit failed-turn marker.
@@ -946,8 +1027,12 @@ async fn load_next_transcript_turn(
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
             turn.recovery_model_call_id,
+            turn.active_tool_round_call_id,
+            turn.approval_tool_request_id,
+            turn.recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
+            turn.terminal_tool_attempt_id,
             terminal_call.terminal_disposition_kind
                 AS terminal_model_call_disposition_kind,
             accepted.accepted_input_id,
@@ -957,7 +1042,8 @@ async fn load_next_transcript_turn(
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
-            recovery_call.context_frontier_id AS recovery_model_call_frontier_id
+            recovery_call.context_frontier_id AS recovery_model_call_frontier_id,
+            active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id
            FROM turn_lifecycle AS turn
            LEFT JOIN accepted_input AS accepted
              ON accepted.accepted_input_id = turn.origin_accepted_input_id
@@ -979,6 +1065,11 @@ async fn load_next_transcript_turn(
             AND terminal_call.turn_id = turn.turn_id
             AND terminal_call.session_id = turn.session_id
             AND terminal_call.state_kind = 'terminal'
+           LEFT JOIN tool_round AS active_tool_round
+             ON active_tool_round.producing_model_call_id =
+                turn.active_tool_round_call_id
+            AND active_tool_round.turn_id = turn.turn_id
+            AND active_tool_round.session_id = turn.session_id
           WHERE turn.session_id = $1
             AND ($2::numeric IS NULL OR turn.acceptance_position > $2)
           ORDER BY turn.acceptance_position
@@ -1056,8 +1147,12 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
     let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
     let recovery_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
+    let active_tool_round_call: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
+    let approval_tool_request: Option<Uuid> = row.try_get("approval_tool_request_id")?;
+    let recovery_tool_attempt: Option<Uuid> = row.try_get("recovery_tool_attempt_id")?;
     let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
     let terminal_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
+    let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
     let terminal_call_disposition: Option<String> =
         row.try_get("terminal_model_call_disposition_kind")?;
     let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
@@ -1066,6 +1161,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("current_model_call_frontier_id")?;
     let recovery_model_call_frontier: Option<Uuid> =
         row.try_get("recovery_model_call_frontier_id")?;
+    let active_tool_round_frontier: Option<Uuid> = row.try_get("active_tool_round_frontier_id")?;
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
         return Err(ProcessReadCorruption::Unsupported {
@@ -1075,7 +1171,13 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         .into());
     }
     if let Some(value) = active_phase.as_deref()
-        && !matches!(value, "running" | "awaiting_model_call_recovery")
+        && !matches!(
+            value,
+            "running"
+                | "awaiting_model_call_recovery"
+                | "awaiting_tool_approval"
+                | "awaiting_tool_recovery"
+        )
     {
         return Err(ProcessReadCorruption::Unsupported {
             field: "turn active phase",
@@ -1137,6 +1239,186 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     };
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
+
+    if matches!(active_phase.as_deref(), Some("awaiting_tool_approval")) {
+        let (Some(starting_frontier), Some(_producing_call), Some(request), Some(tool_frontier)) = (
+            starting_frontier,
+            active_tool_round_call,
+            approval_tool_request,
+            active_tool_round_frontier,
+        ) else {
+            return Err(ProcessReadCorruption::Inconsistent("tool approval wait shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || current_attempt.is_some()
+            || terminal_disposition.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("tool approval wait shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("tool approval frontier").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ActiveAwaitingToolApproval {
+                    request: ToolRequestId::from_uuid(request),
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(latest_frontier),
+        });
+    }
+
+    if matches!(active_phase.as_deref(), Some("awaiting_tool_recovery")) {
+        let (
+            Some(starting_frontier),
+            Some(ended_attempt),
+            Some(_producing_call),
+            Some(recovery_attempt),
+            Some(tool_frontier),
+        ) = (
+            starting_frontier,
+            current_attempt,
+            active_tool_round_call,
+            recovery_tool_attempt,
+            active_tool_round_frontier,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("tool recovery wait shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("tool recovery wait shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("tool recovery frontier").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ActiveAwaitingToolRecovery {
+                    ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
+                    recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(latest_frontier),
+        });
+    }
+
+    if matches!(active_phase.as_deref(), Some("running")) && active_tool_round_call.is_some() {
+        let (Some(starting_frontier), Some(attempt), Some(tool_frontier)) = (
+            starting_frontier,
+            current_attempt,
+            active_tool_round_frontier,
+        ) else {
+            return Err(ProcessReadCorruption::Inconsistent("running tool round shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("running tool round shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("running tool frontier").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ActiveRunning {
+                    current_attempt: TurnAttemptId::from_uuid(attempt),
+                    current_model_call: None,
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(latest_frontier),
+        });
+    }
+
+    if state_kind == "terminal"
+        && terminal_disposition.as_deref() == Some("reconciliation_required")
+        && terminal_call.is_none()
+        && terminal_tool_attempt.is_some()
+    {
+        let (Some(frontier), Some(attempt), Some(tool_attempt)) =
+            (terminal_frontier, terminal_attempt, terminal_tool_attempt)
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("tool reconciliation shape").into());
+        };
+        if active_phase.is_some()
+            || current_attempt.is_some()
+            || recovery_call.is_some()
+            || active_tool_round_call.is_some()
+            || approval_tool_request.is_some()
+            || recovery_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+            || active_tool_round_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("tool reconciliation shape").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ReconciliationRequired {
+                    terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                    terminal_attempt: TurnAttemptId::from_uuid(attempt),
+                    operation: ProcessReconciliationOperation::ToolAttempt(
+                        ToolAttemptId::from_uuid(tool_attempt),
+                    ),
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(ContextFrontierId::from_uuid(frontier)),
+        });
+    }
+
+    if active_tool_round_call.is_some()
+        || approval_tool_request.is_some()
+        || recovery_tool_attempt.is_some()
+        || terminal_tool_attempt.is_some()
+        || active_tool_round_frontier.is_some()
+    {
+        return Err(ProcessReadCorruption::Inconsistent("tool lifecycle authority shape").into());
+    }
 
     let (state, latest_frontier) = match (
         state_kind.as_str(),
@@ -1367,7 +1649,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             ProcessTurnState::ReconciliationRequired {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
                 terminal_attempt: TurnAttemptId::from_uuid(attempt),
-                terminal_call: ModelCallId::from_uuid(call),
+                operation: ProcessReconciliationOperation::ModelCall(ModelCallId::from_uuid(call)),
             },
             Some(ContextFrontierId::from_uuid(frontier)),
         ),
@@ -1453,11 +1735,22 @@ async fn load_transcript_entry(
             entry.assistant_text_value,
             entry.producing_model_call_id,
             entry.assistant_tool_request_id,
+            entry.tool_result_request_id,
+            entry.tool_result_attempt_id,
             entry.completed_turn_id,
             entry.cancelled_turn_id,
             accepted.content_text AS origin_content,
             accepted.origin_turn_id,
-            call.turn_id AS assistant_turn_id
+            call.turn_id AS assistant_turn_id,
+            result_attempt.request_id AS result_attempt_request_id,
+            transcript_request.tool_name AS transcript_tool_name,
+            transcript_request.arguments_text AS transcript_tool_arguments,
+            result_attempt.terminal_disposition_kind AS result_disposition,
+            result_attempt.result_text AS result_text,
+            result_attempt.error_kind AS result_error_kind,
+            result_attempt.error_detail AS result_error_detail,
+            transcript_approval.decision_kind AS transcript_decision_kind,
+            transcript_approval.denial_reason AS transcript_denial_reason
            FROM context_frontier_member AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
@@ -1468,6 +1761,18 @@ async fn load_transcript_entry(
            LEFT JOIN model_call AS call
              ON call.session_id = entry.source_session_id
             AND call.model_call_id = entry.producing_model_call_id
+           LEFT JOIN tool_attempt AS result_attempt
+             ON result_attempt.session_id = entry.source_session_id
+            AND result_attempt.attempt_id = entry.tool_result_attempt_id
+           LEFT JOIN tool_request AS transcript_request
+             ON transcript_request.session_id = entry.source_session_id
+            AND transcript_request.request_id = COALESCE(
+                entry.assistant_tool_request_id,
+                entry.tool_result_request_id,
+                result_attempt.request_id
+            )
+           LEFT JOIN tool_approval_decision AS transcript_approval
+             ON transcript_approval.request_id = transcript_request.request_id
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
             AND member.member_position = $3",
@@ -1503,11 +1808,177 @@ fn decode_transcript_entry(
     let assistant_text: Option<String> = row.try_get("assistant_text_value")?;
     let producing_call: Option<Uuid> = row.try_get("producing_model_call_id")?;
     let tool_request: Option<Uuid> = row.try_get("assistant_tool_request_id")?;
+    let tool_result_request: Option<Uuid> = row.try_get("tool_result_request_id")?;
+    let tool_result_attempt: Option<Uuid> = row.try_get("tool_result_attempt_id")?;
     let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
     let cancelled_turn: Option<Uuid> = row.try_get("cancelled_turn_id")?;
     let origin_content: Option<String> = row.try_get("origin_content")?;
     let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
     let assistant_turn: Option<Uuid> = row.try_get("assistant_turn_id")?;
+    let result_attempt_request: Option<Uuid> = row.try_get("result_attempt_request_id")?;
+    let transcript_tool_name: Option<String> = row.try_get("transcript_tool_name")?;
+    let transcript_tool_arguments: Option<String> = row.try_get("transcript_tool_arguments")?;
+    let result_disposition: Option<String> = row.try_get("result_disposition")?;
+    let result_text: Option<String> = row.try_get("result_text")?;
+    let result_error_kind: Option<String> = row.try_get("result_error_kind")?;
+    let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
+    let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
+    let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+
+    if payload_kind == "assistant_tool_use" {
+        let (Some(call), Some(request), Some(turn), Some(name), Some(arguments)) = (
+            producing_call,
+            tool_request,
+            assistant_turn,
+            transcript_tool_name,
+            transcript_tool_arguments,
+        ) else {
+            return Err(
+                ProcessReadCorruption::Inconsistent("assistant tool-use entry shape").into(),
+            );
+        };
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || tool_result_request.is_some()
+            || tool_result_attempt.is_some()
+            || result_attempt_request.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || origin_content.is_some()
+            || origin_turn.is_some()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("assistant tool-use entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::AssistantToolUse {
+            entry_index,
+            source_session,
+            entry,
+            turn: TurnId::from_uuid(turn),
+            model_call: ModelCallId::from_uuid(call),
+            request: ToolRequestId::from_uuid(request),
+            name,
+            arguments,
+        });
+    }
+
+    if payload_kind == "tool_execution_result" {
+        let (Some(attempt), Some(request), Some(disposition)) = (
+            tool_result_attempt,
+            result_attempt_request,
+            result_disposition.as_deref(),
+        ) else {
+            return Err(
+                ProcessReadCorruption::Inconsistent("tool execution-result entry shape").into(),
+            );
+        };
+        let content = match (
+            disposition,
+            result_text,
+            result_error_kind,
+            result_error_detail,
+        ) {
+            ("completed", Some(text), None, None) => text,
+            ("known_failed", None, Some(kind), detail) => serde_json::json!({
+                "error": {
+                    "kind": kind,
+                    "detail": detail,
+                }
+            })
+            .to_string(),
+            _ => {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("tool execution-result evidence").into(),
+                );
+            }
+        };
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || tool_result_request.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || origin_content.is_some()
+            || origin_turn.is_some()
+            || assistant_turn.is_some()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("tool execution-result entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index,
+            source_session,
+            entry,
+            request: ToolRequestId::from_uuid(request),
+            attempt: ToolAttemptId::from_uuid(attempt),
+            content,
+        });
+    }
+
+    if matches!(
+        payload_kind.as_str(),
+        "tool_denied" | "tool_closed_by_turn_end"
+    ) {
+        let Some(request) = tool_result_request else {
+            return Err(ProcessReadCorruption::Inconsistent("tool result entry shape").into());
+        };
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || tool_result_attempt.is_some()
+            || result_attempt_request.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || origin_content.is_some()
+            || origin_turn.is_some()
+            || assistant_turn.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("tool result entry shape").into());
+        }
+        return Ok(if payload_kind == "tool_denied" {
+            if transcript_decision_kind.as_deref() != Some("deny") {
+                return Err(ProcessReadCorruption::Inconsistent("tool denial decision").into());
+            }
+            ProcessTranscriptEntry::ToolDenied {
+                entry_index,
+                source_session,
+                entry,
+                request: ToolRequestId::from_uuid(request),
+                content: serde_json::json!({
+                    "error": {
+                        "kind": "denied",
+                        "detail": transcript_denial_reason,
+                    }
+                })
+                .to_string(),
+            }
+        } else {
+            ProcessTranscriptEntry::ToolClosed {
+                entry_index,
+                source_session,
+                entry,
+                request: ToolRequestId::from_uuid(request),
+                content: String::from(r#"{"error":{"detail":null,"kind":"closed_by_turn_end"}}"#),
+            }
+        });
+    }
+
+    if tool_result_request.is_some()
+        || tool_result_attempt.is_some()
+        || result_attempt_request.is_some()
+    {
+        return Err(ProcessReadCorruption::Inconsistent("semantic transcript tool fields").into());
+    }
 
     let projected = match (
         payload_kind.as_str(),
@@ -1632,17 +2103,14 @@ fn decode_transcript_entry(
             entry,
             turn: TurnId::from_uuid(turn),
         },
-        ("assistant_tool_use", _, _, _, _, _, _, _, _, _, _, _) => {
-            return Err(ProcessReadCorruption::Unsupported {
-                field: "semantic transcript payload kind",
-                value: payload_kind,
-            }
-            .into());
-        }
         (
             "origin_accepted_input"
             | "steering_accepted_input"
             | "assistant_text"
+            | "assistant_tool_use"
+            | "tool_execution_result"
+            | "tool_denied"
+            | "tool_closed_by_turn_end"
             | "turn_failed"
             | "turn_completed"
             | "turn_cancelled",

@@ -1,8 +1,11 @@
-use std::io::{self, Write};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
-    ModelCallState, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+    ModelCallState, SessionEvent, ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -13,7 +16,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotSelection {
     All,
     Completed {
@@ -29,6 +32,24 @@ pub(crate) enum SnapshotSelection {
         turn_id: CanonicalUuid,
         terminal_entry_id: CanonicalUuid,
     },
+    ToolBatchProposed {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+    },
+    ToolBatchResults {
+        turn_id: CanonicalUuid,
+        model_call_id: CanonicalUuid,
+    },
+    ToolReconciliation {
+        turn_id: CanonicalUuid,
+        tool_attempt_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+    },
+}
+
+#[derive(Default)]
+struct SnapshotSelectionContext {
+    requests: HashSet<CanonicalUuid>,
 }
 
 pub(crate) struct Output<'a> {
@@ -103,7 +124,7 @@ impl<'a> Output<'a> {
         selection: SnapshotSelection,
         render_turns: bool,
     ) -> Result<(), ClientError> {
-        selection.require_terminal_marker(snapshot)?;
+        let selection_context = selection.context(snapshot)?;
         let mut render_content = false;
         for record in snapshot.replay()? {
             match record? {
@@ -111,7 +132,7 @@ impl<'a> Output<'a> {
                 SnapshotRecord::Turn(_) => {}
                 SnapshotRecord::Entry(entry) => {
                     render_content = false;
-                    let selected = selection.includes(&entry);
+                    let selected = selection.includes(&entry, &selection_context);
                     let undisplayed = if selected {
                         match displayed.as_deref_mut() {
                             Some(identities) => {
@@ -198,6 +219,29 @@ impl<'a> Output<'a> {
                  turn={turn_id} call={model_call_id} state={}",
                 model_call_state(*state)
             ),
+            SessionEvent::ToolBatchTransition {
+                turn_id,
+                model_call_id,
+                state,
+            } => match state {
+                ToolBatchState::Proposed { frontier_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=proposed frontier={frontier_id}"
+                ),
+                ToolBatchState::ResultsProjected { frontier_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=results_projected \
+                     frontier={frontier_id}"
+                ),
+                ToolBatchState::RecoveryRequired { tool_attempt_id } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} tool_batch_transition \
+                     turn={turn_id} call={model_call_id} state=recovery_required \
+                     tool_attempt={tool_attempt_id}"
+                ),
+            },
             SessionEvent::TurnCompleted {
                 turn_id,
                 model_call_id,
@@ -243,7 +287,18 @@ impl<'a> Output<'a> {
             } => writeln!(
                 self.stdout,
                 "event={cursor} session={session_id} turn_reconciliation_required \
-                 turn={turn_id} call={model_call_id} frontier={terminal_frontier_id}"
+                 turn={turn_id} operation=model_call operation_id={model_call_id} \
+                 frontier={terminal_frontier_id}"
+            ),
+            SessionEvent::TurnToolReconciliationRequired {
+                turn_id,
+                tool_attempt_id,
+                terminal_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} turn_tool_reconciliation_required \
+                 turn={turn_id} operation=tool_attempt operation_id={tool_attempt_id} \
+                 frontier={terminal_frontier_id}"
             ),
         }
     }
@@ -312,6 +367,19 @@ impl<'a> Output<'a> {
                 "turn={turn_id} position={position} \
                  state=active_awaiting_model_call_recovery \
                  attempt={ended_attempt_id} call={recovery_model_call_id}"
+            ),
+            TurnState::ActiveAwaitingToolApproval { tool_request_id } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_tool_approval \
+                 request={tool_request_id}"
+            ),
+            TurnState::ActiveAwaitingToolRecovery {
+                ended_attempt_id,
+                recovery_tool_attempt_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_tool_recovery \
+                 attempt={ended_attempt_id} tool_attempt={recovery_tool_attempt_id}"
             ),
             TurnState::Failed {
                 terminal_frontier_id,
@@ -386,7 +454,17 @@ impl<'a> Output<'a> {
                 self.stdout,
                 "turn={turn_id} position={position} state=reconciliation_required \
                  frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
-                 call={terminal_model_call_id}"
+                 operation=model_call operation_id={terminal_model_call_id}"
+            ),
+            TurnState::ToolReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_tool_attempt_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=tool_reconciliation_required \
+                 frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
+                 operation=tool_attempt operation_id={terminal_tool_attempt_id}"
             ),
         }
     }
@@ -429,6 +507,53 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
+                turn_id,
+                model_call_id,
+                tool_request_id,
+                tool_name,
+                arguments,
+            }) => writeln!(
+                self.stdout,
+                "assistant_tool_use turn={turn_id} call={model_call_id} \
+                 request={tool_request_id} name={} arguments={} source={} entry={}",
+                self.render(tool_name),
+                self.render(arguments),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolExecutionResult {
+                tool_request_id,
+                tool_attempt_id,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "tool_execution_result request={tool_request_id} attempt={tool_attempt_id} \
+                 content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolDenied {
+                tool_request_id,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "tool_denied request={tool_request_id} content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
+                tool_request_id,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "tool_closed request={tool_request_id} content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
         }
     }
 
@@ -442,23 +567,145 @@ impl<'a> Output<'a> {
 }
 
 impl SnapshotSelection {
-    fn require_terminal_marker(self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
+    fn context(
+        self,
+        snapshot: &mut TranscriptSnapshot,
+    ) -> Result<SnapshotSelectionContext, ClientError> {
         if matches!(self, Self::All) {
-            return Ok(());
+            return Ok(SnapshotSelectionContext::default());
         }
+        let mut proposals = HashSet::new();
+        let mut results = HashSet::new();
+        let mut trailing_results = HashSet::new();
+        let mut terminal_results = HashSet::new();
+        let mut reconciliation_call = None;
+        let mut reconciliation_proposals = HashSet::new();
+        let mut anchor_found = false;
         for record in snapshot.replay()? {
-            if let SnapshotRecord::Entry(entry) = record?
-                && self.includes_terminal_marker(&entry)
-            {
-                return Ok(());
+            let record = record?;
+            if let SnapshotRecord::Turn(turn) = &record {
+                if matches!(
+                    (self, &turn.state),
+                    (
+                        Self::ToolReconciliation {
+                            turn_id,
+                            tool_attempt_id,
+                            terminal_frontier_id,
+                        },
+                        TurnState::ToolReconciliationRequired {
+                            terminal_frontier_id: stored_frontier,
+                            terminal_tool_attempt_id: stored_attempt,
+                            ..
+                        },
+                    ) if turn_id == turn.turn_id
+                        && tool_attempt_id == *stored_attempt
+                        && terminal_frontier_id == *stored_frontier
+                ) {
+                    anchor_found = true;
+                }
+                continue;
+            }
+            let SnapshotRecord::Entry(entry) = record else {
+                continue;
+            };
+            match &entry.kind {
+                SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
+                    turn_id,
+                    model_call_id,
+                    tool_request_id,
+                    ..
+                }) => {
+                    trailing_results.clear();
+                    if self.matches_tool_batch(*turn_id, *model_call_id) {
+                        proposals.insert(*tool_request_id);
+                        if matches!(self, Self::ToolBatchProposed { .. }) {
+                            anchor_found = true;
+                        }
+                    }
+                    if matches!(
+                        self,
+                        Self::ToolReconciliation {
+                            turn_id: selected_turn,
+                            ..
+                        } if selected_turn == *turn_id
+                    ) {
+                        if reconciliation_call != Some(*model_call_id) {
+                            reconciliation_call = Some(*model_call_id);
+                            reconciliation_proposals.clear();
+                        }
+                        reconciliation_proposals.insert(*tool_request_id);
+                    }
+                }
+                SnapshotEntryKind::Marker(
+                    TranscriptEntry::ToolExecutionResult {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolDenied {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolClosed {
+                        tool_request_id, ..
+                    },
+                ) => {
+                    results.insert(*tool_request_id);
+                    trailing_results.insert(*tool_request_id);
+                }
+                _ if self.includes_terminal_marker(&entry) => {
+                    anchor_found = true;
+                    terminal_results.clone_from(&trailing_results);
+                    trailing_results.clear();
+                }
+                _ => trailing_results.clear(),
             }
         }
-        Err(ClientError::Protocol(
-            "terminal reread omitted the event's exact marker",
-        ))
+        match self {
+            Self::ToolBatchResults { .. } => {
+                if proposals.is_empty()
+                    || proposals.iter().any(|request| !results.contains(request))
+                {
+                    return Err(ClientError::Protocol(
+                        "tool-result reread omitted the event's exact proposal or result set",
+                    ));
+                }
+                Ok(SnapshotSelectionContext {
+                    requests: proposals,
+                })
+            }
+            Self::ToolBatchProposed { .. } if anchor_found => {
+                Ok(SnapshotSelectionContext::default())
+            }
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. }
+                if anchor_found =>
+            {
+                Ok(SnapshotSelectionContext {
+                    requests: terminal_results,
+                })
+            }
+            Self::ToolReconciliation { .. }
+                if anchor_found
+                    && !reconciliation_proposals.is_empty()
+                    && reconciliation_proposals
+                        .iter()
+                        .all(|request| results.contains(request)) =>
+            {
+                Ok(SnapshotSelectionContext {
+                    requests: reconciliation_proposals,
+                })
+            }
+            Self::ToolBatchProposed { .. } => Err(ClientError::Protocol(
+                "tool-proposal reread omitted the event's exact proposal",
+            )),
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. } => Err(
+                ClientError::Protocol("terminal reread omitted the event's exact marker"),
+            ),
+            Self::ToolReconciliation { .. } => Err(ClientError::Protocol(
+                "tool reconciliation reread omitted its exact terminal result suffix",
+            )),
+            Self::All => unreachable!("all entries need no selection context"),
+        }
     }
 
-    fn includes(self, entry: &SnapshotEntry) -> bool {
+    fn includes(self, entry: &SnapshotEntry, context: &SnapshotSelectionContext) -> bool {
         match (self, &entry.kind) {
             (Self::All, _) => true,
             (
@@ -466,6 +713,10 @@ impl SnapshotSelection {
                     turn_id,
                     model_call_id,
                     ..
+                }
+                | Self::ToolBatchProposed {
+                    turn_id,
+                    model_call_id,
                 },
                 SnapshotEntryKind::Text(TranscriptTextEntry::Assistant {
                     turn_id: entry_turn,
@@ -473,14 +724,66 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
+                Self::ToolBatchProposed {
+                    turn_id,
+                    model_call_id,
+                },
+                SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
+                    turn_id: entry_turn,
+                    model_call_id: entry_call,
+                    ..
+                }),
+            ) => turn_id == *entry_turn && model_call_id == *entry_call,
+            (
+                Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. },
+                SnapshotEntryKind::Marker(
+                    TranscriptEntry::ToolExecutionResult {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolDenied {
+                        tool_request_id, ..
+                    }
+                    | TranscriptEntry::ToolClosed {
+                        tool_request_id, ..
+                    },
+                ),
+            ) => context.requests.contains(tool_request_id),
+            (
                 Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(_),
             ) => self.includes_terminal_marker(entry),
             (
-                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::Completed { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::ToolBatchProposed { .. }
+                | Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. },
                 SnapshotEntryKind::Text(_),
             ) => false,
+            (
+                Self::ToolBatchProposed { .. }
+                | Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. },
+                SnapshotEntryKind::Marker(_),
+            ) => false,
         }
+    }
+
+    fn matches_tool_batch(self, entry_turn: CanonicalUuid, entry_call: CanonicalUuid) -> bool {
+        matches!(
+            self,
+            Self::ToolBatchProposed {
+                turn_id,
+                model_call_id,
+            } | Self::ToolBatchResults {
+                turn_id,
+                model_call_id,
+            } if turn_id == entry_turn && model_call_id == entry_call
+        )
     }
 
     fn includes_terminal_marker(self, entry: &SnapshotEntry) -> bool {
@@ -514,10 +817,20 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && terminal_entry_id == entry.entry_id,
             (
-                Self::All | Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::All
+                | Self::Completed { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::ToolBatchProposed { .. }
+                | Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
-                    TranscriptEntry::TurnCompleted { .. }
+                    TranscriptEntry::AssistantToolUse { .. }
+                    | TranscriptEntry::ToolExecutionResult { .. }
+                    | TranscriptEntry::ToolDenied { .. }
+                    | TranscriptEntry::ToolClosed { .. }
+                    | TranscriptEntry::TurnCompleted { .. }
                     | TranscriptEntry::TurnFailed { .. }
                     | TranscriptEntry::TurnCancelled { .. },
                 ),
@@ -714,6 +1027,94 @@ mod tests {
     }
 
     #[test]
+    fn tool_reconciliation_reread_uses_its_terminal_turn_batch() {
+        let selected_turn = wire_uuid(1);
+        let selected_call = wire_uuid(2);
+        let selected_request = wire_uuid(3);
+        let selected_attempt = wire_uuid(4);
+        let selected_frontier = wire_uuid(5);
+        let later_turn = wire_uuid(6);
+        let later_call = wire_uuid(7);
+        let later_request = wire_uuid(8);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [
+                ServerMessage::TranscriptTurn {
+                    turn_id: selected_turn,
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::ToolReconciliationRequired {
+                        terminal_frontier_id: selected_frontier,
+                        terminal_attempt_id: wire_uuid(9),
+                        terminal_tool_attempt_id: selected_attempt,
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(11),
+                    entry: TranscriptEntry::AssistantToolUse {
+                        turn_id: selected_turn,
+                        model_call_id: selected_call,
+                        tool_request_id: selected_request,
+                        tool_name: String::from("selected"),
+                        arguments: String::from("{}"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(12),
+                    entry: TranscriptEntry::ToolClosed {
+                        tool_request_id: selected_request,
+                        content: String::from("selected result"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(2),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(13),
+                    entry: TranscriptEntry::AssistantToolUse {
+                        turn_id: later_turn,
+                        model_call_id: later_call,
+                        tool_request_id: later_request,
+                        tool_name: String::from("later"),
+                        arguments: String::from("{}"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(3),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(14),
+                    entry: TranscriptEntry::ToolClosed {
+                        tool_request_id: later_request,
+                        content: String::from("later result"),
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::ToolReconciliation {
+                    turn_id: selected_turn,
+                    tool_attempt_id: selected_attempt,
+                    terminal_frontier_id: selected_frontier,
+                },
+            )
+            .expect("the exact terminal tool batch renders");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains("selected result"));
+        assert!(!rendered.contains("later result"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn terminal_reread_rejects_a_missing_exact_marker_before_output() {
         let selected_turn = wire_uuid(1);
         let selected_call = wire_uuid(2);
@@ -863,7 +1264,7 @@ mod tests {
         });
 
         expect![[r#"
-            turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 operation=model_call operation_id=00000000-0000-0000-0000-000000000004
         "#]]
         .assert_eq(&rendered);
     }
@@ -905,7 +1306,7 @@ mod tests {
         });
 
         expect![[r#"
-            event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
+            event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 operation=model_call operation_id=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
         "#]]
         .assert_eq(&rendered);
     }

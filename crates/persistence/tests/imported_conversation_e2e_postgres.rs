@@ -11,11 +11,11 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     EligibilityNudge, EligibilityNudgeOutcome, ImportConversationOutcome,
     ImportConversationService, ImportedConversationIdGenerator, InProcessAttemptDispatchGate,
-    ModelCallCredentialReference, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelConversationMessage, ScriptedModelCallProvider,
-    ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService,
+    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelConversationMessage,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome,
+    SubmitInputRequest, SubmitInputService,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -321,6 +321,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         },
         SubmitInputRepository::new(pool.clone()),
         AcceptingEligibilityNudge,
+        InProcessToolDispatchGate::default(),
     );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
@@ -424,7 +425,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             if matches!(*outcome, signalbox_domain::ModelCallTerminalOutcome::Completed(_))
     ));
 
-    let (_, _, _, _, _, provider, _, retained) = model_service.into_parts();
+    let (_, _, _, _, _, provider, _, _, retained) = model_service.into_parts();
     assert!(retained.is_none());
     let messages = provider
         .last_prepared_messages()

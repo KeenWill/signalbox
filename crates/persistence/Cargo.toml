@@ -13,6 +13,7 @@ postgres-integration = ["dep:testcontainers-modules"]
 
 [dependencies]
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
+serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 sqlx = { version = "0.9.0", default-features = false, features = [

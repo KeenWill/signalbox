@@ -15,13 +15,15 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::command_registry::{self, CommandKind, RegistryCorruption, RegistryInspectionError};
 use crate::mapping::{
-    PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-    durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+    PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
+    dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
+    defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
+    session_id_to_uuid,
 };
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
@@ -199,7 +201,7 @@ impl CreateSessionRepository {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
-            Some(CommandKind::SubmitInput) => {
+            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -232,11 +234,10 @@ impl CreateSessionRepository {
                 }
                 Some(
                     CommandKind::CreateSessionFromImportedFrontier
-                    | CommandKind::ReplaceSessionDefaults,
+                    | CommandKind::ReplaceSessionDefaults
+                    | CommandKind::SubmitInput
+                    | CommandKind::DecideToolRequest,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
-                Some(CommandKind::SubmitInput) => {
-                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
-                }
                 None => {
                     return Err(
                         CreateSessionCorruption::Inconsistent("winner claim disappeared").into(),
@@ -273,11 +274,10 @@ impl CreateSessionRepository {
             }
             Some(
                 CommandKind::CreateSessionFromImportedFrontier
-                | CommandKind::ReplaceSessionDefaults,
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
-            Some(CommandKind::SubmitInput) => {
-                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
-            }
         }
     }
 }
@@ -344,14 +344,18 @@ async fn insert_prepared(
     sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
-             direct_model_selection_id, model_alias_id)
-         VALUES ($1, $2, $3, $4, $5)",
+             direct_model_selection_id, model_alias_id,
+             dangerous_tool_auto_approval)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(stored_selection.kind)
     .bind(stored_selection.direct)
     .bind(stored_selection.alias)
+    .bind(dangerous_tool_auto_approval_to_str(
+        defaults.defaults().dangerous_tool_auto_approval(),
+    ))
     .execute(&mut *connection)
     .await?;
 
@@ -369,8 +373,8 @@ async fn insert_prepared(
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             dangerous_tool_auto_approval, result_kind, created_session_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -381,6 +385,11 @@ async fn insert_prepared(
     .bind(command_selection.kind)
     .bind(command_selection.direct)
     .bind(command_selection.alias)
+    .bind(dangerous_tool_auto_approval_to_str(
+        command
+            .initial_configuration_defaults()
+            .dangerous_tool_auto_approval(),
+    ))
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
@@ -435,6 +444,7 @@ async fn load_from_connection(
             c.model_selection_kind AS command_model_kind,
             c.direct_model_selection_id AS command_direct_id,
             c.model_alias_id AS command_alias_id,
+            c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -444,7 +454,8 @@ async fn load_from_connection(
             v.version AS stored_defaults_version,
             v.model_selection_kind AS stored_model_kind,
             v.direct_model_selection_id AS stored_direct_id,
-            v.model_alias_id AS stored_alias_id
+            v.model_alias_id AS stored_alias_id,
+            v.dangerous_tool_auto_approval AS stored_tool_auto_approval
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -467,10 +478,13 @@ fn decode_complete(
     command_id: DurableCommandId,
 ) -> Result<ReconstitutedSessionCreation, CreateSessionRepositoryError> {
     require_spelling(&row, "registry_kind", COMMAND_KIND)?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let _: Uuid = required(&row, "typed_command_id")?;
     require_spelling(&row, "typed_kind", COMMAND_KIND)?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(CreateSessionCorruption::Inconsistent("command storage version").into());
+    }
     let command_provenance = decode_provenance(
         required(&row, "command_cause")?,
         required(&row, "command_ancestry")?,
@@ -485,6 +499,8 @@ fn decode_complete(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
+        required(&row, "command_tool_auto_approval")?,
+        typed_version,
         "command model selection",
     )?;
     require_spelling(&row, "result_kind", APPLIED)?;
@@ -505,6 +521,8 @@ fn decode_complete(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
+        required(&row, "stored_tool_auto_approval")?,
+        typed_version,
         "stored model selection",
     )?;
 
@@ -546,14 +564,13 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), CreateSessionRepositoryError> {
+) -> Result<i16, CreateSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1 | 2) {
+        Ok(actual)
     } else {
         Err(CreateSessionCorruption::Unsupported {
             field,
@@ -600,6 +617,8 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    dangerous_tool_auto_approval: String,
+    storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, CreateSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -614,7 +633,27 @@ fn decode_selection(
             return Err(CreateSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
-    Ok(SessionConfigurationDefaults::new(model))
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            CreateSessionRepositoryError::from(CreateSessionCorruption::Unsupported {
+                field: "dangerous tool auto approval",
+                value: dangerous_tool_auto_approval,
+            })
+        })?;
+    if storage_version == 1
+        && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
+    {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "version-one dangerous tool auto approval",
+        )
+        .into());
+    }
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
 }
 
 async fn inspect_registry(

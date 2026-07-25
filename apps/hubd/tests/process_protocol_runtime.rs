@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use signalbox_application::InProcessEligibilityWorkSource;
+use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
 use signalbox_hubd::{
     HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
 };
@@ -178,6 +178,7 @@ impl RunningRuntime {
             listener,
             pool.clone(),
             eligibility_nudge,
+            InProcessToolDispatchGate::default(),
             model_configuration,
         );
         let (shutdown, shutdown_receiver) = watch::channel(false);

@@ -15,13 +15,15 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
     CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
-    ModelCallAuthorizationReread, ModelCallCredentialReference, OperatorFailureClass,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus,
+    ModelCallAuthorizationReread, ModelCallCredentialReference,
+    ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
-    AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AssistantText,
-    AuthorizedModelCall, CancelledModelCallTurn, CompletedModelCallTurn,
+    AcceptedInputDisposition, AcceptedInputId, ActiveTurnPhase, AmbiguousModelCallTurn,
+    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurn,
+    CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
     CorrelatedModelCallTerminalObservation, DirectModelSelection, FailedModelCallTurn,
     FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
     ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
@@ -29,20 +31,22 @@ use signalbox_domain::{
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
-    PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
-    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn, RefusedModelCallTurn,
+    PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
+    PreparedToolResultProjection, ProviderModelIdentity, ReclassifiedPendingSteeringTurn,
+    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
-    StopRequestedModelCallTurn, TurnId,
+    StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
+    ToolRequest, ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     mapping::{
         durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
-        session_id_to_uuid, turn_id_to_uuid,
+        session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
     },
-    outbox::{self, ModelCallOutboxState, OutboxEvent},
+    outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
         SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection,
@@ -284,11 +288,20 @@ impl PostgresModelCallRepository {
                             current_call_id,
                         )
                         .await?;
+                        let dangerous_tool_auto_approval = execution
+                            .active_turn()
+                            .configuration()
+                            .effective()
+                            .dangerous_tool_auto_approval();
+                        let tool_entries =
+                            load_tool_conversation_entries(&mut transaction, &request).await?;
                         Ok((
                             false,
                             PrepareInitialModelCallOutcome::Ready {
                                 request: Box::new(request),
                                 credential_reference,
+                                dangerous_tool_auto_approval,
+                                tool_entries,
                             },
                         ))
                     }
@@ -447,6 +460,25 @@ impl PostgresModelCallRepository {
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        self.apply_terminal_observation_candidates(
+            session,
+            observation,
+            ModelCallTerminalIdentityCandidates::Exact(identities),
+            next_reclassified_turn,
+        )
+        .await
+    }
+
+    async fn apply_terminal_observation_candidates<NextTurn>(
+        &self,
+        session: SessionId,
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentityCandidates,
         mut next_reclassified_turn: NextTurn,
     ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError>
     where
@@ -459,6 +491,7 @@ impl PostgresModelCallRepository {
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 observation.call(),
             )?;
+            let identities = select_terminal_identity_candidates(identities, &execution);
             let identities = attach_pending_reclassification_candidates(
                 identities,
                 &execution,
@@ -904,6 +937,173 @@ impl PostgresModelCallRepository {
     }
 }
 
+/// Prepares one continuation call inside a caller-owned tool-result
+/// transaction. The caller must hold the session scheduler lock and commits or
+/// rolls back this function's writes together with the result projection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    targets: &ModelTargetCatalog,
+    credential_reference: &ModelCallCredentialReference,
+    projection: &PreparedToolResultProjection,
+    call: ModelCallId,
+    failure_identities: FailedModelCallTurnIdentities,
+    steering_frontier: signalbox_domain::ContextFrontierId,
+    mut next_steering_identities: NextSteeringIdentities,
+) -> Result<PrepareToolContinuationOutcome, ModelCallRepositoryError>
+where
+    NextSteeringIdentities:
+        FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+{
+    let continuation_snapshot = projection.snapshot();
+    let continuation = ResolvedContextFrontierReconstitutionInput::new(
+        session,
+        continuation_snapshot.frontier().snapshot(),
+        continuation_snapshot.ordered_entries().collect(),
+    );
+    let execution = require_live_execution_with_targets(
+        connection,
+        session,
+        Some(targets),
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await?;
+    if execution.turn() != turn || execution.current_call().is_some() {
+        return Ok(PrepareToolContinuationOutcome::NoWork);
+    }
+    let mut reserved_entries = execution
+        .frontier_entries()
+        .map(signalbox_domain::SemanticTranscriptEntry::identity)
+        .collect::<BTreeSet<_>>();
+    let mut steering_identities =
+        Vec::with_capacity(execution.active_turn().pending_steering().len());
+    for pending in execution.active_turn().pending_steering() {
+        let accepted_input = pending.accepted_input();
+        let (entry, successor_turn) = next_steering_identities(accepted_input);
+        if !reserved_entries.insert(entry) {
+            return Err(ModelCallRepositoryError::IdentityCollision(
+                ModelCallIdentityCollision::SemanticEntry,
+            ));
+        }
+        steering_identities.push((
+            entry,
+            PendingSteeringReclassificationIdentity::new(accepted_input, successor_turn),
+        ));
+    }
+    let steering_entries = steering_identities
+        .iter()
+        .map(|(entry, _)| *entry)
+        .collect::<Vec<_>>();
+    if !steering_entries.is_empty()
+        && steering_frontier == continuation_snapshot.frontier().snapshot()
+    {
+        return Err(ModelCallRepositoryError::IdentityCollision(
+            ModelCallIdentityCollision::TerminalFrontier,
+        ));
+    }
+    let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+    let prepared = match execution.prepare_initial_call_consuming_steering(
+        call,
+        steering_entries,
+        steering_snapshot,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) if error.failure() == ModelCallPreparationFailure::TargetUnavailable => {
+            let resolution = error.target_resolution_error().ok_or(
+                ModelCallRepositoryError::InvalidTransition(
+                    "continuation target failure omitted its resolution proof",
+                ),
+            )?;
+            let source_turn = error.execution().turn();
+            let reclassifications = steering_identities
+                .into_iter()
+                .map(|(_, reclassification)| reclassification)
+                .collect::<Vec<_>>();
+            let mut proposed_turns = BTreeSet::new();
+            for reclassification in &reclassifications {
+                record_reclassified_turn_candidate(
+                    source_turn,
+                    reclassification.turn(),
+                    &mut proposed_turns,
+                )?;
+            }
+            let failed = error
+                .execution()
+                .clone()
+                .fail_target_resolution(
+                    resolution,
+                    failure_identities.with_pending_steering_reclassifications(reclassifications),
+                )
+                .map_err(|_| {
+                    ModelCallRepositoryError::InvalidTransition(
+                        "continuation target failure could not close execution",
+                    )
+                })?;
+            persist_failed(connection, &failed).await?;
+            return Ok(PrepareToolContinuationOutcome::TargetUnavailable(Box::new(
+                failed,
+            )));
+        }
+        Err(_) => {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "continuation call cannot be prepared",
+            ));
+        }
+    };
+    insert_prepared_call(connection, &prepared, credential_reference).await?;
+    Ok(PrepareToolContinuationOutcome::Checkpointed(call))
+}
+
+/// Closes a turn after a prepared or effect-free tool attempt was lost across
+/// process restart. The caller owns the scheduler lock and commits this
+/// closure with the attempt's `CrashLost` evidence.
+pub(crate) async fn fail_tool_crash_in_transaction<NextTurn>(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    projection: &PreparedToolResultProjection,
+    identities: FailedModelCallTurnIdentities,
+    mut next_turn: NextTurn,
+) -> Result<FailedModelCallTurn, ModelCallRepositoryError>
+where
+    NextTurn: FnMut(AcceptedInputId) -> TurnId,
+{
+    let current_snapshot = projection.snapshot();
+    let continuation = ResolvedContextFrontierReconstitutionInput::new(
+        session,
+        current_snapshot.frontier().snapshot(),
+        current_snapshot.ordered_entries().collect(),
+    );
+    let execution = require_live_execution_with_targets(
+        connection,
+        session,
+        None,
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await?;
+    if execution.turn() != turn || execution.current_call().is_some() {
+        return Err(ModelCallRepositoryError::InvalidTransition(
+            "tool crash closure does not match live execution",
+        ));
+    }
+    let reclassifications = pending_reclassification_candidates(&execution, &mut next_turn)?;
+    let failed = execution
+        .recover_tool_crash_after_restart(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        )
+        .map_err(|_| {
+            ModelCallRepositoryError::InvalidTransition(
+                "tool crash could not close evidence-free execution",
+            )
+        })?;
+    persist_failed(connection, &failed).await?;
+    Ok(failed)
+}
+
 impl PrepareModelCallTransaction for PostgresModelCallRepository {
     type Error = ModelCallRepositoryError;
 
@@ -1031,14 +1231,19 @@ impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
-        identities: ModelCallTerminalIdentities,
+        identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
     ) -> Result<ModelCallTerminalOutcome, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
-        self.apply_terminal_observation(session, observation, identities, next_reclassified_turn)
-            .await
+        self.apply_terminal_observation_candidates(
+            session,
+            observation,
+            identities,
+            next_reclassified_turn,
+        )
+        .await
     }
 
     async fn reread_observation(
@@ -1063,7 +1268,9 @@ async fn terminal_observation_closure_matches(
             completed_terminal_closure_matches(connection, session, observation, assistant_text)
                 .await
         }
-        ModelCallTerminalObservation::CompletedWithTools { .. } => Ok(false),
+        ModelCallTerminalObservation::CompletedWithTools { response } => {
+            tool_round_terminal_closure_matches(connection, session, observation, response).await
+        }
         ModelCallTerminalObservation::KnownFailed => {
             failed_terminal_closure_matches(connection, session, observation).await
         }
@@ -1081,6 +1288,136 @@ async fn terminal_observation_closure_matches(
             ambiguous_terminal_closure_matches(connection, session, observation).await
         }
     }
+}
+
+async fn tool_round_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+    response: &signalbox_domain::ToolUsingAssistantResponse,
+) -> Result<bool, ModelCallRepositoryError> {
+    let row = sqlx::query(
+        "SELECT boundary_frontier_id, response_part_count
+           FROM tool_round
+          WHERE producing_model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3",
+    )
+    .bind(observation.call().into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let boundary_frontier: Uuid = required(&row, "boundary_frontier_id")?;
+    let response_part_count: Decimal = required(&row, "response_part_count")?;
+    if response_part_count != Decimal::from(response.parts().len()) {
+        return Ok(false);
+    }
+
+    let source_members = load_frontier_members(
+        connection,
+        session,
+        observation.correlation().frontier().into_uuid(),
+    )
+    .await?;
+    let boundary_members = load_frontier_members(connection, session, boundary_frontier).await?;
+    if boundary_members.len() < source_members.len() + response.parts().len()
+        || boundary_members
+            .iter()
+            .zip(&source_members)
+            .any(|(stored, expected)| stored != expected)
+    {
+        return Ok(false);
+    }
+
+    let response_start = Decimal::from(source_members.len() + 1);
+    let response_end = Decimal::from(source_members.len() + response.parts().len() + 1);
+    let stored_parts = sqlx::query(
+        "SELECT entry.payload_kind, entry.assistant_text_value,
+                entry.producing_model_call_id,
+                entry.assistant_tool_request_id,
+                request.tool_name, request.arguments_kind,
+                request.arguments_text
+           FROM context_frontier_member AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+           LEFT JOIN tool_request AS request
+             ON request.request_id = entry.assistant_tool_request_id
+          WHERE member.owning_session_id = $1
+            AND member.context_frontier_id = $2
+            AND member.member_position >= $3
+            AND member.member_position < $4
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(boundary_frontier)
+    .bind(response_start)
+    .bind(response_end)
+    .fetch_all(&mut *connection)
+    .await?;
+    if stored_parts.len() != response.parts().len() {
+        return Ok(false);
+    }
+    let call = observation.call().into_uuid();
+    let matches = stored_parts
+        .into_iter()
+        .zip(response.parts())
+        .all(|(stored, expected)| {
+            let payload_kind = stored.try_get::<String, _>("payload_kind").ok();
+            let assistant_text = stored
+                .try_get::<Option<String>, _>("assistant_text_value")
+                .ok()
+                .flatten();
+            let producing_call = stored
+                .try_get::<Option<Uuid>, _>("producing_model_call_id")
+                .ok()
+                .flatten();
+            let request = stored
+                .try_get::<Option<Uuid>, _>("assistant_tool_request_id")
+                .ok()
+                .flatten();
+            let tool_name = stored
+                .try_get::<Option<String>, _>("tool_name")
+                .ok()
+                .flatten();
+            let arguments_kind = stored
+                .try_get::<Option<String>, _>("arguments_kind")
+                .ok()
+                .flatten();
+            let arguments_text = stored
+                .try_get::<Option<String>, _>("arguments_text")
+                .ok()
+                .flatten();
+            match expected {
+                AssistantResponsePart::Text(expected) => {
+                    payload_kind.as_deref() == Some("assistant_text")
+                        && assistant_text.as_deref() == Some(expected.as_str())
+                        && producing_call == Some(call)
+                        && request.is_none()
+                        && tool_name.is_none()
+                        && arguments_kind.is_none()
+                        && arguments_text.is_none()
+                }
+                AssistantResponsePart::ToolCall(expected) => {
+                    let expected_kind = match expected.arguments().kind() {
+                        signalbox_domain::ToolArgumentsKind::Json => "json",
+                        signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
+                    };
+                    payload_kind.as_deref() == Some("assistant_tool_use")
+                        && assistant_text.is_none()
+                        && producing_call == Some(call)
+                        && request.is_some()
+                        && tool_name.as_deref() == Some(expected.name().as_str())
+                        && arguments_kind.as_deref() == Some(expected_kind)
+                        && arguments_text.as_deref() == Some(expected.arguments().as_str())
+                }
+            }
+        });
+    Ok(matches)
 }
 
 async fn terminal_observation_transition_events_match(
@@ -1834,11 +2171,21 @@ pub(crate) fn attach_interrupt_reclassification_candidates(
     )
 }
 
-pub(crate) fn attach_recovery_interrupt_reclassification_candidates(
+pub(crate) fn attach_interrupt_reclassification_candidates_for_active(
     identities: signalbox_domain::CancelledModelCallTurnIdentities,
     active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
+    Ok(identities.with_pending_steering_reclassifications(
+        pending_reclassification_candidates_for_active(active_turn, next_turn)?,
+    ))
+}
+
+pub(crate) fn attach_recovery_interrupt_reclassification_candidates(
+    identities: signalbox_domain::AmbiguousModelCallTurnIdentities,
+    active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<signalbox_domain::AmbiguousModelCallTurnIdentities, ModelCallRepositoryError> {
     Ok(identities.with_pending_steering_reclassifications(
         pending_reclassification_candidates_for_active(active_turn, next_turn)?,
     ))
@@ -1855,6 +2202,28 @@ fn record_reclassified_turn_candidate(
         ));
     }
     Ok(())
+}
+
+fn select_terminal_identity_candidates(
+    identities: ModelCallTerminalIdentityCandidates,
+    execution: &ModelCallExecution,
+) -> ModelCallTerminalIdentities {
+    match identities {
+        ModelCallTerminalIdentityCandidates::Exact(identities) => identities,
+        ModelCallTerminalIdentityCandidates::ToolRound {
+            continuing,
+            stopped,
+        } => {
+            if matches!(
+                execution.current_attempt().state(),
+                signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
+            ) {
+                ModelCallTerminalIdentities::StoppedToolRound(stopped)
+            } else {
+                ModelCallTerminalIdentities::ToolRound(continuing)
+            }
+        }
+    }
 }
 
 fn attach_pending_reclassification_candidates(
@@ -1951,7 +2320,7 @@ fn prepared_matches_stopped(
             })
 }
 
-async fn lock_session(
+pub(crate) async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), ModelCallRepositoryError> {
@@ -1973,20 +2342,23 @@ async fn require_live_execution(
     requested_session: SessionId,
     targets: &ModelTargetCatalog,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    require_live_execution_with_targets(connection, requested_session, Some(targets)).await
+    require_live_execution_with_targets(connection, requested_session, Some(targets), None, None)
+        .await
 }
 
 pub(crate) async fn require_live_execution_for_restart(
     connection: &mut PgConnection,
     requested_session: SessionId,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    require_live_execution_with_targets(connection, requested_session, None).await
+    require_live_execution_with_targets(connection, requested_session, None, None, None).await
 }
 
 async fn require_live_execution_with_targets(
     connection: &mut PgConnection,
     requested_session: SessionId,
     configured_targets: Option<&ModelTargetCatalog>,
+    continuation_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
+    uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
@@ -2023,7 +2395,8 @@ async fn require_live_execution_with_targets(
         }
         None => None,
     };
-    let frontier_references = call_snapshot.as_ref().map_or_else(
+    let current_snapshot = call_snapshot.as_ref().or(continuation_snapshot.as_ref());
+    let frontier_references = current_snapshot.as_ref().map_or_else(
         || starting_snapshot.ordered_entries().collect::<Vec<_>>(),
         |snapshot| snapshot.ordered_entries().to_vec(),
     );
@@ -2043,18 +2416,35 @@ async fn require_live_execution_with_targets(
         .collect::<Vec<_>>();
     let origin_contents =
         load_origin_contents(connection, &frontier_entries, &pending_steering).await?;
+    let tool_result_correlations =
+        load_tool_result_correlations(connection, &frontier_entries).await?;
+    let tool_denial_correlations =
+        load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
         targets.clone()
     } else {
-        recovered_targets = ModelTargetCatalog::try_from_definitions(calls.iter().map(|call| {
-            let direct = match call.selection() {
+        let mut definitions = calls
+            .iter()
+            .map(|call| {
+                let direct = match call.selection() {
+                    FrozenModelSelection::Direct(direct) => direct,
+                    FrozenModelSelection::FrozenAlias { definition, .. } => definition.selected(),
+                };
+                ModelTargetDefinition::new(direct, call.target())
+            })
+            .collect::<Vec<_>>();
+        if let Some(pinned) = pinned_target
+            && calls.is_empty()
+        {
+            let direct = match *active_turn.configuration().effective().model() {
                 FrozenModelSelection::Direct(direct) => direct,
                 FrozenModelSelection::FrozenAlias { definition, .. } => definition.selected(),
             };
-            ModelTargetDefinition::new(direct, call.target())
-        }))
-        .map_err(|_| ModelCallCorruption::Inconsistent("recovery model-target catalog"))?;
+            definitions.push(ModelTargetDefinition::new(direct, pinned.target()));
+        }
+        recovered_targets = ModelTargetCatalog::try_from_definitions(definitions)
+            .map_err(|_| ModelCallCorruption::Inconsistent("recovery model-target catalog"))?;
         recovered_targets
     };
 
@@ -2066,14 +2456,104 @@ async fn require_live_execution_with_targets(
         origin_contents,
         pinned_target,
         calls,
-    );
+    )
+    .with_tool_result_correlations(tool_result_correlations)
+    .with_tool_denial_correlations(tool_denial_correlations);
+    if let Some(projection) = uncommitted_tool_result_projection {
+        input = input.with_uncommitted_tool_result_projection(projection);
+    }
     if let Some(call_snapshot) = call_snapshot {
         input = input.with_call_snapshot(call_snapshot);
+    } else if let Some(continuation_snapshot) = continuation_snapshot {
+        input = input.with_continuation_snapshot(continuation_snapshot);
     }
     input.reconstitute().map_err(|error| {
         let (_, failure) = error.into_parts();
         ModelCallCorruption::Execution(failure).into()
     })
+}
+
+async fn load_tool_denial_correlations(
+    connection: &mut PgConnection,
+    frontier_entries: &[SemanticTranscriptEntry],
+) -> Result<Vec<ToolApprovalResolution>, ModelCallRepositoryError> {
+    let requests = frontier_entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolDenied { request } => Some(request.into_uuid()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT approval.request_id, approval.decision_kind,
+                approval.decision_source, approval.denial_reason,
+                approval.owner_command_id
+           FROM tool_approval_decision AS approval
+          WHERE approval.request_id = ANY($1)",
+    )
+    .bind(&requests)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != requests.len() {
+        return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
+    }
+    let mut approvals = Vec::with_capacity(rows.len());
+    for row in rows {
+        approvals.push(
+            crate::tool_loop::decode_approval(connection, row)
+                .await
+                .map_err(map_tool_evidence_error)?,
+        );
+    }
+    Ok(approvals)
+}
+
+async fn load_tool_result_correlations(
+    connection: &mut PgConnection,
+    frontier_entries: &[SemanticTranscriptEntry],
+) -> Result<Vec<ToolResultAttemptCorrelation>, ModelCallRepositoryError> {
+    let attempts = frontier_entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
+                Some(attempt.into_uuid())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if attempts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "SELECT attempt.attempt_id,
+                request.request_id,
+                request.producing_model_call_id
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+            AND request.session_id = attempt.session_id
+            AND request.turn_id = attempt.turn_id
+          WHERE attempt.attempt_id = ANY($1)",
+    )
+    .bind(&attempts)
+    .fetch_all(connection)
+    .await?;
+    if rows.len() != attempts.len() {
+        return Err(ModelCallCorruption::Inconsistent("tool-result attempt ownership").into());
+    }
+    Ok(rows
+        .into_iter()
+        .map(|(attempt, request, producing_call)| {
+            ToolResultAttemptCorrelation::new(
+                signalbox_domain::ToolAttemptId::from_uuid(attempt),
+                signalbox_domain::ToolRequestId::from_uuid(request),
+                ModelCallId::from_uuid(producing_call),
+            )
+        })
+        .collect())
 }
 
 async fn load_call_snapshot(
@@ -2228,7 +2708,7 @@ async fn load_live_turn_calls(
     ModelCallRepositoryError,
 > {
     let lifecycle = sqlx::query(
-        "SELECT pinned_provider_model_identity_id
+        "SELECT pinned_provider_model_identity_id, recovery_model_call_id
            FROM turn_lifecycle
           WHERE session_id = $1
             AND turn_id = $2",
@@ -2245,6 +2725,7 @@ async fn load_live_turn_calls(
             ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(identity)),
         )
     });
+    let recovery_call: Option<Uuid> = lifecycle.try_get("recovery_model_call_id")?;
     let rows = sqlx::query(
         "SELECT model_call_id, turn_id, turn_attempt_id,
                 selection_kind, direct_model_selection_id,
@@ -2252,12 +2733,17 @@ async fn load_live_turn_calls(
                 resolved_provider_model_identity_id, context_frontier_id,
                 state_kind, terminal_disposition_kind
            FROM model_call
-          WHERE session_id = $1
+         WHERE session_id = $1
             AND turn_id = $2
+            AND (
+                state_kind <> 'terminal'
+                OR model_call_id = $3
+            )
           ORDER BY model_call_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
+    .bind(recovery_call)
     .fetch_all(&mut *connection)
     .await?;
     Ok((
@@ -2365,7 +2851,7 @@ fn require_exact_call(
     }
 }
 
-async fn insert_prepared_call(
+pub(crate) async fn insert_prepared_call(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedInitialModelCall,
     credential_reference: &ModelCallCredentialReference,
@@ -2441,7 +2927,10 @@ async fn insert_prepared_call(
             AND current_attempt_id = $4
             AND state_kind = 'active'
             AND active_phase_kind = 'running'
-            AND pinned_provider_model_identity_id IS NULL",
+            AND (
+                pinned_provider_model_identity_id IS NULL
+                OR pinned_provider_model_identity_id = $1
+            )",
     )
     .bind(call.target().identity().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -2486,6 +2975,150 @@ async fn insert_prepared_call(
     Ok(())
 }
 
+async fn load_tool_conversation_entries(
+    connection: &mut PgConnection,
+    request: &PreparedModelCallRequest,
+) -> Result<Box<[ResolvedToolConversationEntry]>, ModelCallRepositoryError> {
+    let mut request_ids = BTreeSet::new();
+    let mut attempt_ids = BTreeSet::new();
+    let mut approval_ids = BTreeSet::new();
+    for entry in request.frontier_entries() {
+        match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantToolUse { request, .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { request } => {
+                request_ids.insert(*request);
+            }
+            SemanticTranscriptEntryPayload::ToolDenied { request } => {
+                request_ids.insert(*request);
+                approval_ids.insert(*request);
+            }
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
+                attempt_ids.insert(*attempt);
+            }
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
+            | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
+        }
+    }
+    let attempts = crate::tool_loop::load_attempts_by_id(
+        connection,
+        &attempt_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(map_tool_evidence_error)?;
+    for attempt in attempts.values() {
+        let request = match attempt {
+            signalbox_domain::ReconstitutedToolAttempt::Current(current) => current.request(),
+            signalbox_domain::ReconstitutedToolAttempt::Ended(ended) => ended.request(),
+        };
+        request_ids.insert(request);
+    }
+    let requests = crate::tool_loop::load_requests_by_id(
+        connection,
+        &request_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(map_tool_evidence_error)?;
+    let approvals = crate::tool_loop::load_approvals_by_request(
+        connection,
+        &approval_ids.iter().copied().collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(map_tool_evidence_error)?;
+
+    let mut resolved = Vec::new();
+    for entry in request.frontier_entries() {
+        let source = entry.reference();
+        match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                request: request_id,
+                ..
+            } => {
+                let request = requests
+                    .get(request_id)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("tool request evidence"))?;
+                resolved.push(ResolvedToolConversationEntry::AssistantToolUse { source, request });
+            }
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
+                let attempt = attempts
+                    .get(attempt)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("tool attempt evidence"))?;
+                let signalbox_domain::ReconstitutedToolAttempt::Ended(attempt) = attempt else {
+                    return Err(
+                        ModelCallCorruption::Inconsistent("tool result attempt is live").into(),
+                    );
+                };
+                let request = requests
+                    .get(&attempt.request())
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("tool result request evidence"))?;
+                resolved.push(ResolvedToolConversationEntry::ExecutionResult {
+                    source,
+                    request,
+                    attempt,
+                });
+            }
+            SemanticTranscriptEntryPayload::ToolDenied {
+                request: request_id,
+            } => {
+                let request = requests
+                    .get(request_id)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("denied tool request evidence"))?;
+                let approval = approvals
+                    .get(request_id)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("tool denial evidence"))?;
+                resolved.push(ResolvedToolConversationEntry::Denied {
+                    source,
+                    request,
+                    approval,
+                });
+            }
+            SemanticTranscriptEntryPayload::ToolClosed {
+                request: request_id,
+            } => {
+                let request = requests
+                    .get(request_id)
+                    .cloned()
+                    .ok_or(ModelCallCorruption::Missing("closed tool request evidence"))?;
+                resolved.push(ResolvedToolConversationEntry::Closed { source, request });
+            }
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
+            | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
+        }
+    }
+    Ok(resolved.into_boxed_slice())
+}
+
+fn map_tool_evidence_error(
+    error: crate::tool_loop::ToolLoopRepositoryError,
+) -> ModelCallRepositoryError {
+    match error {
+        crate::tool_loop::ToolLoopRepositoryError::Database {
+            source,
+            commit_ambiguous,
+        } => ModelCallRepositoryError::from_database(source, commit_ambiguous),
+        crate::tool_loop::ToolLoopRepositoryError::IdentityCollision
+        | crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
+        | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind
+        | crate::tool_loop::ToolLoopRepositoryError::InvalidTransition(_) => {
+            ModelCallCorruption::Inconsistent("tool conversation evidence").into()
+        }
+    }
+}
+
 async fn load_call_credential_reference(
     connection: &mut PgConnection,
     session: SessionId,
@@ -2518,7 +3151,7 @@ async fn persist_authorization(
           WHERE turn_attempt_id = $1
             AND turn_id = $2
             AND session_id = $3
-            AND state_kind = 'prepared'
+            AND state_kind IN ('prepared', 'running')
             AND end_variant IS NULL
             AND end_disposition IS NULL",
     )
@@ -2628,10 +3261,10 @@ pub(crate) async fn persist_terminal_outcome(
         ModelCallTerminalOutcome::Completed(completed) => {
             persist_completed(connection, completed).await
         }
-        ModelCallTerminalOutcome::ToolRound(_)
-        | ModelCallTerminalOutcome::CancelledWithToolResponse(_) => Err(
-            ModelCallRepositoryError::InvalidTransition("tool-loop persistence is unavailable"),
-        ),
+        ModelCallTerminalOutcome::ToolRound(round) => persist_tool_round(connection, round).await,
+        ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
+            persist_cancelled_tool_round(connection, cancelled).await
+        }
         ModelCallTerminalOutcome::Failed(failed) => persist_failed(connection, failed).await,
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
             persist_cancelled(connection, cancelled).await
@@ -2726,6 +3359,432 @@ async fn persist_reconciliation_required(
     Ok(())
 }
 
+pub(crate) async fn persist_tool_reconciliation_required(
+    connection: &mut PgConnection,
+    reconciliation: &ReconciliationRequiredToolTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    crate::tool_loop::persist_result_entry_slice(connection, reconciliation.tool_result_entries())
+        .await
+        .map_err(map_tool_evidence_error)?;
+    insert_snapshot(connection, reconciliation.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+        reconciliation.reclassified_pending_steering(),
+    )
+    .await?;
+    let rows = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = $1,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                recovery_model_call_id = NULL,
+                active_tool_round_call_id = NULL,
+                approval_tool_request_id = NULL,
+                recovery_tool_attempt_id = NULL,
+                terminal_attempt_id = $2,
+                terminal_model_call_id = NULL,
+                terminal_tool_attempt_id = $3,
+                terminal_disposition_kind = 'reconciliation_required'
+          WHERE turn_id = $4
+            AND session_id = $5
+            AND state_kind = 'active'
+            AND active_phase_kind = 'awaiting_tool_recovery'
+            AND current_attempt_id = $2
+            AND recovery_tool_attempt_id = $3",
+    )
+    .bind(
+        reconciliation
+            .terminal_snapshot()
+            .frontier()
+            .snapshot()
+            .into_uuid(),
+    )
+    .bind(reconciliation.attempt().id().into_uuid())
+    .bind(reconciliation.tool_attempt().attempt().into_uuid())
+    .bind(turn_id_to_uuid(reconciliation.turn()))
+    .bind(session_id_to_uuid(reconciliation.session()))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(rows, "terminal tool-reconciliation lifecycle")?;
+    outbox::append(
+        connection,
+        OutboxEvent::TurnToolReconciliationRequired {
+            session: reconciliation.session(),
+            turn: reconciliation.turn(),
+            attempt: reconciliation.tool_attempt().attempt(),
+            terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn persist_tool_round(
+    connection: &mut PgConnection,
+    round: &ToolRoundModelCallTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    persist_ended_call(connection, round.session(), round.turn(), round.call()).await?;
+    persist_ended_attempt(connection, round.session(), round.turn(), round.attempt()).await?;
+    persist_tool_round_authority(
+        connection,
+        round.session(),
+        round.turn(),
+        round.call().id(),
+        "continuing",
+        round.yielded_snapshot().frontier().snapshot(),
+        round.assistant_entries(),
+        round.requests(),
+    )
+    .await?;
+    for approval in round.automatic_approvals() {
+        let (decision_kind, denial_reason) = encode_tool_approval(approval.decision());
+        let source = encode_tool_decision_source(approval.source())?;
+        sqlx::query(
+            "INSERT INTO tool_approval_decision
+                (request_id, decision_kind, decision_source, denial_reason,
+                 owner_command_id)
+             VALUES ($1, $2, $3, $4, NULL)",
+        )
+        .bind(tool_request_id_to_uuid(approval.request()))
+        .bind(decision_kind)
+        .bind(source)
+        .bind(denial_reason)
+        .execute(&mut *connection)
+        .await?;
+    }
+    insert_snapshot(connection, round.yielded_snapshot()).await?;
+
+    match round.next_phase() {
+        ActiveTurnPhase::AwaitingApproval { request } => {
+            let rows = sqlx::query(
+                "UPDATE turn_lifecycle
+                    SET active_phase_kind = 'awaiting_tool_approval',
+                        current_attempt_id = NULL,
+                        active_tool_round_call_id = $1,
+                        approval_tool_request_id = $2,
+                        recovery_tool_attempt_id = NULL
+                  WHERE turn_id = $3
+                    AND session_id = $4
+                    AND state_kind = 'active'
+                    AND active_phase_kind = 'running'
+                    AND current_attempt_id = $5
+                    AND active_tool_round_call_id IS NULL
+                    AND approval_tool_request_id IS NULL
+                    AND recovery_tool_attempt_id IS NULL",
+            )
+            .bind(round.call().id().into_uuid())
+            .bind(tool_request_id_to_uuid(*request))
+            .bind(turn_id_to_uuid(round.turn()))
+            .bind(session_id_to_uuid(round.session()))
+            .bind(round.attempt().id().into_uuid())
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+            require_single(rows, "tool-round approval wait")?;
+        }
+        ActiveTurnPhase::Running { current_attempt } => {
+            if !matches!(
+                current_attempt.state(),
+                signalbox_domain::CurrentTurnAttemptState::Prepared
+            ) {
+                return Err(
+                    ModelCallCorruption::Inconsistent("tool continuation attempt state").into(),
+                );
+            }
+            sqlx::query(
+                "INSERT INTO turn_attempt
+                    (turn_attempt_id, turn_id, session_id,
+                     continued_from_attempt_id, state_kind)
+                 VALUES ($1, $2, $3, $4, 'prepared')",
+            )
+            .bind(current_attempt.id().into_uuid())
+            .bind(turn_id_to_uuid(round.turn()))
+            .bind(session_id_to_uuid(round.session()))
+            .bind(round.attempt().id().into_uuid())
+            .execute(&mut *connection)
+            .await?;
+            let rows = sqlx::query(
+                "UPDATE turn_lifecycle
+                    SET active_phase_kind = 'running',
+                        current_attempt_id = $1,
+                        active_tool_round_call_id = $2,
+                        approval_tool_request_id = NULL,
+                        recovery_tool_attempt_id = NULL
+                  WHERE turn_id = $3
+                    AND session_id = $4
+                    AND state_kind = 'active'
+                    AND active_phase_kind = 'running'
+                    AND current_attempt_id = $5
+                    AND active_tool_round_call_id IS NULL
+                    AND approval_tool_request_id IS NULL
+                    AND recovery_tool_attempt_id IS NULL",
+            )
+            .bind(current_attempt.id().into_uuid())
+            .bind(round.call().id().into_uuid())
+            .bind(turn_id_to_uuid(round.turn()))
+            .bind(session_id_to_uuid(round.session()))
+            .bind(round.attempt().id().into_uuid())
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+            require_single(rows, "auto-approved tool execution phase")?;
+        }
+        ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+            return Err(
+                ModelCallCorruption::Inconsistent("fresh tool round recovery phase").into(),
+            );
+        }
+    }
+    outbox::append(
+        connection,
+        OutboxEvent::ToolBatchTransition {
+            session: round.session(),
+            turn: round.turn(),
+            producing_call: round.call().id(),
+            state: ToolBatchOutboxState::Proposed(round.yielded_snapshot().frontier().snapshot()),
+        },
+    )
+    .await?;
+    append_terminal_call_event(connection, round.session(), round.turn(), round.call()).await
+}
+
+async fn persist_cancelled_tool_round(
+    connection: &mut PgConnection,
+    cancelled: &CancelledToolRoundModelCallTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    persist_ended_call(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.call(),
+    )
+    .await?;
+    persist_ended_attempt(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.attempt(),
+    )
+    .await?;
+    persist_tool_round_authority(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.call().id(),
+        "closed_by_turn_end",
+        cancelled.terminal_snapshot().frontier().snapshot(),
+        cancelled.assistant_entries(),
+        cancelled.requests(),
+    )
+    .await?;
+    for entry in cancelled.closed_result_entries() {
+        let SemanticTranscriptEntryPayload::ToolClosed { request } = entry.payload() else {
+            return Err(ModelCallCorruption::Inconsistent("closed tool-result payload").into());
+        };
+        sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 tool_result_request_id)
+             VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+        )
+        .bind(session_id_to_uuid(entry.source_session()))
+        .bind(entry.identity().into_uuid())
+        .bind(tool_request_id_to_uuid(*request))
+        .execute(&mut *connection)
+        .await?;
+    }
+    let cancellation = cancelled.cancellation_entry();
+    if !matches!(
+        cancellation.payload(),
+        SemanticTranscriptEntryPayload::TurnCancelled { turn }
+            if *turn == cancelled.turn()
+    ) {
+        return Err(ModelCallCorruption::Inconsistent("cancellation entry payload").into());
+    }
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             cancelled_turn_id)
+         VALUES ($1, $2, 'turn_cancelled', $3)",
+    )
+    .bind(session_id_to_uuid(cancellation.source_session()))
+    .bind(cancellation.identity().into_uuid())
+    .bind(turn_id_to_uuid(cancelled.turn()))
+    .execute(&mut *connection)
+    .await?;
+    insert_snapshot(connection, cancelled.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.reclassified_pending_steering(),
+    )
+    .await?;
+    terminalize_lifecycle(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        "cancelled",
+        cancelled.terminal_snapshot().frontier().snapshot(),
+        Some(cancelled.attempt().id()),
+        Some(cancelled.call().id()),
+    )
+    .await?;
+    append_terminal_call_event(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.call(),
+    )
+    .await?;
+    outbox::append(
+        connection,
+        OutboxEvent::TurnCancelled {
+            session: cancelled.session(),
+            turn: cancelled.turn(),
+            cancellation_entry: cancellation.identity(),
+            terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_tool_round_authority(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+    boundary_kind: &'static str,
+    boundary_frontier: signalbox_domain::ContextFrontierId,
+    assistant_entries: &[SemanticTranscriptEntry],
+    requests: &[ToolRequest],
+) -> Result<(), ModelCallRepositoryError> {
+    let response_part_count = u64::try_from(assistant_entries.len())
+        .map_err(|_| ModelCallCorruption::Inconsistent("tool response part count"))?;
+    let request_count = u64::try_from(requests.len())
+        .map_err(|_| ModelCallCorruption::Inconsistent("tool request count"))?;
+    sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(boundary_kind)
+    .bind(boundary_frontier.into_uuid())
+    .bind(Decimal::from(response_part_count))
+    .bind(Decimal::from(request_count))
+    .execute(&mut *connection)
+    .await?;
+    for request in requests {
+        let arguments_kind = match request.arguments().kind() {
+            signalbox_domain::ToolArgumentsKind::Json => "json",
+            signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
+        };
+        sqlx::query(
+            "INSERT INTO tool_request
+                (request_id, session_id, turn_id, producing_model_call_id,
+                 request_ordinal, tool_name, arguments_kind, arguments_text)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(tool_request_id_to_uuid(request.id()))
+        .bind(session_id_to_uuid(request.session()))
+        .bind(turn_id_to_uuid(request.turn()))
+        .bind(request.producing_call().into_uuid())
+        .bind(Decimal::from(request.ordinal().as_u32()))
+        .bind(request.name().as_str())
+        .bind(arguments_kind)
+        .bind(request.arguments().as_str())
+        .execute(&mut *connection)
+        .await?;
+    }
+    for (response_part_ordinal, entry) in assistant_entries.iter().enumerate() {
+        let response_part_ordinal = u64::try_from(response_part_ordinal)
+            .map_err(|_| ModelCallCorruption::Inconsistent("tool response part ordinal"))?;
+        match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantText {
+                producing_call,
+                value,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         assistant_text_value, producing_model_call_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'assistant_text', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(value.as_str())
+                .bind(producing_call.into_uuid())
+                .bind(Decimal::from(response_part_ordinal))
+                .execute(&mut *connection)
+                .await?;
+            }
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call,
+                request,
+            } => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         producing_model_call_id, assistant_tool_request_id,
+                         assistant_response_part_ordinal)
+                     VALUES ($1, $2, 'assistant_tool_use', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(producing_call.into_uuid())
+                .bind(tool_request_id_to_uuid(*request))
+                .bind(Decimal::from(response_part_ordinal))
+                .execute(&mut *connection)
+                .await?;
+            }
+            _ => {
+                return Err(
+                    ModelCallCorruption::Inconsistent("tool round assistant payload").into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_tool_approval(decision: &ToolApprovalDecision) -> (&'static str, Option<&str>) {
+    match decision {
+        ToolApprovalDecision::Approve => ("approve", None),
+        ToolApprovalDecision::Deny { reason } => (
+            "deny",
+            reason
+                .as_ref()
+                .map(signalbox_domain::ToolDenialReason::as_str),
+        ),
+    }
+}
+
+fn encode_tool_decision_source(
+    source: ToolDecisionSource,
+) -> Result<&'static str, ModelCallRepositoryError> {
+    match source {
+        ToolDecisionSource::OwnerCommand => Ok("owner_command"),
+        ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
+        ToolDecisionSource::SessionBlanket => Ok("session_blanket"),
+        ToolDecisionSource::SessionOverride | ToolDecisionSource::JudgeRecommendation => {
+            Err(ModelCallRepositoryError::InvalidTransition(
+                "unimplemented tool-decision source cannot be stored",
+            ))
+        }
+    }
+}
+
 async fn persist_cancelled(
     connection: &mut PgConnection,
     cancelled: &CancelledModelCallTurn,
@@ -2740,6 +3799,11 @@ async fn persist_cancelled(
         cancelled.attempt(),
     )
     .await?;
+    if !cancelled.tool_result_entries().is_empty() {
+        crate::tool_loop::persist_result_entry_slice(connection, cancelled.tool_result_entries())
+            .await
+            .map_err(map_tool_evidence_error)?;
+    }
     let entry = cancelled.cancellation_entry();
     if !matches!(
         entry.payload(),
@@ -3327,7 +4391,7 @@ fn encode_attempt_end(
     }
 }
 
-async fn insert_snapshot(
+pub(crate) async fn insert_snapshot(
     connection: &mut PgConnection,
     snapshot: &signalbox_domain::ResolvedContextFrontierSnapshot,
 ) -> Result<(), ModelCallRepositoryError> {
@@ -3379,8 +4443,12 @@ async fn terminalize_lifecycle(
                 active_phase_kind = NULL,
                 current_attempt_id = NULL,
                 recovery_model_call_id = NULL,
+                active_tool_round_call_id = NULL,
+                approval_tool_request_id = NULL,
+                recovery_tool_attempt_id = NULL,
                 terminal_attempt_id = $2,
                 terminal_model_call_id = $3,
+                terminal_tool_attempt_id = NULL,
                 terminal_disposition_kind = $4
           WHERE turn_id = $5
             AND session_id = $6

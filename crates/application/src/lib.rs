@@ -14,6 +14,8 @@ mod scheduler;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
+mod tool_dispatch_gate;
+mod tool_loop_ports;
 
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
@@ -38,11 +40,12 @@ pub use model_execution::{
     InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit, ModelCallAuthorizationReread,
     ModelCallCapabilityPreparation, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallProvider, ModelConversationMessage, ModelFrontierRenderingError,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelOperation,
-    RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    ModelCallProvider, ModelCallTerminalIdentityCandidates, ModelConversationMessage,
+    ModelFrontierRenderingError, ModelToolResultContent, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PreparedModelOperation, RetainedCapabilityFailureStatus,
+    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
+    ScriptedModelCallCapability, ScriptedModelCallError, ScriptedModelCallProvider,
+    ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -66,4 +69,13 @@ pub use startup_scan::{
 pub use submit_input::{
     SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
     SubmitInputService, SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
+};
+pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
+pub use tool_loop_ports::{
+    CompiledTool, CompiledToolCatalog, DecideToolRequestTransaction, DuplicateToolDefinition,
+    NoToolCatalog, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedToolAttemptObservationStatus, ToolArgumentValidator, ToolAttemptAuthorizationStatus,
+    ToolCatalog, ToolCatalogValidationFailure, ToolContinuationIdentities,
+    ToolCrashClosureIdentities, ToolDefinition, ToolExecutionTransaction, ToolInputSchema,
+    ToolInputSchemaError, ToolInputSchemaFailure,
 };

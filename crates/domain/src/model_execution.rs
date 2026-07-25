@@ -1180,6 +1180,38 @@ impl ModelCallExecution {
             reclassified_pending_steering,
         )
     }
+
+    /// Fails a current tool continuation after crash closure is materialized.
+    ///
+    /// Unlike evidence-free recovery, the failure marker extends the exact
+    /// current frontier so committed assistant tool uses and their
+    /// proposal-ordered closures remain provider-renderable history.
+    pub fn recover_tool_crash_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some()
+            || !frontier_contains_tool_round(&self.starting_snapshot, &self.frontier_entries)
+        {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &failure_identities.pending_steering_reclassifications,
+        )?;
+        close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.current_snapshot,
+            failure_identities,
+            UnstoppedAttemptDisposition::Lost,
+            reclassified_pending_steering,
+        )
+    }
 }
 
 /// Why a fresh prepared checkpoint could not be derived.
@@ -4890,6 +4922,37 @@ mod tests {
             .clone()
             .reconstitute()
             .expect("the exact transaction-local projection reconstructs");
+        let crash_failure_entry = semantic_transcript_entry_id(37);
+        let crash_failed = input
+            .clone()
+            .reconstitute()
+            .expect("the exact tool frontier reconstructs for crash closure")
+            .recover_tool_crash_after_restart(FailedModelCallTurnIdentities::new(
+                crash_failure_entry,
+                context_frontier_id(38),
+            ))
+            .expect("tool crash failure extends the current result frontier");
+        assert_eq!(
+            crash_failed
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(5),
+                ),
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(31),
+                ),
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(33),
+                ),
+                SemanticTranscriptEntryRef::from_source(session_id(1), crash_failure_entry),
+            ]
+        );
         let prepared = resumed
             .prepare_initial_call(model_call_id(36))
             .expect("the continuation attempt prepares its next call");

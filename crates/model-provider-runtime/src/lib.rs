@@ -12,16 +12,19 @@ use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
-    ModelConversationMessage, OperatorFailureClass, PreparedModelOperation,
+    ModelConversationMessage, ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
     AssistantText, AuthorizedModelCall, ContextFrontierId, FrozenModelSelection, ModelCallId,
-    ModelCallTerminalObservation, ResolvedProviderTarget, SessionId, TurnAttemptId, TurnId,
+    ModelCallTerminalObservation, ResolvedProviderTarget, SessionId, ToolArgumentsKind,
+    ToolExecutionErrorKind, ToolResultContent, TurnAttemptId, TurnId,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, ConversationMessage, CredentialReference, ModelOperation,
-    ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, UnsentCause,
+    AssistantPart, CancellationSignal, ConversationMessage, ConversationRole, CredentialReference,
+    MessagePart, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
+    ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName,
+    ToolResultRecord, UnsentCause,
 };
 
 fn render_conversation_message(message: &ModelConversationMessage) -> ConversationMessage {
@@ -37,6 +40,10 @@ fn render_conversation_message(message: &ModelConversationMessage) -> Conversati
         }
         ModelConversationMessage::ImportedAssistant { content, .. } => {
             ConversationMessage::assistant_text(content.as_str())
+        }
+        ModelConversationMessage::AssistantToolUse { .. }
+        | ModelConversationMessage::ToolResult { .. } => {
+            unreachable!("tool messages require batch-aware rendering")
         }
     }
 }
@@ -207,6 +214,8 @@ pub enum RuntimeModelCallProviderError {
     UnsupportedCompletionMaterial,
     /// A runtime text part cannot construct exact domain assistant text.
     InvalidAssistantText,
+    /// A checked application schema could not form a runtime JSON value.
+    InvalidToolSchema,
 }
 
 impl fmt::Display for RuntimeModelCallProviderError {
@@ -228,6 +237,7 @@ impl fmt::Display for RuntimeModelCallProviderError {
                 "provider completion contains unsupported assistant material"
             }
             Self::InvalidAssistantText => "provider completion contains invalid assistant text",
+            Self::InvalidToolSchema => "application tool schema is invalid at the runtime bridge",
         })
     }
 }
@@ -336,12 +346,9 @@ where
             target: call.target(),
             frontier: call.frontier().snapshot(),
         };
-        let messages = operation
-            .messages()
-            .iter()
-            .map(render_conversation_message)
-            .collect();
-        let runtime_operation = ModelOperation::new(
+        let messages = render_runtime_messages(operation.messages());
+        let tools = render_runtime_tool_definitions(operation.tools())?;
+        let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
@@ -349,6 +356,7 @@ where
             messages,
             ModelSettings::new(definition.max_output_tokens()),
         );
+        runtime_operation.tools = tools;
         let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
@@ -426,6 +434,192 @@ where
         Ok(authorized
             .observation_correlation()
             .bind_terminal_observation(observation))
+    }
+}
+
+fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
+    let mut rendered = Vec::new();
+    let mut assistant_call = None;
+    let mut collecting_tool_results = false;
+    for message in messages {
+        match message {
+            ModelConversationMessage::User { content, .. } => {
+                rendered.push(ConversationMessage::user_text(content.text().as_str()));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::Assistant {
+                producing_call,
+                content,
+                ..
+            } => {
+                let part = MessagePart::Text(content.as_str().to_owned());
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::Assistant,
+                            parts: vec![part],
+                        });
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::AssistantToolUse {
+                producing_call,
+                request,
+                ..
+            } => {
+                let part = MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new(request.id().into_uuid().to_string()),
+                    name: RuntimeToolName::new(request.name().as_str()),
+                    arguments_json: replay_safe_arguments(request),
+                });
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::Assistant,
+                            parts: vec![part],
+                        });
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ToolResult {
+                request, content, ..
+            } => {
+                let (content, is_error) = render_tool_result(content);
+                let part = MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+                    content,
+                    is_error,
+                });
+                if collecting_tool_results {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::User,
+                            parts: vec![part],
+                        });
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::User,
+                        parts: vec![part],
+                    });
+                }
+                assistant_call = None;
+                collecting_tool_results = true;
+            }
+            message @ (ModelConversationMessage::ImportedUser { .. }
+            | ModelConversationMessage::ImportedAssistant { .. }) => {
+                rendered.push(render_conversation_message(message));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+        }
+    }
+    rendered
+}
+
+fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
+    if request.arguments().kind() == ToolArgumentsKind::Json
+        && decode_checked_raw_json(request.arguments().as_str()).is_ok_and(|value| {
+            value.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
+        })
+    {
+        request.arguments().as_str().to_owned()
+    } else {
+        // Exact bytes remain durable authority. Replayed function arguments
+        // must be an object even when the provider originally supplied a
+        // scalar, array, or undecodable value.
+        String::from(r#"{"signalbox_invalid_arguments":true}"#)
+    }
+}
+
+fn decode_checked_raw_json(
+    value: &str,
+) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
+    serde_json::value::RawValue::from_string(value.to_owned())
+}
+
+fn render_runtime_tool_definitions(
+    definitions: &[signalbox_application::ToolDefinition],
+) -> Result<Vec<ToolDefinition>, RuntimeModelCallProviderError> {
+    definitions
+        .iter()
+        .map(|definition| {
+            let schema = serde_json::from_str(definition.input_schema().as_str())
+                .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
+            Ok(ToolDefinition::with_schema(
+                definition.name().as_str(),
+                definition.description(),
+                schema,
+            ))
+        })
+        .collect()
+}
+
+fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
+    match content {
+        ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
+            (text.as_str().to_owned(), false)
+        }
+        ModelToolResultContent::ExecutionError(error) => {
+            let kind = match error.kind() {
+                ToolExecutionErrorKind::UnknownTool => "unknown_tool",
+                ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",
+                ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
+                ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
+                ToolExecutionErrorKind::CrashLost => "crash_lost",
+            };
+            (
+                serde_json::json!({
+                    "error": {
+                        "kind": kind,
+                        "detail": error.detail().map(signalbox_domain::ToolExecutionErrorDetail::as_str),
+                    }
+                })
+                .to_string(),
+                true,
+            )
+        }
+        ModelToolResultContent::Denied { reason } => (
+            serde_json::json!({
+                "error": {
+                    "kind": "denied",
+                    "detail": reason.as_ref().map(signalbox_domain::ToolDenialReason::as_str),
+                }
+            })
+            .to_string(),
+            true,
+        ),
+        ModelToolResultContent::ClosedByTurnEnd => (
+            serde_json::json!({
+                "error": {
+                    "kind": "closed_by_turn_end",
+                    "detail": null,
+                }
+            })
+            .to_string(),
+            true,
+        ),
     }
 }
 
@@ -523,10 +717,16 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use signalbox_application::ModelConversationMessage;
+    use signalbox_application::{
+        ModelConversationMessage, ToolDefinition as ApplicationToolDefinition, ToolInputSchema,
+    };
     use signalbox_domain::{
-        ImportedText, ImportedTranscriptEntryId, ModelCallId, ModelCallTerminalObservation,
-        ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+        AssistantText, ImportedText, ImportedTranscriptEntryId, ModelCallId,
+        ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelIdentity,
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolEffectClass,
+        ToolExecutionError, ToolExecutionErrorKind, ToolName as DomainToolName,
+        ToolPermissionDefault, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TurnId,
     };
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
@@ -540,6 +740,7 @@ mod tests {
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
         RuntimeModelDefinition, classify_terminal, render_conversation_message,
+        render_runtime_messages, render_runtime_tool_definitions,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -549,6 +750,28 @@ mod tests {
 
     fn target(value: u128) -> ResolvedProviderTarget {
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
+    }
+
+    fn source(value: u128) -> SemanticTranscriptEntryRef {
+        SemanticTranscriptEntryRef::from_source(
+            SessionId::from_uuid(Uuid::from_u128(10)),
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value)),
+        )
+    }
+
+    fn request(value: u128, arguments: &str) -> ToolRequest {
+        ToolRequestReconstitutionInput::new(
+            ToolRequestId::from_uuid(Uuid::from_u128(value)),
+            SessionId::from_uuid(Uuid::from_u128(10)),
+            TurnId::from_uuid(Uuid::from_u128(11)),
+            call(),
+            ToolRequestOrdinal::from_u32(u32::try_from(value - 20).expect("fixture ordinal")),
+            signalbox_domain::ToolName::try_new(String::from("current_time"))
+                .expect("fixture name"),
+            NormalizedToolArguments::try_from_provider_text(arguments.to_owned())
+                .expect("fixture arguments"),
+        )
+        .into_request()
     }
 
     /// S28 / INV-038 / INV-039: the outward runtime bridge consumes imported
@@ -591,6 +814,128 @@ mod tests {
             content,
             usage: TokenUsage::unreported(),
         })
+    }
+
+    #[test]
+    fn configured_application_tools_are_advertised_to_the_runtime() {
+        let definition = ApplicationToolDefinition::new(
+            DomainToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            String::from("Returns the current UTC time."),
+            ToolInputSchema::try_new(String::from(
+                r#"{"additionalProperties":false,"properties":{},"type":"object"}"#,
+            ))
+            .expect("fixture schema"),
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        );
+
+        let rendered =
+            render_runtime_tool_definitions(&[definition]).expect("checked catalog maps");
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].name.as_str(), "current_time");
+        assert_eq!(rendered[0].description, "Returns the current UTC time.");
+        assert_eq!(
+            rendered[0].input_schema,
+            serde_json::json!({
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+            })
+        );
+    }
+
+    /// S10 / INV-002 / INV-005: one provider response and its ordered result
+    /// batch remain grouped, while invalid function-argument shapes use
+    /// replay-safe JSON without replacing their exact durable evidence.
+    #[test]
+    fn s10_inv002_inv005_tool_history_is_grouped_and_replay_safe() {
+        let first = request(20, "{}");
+        let malformed = request(21, "{\"timezone\":");
+        let scalar = request(22, "7");
+        let deep_arguments = format!("{}0{}", r#"{"nested":"#.repeat(512), "}".repeat(512));
+        let deep = request(23, &deep_arguments);
+        let messages = [
+            signalbox_application::ModelConversationMessage::Assistant {
+                source: source(30),
+                producing_call: call(),
+                content: AssistantText::try_new(String::from("before")).expect("fixture text"),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(31),
+                producing_call: call(),
+                request: first.clone(),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(32),
+                producing_call: call(),
+                request: malformed.clone(),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(33),
+                producing_call: call(),
+                request: scalar.clone(),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(38),
+                producing_call: call(),
+                request: deep.clone(),
+            },
+            signalbox_application::ModelConversationMessage::Assistant {
+                source: source(34),
+                producing_call: call(),
+                content: AssistantText::try_new(String::from("after")).expect("fixture text"),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(35),
+                request: first.id(),
+                content: signalbox_application::ModelToolResultContent::ExecutionError(
+                    ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                ),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(36),
+                request: malformed.id(),
+                content: signalbox_application::ModelToolResultContent::ExecutionError(
+                    ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
+                ),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(37),
+                request: scalar.id(),
+                content: signalbox_application::ModelToolResultContent::ExecutionError(
+                    ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
+                ),
+            },
+        ];
+
+        let rendered = render_runtime_messages(&messages);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(
+            rendered[0].role,
+            signalbox_model_runtime::ConversationRole::Assistant
+        );
+        assert_eq!(rendered[0].parts.len(), 6);
+        for part in &rendered[0].parts[2..=3] {
+            let signalbox_model_runtime::MessagePart::ToolCall(replayed) = part else {
+                panic!("invalid proposal remains in the assistant group");
+            };
+            assert_eq!(
+                replayed.arguments_json,
+                r#"{"signalbox_invalid_arguments":true}"#
+            );
+        }
+        assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
+        assert_eq!(scalar.arguments().as_str(), "7");
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_deep) = &rendered[0].parts[4]
+        else {
+            panic!("deep valid proposal remains in the assistant group");
+        };
+        assert_eq!(replayed_deep.arguments_json, deep_arguments);
+        assert_eq!(
+            rendered[1].role,
+            signalbox_model_runtime::ConversationRole::User
+        );
+        assert_eq!(rendered[1].parts.len(), 3);
     }
 
     /// INV-026: the application-owned dispatch permit is released exactly

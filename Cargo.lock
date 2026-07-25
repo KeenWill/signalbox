@@ -2554,6 +2554,7 @@ dependencies = [
 name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-model-runtime",
@@ -2607,6 +2608,7 @@ name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
  "rust_decimal",
+ "serde_json",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",
  "signalbox-domain",
