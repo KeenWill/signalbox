@@ -40,7 +40,9 @@ derive them from the URL alone once the variables are refused: an omitted port
 is the fixed 5432, and an omitted database name is the user name the URL states.
 The error names the offending channel and never its contents, and the refusal
 precedes any database contact. The local test connection path keeps SQLx's
-behavior; it never reaches a production cluster.
+behavior; it is a development and test channel by intent, and no check confines
+the URL it is given, so this decision protects production through the refusals
+above rather than through that separation.
 
 **Rejected alternatives.** Documenting the fallback set would make the
 environment surface honest while leaving an unmanaged credential channel and a

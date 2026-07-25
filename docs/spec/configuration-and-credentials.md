@@ -46,9 +46,13 @@ either nowhere the driver reads it: the authority, or the `user`, `host`, and
 server, which derive them from the URL alone: an omitted port is the fixed 5432,
 and an omitted database name is the user name the URL states. The refusal names
 the offending channel and never its contents, and it happens before any database
-contact. A deployment carries every connection parameter in the URL; the local
-test connection path is unaffected because it never reaches a production
-cluster.
+contact. A deployment carries every connection parameter in the URL. The
+separate local test connection path is unchanged and keeps SQLx's behavior; it
+is a development and test channel by intent — the integration suites and
+`signalbox-debug`, which reads its own `SIGNALBOX_DEBUG_DATABASE_URL` — and no
+check confines the URL it is given to a local cluster, so the refusals above are
+what stand between a production cluster and ambient configuration, not that
+path's name.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,
