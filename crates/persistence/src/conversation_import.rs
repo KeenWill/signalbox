@@ -112,6 +112,8 @@ pub enum ImportedConversationCorruption {
         /// Reconstructed member count.
         actual: u64,
     },
+    /// Non-null source-session evidence disagrees with the reconstructed entries.
+    SourceSessionLineageMismatch,
     /// One source digest resolved to a structurally different snapshot.
     ExistingSnapshotMismatch,
     /// Complete durable fields failed domain-owned correlation.
@@ -151,6 +153,8 @@ impl fmt::Display for ImportedConversationCorruption {
                 formatter,
                 "imported raw record {position:?} declares {declared} entries but reconstructs {actual}"
             ),
+            Self::SourceSessionLineageMismatch => formatter
+                .write_str("imported source-session lineage disagrees with reconstructed entries"),
             Self::ExistingSnapshotMismatch => {
                 formatter.write_str("imported source digest resolved to a different snapshot")
             }
@@ -264,9 +268,9 @@ impl ImportedConversationRepository {
         let inserted = sqlx::query(
             "INSERT INTO imported_conversation
                 (imported_conversation_id, storage_version, source_format,
-                 converter_version, source_digest, declared_raw_record_count,
-                 declared_entry_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 converter_version, source_digest, source_session_id,
+                 declared_raw_record_count, declared_entry_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT DO NOTHING",
         )
         .bind(candidate_id.into_uuid())
@@ -274,6 +278,7 @@ impl ImportedConversationRepository {
         .bind(encoded.format)
         .bind(encoded.converter_version)
         .bind(source_digest.as_bytes().as_slice())
+        .bind(encoded.source_session_id.as_deref())
         .bind(Decimal::from(declared_raw_record_count))
         .bind(Decimal::from(declared_entry_count))
         .execute(&mut *transaction)
@@ -339,6 +344,7 @@ impl ImportedConversationStore for ImportedConversationRepository {
 struct EncodedConversation {
     format: &'static str,
     converter_version: i16,
+    source_session_id: Option<Vec<u8>>,
     raws: Vec<EncodedRawRecord>,
     entries: Vec<EncodedEntry>,
 }
@@ -348,6 +354,7 @@ impl EncodedConversation {
         conversation: &ImportedConversation,
     ) -> Result<Self, ImportedConversationRepositoryError> {
         let (format, converter_version) = encode_format(conversation.format());
+        let source_session_id = consistent_source_session_id(conversation).map(<[u8]>::to_vec);
         let mut entry_counts = vec![0_u64; conversation.raw_records().len()];
         for entry in conversation.entries() {
             let raw_index = usize::try_from(entry.raw_record_position().as_u64())
@@ -396,10 +403,28 @@ impl EncodedConversation {
         Ok(Self {
             format,
             converter_version,
+            source_session_id,
             raws,
             entries,
         })
     }
+}
+
+fn consistent_source_session_id(conversation: &ImportedConversation) -> Option<&[u8]> {
+    let mut consistent = None;
+    for entry in conversation.entries() {
+        if let ImportedSourceAttestation::Attested(source_session_id) =
+            entry.source().source_session_id()
+        {
+            let source_session_id = source_session_id.as_str().as_bytes();
+            match consistent {
+                None => consistent = Some(source_session_id),
+                Some(existing) if existing == source_session_id => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    consistent
 }
 
 struct EncodedRawRecord {
@@ -597,8 +622,8 @@ pub(crate) async fn load_from_connection(
 ) -> Result<Option<ImportedConversation>, ImportedConversationRepositoryError> {
     let header = sqlx::query(
         "SELECT imported_conversation_id, storage_version, source_format,
-                converter_version, source_digest, declared_raw_record_count,
-                declared_entry_count
+                converter_version, source_digest, source_session_id,
+                declared_raw_record_count, declared_entry_count
            FROM imported_conversation
           WHERE imported_conversation_id = $1",
     )
@@ -628,6 +653,7 @@ async fn decode_complete(
         "source digest",
         ImportedConversationSourceDigest::from_bytes,
     )?;
+    let source_session_id: Option<Vec<u8>> = header.try_get("source_session_id")?;
     let declared_raw_record_count = positive_u64(header.try_get("declared_raw_record_count")?)
         .map_err(|reason| invalid_ordinal_with_reason("declared raw-record count", reason))?;
     let declared_entry_count = positive_u64(header.try_get("declared_entry_count")?)
@@ -736,7 +762,7 @@ async fn decode_complete(
         }
     }
 
-    ImportedConversationReconstitutionInput::new(
+    let conversation = ImportedConversationReconstitutionInput::new(
         requested,
         stored,
         format,
@@ -747,7 +773,13 @@ async fn decode_complete(
         entries,
     )
     .reconstitute()
-    .map_err(|error| ImportedConversationCorruption::Domain(error.failure()).into())
+    .map_err(|error| ImportedConversationCorruption::Domain(error.failure()))?;
+    if let Some(source_session_id) = source_session_id
+        && Some(source_session_id.as_slice()) != consistent_source_session_id(&conversation)
+    {
+        return Err(ImportedConversationCorruption::SourceSessionLineageMismatch.into());
+    }
+    Ok(conversation)
 }
 
 fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConversation) -> bool {
