@@ -196,7 +196,7 @@ final class SignalboxNativeTests: XCTestCase {
         let transport = StubSignalboxWebSocketTransport(
             incoming: [.string(heartbeat), .string(nextFrame)]
         )
-        let stream = SignalboxWebSocketStream(transport: transport)
+        let stream = SignalboxWebSocketStream(transportFactory: { transport })
 
         var iterator = stream.messages().makeAsyncIterator()
         let yieldedMessage = try await iterator.next()
@@ -222,6 +222,40 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
+    func testWebSocketStreamCreatesTransportLazilyForEachMessagesCall() async throws {
+        let firstTransport = StubSignalboxWebSocketTransport(
+            incoming: [.string(#"{"kind":"turn_started"}"#)]
+        )
+        let secondTransport = StubSignalboxWebSocketTransport(
+            incoming: [.string(#"{"kind":"turn_completed"}"#)]
+        )
+        let factory = StubSignalboxWebSocketTransportFactory(
+            transports: [firstTransport, secondTransport]
+        )
+        let stream = SignalboxWebSocketStream(
+            transportFactory: { factory.makeTransport() }
+        )
+
+        XCTAssertEqual(factory.createdTransportCount, 0)
+        var firstIterator = stream.messages().makeAsyncIterator()
+        XCTAssertEqual(factory.createdTransportCount, 1)
+        let firstYield = try await firstIterator.next()
+        let firstMessage = try XCTUnwrap(firstYield)
+        guard case .unknown(let firstKind, _, _) = firstMessage else {
+            return XCTFail("Expected the first transport's frame")
+        }
+        XCTAssertEqual(firstKind, "turn_started")
+
+        var secondIterator = stream.messages().makeAsyncIterator()
+        XCTAssertEqual(factory.createdTransportCount, 2)
+        let secondYield = try await secondIterator.next()
+        let secondMessage = try XCTUnwrap(secondYield)
+        guard case .unknown(let secondKind, _, _) = secondMessage else {
+            return XCTFail("Expected the second transport's frame")
+        }
+        XCTAssertEqual(secondKind, "turn_completed")
+    }
+
     func testWebSocketStreamContinuesAfterUndecodableFrame() async throws {
         let transport = StubSignalboxWebSocketTransport(
             incoming: [
@@ -229,7 +263,7 @@ final class SignalboxNativeTests: XCTestCase {
                 .string(#"{"kind":"turn_started","turn_id":"turn-1"}"#),
             ]
         )
-        let stream = SignalboxWebSocketStream(transport: transport)
+        let stream = SignalboxWebSocketStream(transportFactory: { transport })
 
         var iterator = stream.messages().makeAsyncIterator()
         let firstYield = try await iterator.next()
@@ -256,7 +290,7 @@ final class SignalboxNativeTests: XCTestCase {
                 .string(#"{"kind":"turn_started","turn_id":"turn-1"}"#),
             ]
         )
-        let stream = SignalboxWebSocketStream(transport: transport)
+        let stream = SignalboxWebSocketStream(transportFactory: { transport })
 
         var iterator = stream.messages().makeAsyncIterator()
         let firstYield = try await iterator.next()
@@ -281,7 +315,7 @@ final class SignalboxNativeTests: XCTestCase {
         """
         let transport = QuietSignalboxWebSocketTransport(heartbeat: .string(heartbeat))
         let stream = SignalboxWebSocketStream(
-            transport: transport,
+            transportFactory: { transport },
             heartbeatTimeout: .milliseconds(25)
         )
 
@@ -470,6 +504,30 @@ private actor StubSignalboxWebSocketTransport: SignalboxWebSocketTransport {
     }
 
     func cancel() async {}
+}
+
+private final class StubSignalboxWebSocketTransportFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var transports: [any SignalboxWebSocketTransport]
+    private var creationCount = 0
+
+    init(transports: [any SignalboxWebSocketTransport]) {
+        self.transports = transports
+    }
+
+    var createdTransportCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return creationCount
+    }
+
+    func makeTransport() -> any SignalboxWebSocketTransport {
+        lock.lock()
+        defer { lock.unlock() }
+        precondition(!transports.isEmpty, "No stub WebSocket transport remains")
+        creationCount += 1
+        return transports.removeFirst()
+    }
 }
 
 private enum StubSignalboxWebSocketTransportError: Error {
