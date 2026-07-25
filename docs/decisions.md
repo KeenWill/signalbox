@@ -29,6 +29,32 @@ IANA input without a recorded need.
 **Affects.** The hub-local `current_time` executor, its focused tests, and the
 implemented result contract in [tool-loop.md](spec/tool-loop.md).
 
+## 2026-07-24 — Make the model-call credential reference total
+
+**Context.** A schema audit found that the nullability of
+`model_call.credential_reference` guarded phantom history. The 2026-07-22 entry
+below kept the column nullable to preserve forward migration of rows predating
+it, but no deployed database exists (the hub-fencing decision already relies on
+no schema predating the stack), and the store writes the reference on every
+`Prepared` insert, so the NULL state is unreachable and the load path's
+NULL-as-corruption arm is dead code.
+
+**Decision.** Make the column total with a forward-only migration
+(`202607240007_credential_reference_total.sql`): `SET NOT NULL` plus a non-empty
+`CHECK`. Remove the dead NULL-handling arm from the persistence load path; a
+missing row remains corruption, and a present row always carries its reference.
+This supersedes the forward-only-nullable rationale of the 2026-07-22
+credential-reference entry.
+
+**Rejected alternatives.** Keeping the nullable column preserves compatibility
+with a history that does not exist and keeps unreachable corruption handling
+alive. Waiting for a future baseline squash defers the fix without benefit;
+pre-production schema discipline states the correct shape now.
+
+**Affects.** The migration set, the persistence model-call store and its INV-014
+nullability test, [persistence-protocol](spec/persistence-protocol.md), and
+[configuration-and-credentials](spec/configuration-and-credentials.md).
+
 ## 2026-07-24 — Retain checked provider JSON as raw text
 
 **Context.** Guarded deserialization admitted deeply nested tool schemas, but an
@@ -91,16 +117,17 @@ introduced.
 
 ## 2026-07-24 — Use jiff for IANA time-zone conversion
 
-**Context.** `current_time` must resolve IANA names, apply historical offsets,
-canonicalize zone names, and format whole-second RFC 3339 output. Signalbox
-should not own a time-zone parser or database, and the dependency should remain
-focused on the hub-local tool.
+**Context.** `current_time` must validate IANA names, apply historical offsets,
+preserve the exact accepted identifier, and format whole-second RFC 3339 output.
+Signalbox should not own a time-zone parser or database, and the dependency
+should remain focused on the hub-local tool.
 
 **Decision.** Add `jiff` to `signalbox-hubd` with default features disabled and
 only `std` plus `tzdb-zoneinfo` enabled. It reads the deployment's system
 zoneinfo database at runtime and supplies checked `SystemTime` conversion, IANA
-lookup, canonical names, offsets, and formatting. This focused runtime edge does
-not constrain other crates and does not warrant the large-dependency owner gate.
+lookup, offsets, and formatting; the adapter preserves the accepted input
+spelling. This focused runtime edge does not constrain other crates and does not
+warrant the large-dependency owner gate.
 
 **Rejected alternatives.** Repository-owned zone parsing duplicates mature,
 security-relevant rules. `chrono-tz` embeds generated zone data and adds build
@@ -112,6 +139,10 @@ lockfile, and the `current_time` behavior recorded in the tool-loop
 specification.
 
 ## 2026-07-24 — Guard provider tool-schema decoding against stack depth
+
+**Status.** Superseded by
+[Retain checked provider JSON as raw text](#2026-07-24--retain-checked-provider-json-as-raw-text),
+which removes the owned runtime-value decode from this bridge.
 
 **Context.** Application tool schemas are valid, object-shaped, and bounded, but
 their contract imposes no nesting limit. The provider bridge must decode them
@@ -135,20 +166,26 @@ dependency edges; no resolved package or public API is added.
 
 **Context.** The model-provider bridge must replay durable tool results as
 bounded JSON error objects and distinguish object-shaped arguments from valid
-JSON scalars or arrays that provider function-call history cannot accept.
-`serde_json` is already pinned and used throughout the model-runtime layer.
+JSON scalars or arrays that provider function-call history cannot accept, and
+the persistence process projection must render durable tool denials and failures
+as the same closed JSON error objects. `serde_json` is already pinned and used
+throughout the model-runtime layer.
 
 **Decision.** Add the existing focused `serde_json` dependency directly to
 `signalbox-model-provider-runtime` for object-shape validation and safe error
-serialization.
+serialization, and to `signalbox-persistence` for rendering the equivalent
+closed tool-error objects in the process transcript projection.
 
 **Rejected alternatives.** Hand-escape JSON: it would duplicate a
 security-sensitive codec. Admit non-object function arguments: provider replay
 would remain invalid. Move provider replay shapes into the domain: that would
-cross the runtime boundary.
+cross the runtime boundary. Format the persistence error objects with string
+concatenation: denial reasons are owner text and must be escaped by a real
+codec.
 
 **Affects.** `crates/model-provider-runtime/Cargo.toml` and its durable
-tool-history translation.
+tool-history translation; `crates/persistence/Cargo.toml` and the `process_read`
+tool-result and denial projections.
 
 ## 2026-07-24 — Normalize bounded JSON with stack-safe Serde traversal
 
@@ -172,6 +209,173 @@ focused capability.
 **Affects.** Domain tool-argument normalization, its dependency graph, and the
 crate-specific exception in `deny.toml`; stored argument kinds, canonical
 encoding, and byte limits do not change.
+
+## 2026-07-24 — Pre-production schema discipline
+
+**Context.** The schema has never had a durable deployment; every database is a
+disposable dev instance. Agent-built migrations risk inheriting production-brain
+caution — nullable columns and tolerant types chosen for backwards compatibility
+with a production that does not exist — a failure mode the owner watched consume
+his prior system.
+
+**Decision.** Until the first durable deployment, schema changes make the
+correct design choice, not the backwards-compatible one: new columns are NOT
+NULL when the domain field is total, types are as tight as the domain (CHECK,
+UNIQUE, and FK constraints where the domain implies them), and a wrong earlier
+choice is fixed rather than papered over. The migration set may additionally be
+squashed to a clean baseline at owner-chosen checkpoints, with dev databases
+recreated. Applied-migration immutability (sqlx checksums) governs any single
+live dev database but does not sanctify history. A superseding entry ends this
+discipline when the first durable deployment freezes migration history and
+append-only discipline begins. A schema audit is underway to decide whether a
+first baseline squash is warranted.
+
+**Rejected alternatives.** Append-only-forever from day one imports production
+constraints without a production. Silent per-agent judgment produced the prior
+system's rot.
+
+**Affects.** `crates/persistence/migrations`, migration-writing goal runs.
+
+## 2026-07-24 — Share the lossless JSON decoder across import edges
+
+**Context.** Codex rollout JSONL needs the same ordered-member,
+duplicate-member, exact-number, Unicode, and depth guarantees as the Claude Code
+converter. The existing bounded decoder contains no Claude-specific semantics,
+but lived inside that provider adapter.
+
+**Decision.** Move the decoder unchanged into a provider-neutral import-edge
+crate used by both converters. It continues to construct the domain's
+source-neutral structured values directly, delegates only JSON string-token
+decoding to `serde_json`, and exposes content-silent syntax, UTF-8, and depth
+failures. Provider record and block semantics remain in their separate edge
+crates.
+
+**Rejected alternatives.** Duplicating the decoder would create two subtly
+different definitions of exact JSON preservation. Depending on the Claude Code
+crate from the Codex crate would couple unrelated providers. Moving parsing into
+the domain would reverse the recorded edge boundary.
+
+**Affects.** The Claude Code and Codex converter dependencies, workspace layout,
+lossless JSON parser tests, and converter implementation ownership; no
+normalized or durable representation changes.
+
+## 2026-07-24 — Run Docker-backed integration suites concurrently in CI
+
+**Context.** GitHub-hosted Ubuntu runners provide Docker, and Signalbox's
+ignored integration tests start pinned PostgreSQL containers through
+testcontainers. The workflow ran several test binaries sequentially from a
+hand-maintained list, which delayed feedback and omitted a newly added
+import-to-native end-to-end binary.
+
+**Decision.** Run three fail-fast-disabled CI matrix suites concurrently: all
+ignored persistence test targets with the `postgres-integration` feature, all
+ignored hubd test targets, and the explicitly selected offline terminal client
+end-to-end test. Retain one aggregate `postgres-integration` job so the existing
+required-check name remains stable. Package-wide selection makes new persistence
+and hubd integration-test binaries covered by default.
+
+**Rejected alternatives.** Keeping one sequential job preserves redundant
+latency and the omission-prone binary inventory. One workspace-wide ignored test
+command would mix Docker coverage with opt-in real-provider and local-file tests
+whose external inputs are deliberately unavailable in public CI. A
+workflow-managed PostgreSQL service would duplicate the pinned, isolated
+testcontainers lifecycle already owned by each test.
+
+**Affects.** GitHub Actions integration-test coverage, feedback latency,
+required-check compatibility, and Docker-backed PostgreSQL test execution.
+
+## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
+
+**Context.** The finished-pull-request rules required push-time reviewer
+replies, but expressed the requirement inside a dense paragraph. An agent could
+incorrectly treat the disposition round as stack-wide batching and move to a
+child pull request after pushing fixes without replying on the reviewed pull
+request.
+
+**Decision.** Make the existing timing operationally explicit in
+[AGENTS.md](../AGENTS.md): accepted findings are replied to after their fixing
+commits are pushed; declined findings may be answered immediately or with the
+pull request's disposition round; and all replies and eligible resolutions are
+complete before work moves to another pull request, propagates a stack, or
+requests another review wave.
+
+**Rejected alternatives.** Retaining the compact wording leaves the sequencing
+easy to overlook. Requiring immediate replies to declined findings prevents a
+useful single disposition round without improving traceability.
+
+**Affects.** The finished-pull-request workflow and every future review loop. It
+changes no code, review-wave limit, merge authority, or validation rule.
+
+## 2026-07-24 — Version tool-bearing process projection as protocol three
+
+**Context.** Process protocol versions one and two use closed tagged unions.
+Emitting tool wait states, tool transcript entries, tool-batch events, or a
+changed reconciliation payload under either accepted version would make an
+upgraded hub send frames that an existing client must reject.
+
+**Decision.** Preserve versions one and two byte-for-byte for native model-call
+states and events, and add protocol version three for tool-bearing projection.
+Version three is a superset of version two, keeps the existing model-call
+reconciliation shapes, and adds distinct tool reconciliation state and event
+variants. A version-one or version-two read/follow request selecting existing
+tool history, or a live follow that first encounters a tool-only event, returns
+`unsupported_version` naming version three before emitting an unknown variant.
+The stack's terminal client uses version three. See
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Extending an older closed union violates its
+compatibility contract. Replacing the model-call reconciliation payload with a
+tagged operation would break old clients even for tool-free sessions. Removing
+older versions would unnecessarily drop their supported projections.
+
+**Affects.** INV-033; process wire types, hub projection gates, terminal-client
+decoding, transcript snapshots, durable follow events, and compatibility tests.
+
+## 2026-07-24 — Complete tool rounds inside one hub-owned turn
+
+**Context.** The owner fixed the tool-loop semantics on 2026-07-23. The
+model-runtime vocabulary already carries tool definitions, tool-call parts,
+results, and a tool-use finish reason, while the durable transcript reserves
+`AssistantToolUse` and the active-turn algebra reserves `AwaitingApproval`.
+Storage deliberately blocks both. Shipping the first tool requires the request,
+approval, physical-attempt, result, continuation, and restart boundaries to land
+together; otherwise a provider response could create unowned work or a side
+effect could outlive its evidence. Interrupts must also order against the
+in-process executor boundary without making an interrupt an approval decision.
+
+**Decision.** Adopt the complete hub-owned loop specified by
+[tool-loop](spec/tool-loop.md): tool-using model completions yield within the
+same logical turn; requests and reference-only semantic entries commit
+atomically; approval sources remain explicit; the dangerous session blanket is
+versioned, stored by every defaults-bearing command family, and frozen per turn;
+execution is serialized behind catalog/executor ports and durably fenced; a
+process-shared turn dispatch gate orders execution against interrupts;
+deny-and-end records the canonical denial before applying the separately durable
+interrupt from execution, with the ordinary dispatch race after execution opens;
+interrupting an ambiguous tool recovery wait retains that exact ambiguity in the
+proof-bearing terminal boundary; 1 MiB bounds both normalized arguments and
+admitted text results; crash classification follows recorded effect class, and a
+known crash failure materializes its exact result evidence plus proposal-ordered
+closure for the remaining requests before `TurnFailed`; and the proposal-ordered
+all-resolved boundary atomically projects results, consumes steering, and
+prepares the next model call. `current_time` is the first effect-free auto tool,
+with an injected clock and IANA conversion supplied by the focused `jiff`
+dependency.
+
+**Rejected alternatives.** Making each round a new turn would fragment one
+conversational outcome and misplace `TurnCompleted`. Process-local approvals or
+results would disappear across restart. Copying request/result content into
+semantic entries would create competing authorities. Concurrent execution now
+would weaken two simple database guards before evidence justified the extra
+state space. Auto-retrying effect-free crash loss would introduce retry policy
+instead of reporting the version-one known failure. Treating blanket, policy, or
+judge decisions as owner approval would violate INV-020.
+
+**Affects.** S02, S05, S06, S07, S10–S12, and S15; INV-004–INV-006,
+INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-036,
+and INV-037; the tool-loop page and linked sibling specifications;
+session-default command storage versions; domain/application spines;
+model/provider bridge, persistence, hubd composition, and offline proof tests.
 
 ## 2026-07-24 — Expose durable tool-batch presentation boundaries
 
@@ -203,17 +407,22 @@ prior batch's results. The all-resolved continuation barrier bounds each batch
 but, without a turn-wide limit, a provider-controlled sequence can retain the
 session slot and consume resources indefinitely.
 
-**Decision.** Admit at most 32 tool-using provider rounds in one turn. After the
-thirty-second batch resolves, prepare the ordinary continuation checkpoint but
-close it as a known failure before provider preparation or send. Count distinct
-producing calls for the turn, not requests, so a multi-request batch consumes
-one round and inherited history from earlier turns consumes none.
+**Decision.** Admit at most 32 tool requests in one completed provider response
+and at most 32 tool-using provider rounds in one turn. A response exceeding the
+request bound closes its model call as a known failure without materializing a
+partial batch. After the thirty-second admitted batch resolves, prepare the
+ordinary continuation checkpoint but close it as a known failure before provider
+preparation or send. Count distinct producing calls for the turn, not requests,
+so a multi-request batch consumes one round and inherited history from earlier
+turns consumes none.
 
 **Rejected alternatives.** An elapsed-time limit makes durable replay depend on
-wall-clock timing. Counting requests penalizes bounded parallel proposals
-instead of repeated model continuation. An unbounded loop leaves availability
-under provider control. A configurable first version adds policy surface without
-evidence for another value.
+wall-clock timing. Counting requests as rounds penalizes bounded parallel
+proposals instead of repeated model continuation. A 128-request response bound
+still permits one serialized batch to retain up to 128 MiB of admitted result
+text. Unbounded batches or rounds leave availability under provider control. A
+configurable first version adds policy surface without evidence for another
+value.
 
 **Affects.** Tool-loop continuation, model-call execution, the current turn's
 failure boundary, and application/offline proofs.
@@ -454,6 +663,42 @@ deadlines would add unrelated timing semantics.
 **Affects.** Process-protocol frame ownership, submitted-input admission, and
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
+
+## 2026-07-24 — Version maximum-fidelity conversion and generic result blocks
+
+**Context.** Maximum-fidelity conversion broadens the original Claude Code
+interpretation so structurally valid source-defined message and result blocks
+are normalized instead of rejected. Reusing converter version 1 would
+reinterpret stored normalized records and violate the fixed-version converter
+contract. Maximum fidelity also adds a generic result-block variant to the
+existing [conversation-import](spec/conversation-import.md) vocabulary.
+Persistence content version 1 already includes the generic message-block tag,
+but its nested result-block tags are closed. Repository validation also needs
+source files without publishing their content.
+
+**Decision.** Preserve the original Claude Code converter-version-1
+interpretation and add converter version 2 for maximum-fidelity normalization;
+the active `ClaudeCodeJsonlConverter` emits version 2. Source digests,
+reconstitution, and persistence map the two converter versions distinctly. Also
+preserve content-encoding version 1 for every existing content shape, including
+generic message blocks. Encode content as version 2 only when it contains a
+generic result block, and reject that new nested tag beneath a version-1 header.
+Committed fixtures are synthetic. Optional local source-file validation is
+path-configured, content-silent, and excluded from ordinary test runs. A private
+repository was consulted only as non-normative provenance.
+
+**Rejected alternatives.** Reusing converter version 1 would make one version
+describe two normalization behaviors. Adding the new nested content tag beneath
+content version 1 would make one encoding version describe two vocabularies.
+Stamping every newly written content value as version 2 would needlessly reduce
+rollback readability for unchanged content. Committing source files or printing
+their transcript data would violate the public-source boundary.
+
+**Affects.** S28; INV-002/INV-038; synthetic and opt-in import tests, the Claude
+Code format enum/projector/store mapping, imported-content adapter encoding, and
+the provenance boundary of the conversation-import stack. Imported-session seed
+ownership remains recorded by
+[the separate seed decision](#2026-07-24--separate-imported-ancestry-from-its-materialized-seed-frontier).
 
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
@@ -1150,78 +1395,6 @@ terminal-client crates, hubd configuration/composition, outbox consumption,
 INV-032/INV-033 enforcement, S01/S02/S24, and
 [open questions](open-questions.md#protocols-and-persistence). Authenticated
 transports and remote clients remain explicitly open upgrade paths.
-
-## 2026-07-23 — Reuse serde_json for canonical tool arguments
-
-**Context.** Tool requests need a bounded provider-neutral argument value: valid
-JSON is compact with recursively lexical object keys, while malformed provider
-text remains exact for typed `InvalidArguments` reporting. Hand-written JSON
-parsing or canonical serialization would add security-sensitive format code to
-the domain crate. `serde_json` is already a pinned workspace dependency used at
-provider boundaries.
-
-**Decision.** Add the existing focused `serde_json` dependency to the domain
-crate and use its value parser and compact serializer around an explicit
-`BTreeMap` recursion. Keep serde types private: the public API accepts and
-returns checked strings plus a domain-owned representation tag. The persistence
-process projection reuses the same focused serializer to expose bounded typed
-tool-failure JSON without copying storage records onto the wire.
-
-**Rejected alternatives.** Preserve all JSON text verbatim: semantically equal
-requests would lack one normalized representation. Reject malformed text at the
-provider bridge: that would lose the durable request and its model-visible typed
-failure. Write a repository-local JSON parser: larger ownership and audit cost
-without a domain benefit.
-
-**Affects.** `crates/domain/Cargo.toml`, `crates/persistence/Cargo.toml`,
-normalized tool-argument construction, process transcript projection, and the
-lockfile dependency list; no storage, wire, or framework type crosses into the
-domain API.
-
-## 2026-07-23 — Complete tool rounds inside one hub-owned turn
-
-**Context.** The model-runtime vocabulary already carries tool definitions,
-tool-call parts, results, and a tool-use finish reason, while the durable
-transcript reserves `AssistantToolUse` and the active-turn algebra reserves
-`AwaitingApproval`. Storage deliberately blocks both. Shipping the first tool
-requires the request, approval, physical-attempt, result, continuation, and
-restart boundaries to land together; otherwise a provider response could create
-unowned work or a side effect could outlive its evidence. Interrupts must also
-order against the in-process executor boundary without making an interrupt an
-approval decision.
-
-**Decision.** Adopt the complete hub-owned loop specified by
-[tool-loop](spec/tool-loop.md): tool-using model completions yield within the
-same logical turn; requests and reference-only semantic entries commit
-atomically; approval sources remain explicit; the dangerous session blanket is
-versioned, stored by every defaults-bearing command family, and frozen per turn;
-execution is serialized behind catalog/executor ports and durably fenced; a
-process-shared turn dispatch gate orders execution against interrupts;
-deny-and-end records the canonical denial before applying the separately durable
-interrupt from execution, with the ordinary dispatch race after execution opens;
-interrupting an ambiguous tool recovery wait retains that exact ambiguity in the
-proof-bearing terminal boundary; 1 MiB bounds both normalized arguments and
-admitted text results; crash classification follows recorded effect class, and a
-known crash failure materializes proposal-ordered tool closure before
-`TurnFailed`; and the proposal-ordered all-resolved boundary atomically projects
-results, consumes steering, and prepares the next model call. `current_time` is
-the first effect-free auto tool, with an injected clock and IANA conversion
-supplied by the focused `jiff` dependency.
-
-**Rejected alternatives.** Making each round a new turn would fragment one
-conversational outcome and misplace `TurnCompleted`. Process-local approvals or
-results would disappear across restart. Copying request/result content into
-semantic entries would create competing authorities. Concurrent execution now
-would weaken two simple database guards before evidence justified the extra
-state space. Auto-retrying effect-free crash loss would introduce retry policy
-instead of reporting the version-one known failure. Treating blanket, policy, or
-judge decisions as owner approval would violate INV-020.
-
-**Affects.** S02, S05, S06, S07, S10–S12, and S15; INV-004–INV-006,
-INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-036,
-and INV-037; the tool-loop page and linked sibling specifications;
-session-default command storage versions; domain/application spines;
-model/provider bridge, persistence, hubd composition, and offline proof tests.
 
 ## 2026-07-23 — Owner-curated work backlog under docs/agents
 

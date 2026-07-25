@@ -2499,7 +2499,8 @@ async fn load_tool_denial_correlations(
     }
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
-                approval.decision_source, approval.denial_reason
+                approval.decision_source, approval.denial_reason,
+                approval.owner_command_id
            FROM tool_approval_decision AS approval
           WHERE approval.request_id = ANY($1)",
     )
@@ -2509,9 +2510,8 @@ async fn load_tool_denial_correlations(
     if rows.len() != requests.len() {
         return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
     }
-    rows.into_iter()
-        .map(crate::tool_loop::decode_approval)
-        .collect::<Result<Vec<_>, _>>()
+    crate::tool_loop::decode_approvals(connection, rows)
+        .await
         .map_err(map_tool_evidence_error)
 }
 
@@ -3128,7 +3128,7 @@ async fn load_call_credential_reference(
     session: SessionId,
     call: ModelCallId,
 ) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
-    let reference = sqlx::query_scalar::<_, Option<String>>(
+    let reference = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM model_call
           WHERE session_id = $1
@@ -3138,10 +3138,7 @@ async fn load_call_credential_reference(
     .bind(call.into_uuid())
     .fetch_optional(&mut *connection)
     .await?
-    .ok_or(ModelCallCorruption::Missing("prepared model call"))?
-    .ok_or(ModelCallCorruption::Missing(
-        "model-call credential reference",
-    ))?;
+    .ok_or(ModelCallCorruption::Missing("prepared model call"))?;
     Ok(ModelCallCredentialReference::new(reference))
 }
 

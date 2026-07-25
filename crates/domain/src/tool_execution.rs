@@ -13,7 +13,7 @@ use crate::{
     ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
     ToolApprovalResolution, ToolAttemptEnd, ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind,
-    ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    ToolRequest, ToolRequestId, TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
 };
 
 /// Stored active phase for one complete logical tool batch.
@@ -85,6 +85,8 @@ impl ToolBatchReconstitutionInput {
 pub enum ToolBatchReconstitutionFailure {
     /// A producing call cannot yield an empty request batch.
     EmptyRequestBatch,
+    /// A producing call cannot exceed the per-response request bound.
+    TooManyRequests,
     /// A request belongs to a different session, turn, or producing call.
     RequestOwnershipMismatch,
     /// Request identity or ordinal is duplicated or noncontiguous.
@@ -271,11 +273,11 @@ impl ToolBatch {
             .iter()
             .find(|candidate| candidate.id() == request)
         else {
-            return Ok(PreparedToolBatchDecision::rejected(
-                self,
-                command.prepare_request_not_found(),
-                waiting_on,
-            ));
+            return Err(ToolBatchDecisionError {
+                batch: Box::new(self),
+                command,
+                failure: ToolBatchDecisionFailure::CommandCorrelationMismatch,
+            });
         };
         if self.approvals.contains_key(&request) {
             return Ok(PreparedToolBatchDecision::rejected(
@@ -575,10 +577,10 @@ impl ToolBatch {
     /// Builds the terminal result suffix for a batch blocked by one
     /// crash-lost physical attempt.
     ///
-    /// This is the failure counterpart to cancellation projection: completed
-    /// and denied requests retain their ordinary references, while the
-    /// crash-lost request and every not-yet-attempted request close without
-    /// fabricated executor evidence.
+    /// This is the failure counterpart to cancellation projection: completed,
+    /// known-failed, and denied requests retain their ordinary references,
+    /// while every not-yet-attempted request closes without fabricated
+    /// executor evidence.
     pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -652,17 +654,6 @@ impl ToolBatch {
                 }
                 Some(resolution) if resolution.is_approved() => {
                     match self.attempts.get(&request.id()) {
-                        Some(ReconstitutedToolAttempt::Ended(attempt))
-                            if matches!(
-                                attempt.end(),
-                                ToolAttemptEnd::KnownFailed { error }
-                                    if error.kind() == ToolExecutionErrorKind::CrashLost
-                            ) =>
-                        {
-                            SemanticTranscriptEntryPayload::ToolClosed {
-                                request: request.id(),
-                            }
-                        }
                         Some(ReconstitutedToolAttempt::Ended(attempt))
                             if attempt.end() != &ToolAttemptEnd::Ambiguous =>
                         {
@@ -1109,6 +1100,9 @@ fn reconstitute_batch(
             ToolBatchReconstitutionFailure::EmptyRequestBatch,
         ));
     }
+    if input.requests.len() > MAX_TOOL_REQUESTS_PER_RESPONSE {
+        return Err(fail(input, ToolBatchReconstitutionFailure::TooManyRequests));
+    }
     if input.yielded_snapshot.frontier().owning_session() != input.session {
         return Err(fail(
             input,
@@ -1402,23 +1396,15 @@ mod tests {
     }
 
     fn approval(request: ToolRequestId, decision: ToolApprovalDecision) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::new(
-            request,
-            decision,
-            ToolDecisionSource::OwnerCommand,
-        )
-        .reconstitute()
-        .expect("owner decisions are implemented")
+        ToolApprovalResolutionReconstitutionInput::owner_fixture(request, decision)
+            .reconstitute()
+            .expect("owner decisions are implemented")
     }
 
     fn automatic_approval(request: ToolRequestId) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::new(
-            request,
-            ToolApprovalDecision::Approve,
-            ToolDecisionSource::PolicyAuto,
-        )
-        .reconstitute()
-        .expect("automatic approval is implemented")
+        ToolApprovalResolutionReconstitutionInput::policy_auto(request)
+            .reconstitute()
+            .expect("automatic approval is implemented")
     }
 
     fn yielded_snapshot() -> ResolvedContextFrontierSnapshot {
@@ -1502,6 +1488,36 @@ mod tests {
         );
     }
 
+    /// S10 / INV-019: reconstitution enforces the same 32-request bound as
+    /// provider-response admission instead of granting authority to oversized
+    /// stored batches.
+    #[test]
+    fn s10_inv019_reconstitution_rejects_oversized_request_batch() {
+        let requests = (0..33)
+            .map(|ordinal| request(u128::from(ordinal) + 10, ordinal))
+            .collect();
+        let input = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            requests,
+            vec![],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+                request: tool_request_id(10),
+            },
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("stored batches above the response bound are rejected");
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::TooManyRequests
+        );
+    }
+
     /// S10 / INV-010 / INV-020: model-call completion may freeze automatic
     /// approval for a later request while an earlier confirmation still waits.
     #[test]
@@ -1571,6 +1587,32 @@ mod tests {
         );
     }
 
+    /// S10 / INV-012: one active batch cannot turn an existing request from a
+    /// different aggregate into an owner-global not-found result.
+    #[test]
+    fn s10_inv012_out_of_batch_decision_is_a_correlation_error() {
+        let command = DecideToolRequest::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(20)),
+            tool_request_id(99),
+            ToolApprovalDecision::Approve,
+        );
+        let error = awaiting_batch()
+            .prepare_owner_decision(command, None)
+            .expect_err("batch-local absence cannot establish global absence");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchDecisionFailure::CommandCorrelationMismatch
+        );
+        assert_eq!(error.command().request(), tool_request_id(99));
+        assert_eq!(
+            error.batch().phase(),
+            ToolBatchPhase::AwaitingApproval {
+                request: tool_request_id(10)
+            }
+        );
+    }
+
     /// S10 / INV-019 / INV-024: serialized execution prepares only the first
     /// approved request without terminal attempt evidence.
     #[test]
@@ -1620,7 +1662,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1660,7 +1703,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1698,7 +1742,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Prepared,
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let later = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(14),
             second.id(),
@@ -1714,7 +1759,8 @@ mod tests {
                 ),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1759,7 +1805,8 @@ mod tests {
                 ),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let ambiguous = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(14),
             second.id(),
@@ -1770,7 +1817,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1813,7 +1861,8 @@ mod tests {
                 error: crate::ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let approvals = vec![
             approval(first.id(), ToolApprovalDecision::Approve),
             approval(second.id(), ToolApprovalDecision::Approve),
@@ -1850,8 +1899,8 @@ mod tests {
             .expect("the blocked batch has a public failure projection");
         assert_eq!(
             failure_projection.entries()[0].payload(),
-            &SemanticTranscriptEntryPayload::ToolClosed {
-                request: tool_request_id(10),
+            &SemanticTranscriptEntryPayload::ToolExecutionResult {
+                attempt: tool_attempt_id(13),
             }
         );
         assert_eq!(
@@ -1876,7 +1925,8 @@ mod tests {
                 ),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let error = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1918,7 +1968,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(success),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),
@@ -1979,7 +2030,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             session_id(1),
             turn_id(2),

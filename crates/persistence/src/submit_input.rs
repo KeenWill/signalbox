@@ -56,7 +56,8 @@ use crate::{
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
-        load_active_batch_from_connection, load_recovery_batch_by_attempt, persist_ended_attempt,
+        load_active_batch_from_connection, load_recovery_batch_by_attempt,
+        load_terminal_result_attempts, persist_ended_attempt,
     },
 };
 
@@ -1636,17 +1637,22 @@ pub(crate) async fn load_scheduling_projection(
                         .await
                         .map_err(map_tool_loop_error)?
                         .ok_or(SubmitInputCorruption::Missing("active tool batch"))?;
-                        let wait = batch
+                        batch
                             .awaiting_approval()
                             .filter(|wait| wait.request().into_uuid() == request)
                             .ok_or(SubmitInputCorruption::Inconsistent(
                                 "tool approval wait evidence",
                             ))?;
+                        required_frontiers
+                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                         required_model_calls.insert(round_call);
                         ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
                             lifecycle_turn,
-                            wait,
+                            &batch,
                         )
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "tool approval batch evidence",
+                        ))?
                     }
                     Some("awaiting_tool_recovery")
                         if recovery_model_call.is_none() && approval_tool_request.is_none() =>
@@ -1813,55 +1819,64 @@ pub(crate) async fn load_scheduling_projection(
                                     required_model_calls.insert(call);
                                     ModelCallId::from_uuid(call)
                                 });
-                                Some(
-                                    match (
-                                        end_variant.as_deref(),
-                                        end_disposition.as_deref(),
-                                        ended_call,
-                                    ) {
-                                        (
-                                            Some("without_stop"),
-                                            Some("known_failure"),
-                                            Some(call),
-                                        ) => FailedTurnExecutionReconstitutionInput::with_call(
+                                let terminal_tool_attempts = if terminal_call.is_none() {
+                                    load_terminal_result_attempts(
+                                        connection,
+                                        lifecycle_session,
+                                        lifecycle_turn,
+                                        ContextFrontierId::from_uuid(terminal_frontier),
+                                    )
+                                    .await
+                                    .map_err(map_tool_loop_error)?
+                                } else {
+                                    Vec::new()
+                                };
+                                let execution = match (
+                                    end_variant.as_deref(),
+                                    end_disposition.as_deref(),
+                                    ended_call,
+                                ) {
+                                    (Some("without_stop"), Some("known_failure"), Some(call)) => {
+                                        FailedTurnExecutionReconstitutionInput::with_call(
                                             lifecycle_turn,
                                             stored_attempt_id,
                                             UnstoppedAttemptDisposition::KnownFailure,
                                             call,
-                                        ),
-                                        (Some("without_stop"), Some("known_failure"), None) => {
-                                            FailedTurnExecutionReconstitutionInput::attempt_only(
-                                                lifecycle_turn,
-                                                stored_attempt_id,
-                                                UnstoppedAttemptDisposition::KnownFailure,
-                                            )
-                                        }
-                                        (Some("without_stop"), Some("lost"), Some(call)) => {
-                                            FailedTurnExecutionReconstitutionInput::with_call(
-                                                lifecycle_turn,
-                                                stored_attempt_id,
-                                                UnstoppedAttemptDisposition::Lost,
-                                                call,
-                                            )
-                                        }
-                                        (Some("without_stop"), Some("lost"), None) => {
-                                            FailedTurnExecutionReconstitutionInput::attempt_only(
-                                                lifecycle_turn,
-                                                stored_attempt_id,
-                                                UnstoppedAttemptDisposition::Lost,
-                                            )
-                                        }
-                                        (
-                                            Some("after_cancellation"),
-                                            Some("known_failure"),
-                                            ended_call,
-                                        ) => {
-                                            let interrupt = require_applied_interrupt_from_attempt(
-                                                &row,
-                                                lifecycle_turn,
-                                                &recorded_commands,
-                                            )?;
-                                            match ended_call {
+                                        )
+                                    }
+                                    (Some("without_stop"), Some("known_failure"), None) => {
+                                        FailedTurnExecutionReconstitutionInput::attempt_only(
+                                            lifecycle_turn,
+                                            stored_attempt_id,
+                                            UnstoppedAttemptDisposition::KnownFailure,
+                                        )
+                                    }
+                                    (Some("without_stop"), Some("lost"), Some(call)) => {
+                                        FailedTurnExecutionReconstitutionInput::with_call(
+                                            lifecycle_turn,
+                                            stored_attempt_id,
+                                            UnstoppedAttemptDisposition::Lost,
+                                            call,
+                                        )
+                                    }
+                                    (Some("without_stop"), Some("lost"), None) => {
+                                        FailedTurnExecutionReconstitutionInput::attempt_only(
+                                            lifecycle_turn,
+                                            stored_attempt_id,
+                                            UnstoppedAttemptDisposition::Lost,
+                                        )
+                                    }
+                                    (
+                                        Some("after_cancellation"),
+                                        Some("known_failure"),
+                                        ended_call,
+                                    ) => {
+                                        let interrupt = require_applied_interrupt_from_attempt(
+                                            &row,
+                                            lifecycle_turn,
+                                            &recorded_commands,
+                                        )?;
+                                        match ended_call {
                                             Some(call) => FailedTurnExecutionReconstitutionInput::with_call_after_cancellation(
                                                 lifecycle_turn,
                                                 stored_attempt_id,
@@ -1876,14 +1891,14 @@ pub(crate) async fn load_scheduling_projection(
                                                 interrupt,
                                             ),
                                         }
-                                        }
-                                        (Some("after_cancellation"), Some("lost"), ended_call) => {
-                                            let interrupt = require_applied_interrupt_from_attempt(
-                                                &row,
-                                                lifecycle_turn,
-                                                &recorded_commands,
-                                            )?;
-                                            match ended_call {
+                                    }
+                                    (Some("after_cancellation"), Some("lost"), ended_call) => {
+                                        let interrupt = require_applied_interrupt_from_attempt(
+                                            &row,
+                                            lifecycle_turn,
+                                            &recorded_commands,
+                                        )?;
+                                        match ended_call {
                                             Some(call) => FailedTurnExecutionReconstitutionInput::with_call_after_cancellation(
                                                 lifecycle_turn,
                                                 stored_attempt_id,
@@ -1898,15 +1913,15 @@ pub(crate) async fn load_scheduling_projection(
                                                 interrupt,
                                             ),
                                         }
-                                        }
-                                        _ => {
-                                            return Err(SubmitInputCorruption::Inconsistent(
-                                                "failed terminal attempt disposition",
-                                            )
-                                            .into());
-                                        }
-                                    },
-                                )
+                                    }
+                                    _ => {
+                                        return Err(SubmitInputCorruption::Inconsistent(
+                                            "failed terminal attempt disposition",
+                                        )
+                                        .into());
+                                    }
+                                };
+                                Some(execution.with_terminal_tool_attempts(terminal_tool_attempts))
                             }
                             (None, Some(_)) => {
                                 return Err(SubmitInputCorruption::Inconsistent(
@@ -1954,6 +1969,18 @@ pub(crate) async fn load_scheduling_projection(
                         if let Some(call) = terminal_model_call {
                             required_model_calls.insert(call);
                         }
+                        let terminal_tool_attempts = if terminal_model_call.is_none() {
+                            load_terminal_result_attempts(
+                                connection,
+                                lifecycle_session,
+                                lifecycle_turn,
+                                ContextFrontierId::from_uuid(terminal_frontier),
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?
+                        } else {
+                            Vec::new()
+                        };
                         AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
                             starting_lineage,
                             starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
@@ -1966,7 +1993,8 @@ pub(crate) async fn load_scheduling_projection(
                                 ),
                                 ended_call,
                                 interrupt,
-                            ),
+                            )
+                            .with_terminal_tool_attempts(terminal_tool_attempts),
                             terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                         }
                     }
@@ -2090,7 +2118,7 @@ pub(crate) async fn load_scheduling_projection(
                                     starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
                                     reconciling_attempt: stored_attempt_id,
                                     reconciling_attempt_end,
-                                    ambiguous_tool,
+                                    tool_batch: batch,
                                     interrupt,
                                     terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                                 }

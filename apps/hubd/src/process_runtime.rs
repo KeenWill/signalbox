@@ -11,8 +11,9 @@ use std::{
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    InProcessEligibilityNudge, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    InProcessEligibilityNudge, InProcessToolDispatchGate, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, SubmitInputTransaction, UuidV7SessionIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, DeliveryRequest, DirectModelSelection,
@@ -29,20 +30,23 @@ use signalbox_persistence::{
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
-        ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
+        ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
+        ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessModelSelection,
         ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
-        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
+        ProcessSessionAncestry, ProcessTranscriptEntry, ProcessTranscriptItem,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CurrentModelCall, CurrentModelCallState, ErrorCode,
     ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-    FrameEncodeError, InputContent, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection as WireModelSelection, ReconciliationOperation, RejectionDetail, RequestId,
-    ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
-    TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_request_id,
+    FrameEncodeError, FrameValidationError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
+    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_FRAME_BYTES,
+    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+    TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments, decode_client_line,
+    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -70,6 +74,7 @@ const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 struct ConnectionServices {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
     updates: broadcast::Sender<ProcessUpdate>,
     inbound_frame_budget: Arc<Semaphore>,
@@ -83,6 +88,7 @@ pub struct ProcessRuntime {
     listener: LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
 }
 
@@ -92,12 +98,14 @@ impl ProcessRuntime {
         listener: LocalProcessListener,
         pool: PgPool,
         eligibility_nudge: InProcessEligibilityNudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
         model_configuration: HubModelConfiguration,
     ) -> Self {
         Self {
             listener,
             pool,
             eligibility_nudge,
+            tool_dispatch_gate,
             model_configuration,
         }
     }
@@ -110,6 +118,7 @@ impl ProcessRuntime {
             &self.listener,
             self.pool.clone(),
             self.eligibility_nudge,
+            self.tool_dispatch_gate,
             self.model_configuration,
             updates.clone(),
             shutdown.clone(),
@@ -160,6 +169,7 @@ async fn serve_connections(
     listener: &LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
     updates: broadcast::Sender<ProcessUpdate>,
     mut shutdown: watch::Receiver<bool>,
@@ -169,6 +179,7 @@ async fn serve_connections(
     let services = ConnectionServices {
         pool,
         eligibility_nudge,
+        tool_dispatch_gate,
         model_configuration: Arc::new(model_configuration),
         updates,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
@@ -262,6 +273,9 @@ async fn serve_connection(
             IncomingLine::Complete(line) => match decode_client_line(&line) {
                 Ok(frame) => frame,
                 Err(error) => {
+                    let admitted_version = line
+                        .strip_suffix(b"\n")
+                        .and_then(recover_bounded_client_protocol_version);
                     let code = match error.kind() {
                         FrameDecodeErrorKind::UnsupportedVersion => ErrorCode::UnsupportedVersion,
                         FrameDecodeErrorKind::OversizedFrame
@@ -269,6 +283,7 @@ async fn serve_connection(
                     };
                     write_error(
                         &mut writer,
+                        admitted_version.unwrap_or(ProtocolVersion::One),
                         error.request_id(),
                         ProtocolError::without_detail(code),
                     )
@@ -276,9 +291,13 @@ async fn serve_connection(
                     return Ok(());
                 }
             },
-            IncomingLine::Oversized(request_id) => {
+            IncomingLine::Oversized {
+                request_id,
+                admitted_version,
+            } => {
                 write_error(
                     &mut writer,
+                    admitted_version.unwrap_or(ProtocolVersion::One),
                     request_id,
                     ProtocolError::without_detail(ErrorCode::MalformedFrame),
                 )
@@ -287,10 +306,11 @@ async fn serve_connection(
             }
         };
         drop(frame_buffer_permit);
-        let (request_id, request) = frame.into_parts();
+        let (version, request_id, request) = frame.into_parts();
         let follows = matches!(request, ClientRequest::FollowSession { .. });
         handle_request(
             &mut writer,
+            version,
             request_id,
             request,
             &services,
@@ -356,6 +376,7 @@ fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
 
 async fn handle_request<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     request: ClientRequest,
     services: &ConnectionServices,
@@ -371,6 +392,7 @@ where
         } => {
             handle_create_session(
                 writer,
+                version,
                 request_id,
                 command_id.into_uuid(),
                 initial_model_selection,
@@ -387,7 +409,7 @@ where
             else {
                 return Ok(());
             };
-            handle_list_sessions(writer, request_id, &services.pool, snapshot_permit).await
+            handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
         }
         ClientRequest::SubmitInput {
             command_id,
@@ -397,6 +419,7 @@ where
         } => {
             handle_submit_input(
                 writer,
+                version,
                 request_id,
                 command_id.into_uuid(),
                 session_id,
@@ -404,6 +427,7 @@ where
                 expected_defaults_version,
                 &services.pool,
                 &services.eligibility_nudge,
+                &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
             )
             .await
@@ -419,6 +443,7 @@ where
             };
             handle_read_transcript(
                 writer,
+                version,
                 request_id,
                 session_id,
                 &services.pool,
@@ -437,6 +462,7 @@ where
             };
             handle_follow_session(
                 writer,
+                version,
                 request_id,
                 session_id,
                 &services.pool,
@@ -451,6 +477,7 @@ where
 
 async fn handle_create_session<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     command_id: uuid::Uuid,
     initial_model_selection: WireModelSelection,
@@ -466,6 +493,7 @@ where
     let Ok(request) = request else {
         return write_error(
             writer,
+            version,
             request_id,
             ProtocolError::without_detail(ErrorCode::InvalidRequest),
         )
@@ -479,6 +507,7 @@ where
         Ok(CreateSessionOutcome::Applied(result)) => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
@@ -489,6 +518,7 @@ where
         Ok(CreateSessionOutcome::ConflictingReuse { .. }) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
             )
@@ -497,6 +527,7 @@ where
         Err(CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_))) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::mutation_unavailable(false),
             )
@@ -505,6 +536,7 @@ where
         Err(CreateSessionError::Transaction(CreateSessionRepositoryError::CommitAmbiguous(_))) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::mutation_unavailable(true),
             )
@@ -519,6 +551,7 @@ where
         ) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::Internal),
             )
@@ -529,6 +562,7 @@ where
 
 async fn handle_list_sessions<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     pool: &PgPool,
     snapshot_permit: OwnedSemaphorePermit,
@@ -536,16 +570,20 @@ async fn handle_list_sessions<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let spool_result =
-        spool_session_summaries(ProcessReadRepository::new(pool.clone()), request_id).await;
+    let spool_result = spool_session_summaries(
+        ProcessReadRepository::new(pool.clone()),
+        version,
+        request_id,
+    )
+    .await;
     drop(snapshot_permit);
     let mut spool = match spool_result {
         Ok(spool) => spool,
         Err(SessionListSpoolError::Read(error)) => {
-            return write_process_read_error(writer, request_id, error).await;
+            return write_process_read_error(writer, version, request_id, error).await;
         }
         Err(SessionListSpoolError::Spool(error)) => {
-            return write_snapshot_spool_error(writer, request_id, error).await;
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
     write_spooled_file(writer, &mut spool.file).await
@@ -583,6 +621,7 @@ impl SnapshotSpoolError {
 
 async fn write_snapshot_spool_error<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     error: SnapshotSpoolError,
 ) -> Result<(), ProcessConnectionError>
@@ -594,8 +633,20 @@ where
             tracing::warn!(error = %error, "process snapshot spooling failed before response");
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
+        SnapshotSpoolError::Encode(FrameEncodeError::Validation(
+            FrameValidationError::MessageRequiresNewerVersion,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(3),
             )
             .await
         }
@@ -606,6 +657,7 @@ where
 
 async fn spool_session_summaries(
     repository: ProcessReadRepository,
+    version: ProtocolVersion,
     request_id: RequestId,
 ) -> Result<SessionListSpool, SessionListSpoolError> {
     let mut reader = repository
@@ -616,9 +668,14 @@ async fn spool_session_summaries(
         .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     let mut file = tokio::fs::File::from_std(standard_file);
-    write_spool_message(&mut file, request_id, ServerMessage::SessionsStart {})
-        .await
-        .map_err(SessionListSpoolError::Spool)?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::SessionsStart {},
+    )
+    .await
+    .map_err(SessionListSpoolError::Spool)?;
     while let Some(summary) = reader
         .next_summary()
         .await
@@ -626,6 +683,7 @@ async fn spool_session_summaries(
     {
         write_spool_message(
             &mut file,
+            version,
             request_id,
             ServerMessage::SessionSummary {
                 session_id: wire_uuid(summary.session().into_uuid()),
@@ -642,6 +700,7 @@ async fn spool_session_summaries(
         .map_err(SessionListSpoolError::Spool)?;
     write_spool_message(
         &mut file,
+        version,
         request_id,
         ServerMessage::SessionsEnd {
             session_count: CanonicalU64::new(session_count),
@@ -715,6 +774,7 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
 )]
 async fn handle_submit_input<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     command_id: uuid::Uuid,
     session_id: CanonicalUuid,
@@ -722,17 +782,34 @@ async fn handle_submit_input<Writer>(
     expected_defaults_version: CanonicalU64,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
+    tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
+    match selected_session_required_protocol_version(version, pool, session).await {
+        Ok(Some(required_version)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(required_version),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return write_process_read_error(writer, version, request_id, error).await;
+        }
+    }
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
         return write_error(
             writer,
+            version,
             request_id,
             ProtocolError::without_detail(ErrorCode::InvalidRequest),
         )
@@ -741,6 +818,7 @@ where
     let Ok(content) = admitted_user_content(content) else {
         return write_error(
             writer,
+            version,
             request_id,
             ProtocolError::without_detail(ErrorCode::InvalidRequest),
         )
@@ -760,6 +838,7 @@ where
     let Ok(request) = request else {
         return write_error(
             writer,
+            version,
             request_id,
             ProtocolError::without_detail(ErrorCode::InvalidRequest),
         )
@@ -772,7 +851,7 @@ where
             model_configuration,
         },
         eligibility_nudge.clone(),
-        signalbox_application::InProcessToolDispatchGate::default(),
+        tool_dispatch_gate.clone(),
     );
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
@@ -780,6 +859,7 @@ where
         ))) => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::InputSubmitted {
                     session_id,
@@ -793,6 +873,7 @@ where
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(rejected))) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::rejected(map_rejection(rejected)?),
             )
@@ -801,6 +882,7 @@ where
         Ok(SubmitInputOutcome::ConflictingReuse { .. }) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
             )
@@ -809,6 +891,7 @@ where
         Err(SubmitInputRepositoryError::Database(_)) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::mutation_unavailable(false),
             )
@@ -817,6 +900,7 @@ where
         Err(SubmitInputRepositoryError::CommitAmbiguous(_)) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::mutation_unavailable(true),
             )
@@ -829,6 +913,7 @@ where
             } => {
                 write_error(
                     writer,
+                    version,
                     request_id,
                     ProtocolError::mutation_unavailable(*commit_ambiguous),
                 )
@@ -837,6 +922,7 @@ where
             _ => {
                 write_error(
                     writer,
+                    version,
                     request_id,
                     ProtocolError::without_detail(ErrorCode::Internal),
                 )
@@ -853,6 +939,7 @@ where
         ) => {
             write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::Internal),
             )
@@ -869,8 +956,47 @@ fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {
     UserContent::try_text(content).map_err(|_| ())
 }
 
+async fn selected_session_required_protocol_version(
+    version: ProtocolVersion,
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<Option<u64>, ProcessReadError> {
+    if version == ProtocolVersion::Three {
+        return Ok(None);
+    }
+    let repository = ProcessReadRepository::new(pool.clone());
+    let has_tool_history = repository.session_has_tool_history(session).await?;
+    let ancestry = if version.as_u64() < IMPORTED_TRANSCRIPT_PROTOCOL_VERSION {
+        repository.session_ancestry(session).await?
+    } else {
+        None
+    };
+    Ok(required_protocol_version_for_selected_session(
+        version,
+        has_tool_history,
+        ancestry,
+    ))
+}
+
+fn required_protocol_version_for_selected_session(
+    version: ProtocolVersion,
+    has_tool_history: bool,
+    ancestry: Option<ProcessSessionAncestry>,
+) -> Option<u64> {
+    if has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
+        Some(ProtocolVersion::Three.as_u64())
+    } else if version == ProtocolVersion::One
+        && matches!(ancestry, Some(ProcessSessionAncestry::ImportedConversation))
+    {
+        Some(IMPORTED_TRANSCRIPT_PROTOCOL_VERSION)
+    } else {
+        None
+    }
+}
+
 async fn handle_read_transcript<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
@@ -879,9 +1005,26 @@ async fn handle_read_transcript<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let selected_session = SessionId::from_uuid(session_id.into_uuid());
+    match selected_session_required_protocol_version(version, pool, selected_session).await {
+        Ok(Some(required_version)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(required_version),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return write_process_read_error(writer, version, request_id, error).await;
+        }
+    }
     let spool_result = spool_transcript(
         ProcessReadRepository::new(pool.clone()),
-        SessionId::from_uuid(session_id.into_uuid()),
+        selected_session,
+        version,
         request_id,
     )
     .await;
@@ -891,23 +1034,29 @@ where
         Ok(None) => {
             return write_error(
                 writer,
+                version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::NotFound),
             )
             .await;
         }
         Err(TranscriptSpoolError::Read(error)) => {
-            return write_process_read_error(writer, request_id, error).await;
+            return write_process_read_error(writer, version, request_id, error).await;
         }
         Err(TranscriptSpoolError::Spool(error)) => {
-            return write_snapshot_spool_error(writer, request_id, error).await;
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
     write_spooled_transcript(writer, spool).await.map(|_| ())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the versioned follow stream keeps each protocol and runtime boundary explicit"
+)]
 async fn handle_follow_session<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
@@ -918,13 +1067,29 @@ async fn handle_follow_session<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let mut subscription = updates.subscribe();
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
+    match selected_session_required_protocol_version(version, pool, selected_session).await {
+        Ok(Some(required_version)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(required_version),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return write_process_read_error(writer, version, request_id, error).await;
+        }
+    }
+    let mut subscription = updates.subscribe();
     let snapshot_result = run_until_shutdown(
         &mut shutdown,
         spool_transcript(
             ProcessReadRepository::new(pool.clone()),
             selected_session,
+            version,
             request_id,
         ),
     )
@@ -940,6 +1105,7 @@ where
                 &mut shutdown,
                 write_error(
                     writer,
+                    version,
                     request_id,
                     ProtocolError::without_detail(ErrorCode::NotFound),
                 ),
@@ -950,13 +1116,13 @@ where
         Err(TranscriptSpoolError::Read(error)) => {
             return run_until_shutdown(
                 &mut shutdown,
-                write_process_read_error(writer, request_id, error),
+                write_process_read_error(writer, version, request_id, error),
             )
             .await
             .unwrap_or(Ok(()));
         }
         Err(TranscriptSpoolError::Spool(error)) => {
-            return write_snapshot_spool_error(writer, request_id, error).await;
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
         }
     };
     let Some(snapshot_write) =
@@ -978,6 +1144,7 @@ where
                     &mut shutdown,
                     write_error(
                         writer,
+                        version,
                         request_id,
                         ProtocolError::without_detail(ErrorCode::ResyncRequired),
                     ),
@@ -994,17 +1161,27 @@ where
         if update.session != selected_session {
             continue;
         }
+        let message = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(update.cursor),
+            session_id,
+            event: update.event.wire(),
+        };
+        if version.as_u64() < message.minimum_protocol_version() {
+            return run_until_shutdown(
+                &mut shutdown,
+                write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::unsupported_version(message.minimum_protocol_version()),
+                ),
+            )
+            .await
+            .unwrap_or(Ok(()));
+        }
         let Some(event_write) = run_until_shutdown(
             &mut shutdown,
-            write_message(
-                writer,
-                request_id,
-                ServerMessage::SessionEvent {
-                    cursor: CanonicalU64::new(update.cursor),
-                    session_id,
-                    event: update.event.wire(),
-                },
-            ),
+            write_message(writer, version, request_id, message),
         )
         .await
         else {
@@ -1027,6 +1204,7 @@ enum TranscriptSpoolError {
 async fn spool_transcript(
     repository: ProcessReadRepository,
     session: SessionId,
+    version: ProtocolVersion,
     request_id: RequestId,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
     let Some(mut reader) = repository
@@ -1044,6 +1222,7 @@ async fn spool_transcript(
     let cursor = CanonicalU64::new(reader.cursor());
     write_spool_message(
         &mut file,
+        version,
         request_id,
         ServerMessage::TranscriptSnapshotStart { session_id, cursor },
     )
@@ -1056,13 +1235,13 @@ async fn spool_transcript(
     {
         match item {
             ProcessTranscriptItem::Turn(turn) => {
-                write_transcript_turn(&mut file, request_id, &turn)
+                write_transcript_turn(&mut file, version, request_id, &turn)
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::Entry(entry) => {
-                write_transcript_entry(&mut file, request_id, &entry)
+                write_transcript_entry(&mut file, version, request_id, &entry)
                     .await
                     .map_err(SnapshotSpoolError::from_connection)
                     .map_err(TranscriptSpoolError::Spool)?;
@@ -1075,6 +1254,7 @@ async fn spool_transcript(
         .map_err(TranscriptSpoolError::Spool)?;
     write_spool_message(
         &mut file,
+        version,
         request_id,
         ServerMessage::TranscriptSnapshotEnd {
             session_id,
@@ -1135,6 +1315,7 @@ where
 
 async fn write_transcript_turn<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     turn: &ProcessTranscriptTurn,
 ) -> Result<(), ProcessConnectionError>
@@ -1143,6 +1324,7 @@ where
 {
     write_message(
         writer,
+        version,
         request_id,
         ServerMessage::TranscriptTurn {
             turn_id: wire_uuid(turn.turn().into_uuid()),
@@ -1155,6 +1337,7 @@ where
 
 async fn write_transcript_entry<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     entry: &ProcessTranscriptEntry,
 ) -> Result<(), ProcessConnectionError>
@@ -1172,6 +1355,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptTextEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1184,7 +1368,7 @@ where
                 },
             )
             .await?;
-            write_content(writer, request_id, *entry_index, content).await
+            write_content(writer, version, request_id, *entry_index, content).await
         }
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -1196,6 +1380,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptTextEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1208,7 +1393,7 @@ where
                 },
             )
             .await?;
-            write_content(writer, request_id, *entry_index, content).await
+            write_content(writer, version, request_id, *entry_index, content).await
         }
         ProcessTranscriptEntry::AssistantToolUse {
             entry_index,
@@ -1222,6 +1407,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1248,6 +1434,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1271,6 +1458,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1293,6 +1481,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1314,6 +1503,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1334,6 +1524,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1354,6 +1545,7 @@ where
         } => {
             write_message(
                 writer,
+                version,
                 request_id,
                 ServerMessage::TranscriptEntry {
                     entry_index: CanonicalU64::new(*entry_index),
@@ -1366,11 +1558,66 @@ where
             )
             .await
         }
+        ProcessTranscriptEntry::ImportedText {
+            entry_index,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptTextEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptTextEntry::Imported {
+                        imported_conversation_id: wire_uuid(imported_conversation.into_uuid()),
+                        imported_entry_id: wire_uuid(imported_entry.into_uuid()),
+                        source_speaker: wire_imported_source_speaker(*source_speaker),
+                    },
+                },
+            )
+            .await?;
+            write_content(writer, version, request_id, *entry_index, content).await
+        }
+        ProcessTranscriptEntry::Imported {
+            entry_index,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker,
+            content_kind,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::Imported {
+                        imported_conversation_id: wire_uuid(imported_conversation.into_uuid()),
+                        imported_entry_id: wire_uuid(imported_entry.into_uuid()),
+                        source_speaker: wire_imported_source_speaker(*source_speaker),
+                        content_kind: wire_imported_content_kind(*content_kind),
+                    },
+                },
+            )
+            .await
+        }
     }
 }
 
 async fn write_content<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     entry_index: u64,
     content: &str,
@@ -1384,6 +1631,7 @@ where
         let final_fragment = fragments.peek().is_none();
         write_message(
             writer,
+            version,
             request_id,
             ServerMessage::TranscriptContent {
                 entry_index: CanonicalU64::new(entry_index),
@@ -1467,6 +1715,37 @@ fn wire_model_selection(selection: ProcessModelSelection) -> WireModelSelection 
         ProcessModelSelection::Alias(alias) => WireModelSelection::Alias {
             alias_id: wire_uuid(alias.into_uuid()),
         },
+    }
+}
+
+const fn wire_imported_source_speaker(
+    source: ProcessImportedSourceSpeaker,
+) -> ImportedSourceSpeaker {
+    match source {
+        ProcessImportedSourceSpeaker::NotAttested => ImportedSourceSpeaker::NotAttested {},
+        ProcessImportedSourceSpeaker::AttestedAbsent => ImportedSourceSpeaker::AttestedAbsent {},
+        ProcessImportedSourceSpeaker::User => ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::User,
+        },
+        ProcessImportedSourceSpeaker::Assistant => ImportedSourceSpeaker::Attested {
+            speaker: ImportedSpeaker::Assistant,
+        },
+    }
+}
+
+const fn wire_imported_content_kind(kind: ProcessImportedContentKind) -> ImportedContentKind {
+    match kind {
+        ProcessImportedContentKind::SourceEvent => ImportedContentKind::SourceEvent,
+        ProcessImportedContentKind::SourceMessageBlock => ImportedContentKind::SourceMessageBlock,
+        ProcessImportedContentKind::Text => ImportedContentKind::Text,
+        ProcessImportedContentKind::ToolCall => ImportedContentKind::ToolCall,
+        ProcessImportedContentKind::ToolResult => ImportedContentKind::ToolResult,
+        ProcessImportedContentKind::Thinking => ImportedContentKind::Thinking,
+        ProcessImportedContentKind::RedactedThinking => ImportedContentKind::RedactedThinking,
+        ProcessImportedContentKind::Document => ImportedContentKind::Document,
+        ProcessImportedContentKind::MessageContentAbsent => {
+            ImportedContentKind::MessageContentAbsent
+        }
     }
 }
 
@@ -1572,27 +1851,26 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             terminal_frontier,
             terminal_attempt,
             operation,
-        } => TurnState::ReconciliationRequired {
-            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
-            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
-            operation: match operation {
-                ProcessReconciliationOperation::ModelCall(call) => {
-                    ReconciliationOperation::ModelCall {
-                        model_call_id: wire_uuid(call.into_uuid()),
-                    }
-                }
-                ProcessReconciliationOperation::ToolAttempt(attempt) => {
-                    ReconciliationOperation::ToolAttempt {
-                        tool_attempt_id: wire_uuid(attempt.into_uuid()),
-                    }
-                }
+        } => match operation {
+            ProcessReconciliationOperation::ModelCall(call) => TurnState::ReconciliationRequired {
+                terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+                terminal_model_call_id: wire_uuid(call.into_uuid()),
             },
+            ProcessReconciliationOperation::ToolAttempt(attempt) => {
+                TurnState::ToolReconciliationRequired {
+                    terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                    terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+                    terminal_tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                }
+            }
         },
     }
 }
 
 async fn write_process_read_error<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     error: ProcessReadError,
 ) -> Result<(), ProcessConnectionError>
@@ -1603,11 +1881,18 @@ where
         ProcessReadError::Database(_) => ErrorCode::Unavailable,
         ProcessReadError::Corruption(_) => ErrorCode::Internal,
     };
-    write_error(writer, request_id, ProtocolError::without_detail(code)).await
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(code),
+    )
+    .await
 }
 
 async fn write_error<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     error: ProtocolError,
 ) -> Result<(), ProcessConnectionError>
@@ -1616,6 +1901,7 @@ where
 {
     write_message(
         writer,
+        version,
         request_id,
         ServerMessage::Error {
             code: error.code,
@@ -1628,13 +1914,15 @@ where
 
 async fn write_message<Writer>(
     writer: &mut Writer,
+    version: ProtocolVersion,
     request_id: RequestId,
     message: ServerMessage,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let frame = ServerFrame::try_new(request_id, message).map_err(FrameEncodeError::Validation)?;
+    let frame = ServerFrame::try_new_for_version(version, request_id, message)
+        .map_err(FrameEncodeError::Validation)?;
     let encoded = encode_server_line(&frame)?;
     writer.write_all(&encoded).await?;
     Ok(())
@@ -1642,10 +1930,11 @@ where
 
 async fn write_spool_message(
     writer: &mut tokio::fs::File,
+    version: ProtocolVersion,
     request_id: RequestId,
     message: ServerMessage,
 ) -> Result<(), SnapshotSpoolError> {
-    let frame = ServerFrame::try_new(request_id, message)
+    let frame = ServerFrame::try_new_for_version(version, request_id, message)
         .map_err(FrameEncodeError::Validation)
         .map_err(SnapshotSpoolError::Encode)?;
     let encoded = encode_server_line(&frame).map_err(SnapshotSpoolError::Encode)?;
@@ -1657,7 +1946,10 @@ async fn write_spool_message(
 
 enum IncomingLine {
     Complete(Vec<u8>),
-    Oversized(RequestId),
+    Oversized {
+        request_id: RequestId,
+        admitted_version: Option<ProtocolVersion>,
+    },
 }
 
 async fn read_frame_line<Reader>(
@@ -1680,14 +1972,20 @@ where
             let consumed = newline + 1;
             let frame_len = line.len().saturating_add(consumed);
             if frame_len > MAX_FRAME_BYTES {
-                let request_id = if frame_len == MAX_FRAME_BYTES + 1 {
+                let (request_id, admitted_version) = if frame_len == MAX_FRAME_BYTES + 1 {
                     line.extend_from_slice(&available[..newline]);
-                    recover_bounded_client_request_id(&line)
+                    (
+                        recover_bounded_client_request_id(&line),
+                        recover_bounded_client_protocol_version(&line),
+                    )
                 } else {
-                    RequestId::uncorrelated()
+                    (RequestId::uncorrelated(), None)
                 };
                 reader.consume(consumed);
-                return Ok(Some(IncomingLine::Oversized(request_id)));
+                return Ok(Some(IncomingLine::Oversized {
+                    request_id,
+                    admitted_version,
+                }));
             }
             line.extend_from_slice(&available[..consumed]);
             reader.consume(consumed);
@@ -1696,7 +1994,10 @@ where
         if line.len().saturating_add(available.len()) > MAX_FRAME_BYTES {
             let consumed = available.len();
             reader.consume(consumed);
-            return Ok(Some(IncomingLine::Oversized(RequestId::uncorrelated())));
+            return Ok(Some(IncomingLine::Oversized {
+                request_id: RequestId::uncorrelated(),
+                admitted_version: None,
+            }));
         }
         line.extend_from_slice(available);
         let consumed = available.len();
@@ -1740,13 +2041,25 @@ struct ProtocolError {
 }
 
 impl ProtocolError {
+    const fn unsupported_version(required_version: u64) -> Self {
+        Self {
+            code: ErrorCode::UnsupportedVersion,
+            message: match required_version {
+                2 => "the selected session requires protocol version 2",
+                3 => "the selected session requires protocol version 3",
+                _ => "the protocol version is unsupported",
+            },
+            detail: ErrorDetail::none(),
+        }
+    }
+
     const fn without_detail(code: ErrorCode) -> Self {
         Self {
             code,
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported version: 1"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -2033,21 +2346,21 @@ impl ProcessUpdateEvent {
                 turn,
                 operation,
                 terminal_frontier,
-            } => SessionEvent::TurnReconciliationRequired {
-                turn_id: wire_uuid(turn.into_uuid()),
-                operation: match operation {
-                    DispatchedReconciliationOperation::ModelCall(call) => {
-                        ReconciliationOperation::ModelCall {
-                            model_call_id: wire_uuid(call.into_uuid()),
-                        }
+            } => match operation {
+                DispatchedReconciliationOperation::ModelCall(call) => {
+                    SessionEvent::TurnReconciliationRequired {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        model_call_id: wire_uuid(call.into_uuid()),
+                        terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
                     }
-                    DispatchedReconciliationOperation::ToolAttempt(attempt) => {
-                        ReconciliationOperation::ToolAttempt {
-                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
-                        }
+                }
+                DispatchedReconciliationOperation::ToolAttempt(attempt) => {
+                    SessionEvent::TurnToolReconciliationRequired {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
                     }
-                },
-                terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                }
             },
         }
     }
@@ -2201,13 +2514,14 @@ mod tests {
     use std::{error::Error, io, sync::Arc};
 
     use signalbox_domain::{
-        ContextFrontierId, ModelCallId, SemanticTranscriptEntryId, ToolAttemptId, TurnAttemptId,
-        TurnId,
+        ContextFrontierId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ReconciliationOperation, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, TurnState, decode_server_line, encode_server_line,
+        CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
+        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
+        ProtocolVersion, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry,
+        TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
@@ -2223,15 +2537,20 @@ mod tests {
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SnapshotSpoolError,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_snapshot_reader_permit, admitted_user_content, inspect_connection_completion,
-        read_frame_line, run_until_shutdown, snapshot_reader_capacity, wire_model_call_state,
-        wire_turn_state, write_content, write_snapshot_spool_error,
+        read_frame_line, required_protocol_version_for_selected_session, run_until_shutdown,
+        snapshot_reader_capacity, wire_model_call_state, wire_turn_state, write_content,
+        write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
             DispatchedReconciliationOperation, DispatchedToolBatchState,
         },
-        process_read::{ProcessReconciliationOperation, ProcessTurnState},
+        process_read::{
+            ProcessImportedContentKind, ProcessImportedSourceSpeaker,
+            ProcessReconciliationOperation, ProcessSessionAncestry, ProcessTranscriptEntry,
+            ProcessTurnState,
+        },
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
@@ -2244,6 +2563,55 @@ mod tests {
         assert_eq!(
             ProtocolError::mutation_unavailable(true).code,
             ErrorCode::CommitAmbiguous
+        );
+        assert!(
+            ProtocolError::unsupported_version(2)
+                .message
+                .contains("version 2")
+        );
+        assert!(
+            ProtocolError::unsupported_version(3)
+                .message
+                .contains("version 3")
+        );
+    }
+
+    #[test]
+    fn legacy_session_compatibility_requires_the_first_representable_version() {
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::One,
+                false,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            Some(2)
+        );
+        for version in [ProtocolVersion::One, ProtocolVersion::Two] {
+            assert_eq!(
+                required_protocol_version_for_selected_session(
+                    version,
+                    true,
+                    Some(ProcessSessionAncestry::OwnerInitiated),
+                ),
+                Some(3),
+                "tool history takes precedence over retained-version ancestry"
+            );
+        }
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Three,
+                true,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Two,
+                false,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
         );
     }
 
@@ -2269,7 +2637,10 @@ mod tests {
         let mut oversized_reader = BufReader::new(oversized.as_slice());
         assert!(matches!(
             read_frame_line(&mut oversized_reader).await?,
-            Some(IncomingLine::Oversized(request_id)) if request_id.value() == 0
+            Some(IncomingLine::Oversized {
+                request_id,
+                admitted_version: None,
+            }) if request_id.value() == 0
         ));
 
         let request_members = r#""request_id":"9""#;
@@ -2284,7 +2655,10 @@ mod tests {
         let mut correlated_reader = BufReader::new(correlated.as_slice());
         assert!(matches!(
             read_frame_line(&mut correlated_reader).await?,
-            Some(IncomingLine::Oversized(request_id)) if request_id.value() == 9
+            Some(IncomingLine::Oversized {
+                request_id,
+                admitted_version: Some(ProtocolVersion::One),
+            }) if request_id.value() == 9
         ));
         Ok(())
     }
@@ -2498,6 +2872,7 @@ mod tests {
 
         write_snapshot_spool_error(
             &mut writer,
+            ProtocolVersion::One,
             request_id,
             SnapshotSpoolError::Io(io::Error::other("fixture spool write")),
         )
@@ -2547,7 +2922,7 @@ mod tests {
             "a".repeat(MAX_CONTENT_FRAGMENT_BYTES - 1)
         );
         let (mut writer, mut reader) = duplex(MAX_FRAME_BYTES * 2);
-        write_content(&mut writer, request_id, 3, &text).await?;
+        write_content(&mut writer, ProtocolVersion::One, request_id, 3, &text).await?;
         drop(writer);
         let mut encoded = Vec::new();
         reader.read_to_end(&mut encoded).await?;
@@ -2579,7 +2954,7 @@ mod tests {
         assert_eq!(reconstructed, text);
 
         let (mut writer, mut reader) = duplex(1_024);
-        write_content(&mut writer, request_id, 0, "").await?;
+        write_content(&mut writer, ProtocolVersion::One, request_id, 0, "").await?;
         drop(writer);
         let mut encoded = Vec::new();
         reader.read_to_end(&mut encoded).await?;
@@ -2593,6 +2968,103 @@ mod tests {
                 ..
             } if fragment_index.value() == 0 && content_fragment.as_str().is_empty()
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn s28_imported_entries_map_only_to_version_two_conservative_shapes()
+    -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(11)?;
+        let source_session = SessionId::from_uuid(Uuid::from_u128(1));
+        let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(2));
+        let imported_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(3));
+        let semantic_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(4));
+        let (mut writer, mut reader) = duplex(4_096);
+
+        write_transcript_entry(
+            &mut writer,
+            ProtocolVersion::Two,
+            request_id,
+            &ProcessTranscriptEntry::ImportedText {
+                entry_index: 0,
+                source_session,
+                entry: semantic_entry,
+                imported_conversation: conversation,
+                imported_entry,
+                source_speaker: ProcessImportedSourceSpeaker::User,
+                content: String::from("source-attested"),
+            },
+        )
+        .await?;
+        write_transcript_entry(
+            &mut writer,
+            ProtocolVersion::Two,
+            request_id,
+            &ProcessTranscriptEntry::Imported {
+                entry_index: 1,
+                source_session,
+                entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(5)),
+                imported_conversation: conversation,
+                imported_entry: ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(6)),
+                source_speaker: ProcessImportedSourceSpeaker::NotAttested,
+                content_kind: ProcessImportedContentKind::ToolResult,
+            },
+        )
+        .await?;
+        drop(writer);
+
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let mut lines = encoded.split_inclusive(|byte| *byte == b'\n');
+        let text = decode_server_line(
+            lines
+                .next()
+                .ok_or_else(|| io::Error::other("missing imported text metadata"))?,
+        )?;
+        assert!(matches!(
+            text.message(),
+            ServerMessage::TranscriptTextEntry {
+                entry: TranscriptTextEntry::Imported {
+                    imported_conversation_id,
+                    imported_entry_id,
+                    source_speaker: ImportedSourceSpeaker::Attested {
+                        speaker: ImportedSpeaker::User,
+                    },
+                },
+                ..
+            } if imported_conversation_id.into_uuid() == conversation.into_uuid()
+                && imported_entry_id.into_uuid() == imported_entry.into_uuid()
+        ));
+        assert!(matches!(
+            decode_server_line(
+                lines
+                    .next()
+                    .ok_or_else(|| io::Error::other("missing imported text content"))?
+            )?
+            .message(),
+            ServerMessage::TranscriptContent {
+                final_fragment: true,
+                content_fragment,
+                ..
+            } if content_fragment.as_str() == "source-attested"
+        ));
+        assert!(matches!(
+            decode_server_line(
+                lines
+                    .next()
+                    .ok_or_else(|| io::Error::other("missing conservative imported entry"))?
+            )?
+            .message(),
+            ServerMessage::TranscriptEntry {
+                entry: TranscriptEntry::Imported {
+                    source_speaker: ImportedSourceSpeaker::NotAttested {},
+                    content_kind: ImportedContentKind::ToolResult,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(lines.next().is_none());
         Ok(())
     }
 
@@ -2673,9 +3145,7 @@ mod tests {
             TurnState::ReconciliationRequired {
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
                 terminal_attempt_id: CanonicalUuid::from_uuid(attempt.into_uuid()),
-                operation: ReconciliationOperation::ModelCall {
-                    model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
-                },
+                terminal_model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
             }
         );
 
@@ -2702,9 +3172,7 @@ mod tests {
             reconciliation.wire(),
             SessionEvent::TurnReconciliationRequired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
-                operation: ReconciliationOperation::ModelCall {
-                    model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
-                },
+                model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
             }
         );

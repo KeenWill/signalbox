@@ -247,11 +247,14 @@ impl ToolLoopFixture {
             PostgresToolLoopRepository::new(self.pool.clone()),
         );
         let prepared = service
-            .execute(DecideToolRequest::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(DECISION_COMMAND_ID)),
-                request,
-                decision,
-            ))
+            .execute(
+                DecideToolRequest::try_new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(DECISION_COMMAND_ID)),
+                    request,
+                    decision,
+                )
+                .expect("fixture decision reason is admitted"),
+            )
             .await?;
         assert!(
             matches!(prepared.result(), DecideToolRequestResult::Applied(_)),
@@ -276,6 +279,80 @@ impl ToolLoopFixture {
         .await
         .map_err(|_| std::io::Error::other("tool requests were not durably parked"))?
         .map_err(Into::into)
+    }
+
+    async fn submit_new_turn(
+        &self,
+        command: u128,
+        content: &str,
+    ) -> Result<TurnId, Box<dyn Error>> {
+        let sweep = PostgresEligibilitySweep::new(self.pool.clone());
+        let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let mut submit = SubmitInputService::new(
+            UuidV7SubmitInputIdGenerator,
+            SubmitInputRepository::new(self.pool.clone()),
+            nudge,
+            self.tool_dispatch_gate.clone(),
+        );
+        let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(origin),
+        )) = submit
+            .execute(SubmitInputRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::from_u128(command)),
+                self.session,
+                UserContent::try_text(content.to_owned())
+                    .expect("follow-up fixture content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: default_configuration(),
+                },
+            )?)
+            .await?
+        else {
+            panic!("terminal tool history must admit a new queued turn")
+        };
+        Ok(origin.turn())
+    }
+
+    async fn activate_and_complete_turn(
+        &self,
+        expected_turn: TurnId,
+        response: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut start = StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(self.pool.clone()),
+        );
+        let StartEligibleTurnOutcome::Activated(activated) = start.execute(self.session).await?
+        else {
+            panic!("the expected queued follow-up turn must activate")
+        };
+        assert_eq!(activated.turn(), expected_turn);
+
+        let (execution, runtime) = self.execution(
+            [completion_script(response)],
+            catalog(std::iter::empty::<CompiledTool>()),
+            RecordingExecutor::completing(),
+        );
+        execution.execute(activated).await?;
+        assert_eq!(
+            runtime.received_operations().len(),
+            1,
+            "the activated follow-up must run exactly one model call"
+        );
+        let terminal_shape: (String, i64) = sqlx::query_as(
+            "SELECT terminal_disposition_kind,
+                    (SELECT count(*) FROM model_call
+                      WHERE session_id = $1 AND turn_id = $2)
+               FROM turn_lifecycle
+              WHERE session_id = $1
+                AND turn_id = $2",
+        )
+        .bind(self.session.into_uuid())
+        .bind(expected_turn.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        assert_eq!(terminal_shape, (String::from("completed"), 1));
+        Ok(())
     }
 
     async fn transcript_kinds(&self) -> Result<Vec<String>, sqlx::Error> {
@@ -779,11 +856,12 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
 
 /// S10 / INV-019 / INV-020 / INV-027 / INV-029 / INV-037: deny-and-end first
 /// records the exact denial, then the ordinary proof-bearing interrupt closes
-/// the active turn; no tool attempt is created and the stop remains
-/// independently auditable.
+/// the active turn; no tool attempt is created, the stop remains independently
+/// auditable, and a later submit survives reconstitution before its new turn
+/// activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_turn()
+async fn s10_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_later_turn()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
@@ -873,6 +951,16 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
         ],
         "the denial result must precede the independently authorized cancellation marker"
     );
+
+    let later_turn = fixture
+        .submit_new_turn(0x3312, "work after cancelled tool round")
+        .await?;
+    fixture
+        .activate_and_complete_turn(origin.turn(), "interrupt successor completed")
+        .await?;
+    fixture
+        .activate_and_complete_turn(later_turn, "post-cancellation submit completed")
+        .await?;
     Ok(())
 }
 
@@ -1115,10 +1203,11 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 
 /// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
 /// never retries it; startup idempotently classifies it `known_failed` with
-/// `crash_lost` evidence, closes the request, and then fails the turn honestly.
+/// `crash_lost` evidence, closes the request, fails the turn honestly, and
+/// admits a later submit whose new turn activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retry()
+async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
@@ -1185,10 +1274,17 @@ async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retr
         vec![
             "origin_accepted_input",
             "assistant_tool_use",
-            "tool_closed_by_turn_end",
+            "tool_execution_result",
             "turn_failed",
         ]
     );
+
+    let later_turn = fixture
+        .submit_new_turn(0x3412, "work after failed tool round")
+        .await?;
+    fixture
+        .activate_and_complete_turn(later_turn, "post-failure submit completed")
+        .await?;
     Ok(())
 }
 

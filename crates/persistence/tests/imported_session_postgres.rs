@@ -195,7 +195,7 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
     .await?;
 
     let command = imported_command(0x301, &conversation, ImportedSessionRelationship::Resume);
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool.clone());
     let mut next_semantic = 0x610_u128;
     let first = repository
         .handle(
@@ -267,7 +267,7 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
             DangerousToolAutoApproval::ApproveAll,
         ),
     );
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool.clone());
     let mut next_semantic = 0x620_u128;
     let created = repository
         .handle(
@@ -293,6 +293,17 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
     assert_eq!(recorded.applied_result(), applied);
     assert_eq!(recorded.semantic_entries().len(), 2);
     assert_eq!(recorded.seed_snapshot().entry_count(), 2);
+    let versions: (i16, i16) = sqlx::query_as(
+        "SELECT registry.storage_version, typed.storage_version
+           FROM durable_command AS registry
+           JOIN create_session_from_imported_frontier_command AS typed
+             ON typed.command_id = registry.command_id
+          WHERE registry.command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x302))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(versions, (2, 2));
     Ok(())
 }
 

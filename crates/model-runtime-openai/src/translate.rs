@@ -328,20 +328,13 @@ fn wire_messages(
     let mut pending_text: Option<String> = None;
     let mut pending_tool_calls: Vec<WireRequestToolCall> = Vec::new();
     let mut user_text_seen = false;
-    let mut previous_part_was_text = false;
     for part in &message.parts {
         match part {
             MessagePart::Text(text) => {
                 match &mut pending_text {
-                    Some(pending) => {
-                        if !previous_part_was_text {
-                            pending.push('\n');
-                        }
-                        pending.push_str(text);
-                    }
+                    Some(pending) => pending.push_str(text),
                     None => pending_text = Some(text.clone()),
                 }
-                previous_part_was_text = true;
                 if role == "user" {
                     user_text_seen = true;
                 }
@@ -382,7 +375,6 @@ fn wire_messages(
                         arguments: proposal.arguments_json.clone(),
                     },
                 });
-                previous_part_was_text = false;
             }
             MessagePart::ToolResult(result) => {
                 if role != "user" {
@@ -405,7 +397,6 @@ fn wire_messages(
                     tool_calls: None,
                     tool_call_id: Some(result.tool_call_id.as_str().to_string()),
                 });
-                previous_part_was_text = false;
             }
             // Chat Completions has no representation for replayed reasoning;
             // dropping caller-stated history silently would misstate the
@@ -1019,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn text_segments_separated_by_a_tool_call_gain_a_legible_boundary() {
+    fn text_segments_separated_by_a_tool_call_preserve_exact_content() {
         let mut operation = operation("call-separated-text");
         operation.messages = vec![
             ConversationMessage {
@@ -1047,7 +1038,7 @@ mod tests {
         let request = build_request(&operation).expect("grouped tool history remains replayable");
         assert_eq!(
             request.messages[0].content.as_deref(),
-            Some("before the call\nafter the call")
+            Some("before the callafter the call")
         );
     }
 

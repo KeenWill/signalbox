@@ -52,9 +52,9 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
     ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorKind, ToolName, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
+    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -112,6 +112,15 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 fn model_credential_reference() -> ModelCallCredentialReference {
     ModelCallCredentialReference::new("fixture-provider-primary")
+}
+
+fn decide_tool_request(
+    command_id: DurableCommandId,
+    request: signalbox_domain::ToolRequestId,
+    decision: ToolApprovalDecision,
+) -> DecideToolRequest {
+    DecideToolRequest::try_new(command_id, request, decision)
+        .expect("fixture command identities are admitted")
 }
 
 static TEST_SUBMIT_ID: AtomicU64 = AtomicU64::new(1);
@@ -959,22 +968,22 @@ impl ModelCallExecutionIdGenerator for FixedModelCallExecutionIds {
             .expect("context-frontier identity fixture")
     }
 
-    fn next_turn_id(&mut self) -> TurnId {
-        self.turns
-            .pop_front()
-            .expect("successor-turn identity fixture")
-    }
-
-    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId {
+    fn next_tool_request_id(&mut self) -> ToolRequestId {
         self.tool_requests
             .pop_front()
             .expect("tool-request identity fixture")
     }
 
-    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
         self.tool_attempts
             .pop_front()
             .expect("tool-attempt identity fixture")
+    }
+
+    fn next_turn_id(&mut self) -> TurnId {
+        self.turns
+            .pop_front()
+            .expect("successor-turn identity fixture")
     }
 }
 
@@ -1224,32 +1233,74 @@ async fn checkpoint_confirmed_tool_round(
     ),
     Box<dyn Error>,
 > {
+    let (fixture, repository, observation, requests) =
+        checkpoint_confirmed_tool_batch(pool, seed, &[(tool_name, arguments)]).await?;
+    let [request] = requests.as_slice() else {
+        panic!("the single-proposal fixture returns one request")
+    };
+    Ok((fixture, repository, observation, *request))
+}
+
+async fn checkpoint_confirmed_tool_batch(
+    pool: &PgPool,
+    seed: u128,
+    proposals: &[(&str, &str)],
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
     let (fixture, model_repository, authorized) =
         authorize_checkpointed_model_call(pool, seed).await?;
-    let request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 20));
-    let response =
-        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
-            ToolCallProposal::new(
-                ToolName::try_new(String::from(tool_name)).expect("valid fixture tool name"),
-                NormalizedToolArguments::try_from_provider_text(String::from(arguments))
-                    .expect("bounded fixture arguments"),
-            ),
-        )])
-        .expect("one proposal is a tool-using response");
+    let requests = proposals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
+                seed + 0x40 + u128::try_from(index).expect("the bounded batch index fits u128"),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        proposals
+            .iter()
+            .map(|(tool_name, arguments)| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(String::from(*tool_name)).expect("valid fixture tool name"),
+                    NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
+                        .expect("bounded fixture arguments"),
+                ))
+            })
+            .collect(),
+    )
+    .expect("the proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let identities = requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            ToolResponsePartIdentity::tool_call(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x80 + u128::try_from(index).expect("the bounded batch index fits u128"),
+                )),
+                *request,
+                InitialToolApproval::Confirm,
+            )
+        })
+        .collect();
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
             observation.clone(),
             ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
-                vec![ToolResponsePartIdentity::tool_call(
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
-                    request,
-                    InitialToolApproval::Confirm,
-                )],
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 21)),
+                identities,
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xc0)),
                 None,
             )),
             |_| panic!("the fixture has no pending steering to reclassify"),
@@ -1261,10 +1312,10 @@ async fn checkpoint_confirmed_tool_round(
             if matches!(
                 round.next_phase(),
                 ActiveTurnPhase::AwaitingApproval { request: waiting }
-                    if *waiting == request
+                    if Some(waiting) == requests.first()
             )
     ));
-    Ok((fixture, model_repository, observation, request))
+    Ok((fixture, model_repository, observation, requests))
 }
 
 /// S10 / INV-005: stored tool arguments use the same exact canonical JSON or
@@ -1302,10 +1353,27 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
     .await?;
     assert_eq!(stored_deep, (String::from("json"), deep));
 
+    let escaped_nul = r#"{"x":"\u0000"}"#;
+    let (_, _, _, escaped_nul_request) =
+        checkpoint_confirmed_tool_round(&pool, seed + 0x2000, "current_time", escaped_nul).await?;
+    let stored_escaped_nul: (String, String) = sqlx::query_as(
+        "SELECT arguments_kind, arguments_text
+           FROM tool_request
+          WHERE request_id = $1",
+    )
+    .bind(escaped_nul_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_escaped_nul,
+        (String::from("json"), String::from(escaped_nul))
+    );
+
     for (offset, kind, text) in [
         (0_u128, "json", "{broken"),
         (1, "json", r#"{"b":2,"a":1}"#),
         (2, "undecodable", "{}"),
+        (3, "undecodable", r#"{ "a": 1 }"#),
     ] {
         let error = sqlx::query(
             "INSERT INTO tool_request
@@ -1330,6 +1398,65 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
             Some("tool_request_arguments_representation")
         );
     }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10: owner-decision receipts for one batch reconstitute from one identity-set
+/// load instead of one query per approval row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_owner_decision_receipts_batch_reconstitute() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x73a0;
+    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+        &pool,
+        seed,
+        &[
+            ("first-dangerous-tool", "{}"),
+            ("second-dangerous-tool", "{}"),
+        ],
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    for (index, request) in requests.iter().enumerate() {
+        let offset = u128::try_from(index)?;
+        repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0 + offset)),
+                    *request,
+                    ToolApprovalDecision::Deny { reason: None },
+                ),
+                || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0 + offset)),
+            )
+            .await?;
+    }
+
+    let reconstituted = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the fully denied batch remains available for result projection");
+    for request in requests {
+        let approval = reconstituted
+            .approval(request)
+            .expect("each owner decision reconstitutes");
+        assert!(matches!(
+            approval.decision(),
+            ToolApprovalDecision::Deny { .. }
+        ));
+        assert_eq!(
+            approval.source(),
+            signalbox_domain::ToolDecisionSource::OwnerCommand
+        );
+    }
+    assert!(
+        ProcessReadRepository::new(pool.clone())
+            .session_has_tool_history(fixture.session)
+            .await?
+    );
 
     pool.close().await;
     drop(container);
@@ -1436,7 +1563,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
 
     let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 24));
-    let approve = DecideToolRequest::new(command_id, request, ToolApprovalDecision::Approve);
+    let approve = decide_tool_request(command_id, request, ToolApprovalDecision::Approve);
     let decision = tool_repository
         .decide(approve.clone(), || continuation_attempt)
         .await?;
@@ -1465,7 +1592,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     assert!(matches!(
         tool_repository
             .decide(
-                DecideToolRequest::new(
+                decide_tool_request(
                     command_id,
                     request,
                     ToolApprovalDecision::Deny { reason: None },
@@ -1706,6 +1833,10 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             .and_then(|error| error.code()),
         Some("23505".into())
     );
+    assert!(matches!(
+        ToolLoopRepositoryError::from(duplicate_result_error),
+        ToolLoopRepositoryError::Corruption(_)
+    ));
 
     let mut missing_current_result = pool.begin().await?;
     sqlx::query(
@@ -1793,7 +1924,7 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     let tool_repository = PostgresToolLoopRepository::new(pool.clone());
     tool_repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 23)),
                 request,
                 ToolApprovalDecision::Approve,
@@ -1848,17 +1979,17 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
            FROM semantic_transcript_entry AS entry
           WHERE entry.source_session_id = $1
             AND (
-                entry.tool_result_request_id = $2
+                entry.tool_result_attempt_id = $2
                 OR entry.cancelled_turn_id = $3
             )",
     )
     .bind(fixture.session.into_uuid())
-    .bind(request.into_uuid())
+    .bind(tool_attempt.into_uuid())
     .bind(fixture.turn.into_uuid())
     .fetch_all(&pool)
     .await?;
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|row| row == "tool_closed_by_turn_end"));
+    assert!(rows.iter().any(|row| row == "tool_execution_result"));
     assert!(rows.iter().any(|row| row == "turn_cancelled"));
     let attempt_end: (String, String) = sqlx::query_as(
         "SELECT terminal_disposition_kind, error_kind
@@ -1938,6 +2069,29 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         "tool-batch cancellation must remain deliverable after its producing call"
     );
 
+    let follow_up = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 40,
+                seed + 1,
+                "work after cancelled tool round",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 42))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            follow_up,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "writer-produced cancelled tool history must reconstitute before the next submit"
+    );
+
     pool.close().await;
     drop(container);
     Ok(())
@@ -1958,7 +2112,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
                 request,
                 ToolApprovalDecision::Approve,
@@ -2214,7 +2368,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let denied_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(deny_seed + 23));
     let denial = repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(deny_seed + 24)),
                 denied_request,
                 ToolApprovalDecision::Deny { reason: None },
@@ -2233,7 +2387,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     assert!(matches!(
         repository
             .decide(
-                DecideToolRequest::new(
+                decide_tool_request(
                     DurableCommandId::from_uuid(Uuid::from_u128(deny_seed + 25)),
                     denied_request,
                     ToolApprovalDecision::Approve,
@@ -2278,7 +2432,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let schema_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(schema_seed + 23));
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(schema_seed + 24)),
                 schema_request,
                 ToolApprovalDecision::Approve,
@@ -2328,6 +2482,18 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ToolAttemptEnd::KnownFailed { error }
             if error.kind() == ToolExecutionErrorKind::InvalidArguments
     ));
+    let issuing_attempt_state: String = sqlx::query_scalar(
+        "SELECT state_kind
+           FROM turn_attempt
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(schema_continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        issuing_attempt_state, "running",
+        "preflight terminal evidence makes the result projection continuation-eligible"
+    );
     let mut completed_attempt_recovery_ids = FixedStartupScanIds::new([], []);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
@@ -2343,6 +2509,19 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         StartupScanSessionOutcome::ResumableToolBatch { turn }
             if turn == schema_fixture.turn
     ));
+    let mut recovery_sweep = PostgresEligibilitySweep::new(pool.clone());
+    let mut recovery_sessions = Vec::new();
+    loop {
+        let (page, continuation) = recovery_sweep.find_sessions().await?.into_parts();
+        recovery_sessions.extend(page);
+        if !continuation {
+            break;
+        }
+    }
+    assert!(
+        recovery_sessions.contains(&schema_fixture.session),
+        "the durable sweep must reschedule a resumable active tool batch"
+    );
     let schema_batch = repository
         .load_active_batch(schema_fixture.session, schema_fixture.turn)
         .await?
@@ -2362,7 +2541,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let crash_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(crash_seed + 23));
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(crash_seed + 24)),
                 crash_request,
                 ToolApprovalDecision::Approve,
@@ -2478,7 +2657,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         checkpoint_confirmed_tool_round(&pool, effect_free_seed, "current_time", "{}").await?;
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(effect_free_seed + 24)),
                 effect_free_request,
                 ToolApprovalDecision::Approve,
@@ -2590,7 +2769,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         [
             "origin_accepted_input",
             "assistant_tool_use",
-            "tool_closed_by_turn_end",
+            "tool_execution_result",
             "turn_failed",
         ]
     );
@@ -2638,8 +2817,11 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         .expect("known tool-crash failure remains process-readable");
     assert!(effect_free_snapshot.entries().iter().any(|entry| matches!(
         entry,
-        ProcessTranscriptEntry::ToolClosed { request, .. }
-            if *request == effect_free_request
+        ProcessTranscriptEntry::ToolExecutionResult {
+            request,
+            attempt,
+            ..
+        } if *request == effect_free_request && *attempt == effect_free_attempt
     )));
     let mut failure_dispatched = false;
     drain_outbox(&pool, |event| {
@@ -2655,6 +2837,29 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     assert!(
         failure_dispatched,
         "known tool-crash failure must not be rejected for earlier call history"
+    );
+
+    let follow_up = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                effect_free_seed + 40,
+                effect_free_seed + 1,
+                "work after failed tool round",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(effect_free_seed + 41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(effect_free_seed + 42))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            follow_up,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "writer-produced failed tool history must reconstitute before the next submit"
     );
 
     pool.close().await;
@@ -2677,11 +2882,11 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x7b00));
     let repository = PostgresToolLoopRepository::new(pool.clone());
     let first_decision = repository.decide(
-        DecideToolRequest::new(command_id, first_request, ToolApprovalDecision::Approve),
+        decide_tool_request(command_id, first_request, ToolApprovalDecision::Approve),
         || TurnAttemptId::from_uuid(Uuid::from_u128(first_seed + 23)),
     );
     let second_decision = repository.decide(
-        DecideToolRequest::new(command_id, second_request, ToolApprovalDecision::Approve),
+        decide_tool_request(command_id, second_request, ToolApprovalDecision::Approve),
         || TurnAttemptId::from_uuid(Uuid::from_u128(second_seed + 23)),
     );
     let (first_result, second_result) = tokio::join!(first_decision, second_decision);
@@ -2804,7 +3009,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
 
     let rejection = PostgresToolLoopRepository::new(pool.clone())
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 31)),
                 first_request,
                 ToolApprovalDecision::Approve,
@@ -2983,15 +3188,12 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-014: the forward-only nullable credential-reference column remains
-/// compatible with historical rows, while a reference pinned on a new model
-/// call cannot be replaced or cleared.
+/// INV-014: the credential-reference column is total; the migrated schema
+/// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
--> Result<(), Box<dyn Error>> {
+async fn inv014_model_call_credential_reference_is_total() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
 
     let is_nullable: String = sqlx::query_scalar(
         "SELECT is_nullable
@@ -3002,7 +3204,21 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(is_nullable, "YES");
+    assert_eq!(is_nullable, "NO");
+
+    pool.close().await;
+    drop(container);
+
+    Ok(())
+}
+
+/// INV-014: a reference pinned on a new model call cannot be replaced or
+/// cleared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
 
     let replacement = sqlx::query(
         "UPDATE model_call
@@ -3034,7 +3250,7 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
         Some("23514".into())
     );
 
-    let stored: Option<String> = sqlx::query_scalar(
+    let stored: String = sqlx::query_scalar(
         "SELECT credential_reference
            FROM model_call
           WHERE model_call_id = $1",
@@ -3042,10 +3258,7 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
     .bind(fixture.call.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        stored.as_deref(),
-        Some(model_credential_reference().as_str())
-    );
+    assert_eq!(stored, model_credential_reference().as_str());
 
     pool.close().await;
     drop(container);
@@ -8960,11 +9173,12 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         checkpoint_confirmed_tool_round(&pool, tool_seed, "current_time", "{}").await?;
     PostgresToolLoopRepository::new(pool.clone())
         .decide(
-            DecideToolRequest::new(
+            DecideToolRequest::try_new(
                 DurableCommandId::from_uuid(Uuid::from_u128(tool_seed + 24)),
                 tool_request,
                 ToolApprovalDecision::Approve,
-            ),
+            )
+            .expect("fixture decision command is valid"),
             || TurnAttemptId::from_uuid(Uuid::from_u128(tool_seed + 23)),
         )
         .await?;
@@ -15025,6 +15239,39 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
         .fetch_one(&pool)
         .await?,
         Decimal::from(2)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10 / INV-002: storage independently rejects a restored tool response whose
+/// request inventory exceeds the bounded domain vocabulary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv002_tool_round_storage_rejects_more_than_32_requests() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, 'continuing', $4, 33, 33)",
+    )
+    .bind(Uuid::from_u128(1))
+    .bind(Uuid::from_u128(2))
+    .bind(Uuid::from_u128(3))
+    .bind(Uuid::from_u128(4))
+    .execute(&pool)
+    .await
+    .expect_err("the request-count constraint rejects the thirty-third request");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("tool_round_counts_bounded")
     );
 
     pool.close().await;

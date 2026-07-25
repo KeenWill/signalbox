@@ -60,12 +60,10 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Conversation import
 
-- **Exact mappings for additional source formats.** Codex sessions and older
-  backup formats have no converter. A later slice must select each source
-  format's exact mapping and converter version, with synthetic fixtures and
-  persistence round-trip coverage. The accepted format-versioned converter seam
-  remains fixed, and no later converter may reinterpret Claude Code version 1.
-  (S28)
+- **Exact mappings for additional source formats.** Older backup formats have no
+  converter. A later slice must select each source format's exact mapping and
+  converter version, with synthetic fixtures and persistence round-trip
+  coverage. The accepted format-versioned converter seam remains fixed. (S28)
 - **Import discovery and operational surfaces.** Directory traversal, file
   watching, bulk-import policy, source-size admission, client presentation, and
   raw-record access are not implemented. Their interfaces, limits, and
@@ -337,6 +335,9 @@ questions below remain open.
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
   browser protocol and product slice are measured. (S01, S02, S24)
+- **Client approval presentation.** How pending tool-approval prompts are
+  surfaced and owner decisions are collected across the terminal baseline and
+  later client forms remains undesigned. (S10, S11, S24)
 
 ## Destination features (target model)
 
