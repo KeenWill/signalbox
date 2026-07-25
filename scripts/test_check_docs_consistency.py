@@ -131,6 +131,25 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("`missing_test`", failures[0].message)
 
+    def test_escaped_reference_label_binds_its_named_test(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "tests `missing_test` in [tests][tests\\-file]. |\n\n"
+            "[tests-file]: ../src/tests.rs\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["invariant-test"],
+        )
+        self.assertIn("`missing_test`", failures[0].message)
+
     def test_natural_named_test_must_appear_in_its_cited_file(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"
@@ -219,6 +238,22 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("escapes the repository", failures[0].message)
 
+    def test_even_backslash_run_does_not_escape_link_opener(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "\\[Ignored](ignored.md)\n"
+            "\\\\[Missing](missing.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
+
     def test_escaped_reference_label_target_is_checked(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n[broken\\]]: missing.md\n",
@@ -232,6 +267,42 @@ class DocsConsistencyTests(unittest.TestCase):
             ["relative-link"],
         )
         self.assertIn("`missing.md`", failures[0].message)
+
+    def test_malformed_inline_link_title_tail_is_ignored(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[literal](missing.md not-a-title)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_well_formed_inline_link_title_is_checked(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            '# Agent guidance\n\n[Missing](missing.md "A title")\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
+
+    def test_container_fenced_code_does_not_expose_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "> ~~~\n"
+            "> [Quoted sample](missing-quoted.md)\n"
+            "> ~~~\n\n"
+            "- ~~~\n"
+            "  [Listed sample](missing-listed.md)\n"
+            "  ~~~\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_longer_backtick_run_does_not_close_inline_code(self) -> None:
         (self.root / "AGENTS.md").write_text(
@@ -276,6 +347,34 @@ class DocsConsistencyTests(unittest.TestCase):
             "Verified through PR #12 (`agent/example`).\n\n"
             "> ## Quoted heading\n\n"
             "- ## Listed heading\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_heading_autolink_contributes_its_visible_text(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Autolink](docs/spec/example.md#httpsexamplecom)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "## <https://example.com>\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_directory_fragment_resolves_through_readme(self) -> None:
+        guide = self.root / "docs/guide"
+        guide.mkdir()
+        (guide / "README.md").write_text(
+            "# Guide\n\n## Setup\n", encoding="utf-8"
+        )
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[Setup](docs/guide/#setup)\n",
             encoding="utf-8",
         )
 
@@ -447,6 +546,17 @@ class DocsConsistencyTests(unittest.TestCase):
             "# Example\n\n"
             "Behavior was verified, e.g. by inspection, through PR #12 "
             "(`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_verification_reference_allows_against(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "This page was verified against PR #12 (`agent/example`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
             encoding="utf-8",

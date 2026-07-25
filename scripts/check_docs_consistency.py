@@ -39,6 +39,10 @@ SPEC_DIR = Path("docs/spec")
 ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$")
 SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+AUTOLINK = re.compile(
+    r"<((?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*|"
+    r"[^<>\s@]+@[^<>\s@]+))>"
+)
 HEADING_CONTAINER = re.compile(
     r"^ {0,3}(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+)"
 )
@@ -62,7 +66,6 @@ PR_TOKEN = re.compile(
 VERIFICATION_LEAD = re.compile(
     r"\bverified\b"
     r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])).)*?"
-    r"\b(?:through|rooted[ \t]+at)[ \t\r\n]+"
     r"(?P<pr>\bPR[ \t]*#)",
     re.IGNORECASE | re.DOTALL,
 )
@@ -138,7 +141,8 @@ def mask_fenced_code(text: str) -> str:
     fence_char: str | None = None
     fence_length = 0
     for line in text.splitlines(keepends=True):
-        match = FENCE.match(line)
+        container_content = strip_heading_containers(line)
+        match = FENCE.match(container_content)
         if fence_char is None and match:
             fence_char = match.group(1)[0]
             fence_length = len(match.group(1))
@@ -148,7 +152,7 @@ def mask_fenced_code(text: str) -> str:
             closing = re.match(
                 rf"^ {{0,3}}{re.escape(fence_char)}{{{fence_length},}}[ \t]*"
                 r"(?:\r?\n)?$",
-                line,
+                container_content,
             )
             if closing:
                 fence_char = None
@@ -315,29 +319,52 @@ def find_closing_bracket(text: str, start: int) -> int | None:
     return None
 
 
+def is_escaped(text: str, offset: int) -> bool:
+    """Return whether an opener follows an odd-length backslash run."""
+    backslashes = 0
+    offset -= 1
+    while offset >= 0 and text[offset] == "\\":
+        backslashes += 1
+        offset -= 1
+    return backslashes % 2 == 1
+
+
 def find_link_close(text: str, start: int) -> int | None:
-    """Find the outer close after a destination and optional Markdown title."""
-    depth = 0
-    quote: str | None = None
-    index = start
-    while index < len(text):
-        character = text[index]
-        if character == "\\":
-            index += 2
+    """Validate an optional Markdown title and return the outer close."""
+    if start >= len(text):
+        return None
+    if text[start] == ")":
+        return start
+    if not text[start].isspace():
+        return None
+
+    position = start
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if position >= len(text):
+        return None
+    if text[position] == ")":
+        return position
+
+    opener = text[position]
+    closer = {"\"": "\"", "'": "'", "(": ")"}.get(opener)
+    if closer is None:
+        return None
+    position += 1
+    while position < len(text):
+        if text[position] == "\\":
+            position += 2
             continue
-        if quote is not None:
-            if character == quote:
-                quote = None
-        elif character in "\"'":
-            quote = character
-        elif character == "(":
-            depth += 1
-        elif character == ")":
-            if depth == 0:
-                return index
-            depth -= 1
-        index += 1
-    return None
+        if text[position] == closer:
+            position += 1
+            break
+        position += 1
+    else:
+        return None
+
+    while position < len(text) and text[position].isspace():
+        position += 1
+    return position if position < len(text) and text[position] == ")" else None
 
 
 def extract_inline_links(text: str) -> list[MarkdownLink]:
@@ -345,7 +372,7 @@ def extract_inline_links(text: str) -> list[MarkdownLink]:
     links: list[MarkdownLink] = []
     index = 0
     while index < len(text):
-        if text[index] != "[" or (index and text[index - 1] == "\\"):
+        if text[index] != "[" or is_escaped(text, index):
             index += 1
             continue
         label_end = find_closing_bracket(text, index)
@@ -412,6 +439,11 @@ def extract_inline_links(text: str) -> list[MarkdownLink]:
 
 
 def normalize_reference_label(label: str) -> str:
+    label = re.sub(
+        rf"\\([{re.escape(string.punctuation)}])",
+        r"\1",
+        label,
+    )
     return " ".join(label.split()).casefold()
 
 
@@ -443,6 +475,8 @@ def extract_reference_links(
     """Resolve full/collapsed reference links through known definitions."""
     links: list[MarkdownLink] = []
     for match in REFERENCE_LINK.finditer(text):
+        if is_escaped(text, match.start()):
+            continue
         reference_label = match.group(2) or match.group(1)
         definition = definitions.get(normalize_reference_label(reference_label))
         if definition is None:
@@ -522,6 +556,7 @@ def render_heading_text(text: str) -> str:
     text = re.sub(r"`+([^`]*)`+", r"\1", text)
     text = re.sub(r"!?\[([^\]]*)\]\[[^\]]*\]", r"\1", text)
     text = re.sub(r"!?\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = AUTOLINK.sub(r"\1", text)
     text = re.sub(r"<[^>]*>", "", text)
     text = re.sub(r"\\(.)", r"\1", text)
     return text
@@ -790,15 +825,21 @@ def check_relative_links(
                 continue
             if not fragment:
                 continue
-            if target.is_file() and target.suffix.lower() in {".md", ".markdown"}:
-                if fragment not in heading_anchors(target):
+            anchor_target = target
+            if target.is_dir() and (target / "README.md").is_file():
+                anchor_target = target / "README.md"
+            if anchor_target.is_file() and anchor_target.suffix.lower() in {
+                ".md",
+                ".markdown",
+            }:
+                if fragment not in heading_anchors(anchor_target):
                     violations.append(
                         Violation(
                             source_label,
                             line,
                             "relative-link",
                             f"anchor `#{fragment}` does not exist in "
-                            f"`{repository_path(root, target)}`",
+                            f"`{repository_path(root, anchor_target)}`",
                         )
                     )
                 continue
