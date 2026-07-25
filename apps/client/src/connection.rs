@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use signalbox_process_protocol::{
-    ClientFrame, ClientRequest, MAX_FRAME_BYTES, RequestId, ServerFrame, ServerMessage,
-    decode_server_line, encode_client_line,
+    ClientFrame, ClientRequest, ErrorCode, MAX_FRAME_BYTES, ProtocolVersion, RequestId,
+    ServerFrame, ServerMessage, decode_server_line, encode_client_line,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -64,6 +64,7 @@ enum RequestDelivery {
 }
 
 pub(crate) struct Connection {
+    version: ProtocolVersion,
     request_id: RequestId,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
@@ -79,11 +80,12 @@ impl Connection {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
+            version: ProtocolVersion::Two,
             request_id,
             reader: BufReader::new(reader),
             writer,
         };
-        let frame = ClientFrame::try_new(request_id, request)
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Two, request_id, request)
             .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame)?;
         connection
@@ -107,11 +109,29 @@ impl Connection {
     pub(crate) async fn frame(&mut self) -> Result<ServerFrame, ClientError> {
         let line = read_frame_line(&mut self.reader).await?;
         let frame: ServerFrame = decode_server_line(&line)?;
+        if !response_version_is_admitted(self.version, &frame) {
+            return Err(ClientError::Protocol("response protocol version mismatch"));
+        }
         if frame.request_id() != self.request_id {
             return Err(ClientError::Protocol("response request identity mismatch"));
         }
         Ok(frame)
     }
+}
+
+fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) -> bool {
+    frame.version() == expected
+        || matches!(
+            (expected, frame.version(), frame.message()),
+            (
+                ProtocolVersion::Two,
+                ProtocolVersion::One,
+                ServerMessage::Error {
+                    code: ErrorCode::MalformedFrame | ErrorCode::UnsupportedVersion,
+                    ..
+                }
+            )
+        )
 }
 
 async fn read_frame_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<u8>, ClientError> {
@@ -140,5 +160,53 @@ async fn read_frame_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<u8
         line.extend_from_slice(available);
         let consumed = available.len();
         reader.consume(consumed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use signalbox_process_protocol::ErrorDetail;
+
+    use super::*;
+
+    #[test]
+    fn inv033_version_two_client_admits_version_one_pre_admission_errors()
+    -> Result<(), Box<dyn Error>> {
+        assert!(response_version_is_admitted(
+            ProtocolVersion::Two,
+            &error_frame(ProtocolVersion::One, ErrorCode::MalformedFrame)?
+        ));
+        assert!(response_version_is_admitted(
+            ProtocolVersion::Two,
+            &error_frame(ProtocolVersion::One, ErrorCode::UnsupportedVersion)?
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_version_two_client_rejects_version_one_application_errors()
+    -> Result<(), Box<dyn Error>> {
+        assert!(!response_version_is_admitted(
+            ProtocolVersion::Two,
+            &error_frame(ProtocolVersion::One, ErrorCode::InvalidRequest)?
+        ));
+        Ok(())
+    }
+
+    fn error_frame(
+        version: ProtocolVersion,
+        code: ErrorCode,
+    ) -> Result<ServerFrame, Box<dyn Error>> {
+        Ok(ServerFrame::try_new_for_version(
+            version,
+            RequestId::try_new(1)?,
+            ServerMessage::Error {
+                code,
+                message: String::from("fixture"),
+                detail: ErrorDetail::none(),
+            },
+        )?)
     }
 }
