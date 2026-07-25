@@ -18,16 +18,17 @@ use signalbox_domain::{
     ModelSelectionRequest, PerInputConfigurationChoices, ReviewChangeRequestNumber,
     ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
     ReviewExternalLinkAttachment, ReviewExternalLinkId, ReviewExternalLinkObservation,
-    ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingId,
-    ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity,
-    ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassId,
-    ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
-    ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunPassEvidence, ReviewRunRef, ReviewRunState,
-    ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry,
-    TurnAttemptId, TurnId, UserContent,
+    ReviewExternalLinkTransitionError, ReviewExternalObjectKind, ReviewExternalObjectState,
+    ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
+    ReviewFindingEventKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
+    ReviewFindingRef, ReviewFindingSeverity, ReviewFindingTransitionFailure, ReviewKey,
+    ReviewLineRange, ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
+    ReviewRunPassEvidence, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId,
+    ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -495,6 +496,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         Some(posted_finding)
     );
     let observation = ReviewExternalLinkObservation::new(
+        link_id,
         ReviewEventOrdinal::one(),
         pass_ref,
         ReviewExternalObjectState::Current,
@@ -520,15 +522,13 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     Ok(())
 }
 
-/// INV-040: the adapter supplies canonical accepted-input and turn rows to
-/// domain reconstitution instead of trusting repeated pass-row identifiers.
+/// INV-040: pass loading validates the accepted input's canonical session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_pass_loader_rejects_cross_wired_canonical_evidence() -> Result<(), Box<dyn Error>> {
+async fn inv040_pass_loader_rejects_cross_wired_accepted_input() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let pass = fixture.pass.pass();
-    let original_session = SessionId::from_uuid(uuid(0x201));
     let other_session = SessionId::from_uuid(uuid(0x211));
     let other_input = AcceptedInputId::from_uuid(uuid(0x212));
     let other_turn = TurnId::from_uuid(uuid(0x213));
@@ -570,13 +570,25 @@ async fn inv040_pass_loader_rejects_cross_wired_canonical_evidence() -> Result<(
             .contains("AcceptedInputSessionMismatch")
     );
 
+    Ok(())
+}
+
+/// INV-040: pass loading validates the referenced turn's canonical session.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_pass_loader_rejects_cross_wired_turn() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let pass = fixture.pass.pass();
+    let other_session = SessionId::from_uuid(uuid(0x211));
+    let other_input = AcceptedInputId::from_uuid(uuid(0x212));
+    let other_turn = TurnId::from_uuid(uuid(0x213));
+    insert_active_turn_with_offset(&pool, other_session, other_input, other_turn, 0x1_000).await;
+
     sqlx::query(
-        "UPDATE review_pass
-            SET session_id = $2
-          WHERE pass_id = $1",
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_change_is_guarded",
     )
-    .bind(pass.into_uuid())
-    .bind(original_session.into_uuid())
     .execute(&pool)
     .await?;
     sqlx::query(
@@ -773,6 +785,71 @@ async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// INV-040: appending an observation through another same-target external link
+/// fails before persistence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let first = ReviewExternalLinkId::from_uuid(uuid(0x335));
+    let second = ReviewExternalLinkId::from_uuid(uuid(0x336));
+    fixture
+        .store
+        .reserve_external_link(ReviewExternalLink::reserve(
+            first,
+            ReviewExternalLinkAssociation::Target(fixture.target),
+            key("example-code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        ))
+        .await?;
+    fixture
+        .store
+        .attach_external_link(
+            first,
+            ReviewExternalLinkAttachment::new(fixture.pass, key("comment-335")),
+        )
+        .await?;
+    fixture
+        .store
+        .reserve_external_link(ReviewExternalLink::reserve(
+            second,
+            ReviewExternalLinkAssociation::Target(fixture.target),
+            key("example-code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        ))
+        .await?;
+    fixture
+        .store
+        .attach_external_link(
+            second,
+            ReviewExternalLinkAttachment::new(fixture.pass, key("comment-336")),
+        )
+        .await?;
+
+    let error = fixture
+        .store
+        .append_external_observation(
+            first,
+            ReviewExternalLinkObservation::new(
+                second,
+                ReviewEventOrdinal::one(),
+                fixture.pass,
+                ReviewExternalObjectState::Current,
+            ),
+        )
+        .await
+        .expect_err("observation owner must equal the loaded external link");
+    assert!(matches!(
+        error,
+        ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::ExternalLink(
+            ReviewExternalLinkTransitionError::ForeignObservationLink
+        ))
+    ));
+
+    Ok(())
+}
+
 /// INV-040: file-relative findings admit no diff side, while a diff-relative
 /// location requires a canonical target base.
 #[tokio::test(flavor = "multi_thread")]
@@ -848,19 +925,49 @@ async fn inv040_finding_diff_side_requires_target_base() -> Result<(), Box<dyn E
     Ok(())
 }
 
-/// INV-040 / INV-041: new rows admit only queued run/pass state and a pending
-/// pre-effect external-link reservation.
+/// INV-040: the store refuses to insert a run projection after transition.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dyn Error>> {
+async fn inv040_run_insert_requires_queued_state() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let running = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("fixture run exists")
+        .transition(
+            ReviewRunState::Running {
+                active_pass: fixture.pass,
+            },
+            Some(ReviewRunPassEvidence::new(
+                fixture.pass,
+                ReviewPassState::Running {
+                    turn: TurnId::from_uuid(uuid(0x203)),
+                },
+            )),
+        )
+        .expect("queued run activates with matching pass evidence");
+    assert!(matches!(
+        fixture.store.insert_run(&running).await,
+        Err(ReviewWorkflowStoreError::InvalidInsertion(
+            ReviewWorkflowInsertionError::RunNotQueued { .. }
+        ))
+    ));
+    Ok(())
+}
+
+/// INV-040: the store refuses to insert a pass projection after transition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_pass_insert_requires_queued_state() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let turn = TurnId::from_uuid(uuid(0x203));
-    let running_pass = fixture
+    let running = fixture
         .store
         .load_pass(fixture.pass.pass())
-        .await
-        .expect("pass loads")
+        .await?
         .expect("fixture pass exists")
         .transition(
             ReviewPassState::Running { turn },
@@ -872,39 +979,24 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
                 None,
             )),
         )
-        .expect("queued pass activates");
+        .expect("queued pass activates with matching turn evidence");
     assert!(matches!(
-        fixture.store.insert_pass(&running_pass).await,
+        fixture.store.insert_pass(&running).await,
         Err(ReviewWorkflowStoreError::InvalidInsertion(
             ReviewWorkflowInsertionError::PassNotQueued { .. }
         ))
     ));
+    Ok(())
+}
 
-    let running_run = fixture
-        .store
-        .load_run(fixture.run.run())
-        .await
-        .expect("run loads")
-        .expect("fixture run exists")
-        .transition(
-            ReviewRunState::Running {
-                active_pass: fixture.pass,
-            },
-            Some(ReviewRunPassEvidence::new(
-                fixture.pass,
-                running_pass.state(),
-            )),
-        )
-        .expect("queued run activates");
-    assert!(matches!(
-        fixture.store.insert_run(&running_run).await,
-        Err(ReviewWorkflowStoreError::InvalidInsertion(
-            ReviewWorkflowInsertionError::RunNotQueued { .. }
-        ))
-    ));
-
+/// INV-040: the store refuses to insert a finding carrying event history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_insert_requires_open_state() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x306)));
-    let accepted_finding = finding(finding_ref, fixture.pass, &fixture.target_snapshot)
+    let accepted = finding(finding_ref, fixture.pass, &fixture.target_snapshot)
         .apply(ReviewFindingEvent::new(
             finding_ref,
             ReviewEventOrdinal::one(),
@@ -913,13 +1005,21 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
         ))
         .expect("open finding accepts judgment");
     assert!(matches!(
-        fixture.store.insert_finding(&accepted_finding).await,
+        fixture.store.insert_finding(&accepted).await,
         Err(ReviewWorkflowStoreError::InvalidInsertion(
             ReviewWorkflowInsertionError::FindingNotOpen { .. }
         ))
     ));
+    Ok(())
+}
 
-    let attached_reservation = ReviewExternalLink::reserve(
+/// INV-041: reservation insertion refuses post-effect attachment evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_reservation_insert_requires_pending_state() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let attached = ReviewExternalLink::reserve(
         ReviewExternalLinkId::from_uuid(uuid(0x307)),
         ReviewExternalLinkAssociation::Target(fixture.target),
         key("example-code-host"),
@@ -931,27 +1031,20 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
     ))
     .expect("same-target pass may attach");
     assert!(matches!(
-        fixture
-            .store
-            .reserve_external_link(attached_reservation)
-            .await,
+        fixture.store.reserve_external_link(attached).await,
         Err(ReviewWorkflowStoreError::InvalidInsertion(
             ReviewWorkflowInsertionError::ExternalLinkNotPending
         ))
     ));
-
     Ok(())
 }
 
-/// INV-040 / INV-041: nullable SQL shapes, exact version-one policy, and
-/// evidence-preserving transition guards reject representations the domain
-/// cannot construct.
+/// INV-040: raw run rows must begin queued.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<dyn Error>> {
+async fn inv040_schema_requires_new_run_to_be_queued() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
-
     let direct_cancelled_run = sqlx::query(
         "INSERT INTO review_run
             (run_id, target_id, workflow_kind, policy_version,
@@ -968,7 +1061,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("raw review runs must begin queued");
     assert_sqlstate(&direct_cancelled_run, "23514");
+    Ok(())
+}
 
+/// INV-040: raw pass rows must begin queued.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_requires_new_pass_to_be_queued() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let direct_failed_pass = sqlx::query(
         "INSERT INTO review_pass
             (pass_id, run_id, target_id, pass_kind, session_id,
@@ -988,7 +1089,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("raw review passes must begin queued");
     assert_sqlstate(&direct_failed_pass, "23514");
+    Ok(())
+}
 
+/// S29 / INV-040: change-request targets require a frozen comparison
+/// revision.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s29_inv040_schema_requires_change_request_base() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
     let missing_change_request = sqlx::query(
         "INSERT INTO review_target
             (target_id, provider_key, repository_key, subject_kind,
@@ -1004,7 +1113,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("change-request targets require their frozen comparison revision");
     assert_sqlstate(&missing_change_request, "23514");
+    Ok(())
+}
 
+/// INV-040: policy version one has one canonical threshold tuple.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_requires_canonical_version_one_policy() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let noncanonical_policy = sqlx::query(
         "INSERT INTO review_run
             (run_id, target_id, workflow_kind, policy_version,
@@ -1018,7 +1135,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("version one requires the exact 7000/8000 threshold tuple");
     assert_sqlstate(&noncanonical_policy, "23514");
+    Ok(())
+}
 
+/// INV-040: finding line ranges are absent or complete.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_rejects_half_populated_line_range() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let half_populated_range = sqlx::query(
         "INSERT INTO review_finding
             (finding_id, run_id, target_id, producing_pass_id, file_path,
@@ -1038,7 +1163,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("finding line ranges are absent or fully populated");
     assert_sqlstate(&half_populated_range, "23514");
+    Ok(())
+}
 
+/// INV-040: rejected finding events require their exact reason.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_requires_rejection_reason() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let reason_finding =
         ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x604)));
     fixture
@@ -1066,7 +1199,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("rejected events require a reason");
     assert_sqlstate(&missing_reason, "23514");
+    Ok(())
+}
 
+/// INV-041: a posted event requires an attached canonical external link.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let posted_finding =
         ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x605)));
     fixture
@@ -1119,7 +1260,15 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("posted status requires attached external-effect evidence");
     assert_sqlstate(&posted_without_attachment, "23503");
+    Ok(())
+}
 
+/// INV-040: cancelling a running run cannot erase its active pass.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_running_run_cancellation_retains_pass() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
     let turn = TurnId::from_uuid(uuid(0x203));
     fixture
         .store
@@ -1147,7 +1296,21 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
     .await
     .expect_err("running cancellation retains the active pass");
     assert_sqlstate(&erased_run_pass, "23514");
+    Ok(())
+}
 
+/// INV-040: cancelling a running pass cannot erase its active turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_schema_running_pass_cancellation_retains_turn() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let turn = TurnId::from_uuid(uuid(0x203));
+    fixture
+        .store
+        .transition_pass(fixture.pass.pass(), ReviewPassState::Running { turn })
+        .await
+        .expect("pass activation persists");
     let erased_pass_turn = sqlx::query(
         "UPDATE review_pass
             SET state_kind = 'cancelled', turn_id = NULL

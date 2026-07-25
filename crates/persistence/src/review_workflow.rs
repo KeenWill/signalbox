@@ -530,7 +530,7 @@ impl ReviewWorkflowStore {
                  pass_run_id, pass_id, object_state)
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(link.into_uuid())
+        .bind(observation.link().into_uuid())
         .bind(i64::from(observation.ordinal().get()))
         .bind(next.association().target().into_uuid())
         .bind(observation.pass().run().run().into_uuid())
@@ -572,8 +572,8 @@ impl ReviewWorkflowStore {
         .map(|row| decode_external_link_attachment(&row))
         .transpose()?;
         let observations = sqlx::query(
-            "SELECT observation_ordinal, pass_run_id, pass_id, target_id,
-                    object_state
+            "SELECT external_link_id, observation_ordinal, pass_run_id,
+                    pass_id, target_id, object_state
                FROM review_external_link_observation
               WHERE external_link_id = $1
               ORDER BY observation_ordinal",
@@ -1229,6 +1229,7 @@ fn decode_external_link_observation(
     row: &PgRow,
 ) -> Result<ReviewExternalLinkObservation, ReviewWorkflowStoreError> {
     Ok(ReviewExternalLinkObservation::new(
+        external_link_id(row.try_get("external_link_id")?),
         ReviewEventOrdinal::try_new(positive_u32(
             row.try_get("observation_ordinal")?,
             "review_external_link_observation",
