@@ -206,20 +206,20 @@ public enum SignalboxEventNormalizer {
     ) -> SignalboxToolCard {
         let functionCall = messageEvent(recordsByID[event.functionCallEventID])
         let functionResponse = event.functionResponseEventID.flatMap { messageEvent(recordsByID[$0]) }
-        let arguments = functionCall?.message.parts.compactMap { part -> String? in
+        let functionCalls = functionCall?.message.parts.compactMap { part -> SignalboxFunctionCallContent? in
             if case .functionCall(let content) = part {
-                return content.arguments
+                return content
             }
             return nil
-        }
-        .first
-        let output = functionResponse?.message.parts.compactMap { part -> String? in
+        } ?? []
+        let functionResponses = functionResponse?.message.parts.compactMap { part -> SignalboxFunctionResponseContent? in
             if case .functionResponse(let content) = part {
-                return content.output
+                return content
             }
             return nil
-        }
-        .first
+        } ?? []
+        let arguments = matchingContent(functionCalls, toolCallID: event.toolCallID)?.arguments
+        let output = matchingContent(functionResponses, toolCallID: event.toolCallID)?.output
 
         return SignalboxToolCard(
             eventID: record.eventID,
@@ -232,6 +232,34 @@ public enum SignalboxEventNormalizer {
             decisionReason: event.decisionReason,
             childSessionID: event.childSessionID
         )
+    }
+
+    private static func matchingContent<Content>(
+        _ content: [Content],
+        toolCallID: SignalboxToolCallID?,
+        callID: (Content) -> SignalboxToolCallID
+    ) -> Content? {
+        if let toolCallID {
+            return content.first { callID($0) == toolCallID }
+        }
+        guard content.count == 1 else {
+            return nil
+        }
+        return content[0]
+    }
+
+    private static func matchingContent(
+        _ content: [SignalboxFunctionCallContent],
+        toolCallID: SignalboxToolCallID?
+    ) -> SignalboxFunctionCallContent? {
+        matchingContent(content, toolCallID: toolCallID, callID: \.callID)
+    }
+
+    private static func matchingContent(
+        _ content: [SignalboxFunctionResponseContent],
+        toolCallID: SignalboxToolCallID?
+    ) -> SignalboxFunctionResponseContent? {
+        matchingContent(content, toolCallID: toolCallID, callID: \.callID)
     }
 
     private static func messageEvent(_ event: SignalboxConversationEvent?) -> SignalboxMessageEvent? {
