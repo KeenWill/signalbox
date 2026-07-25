@@ -270,11 +270,14 @@ executors, with replay eligibility conditioned on turn state.
 ## Session metadata, tags, and visibility [blocked-on: owner commission call] [size: M-L]
 
 Owns: session satellite tables, list projection, additive protocol frames.
-Collides-with: little — parallel-safe against turn machinery. Titles, tags,
-archive/restore, filtered and paginated listing — plus visibility control for
-the automation era: sessions spawned by automations and background work must not
-crowd the interactive default view, while monitor surfaces see everything and
-can hop into any session. Owner-flagged high priority — the daily-driver item.
+Collides-with: the session-creation command surface (the creation-time
+visibility override lands there, where Context assembly's session-defaults stage
+also composes); otherwise little — parallel-safe against turn machinery. Titles,
+tags, archive/restore, filtered and paginated listing — plus visibility control
+for the automation era: sessions spawned by automations and background work must
+not crowd the interactive default view, while monitor surfaces see everything
+and can hop into any session. Owner-flagged high priority — the daily-driver
+item.
 
 Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
 carries the real design and its decision-log entries — direction is set, and the
@@ -284,15 +287,20 @@ are organizational, not conversational — with a last-writer audit stamp (updat
 time plus actor) and no aggregate versioning. Accepted cost, stated: no full
 causal history of metadata edits; last-writer suffices for a single-owner
 system. Visibility is derived, not a taxonomy — this settles the entry's earlier
-simple-starting-point sketch in its favor: creation cause and actor attribution
-already distinguish owner-initiated from automation-spawned sessions for free,
-so the default interactive view is owner-initiated creation cause and not
-archived, automation-spawned sessions sit outside it, monitor surfaces see
-everything, and one nullable override the spawning actor can set at creation
-handles the exceptions. Two boring shapes, both: tags (a flat string set,
-human-facing organization, AND-filtering) and attributes (a string-to-string
-map, machine-facing — automations stamping provenance such as a trigger name or
-run id). Keeping them separate is deliberate; map-only would make the human case
+simple-starting-point sketch in its favor: the derivation rides on creation
+cause and actor attribution rather than a parallel classification. Today only
+the owner-initiated creation cause is constructible and `CreateSession` carries
+no actor (adding one is a recorded owner choice not yet taken), so the default
+view is trivially everything-not-archived until the automation era adds its
+variants; clearing that creation-attribution gate is a named dependency of the
+pickup spec-diff, which also decides what authority may set the override. Once
+the variants exist, the default interactive view is owner-initiated creation
+cause and not archived, automation-spawned sessions sit outside it, monitor
+surfaces see everything, and one nullable creation-time override handles the
+exceptions. Two boring shapes, both: tags (a flat string set, human-facing
+organization, AND-filtering) and attributes (a string-to-string map,
+machine-facing — automations stamping provenance such as a trigger name or run
+id). Keeping them separate is deliberate; map-only would make the human case
 awkward. Expressive filter rules stay an open edge.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
@@ -343,15 +351,17 @@ feature from the target model that previously had no entry.
 Owns: the model-facing prompt/context composition seam — default and
 per-use-case system prompts, instruction files, skill/tool description
 injection, and lifecycle transformation points. Collides-with: frontier
-materialization, Compaction, Templates. The organizing idea (owner-stated):
-everything composed into the model call — system prompt, instruction files, tool
-metadata, compaction — is frontier composition, so the plugin interface is typed
-transformations over the structured operation at defined lifecycle points, not
-string-to-string middleware. This is the owning entry that Templates' pending
-"system-prompt configuration category," Compaction's prompts, and
-goal-mode-as-plugin hang off. Vendoring stance: openly licensed CLI
-implementations may be vendored with attribution; closed-source clients are
-reference-only — observe, do not copy.
+materialization, Compaction, Templates, and the session-creation command surface
+— the session-defaults stage composes at creation, shared with Session
+metadata's creation-time visibility override. The organizing idea
+(owner-stated): everything composed into the model call — system prompt,
+instruction files, tool metadata, compaction — is frontier composition, so the
+plugin interface is typed transformations over the structured operation at
+defined lifecycle points, not string-to-string middleware. This is the owning
+entry that Templates' pending "system-prompt configuration category,"
+Compaction's prompts, and goal-mode-as-plugin hang off. Vendoring stance: openly
+licensed CLI implementations may be vendored with attribution; closed-source
+clients are reference-only — observe, do not copy.
 
 Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
 carries the real design and its decision-log entries): composed context follows
