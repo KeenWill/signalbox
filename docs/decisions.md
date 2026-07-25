@@ -10,6 +10,39 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
+
+**Context.** [tool-loop](spec/tool-loop.md) and S07 fix the caller protocol for
+ending a turn whose approval wait is parked: record the denial first, then
+submit the interrupt once decision progression opens execution; an interrupt
+alone is not a denial and does not bypass the decision command. What the hub
+records for an interrupt that arrives while the wait is still parked was
+unspecified: the domain accepted it, persistence closure routing then demanded a
+live `Running` execution, and the whole submit transaction failed with a
+bug-classed `NoLiveExecution` error — a misleading outcome for every owner stop
+issued while a confirm request was pending, unlike every sibling
+invalid-interrupt condition, which records an authoritative typed rejection.
+
+**Decision.** The domain rejects the interrupt with
+`InterruptUnavailableWhileAwaitingApproval { session, active_turn }`, recorded
+durably as rejection kind `interrupt_unavailable_while_awaiting_approval`
+(migration `202607280001`) with replay reconstitution, exactly like the sibling
+invalid-interrupt rejections. The wait remains parked; the caller resolves the
+approval obligation through the decision command first.
+
+**Rejected alternatives.** Park-and-defer (hold the interrupt and apply it once
+decision progression opens execution): it converts one command into a delayed
+effect with no typed receipt, contradicts the two-independent-commands shape the
+specification fixes for deny-and-end, and needs new durable state for the parked
+interrupt. Keeping the transaction failure under a friendlier classification: a
+rollback still records nothing durable, so replay of the command stays
+undefined.
+
+**Affects.** `crates/domain/src/submit_input.rs`,
+`crates/persistence/src/submit_input.rs` and migration `202607280001`,
+`apps/hubd/src/process_runtime.rs`, and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
+
 ## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
 
 **Context.** The specification states that hubd reads exactly four deployment

@@ -2098,6 +2098,115 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     Ok(())
 }
 
+/// S07 / S10 / INV-012 / INV-028: an interrupt against a parked approval wait
+/// records the authoritative typed rejection instead of failing the submit
+/// transaction, the wait remains durably parked with no accepted input, and
+/// equal replay returns the recorded rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7e00;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let interrupt_command = Uuid::from_u128(seed + 23);
+    let parked_before: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT active_phase_kind, approval_tool_request_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        parked_before,
+        (
+            String::from("awaiting_tool_approval"),
+            Some(request.into_uuid()),
+        ),
+        "the confirmed tool round must be parked before the interrupt"
+    );
+
+    let interrupt = input_with_delivery(
+        seed + 23,
+        seed + 1,
+        "stop while confirm is pending",
+        DeliveryRequest::Interrupt {
+            expected_active_turn: fixture.turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            interrupt.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 24)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 25))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn,
+                },
+            )) if session == fixture.session && active_turn == fixture.turn
+        ),
+        "an interrupt alone must not bypass the decision command: {outcome:?}"
+    );
+
+    let parked_after: (String, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT active_phase_kind, approval_tool_request_id,
+                (SELECT count(*) FROM accepted_input
+                  WHERE accepting_command_id = $3)
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(interrupt_command)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        parked_after,
+        (
+            String::from("awaiting_tool_approval"),
+            Some(request.into_uuid()),
+            0,
+        ),
+        "the approval wait must remain parked and the rejection must accept no input"
+    );
+
+    let replayed = SubmitInputRepository::new(pool.clone())
+        .handle(
+            interrupt,
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 26)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 27))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            replayed,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn,
+                },
+            )) if session == fixture.session && active_turn == fixture.turn
+        ),
+        "equal replay must return the recorded parked-approval rejection: {replayed:?}"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006 / INV-025 / INV-029 / INV-037: an interrupt against an external
 /// tool recovery wait releases the slot as reconciliation-required while
 /// retaining the exact ambiguous tool attempt and closing its logical request.

@@ -342,6 +342,20 @@ impl SubmitInput {
                         ),
                     });
                 }
+                if matches!(
+                    active_turn.active_phase(),
+                    Some(crate::ActiveTurnPhase::AwaitingApproval { .. })
+                ) {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                            },
+                        ),
+                    });
+                }
                 let Some(turn) = turn else {
                     return Err(SubmitInputPreparationError {
                         command: Box::new(self),
@@ -903,6 +917,15 @@ pub enum SubmitInputRejectedResult {
         /// The command whose applied result remains cancellation authority.
         existing_command: DurableCommandId,
     },
+    /// An interrupt arrived while a parked approval wait held the active
+    /// slot; the wait remains parked until its canonical decision command
+    /// resolves the approval obligation.
+    InterruptUnavailableWhileAwaitingApproval {
+        /// The target session.
+        session: SessionId,
+        /// The exact active turn retaining the slot on its approval wait.
+        active_turn: TurnId,
+    },
 }
 
 /// One sealed pre-commit command/result candidate.
@@ -1221,6 +1244,11 @@ enum SubmitInputReconstitutionFacts {
         active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
         existing_interrupt: AppliedInterruptCommandResult,
     },
+    RejectedInterruptUnavailableWhileAwaitingApproval {
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+    },
 }
 
 /// Complete checked domain inputs for reconstructing one recorded submission.
@@ -1514,6 +1542,27 @@ impl SubmitInputReconstitutionInput {
                 active_turn_origin,
                 existing_interrupt,
             },
+        }
+    }
+
+    /// Supplies a parked-approval interrupt rejection and the canonical
+    /// origin of the active turn retaining the slot on its approval wait.
+    pub const fn rejected_interrupt_unavailable_while_awaiting_approval(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts:
+                SubmitInputReconstitutionFacts::RejectedInterruptUnavailableWhileAwaitingApproval {
+                    result_session,
+                    result_active_turn,
+                    active_turn_origin,
+                },
         }
     }
 
@@ -2127,6 +2176,40 @@ impl SubmitInputReconstitutionInput {
                     existing_command: result_existing_command,
                 })
             }
+            SubmitInputReconstitutionFacts::RejectedInterruptUnavailableWhileAwaitingApproval {
+                result_session,
+                result_active_turn,
+                active_turn_origin,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn,
+                        ..
+                    } if expected_active_turn == result_active_turn
+                ) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
+                    ));
+                }
+                validate_rejection_active_turn_origin(
+                    &self.command,
+                    Some(result_active_turn),
+                    Some(&active_turn_origin),
+                )
+                .map_err(&fail)?;
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                        session: result_session,
+                        active_turn: result_active_turn,
+                    },
+                )
+            }
         };
 
         Ok(ReconstitutedSubmitInput {
@@ -2594,7 +2677,10 @@ mod tests {
         accepted_input_id, alias, command_id, direct, model_call_id, provider_target_evidence_id,
         session_id, turn_id,
     };
-    use crate::test_support::{context_frontier_id, semantic_transcript_entry_id, turn_attempt_id};
+    use crate::test_support::{
+        context_frontier_id, provider_model_identity, semantic_transcript_entry_id,
+        tool_request_id, turn_attempt_id,
+    };
     use crate::turn_attempt::test_fatal_mismatch_stop_causes;
     use crate::turn_lifecycle::{
         test_applied_stop_for_reconciliation_proof, test_reconciliation_marker,
@@ -2603,17 +2689,22 @@ mod tests {
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
-        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
         ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FrozenAliasDefinition,
         FrozenModelSelection, InitialSemanticTranscriptEntryPayload, IssuedOperationRef,
+        ModelCallDisposition, ModelCallReconstitutionInput, ModelCallReconstitutionState,
         ModelSelectionOverride, ModelSelectionRequest, NonEmptyIssuedOperationRefs,
-        OriginConfiguration, PerInputConfigurationChoices, ReconciliationReason,
-        ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryReconstitutionInput,
+        NormalizedToolArguments, OriginConfiguration, PerInputConfigurationChoices,
+        PinnedProviderTargetReconstitutionInput, ReconciliationReason,
+        ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+        ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
         SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
         SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionInputPosition, SessionReconstitutionInput, SteeringBinding, TranscriptAncestry,
-        TurnDisposition, UserContent,
+        SessionInputPosition, SessionReconstitutionInput, SteeringBinding,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
+        UserContent,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -3611,6 +3702,240 @@ mod tests {
             AcceptedInputQueuePriority::InterruptImmediatelyAfter {
                 predecessor: active_turn
             }
+        );
+    }
+
+    /// The canonical active-slot projection parked on one confirm request:
+    /// fixture turn 7 completed its producing call, the yielded tool round
+    /// proposes one request, and no decision has resolved the approval wait.
+    fn approval_wait_turn(current: &Session) -> AcceptedInputSchedulingProjection {
+        let origin_entry = semantic_transcript_entry_id(0x31);
+        let tool_use_entry = semantic_transcript_entry_id(0x32);
+        let producing_call = model_call_id(0x61);
+        let undecided_request = tool_request_id(0x71);
+        let starting_frontier = context_frontier_id(0x41);
+        let yielded_frontier = context_frontier_id(0x42);
+        let request = ToolRequestReconstitutionInput::new(
+            undecided_request,
+            current.id(),
+            turn_id(7),
+            producing_call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("confirmed")).expect("fixture name is canonical"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .into_request();
+        let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
+            current.id(),
+            yielded_frontier,
+            vec![
+                SemanticTranscriptEntryRef::from_source(current.id(), origin_entry),
+                SemanticTranscriptEntryRef::from_source(current.id(), tool_use_entry),
+            ],
+        )
+        .expect("the tool response extends the starting frontier");
+        let batch = ToolBatchReconstitutionInput::new(
+            current.id(),
+            turn_id(7),
+            producing_call,
+            yielded,
+            vec![request],
+            vec![],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+                request: undecided_request,
+            },
+        )
+        .reconstitute()
+        .expect("the undecided single-request batch awaits its approval");
+        let target = ResolvedProviderTarget::naming(provider_model_identity(0x62));
+        let accepted_input = AcceptedInputLifecycle::new(
+            accepted_input_id(0x21),
+            AcceptedInputDisposition::OriginOf(turn_id(7)),
+        );
+        AcceptedInputSchedulingReconstitutionInput::new(
+            current.clone(),
+            vec![AcceptedInputTurnSchedulingRecord::new(
+                current.id(),
+                turn_id(7),
+                current.id(),
+                accepted_input.clone(),
+                current.id(),
+                turn_id(7),
+                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: choices(
+                        current.current_configuration_defaults().version().as_u64(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+                origin_configuration(current),
+                AcceptedInputTurnSchedulingRecordState::Active {
+                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                    starting_frontier,
+                    phase: ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
+                        turn_id(7),
+                        &batch,
+                    )
+                    .expect("the approval wait names the fixture turn"),
+                },
+            )],
+            vec![
+                SemanticTranscriptEntryReconstitutionInput::new(
+                    origin_entry,
+                    current.id(),
+                    InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                        accepted_input: accepted_input_id(0x21),
+                    },
+                ),
+                SemanticTranscriptEntryReconstitutionInput::new(
+                    tool_use_entry,
+                    current.id(),
+                    InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                        producing_call,
+                        request: undecided_request,
+                    },
+                ),
+            ],
+            vec![
+                ResolvedContextFrontierReconstitutionInput::new(
+                    current.id(),
+                    starting_frontier,
+                    vec![SemanticTranscriptEntryRef::from_source(
+                        current.id(),
+                        origin_entry,
+                    )],
+                ),
+                ResolvedContextFrontierReconstitutionInput::new(
+                    current.id(),
+                    yielded_frontier,
+                    vec![
+                        SemanticTranscriptEntryRef::from_source(current.id(), origin_entry),
+                        SemanticTranscriptEntryRef::from_source(current.id(), tool_use_entry),
+                    ],
+                ),
+            ],
+            Some(SessionAcceptanceTailReconstitutionInput::new(
+                current.id(),
+                accepted_input.id(),
+                SessionInputPosition::first(),
+                vec![SessionAcceptanceTailEntryReconstitutionInput::new(
+                    current.id(),
+                    accepted_input,
+                    SessionInputPosition::first(),
+                    DeliveryRequest::StartWhenNoActiveTurn {
+                        configuration: choices(
+                            current.current_configuration_defaults().version().as_u64(),
+                            ModelSelectionOverride::UseSessionDefault,
+                        ),
+                    },
+                )],
+            )),
+        )
+        .with_model_call_facts(
+            vec![PinnedProviderTargetReconstitutionInput::new(
+                turn_id(7),
+                target,
+            )],
+            vec![ModelCallReconstitutionInput::new(
+                producing_call,
+                turn_id(7),
+                turn_attempt_id(0x52),
+                FrozenModelSelection::Direct(direct(2)),
+                target,
+                starting_frontier,
+                ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+            )],
+        )
+        .reconstitute()
+        .expect("the parked approval-wait scheduling facts are complete")
+    }
+
+    /// S07 / S10 / INV-012 / INV-028: an interrupt against a parked approval
+    /// wait records the typed rejection instead of accepting a successor; the
+    /// wait remains parked until its canonical decision command resolves the
+    /// approval obligation.
+    #[test]
+    fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejected() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let active = approval_wait_turn(&current);
+        let parked_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn");
+        assert!(
+            matches!(
+                parked_turn.active_phase(),
+                Some(ActiveTurnPhase::AwaitingApproval { .. })
+            ),
+            "the fixture slot must be parked on its approval wait"
+        );
+        let actual_active_turn = parked_turn.turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+
+        let rejected = interrupt_command(6, actual_active_turn)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
+            .expect("a parked approval wait is an authoritative rejection");
+        assert!(
+            matches!(
+                rejected.result(),
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                        session,
+                        active_turn,
+                    },
+                ) if *session == current.id() && *active_turn == actual_active_turn
+            ),
+            "the interrupt must not bypass the decision command: {:?}",
+            rejected.result()
+        );
+    }
+
+    /// S07 / S10 / INV-012 / INV-028: the recorded parked-approval interrupt
+    /// rejection reconstructs exactly and rejects cross-wired delivery or
+    /// active-turn facts.
+    #[test]
+    fn s07_s10_inv012_inv028_parked_approval_interrupt_rejection_reconstitutes_exactly() {
+        let replayed =
+            SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
+                interrupt_command(1, turn_id(7)),
+                Actor::Owner,
+                session_id(1),
+                turn_id(7),
+                source_turn_origin(),
+            )
+            .reconstitute()
+            .expect("a parked-approval interrupt rejection reconstructs");
+        assert!(matches!(
+            replayed.result(),
+            SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn,
+                },
+            ) if *session == session_id(1) && *active_turn == turn_id(7)
+        ));
+
+        assert_rejection_reconstitution_fails(
+            SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
+                interrupt_command(1, turn_id(9)),
+                Actor::Owner,
+                session_id(1),
+                turn_id(7),
+                source_turn_origin(),
+            ),
+            SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
+            SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
+                safe_point_command(1, turn_id(7)),
+                Actor::Owner,
+                session_id(1),
+                turn_id(7),
+                source_turn_origin(),
+            ),
+            SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
         );
     }
 

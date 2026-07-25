@@ -2078,7 +2078,8 @@ fn map_rejection(
         SubmitInputRejectedResult::NoActiveTurn { .. }
         | SubmitInputRejectedResult::ActiveTurnMismatch { .. }
         | SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. }
-        | SubmitInputRejectedResult::InterruptAlreadyApplied { .. } => {
+        | SubmitInputRejectedResult::InterruptAlreadyApplied { .. }
+        | SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval { .. } => {
             return Err(ProcessConnectionError::EncodeInvariant);
         }
     })

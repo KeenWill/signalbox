@@ -375,7 +375,14 @@ delivery outcomes implemented here are:
   records `SafePointUnavailableWhileStopping`; equal interrupt replay returns
   the original applied result. A distinct later interrupt records
   `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
-  an input or replacing the existing proof.
+  an input or replacing the existing proof. An interrupt delivered while the
+  active turn is parked on a tool-approval wait records
+  `InterruptUnavailableWhileAwaitingApproval { active_turn }` without accepting
+  an input: the wait remains parked until its canonical decision command
+  resolves the approval obligation, and the interrupt is neither a denial nor a
+  bypass of the decision command
+  ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
+  deny-first caller protocol).
 
 ## Context frontier snapshots
 
