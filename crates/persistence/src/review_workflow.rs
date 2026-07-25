@@ -185,7 +185,7 @@ impl ReviewWorkflowStore {
         .bind(state_pass.map(ReviewPassId::into_uuid))
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        commit_mutation(transaction).await?;
         Ok(Some(transitioned))
     }
 
@@ -292,7 +292,7 @@ impl ReviewWorkflowStore {
         .bind(state.frontier.map(ContextFrontierId::into_uuid))
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        commit_mutation(transaction).await?;
         Ok(Some(transitioned))
     }
 
@@ -376,7 +376,7 @@ impl ReviewWorkflowStore {
         .bind(run_state_pass.map(ReviewPassId::into_uuid))
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        commit_mutation(transaction).await?;
         Ok(Some((transitioned_run, transitioned_pass)))
     }
 
@@ -427,7 +427,7 @@ impl ReviewWorkflowStore {
         .bind(content.recommended_fix().map(ReviewText::as_str))
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        commit_mutation(transaction).await?;
         Ok(())
     }
 
@@ -447,7 +447,7 @@ impl ReviewWorkflowStore {
         })?;
         let mut transaction = self.pool.begin().await?;
         insert_finding_event(&mut transaction, &event).await?;
-        transaction.commit().await?;
+        commit_mutation(transaction).await?;
         Ok(Some(next))
     }
 
@@ -468,19 +468,22 @@ impl ReviewWorkflowStore {
                     target.subject_kind, target.change_request_number,
                     target.head_revision, target.base_revision,
                     target.stack_parent_target_id,
+                    target.target_id AS canonical_target_id,
                     parent.provider_key AS stack_parent_provider_key,
                     parent.repository_key AS stack_parent_repository_key,
+                    producing_pass.pass_id
+                        AS canonical_producing_pass_id,
                     producing_pass.pass_kind AS producing_pass_kind,
                     producing_pass.state_kind AS producing_pass_state_kind,
                     producing_pass.turn_id AS producing_pass_turn_id,
                     producing_pass.output_frontier_id
                         AS producing_pass_output_frontier_id
                FROM review_finding AS finding
-               JOIN review_target AS target
+               LEFT JOIN review_target AS target
                  ON target.target_id = finding.target_id
                LEFT JOIN review_target AS parent
                  ON parent.target_id = target.stack_parent_target_id
-               JOIN review_pass AS producing_pass
+               LEFT JOIN review_pass AS producing_pass
                  ON producing_pass.pass_id = finding.producing_pass_id
                 AND producing_pass.run_id = finding.run_id
                 AND producing_pass.target_id = finding.target_id
@@ -493,11 +496,24 @@ impl ReviewWorkflowStore {
             transaction.commit().await?;
             return Ok(None);
         };
+        require_joined_reference(
+            &row,
+            "canonical_target_id",
+            "review_finding",
+            "referenced target row is missing",
+        )?;
+        require_joined_reference(
+            &row,
+            "canonical_producing_pass_id",
+            "review_finding",
+            "producing pass row is missing",
+        )?;
         let proposal = decode_finding_proposal(&row)?;
         let event_rows = sqlx::query(
             "SELECT event.finding_id, event.event_ordinal,
                     event.finding_run_id, event.target_id,
                     event.event_pass_id, event.event_pass_run_id,
+                    event_pass.pass_id AS canonical_event_pass_id,
                     event_pass.pass_kind AS event_pass_kind,
                     event_pass.state_kind AS event_pass_state_kind,
                     event_pass.turn_id AS event_pass_turn_id,
@@ -529,7 +545,7 @@ impl ReviewWorkflowStore {
                     attachment.external_object_key
                         AS attachment_external_object_key
                FROM review_finding_event AS event
-               JOIN review_pass AS event_pass
+               LEFT JOIN review_pass AS event_pass
                  ON event_pass.pass_id = event.event_pass_id
                 AND event_pass.run_id = event.event_pass_run_id
                 AND event_pass.target_id = event.target_id
@@ -559,7 +575,15 @@ impl ReviewWorkflowStore {
         .await?;
         let events = event_rows
             .into_iter()
-            .map(|row| decode_finding_event(&row, proposal.reference()))
+            .map(|row| {
+                require_joined_reference(
+                    &row,
+                    "canonical_event_pass_id",
+                    "review_finding_event",
+                    "event pass row is missing",
+                )?;
+                decode_finding_event(&row, proposal.reference())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let finding = ReviewFinding::try_reconstitute(proposal, events).map_err(|error| {
             corruption(
@@ -715,12 +739,13 @@ impl ReviewWorkflowStore {
         let attachment = sqlx::query(
             "SELECT attachment.external_link_id, attachment.pass_run_id,
                     attachment.pass_id, attachment.target_id,
+                    pass.pass_id AS canonical_attachment_pass_id,
                     pass.pass_kind, pass.state_kind AS pass_state_kind,
                     pass.turn_id AS pass_turn_id,
                     pass.output_frontier_id AS pass_output_frontier_id,
                     attachment.external_object_key
                FROM review_external_link_attachment AS attachment
-               JOIN review_pass AS pass
+               LEFT JOIN review_pass AS pass
                  ON pass.pass_id = attachment.pass_id
                 AND pass.run_id = attachment.pass_run_id
                 AND pass.target_id = attachment.target_id
@@ -729,18 +754,27 @@ impl ReviewWorkflowStore {
         .bind(link.into_uuid())
         .fetch_optional(&mut *transaction)
         .await?
-        .map(|row| decode_external_link_attachment(&row))
+        .map(|row| {
+            require_joined_reference(
+                &row,
+                "canonical_attachment_pass_id",
+                "review_external_link_attachment",
+                "attaching pass row is missing",
+            )?;
+            decode_external_link_attachment(&row)
+        })
         .transpose()?;
         let observations = sqlx::query(
             "SELECT observation.external_link_id,
                     observation.observation_ordinal,
                     observation.pass_run_id, observation.pass_id,
                     observation.target_id, observation.object_state,
+                    pass.pass_id AS canonical_observation_pass_id,
                     pass.pass_kind, pass.state_kind AS pass_state_kind,
                     pass.turn_id AS pass_turn_id,
                     pass.output_frontier_id AS pass_output_frontier_id
                FROM review_external_link_observation AS observation
-               JOIN review_pass AS pass
+               LEFT JOIN review_pass AS pass
                  ON pass.pass_id = observation.pass_id
                 AND pass.run_id = observation.pass_run_id
                 AND pass.target_id = observation.target_id
@@ -751,7 +785,15 @@ impl ReviewWorkflowStore {
         .fetch_all(&mut *transaction)
         .await?
         .into_iter()
-        .map(|row| decode_external_link_observation(&row))
+        .map(|row| {
+            require_joined_reference(
+                &row,
+                "canonical_observation_pass_id",
+                "review_external_link_observation",
+                "observing pass row is missing",
+            )?;
+            decode_external_link_observation(&row)
+        })
         .collect::<Result<Vec<_>, _>>()?;
         let link = ReviewExternalLink::try_reconstitute(
             id,
@@ -765,6 +807,35 @@ impl ReviewWorkflowStore {
         transaction.commit().await?;
         Ok(Some(link))
     }
+}
+
+async fn commit_mutation(
+    transaction: Transaction<'_, Postgres>,
+) -> Result<(), ReviewWorkflowStoreError> {
+    transaction
+        .commit()
+        .await
+        .map_err(classify_mutating_commit_error)
+}
+
+fn classify_mutating_commit_error(error: sqlx::Error) -> ReviewWorkflowStoreError {
+    if crate::commit_failure_is_ambiguous(&error) {
+        ReviewWorkflowStoreError::CommitAmbiguous(error)
+    } else {
+        ReviewWorkflowStoreError::Database(error)
+    }
+}
+
+fn require_joined_reference(
+    row: &PgRow,
+    column: &str,
+    aggregate: &'static str,
+    detail: &'static str,
+) -> Result<(), ReviewWorkflowStoreError> {
+    if row.try_get::<Option<Uuid>, _>(column)?.is_none() {
+        return Err(corruption(aggregate, String::from(detail)));
+    }
+    Ok(())
 }
 
 async fn begin_repeatable_read(
@@ -2147,6 +2218,8 @@ impl Error for ReviewWorkflowCorruption {}
 pub enum ReviewWorkflowStoreError {
     /// PostgreSQL or transport failure.
     Database(sqlx::Error),
+    /// PostgreSQL may have committed a mutation before the response was lost.
+    CommitAmbiguous(sqlx::Error),
     /// Stored facts failed closed reconstitution.
     Corruption(ReviewWorkflowCorruption),
     /// A caller attempted to insert a post-transition aggregate as new.
@@ -2161,6 +2234,12 @@ impl fmt::Display for ReviewWorkflowStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(error) => write!(formatter, "review-workflow database failure: {error}"),
+            Self::CommitAmbiguous(error) => {
+                write!(
+                    formatter,
+                    "review-workflow commit outcome is ambiguous: {error}"
+                )
+            }
             Self::Corruption(error) => error.fmt(formatter),
             Self::InvalidInsertion(error) => error.fmt(formatter),
             Self::InvalidTransition(error) => error.fmt(formatter),
@@ -2172,7 +2251,7 @@ impl fmt::Display for ReviewWorkflowStoreError {
 impl Error for ReviewWorkflowStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Corruption(error) => Some(error),
             Self::InvalidInsertion(error) => Some(error),
             Self::InvalidTransition(error) => Some(error),
@@ -2184,5 +2263,19 @@ impl Error for ReviewWorkflowStoreError {
 impl From<sqlx::Error> for ReviewWorkflowStoreError {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReviewWorkflowStoreError, classify_mutating_commit_error};
+
+    #[test]
+    fn unknown_commit_transport_failure_is_ambiguous() {
+        let classified = classify_mutating_commit_error(sqlx::Error::PoolClosed);
+        assert!(matches!(
+            classified,
+            ReviewWorkflowStoreError::CommitAmbiguous(sqlx::Error::PoolClosed)
+        ));
     }
 }

@@ -1930,6 +1930,122 @@ async fn inv040_cross_wired_pass_ancestry_is_rejected() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// INV-040: a missing immutable finding producer is corruption, not absence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_load_rejects_missing_producing_pass() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let review_evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass]).await[0];
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x740)));
+    fixture
+        .store
+        .insert_finding(&finding(
+            finding_ref,
+            review_evidence,
+            &fixture.target_snapshot,
+        ))
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_finding
+         DROP CONSTRAINT review_finding_producing_pass_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_run
+         DROP CONSTRAINT review_run_state_pass_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_reject_delete",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM review_pass WHERE pass_id = $1")
+        .bind(fixture.pass.pass().into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let error = fixture
+        .store
+        .load_finding(finding_ref.finding())
+        .await
+        .expect_err("missing producer must fail closed");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed review-finding corruption");
+    };
+    assert_eq!(error.aggregate(), "review_finding");
+    assert!(error.detail().contains("producing pass row is missing"));
+    Ok(())
+}
+
+/// INV-040: a missing finding-event pass is corruption, not a silently
+/// shortened history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let judge_pass = insert_fixture_pass(&fixture, 0x741, ReviewPassKind::Judge).await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, judge_pass]).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x742)));
+    fixture
+        .store
+        .insert_finding(&finding(finding_ref, evidence[0], &fixture.target_snapshot))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            ReviewFindingEvent::new(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                evidence[1],
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         DROP CONSTRAINT review_finding_event_pass_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_run
+         DROP CONSTRAINT review_run_state_pass_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_reject_delete",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM review_pass WHERE pass_id = $1")
+        .bind(judge_pass.pass().into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let error = fixture
+        .store
+        .load_finding(finding_ref.finding())
+        .await
+        .expect_err("missing event pass must fail closed");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed review-event corruption");
+    };
+    assert_eq!(error.aggregate(), "review_finding_event");
+    assert!(error.detail().contains("event pass row is missing"));
+    Ok(())
+}
+
 /// INV-041: one provider/kind/object identity has at most one attachment.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

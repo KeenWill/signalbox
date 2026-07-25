@@ -356,10 +356,13 @@ Locks per transaction, in acquisition order:
   transaction. Deferred relational guards reject a commit containing only one
   side of the state change. A run-only transition locks only its run row; a
   pass-only transition locks only its pass row, and neither can commit an
-  inconsistent projection. Finding-event and external-observation inserts take
-  only the corresponding schema-trigger root lock named above before checking
-  the next ordinal. Review workflow operations do not write `turn_lifecycle` and
-  therefore do not enter the session-scheduler lock order.
+  inconsistent projection. Explicit-transaction run/pass and finding mutations
+  report a non-definitive commit response as `CommitAmbiguous` rather than as a
+  definitely uncommitted database failure. Finding-event and
+  external-observation inserts take only the corresponding schema-trigger root
+  lock named above before checking the next ordinal. Review workflow operations
+  do not write `turn_lifecycle` and therefore do not enter the session-scheduler
+  lock order.
 
 The guarded hub database keeps its fenced application pool and singleton guard
 behind one shutdown boundary. Graceful shutdown globally closes the pool and
