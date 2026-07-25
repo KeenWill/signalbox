@@ -29,7 +29,8 @@ use signalbox_domain::{
     ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
     ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
     ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ModelSelectionRequest,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId, TranscriptAncestry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionConfigurationDefaults,
+    SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
 
@@ -614,6 +615,19 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
         .frontiers()
         .nth(1)
         .expect("the fixture has an interior addressable boundary");
+    let selected_prefix = imported
+        .prefix(selected)
+        .expect("the selected fixture frontier resolves to its exact prefix");
+    let expected_first_payload = SemanticTranscriptEntryPayload::Imported {
+        imported_entry: selected_prefix[0].identity(),
+        source_speaker: selected_prefix[0].source_speaker().clone(),
+        content: selected_prefix[0].content().clone(),
+    };
+    let expected_second_payload = SemanticTranscriptEntryPayload::Imported {
+        imported_entry: selected_prefix[1].identity(),
+        source_speaker: selected_prefix[1].source_speaker().clone(),
+        content: selected_prefix[1].content().clone(),
+    };
     let mut next_resume_entry = 0x1100;
     let resume = CreateSessionFromImportedFrontier::new(
         command_id(0x1200),
@@ -664,6 +678,38 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
 
     assert_eq!(resume.seed_snapshot().entry_count(), 2);
     assert_eq!(fork.seed_snapshot().entry_count(), 2);
+    assert_eq!(resume.semantic_entries().len(), selected_prefix.len());
+    assert_eq!(fork.semantic_entries().len(), selected_prefix.len());
+    assert_eq!(
+        resume.semantic_entries()[0].payload(),
+        &expected_first_payload
+    );
+    assert_eq!(
+        resume.semantic_entries()[1].payload(),
+        &expected_second_payload
+    );
+    assert_eq!(
+        fork.semantic_entries()[0].payload(),
+        &expected_first_payload
+    );
+    assert_eq!(
+        fork.semantic_entries()[1].payload(),
+        &expected_second_payload
+    );
+    assert_eq!(
+        resume.seed_snapshot().ordered_entries().collect::<Vec<_>>(),
+        vec![
+            resume.semantic_entries()[0].reference(),
+            resume.semantic_entries()[1].reference(),
+        ]
+    );
+    assert_eq!(
+        fork.seed_snapshot().ordered_entries().collect::<Vec<_>>(),
+        vec![
+            fork.semantic_entries()[0].reference(),
+            fork.semantic_entries()[1].reference(),
+        ]
+    );
     assert_eq!(
         resume.session().provenance().ancestry(),
         TranscriptAncestry::ImportedConversation {
