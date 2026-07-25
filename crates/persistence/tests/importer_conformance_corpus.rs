@@ -615,18 +615,19 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
         .frontiers()
         .nth(1)
         .expect("the fixture has an interior addressable boundary");
-    let selected_prefix = imported
-        .prefix(selected)
-        .expect("the selected fixture frontier resolves to its exact prefix");
+    let expected_seed_entries = imported
+        .entries()
+        .get(..2)
+        .expect("the fixture has the two entries preceding the selected boundary");
     let expected_first_payload = SemanticTranscriptEntryPayload::Imported {
-        imported_entry: selected_prefix[0].identity(),
-        source_speaker: selected_prefix[0].source_speaker().clone(),
-        content: selected_prefix[0].content().clone(),
+        imported_entry: expected_seed_entries[0].identity(),
+        source_speaker: expected_seed_entries[0].source_speaker().clone(),
+        content: expected_seed_entries[0].content().clone(),
     };
     let expected_second_payload = SemanticTranscriptEntryPayload::Imported {
-        imported_entry: selected_prefix[1].identity(),
-        source_speaker: selected_prefix[1].source_speaker().clone(),
-        content: selected_prefix[1].content().clone(),
+        imported_entry: expected_seed_entries[1].identity(),
+        source_speaker: expected_seed_entries[1].source_speaker().clone(),
+        content: expected_seed_entries[1].content().clone(),
     };
     let mut next_resume_entry = 0x1100;
     let resume = CreateSessionFromImportedFrontier::new(
@@ -678,8 +679,8 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
 
     assert_eq!(resume.seed_snapshot().entry_count(), 2);
     assert_eq!(fork.seed_snapshot().entry_count(), 2);
-    assert_eq!(resume.semantic_entries().len(), selected_prefix.len());
-    assert_eq!(fork.semantic_entries().len(), selected_prefix.len());
+    assert_eq!(resume.semantic_entries().len(), expected_seed_entries.len());
+    assert_eq!(fork.semantic_entries().len(), expected_seed_entries.len());
     assert_eq!(
         resume.semantic_entries()[0].payload(),
         &expected_first_payload
