@@ -134,6 +134,7 @@ impl ReviewWorkflowStore {
                     workflow_run.minimum_judge_confidence,
                     workflow_run.minimum_publication_confidence,
                     workflow_run.state_kind, workflow_run.state_pass_id,
+                    canonical_target.target_id AS canonical_target_id,
                     canonical_pass.pass_id AS evidence_pass_id,
                     canonical_pass.run_id AS evidence_pass_run_id,
                     canonical_pass.target_id AS evidence_pass_target_id,
@@ -143,6 +144,8 @@ impl ReviewWorkflowStore {
                     canonical_pass.output_frontier_id
                         AS evidence_pass_output_frontier_id
                FROM review_run AS workflow_run
+               LEFT JOIN review_target AS canonical_target
+                 ON canonical_target.target_id = workflow_run.target_id
                LEFT JOIN review_pass AS canonical_pass
                  ON canonical_pass.pass_id = workflow_run.state_pass_id
               WHERE workflow_run.run_id = $1",
@@ -150,7 +153,16 @@ impl ReviewWorkflowStore {
         .bind(run.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
-        row.map(decode_run).transpose()
+        row.map(|row| {
+            require_joined_reference(
+                &row,
+                "canonical_target_id",
+                "review_run",
+                "referenced target row is missing",
+            )?;
+            decode_run(row)
+        })
+        .transpose()
     }
 
     /// Applies one domain-validated run transition under row lock.
@@ -240,9 +252,10 @@ impl ReviewWorkflowStore {
                     canonical_turn.terminal_disposition_kind
                         AS turn_terminal_disposition_kind,
                     canonical_turn.terminal_frontier_id
-                        AS turn_terminal_frontier_id
+                        AS turn_terminal_frontier_id,
+                    canonical_run.run_id AS canonical_run_id
                FROM review_pass AS workflow_pass
-               JOIN review_run AS canonical_run
+               LEFT JOIN review_run AS canonical_run
                  ON canonical_run.run_id = workflow_pass.run_id
                 AND canonical_run.target_id = workflow_pass.target_id
                LEFT JOIN accepted_input AS canonical_input
@@ -255,7 +268,16 @@ impl ReviewWorkflowStore {
         .bind(pass.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
-        row.map(decode_pass).transpose()
+        row.map(|row| {
+            require_joined_reference(
+                &row,
+                "canonical_run_id",
+                "review_pass",
+                "referenced run row is missing",
+            )?;
+            decode_pass(row)
+        })
+        .transpose()
     }
 
     /// Applies one domain-validated pass transition under row lock.
@@ -687,6 +709,7 @@ impl ReviewWorkflowStore {
                 ReviewWorkflowTransitionError::ExternalLink(error),
             )
         })?;
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_external_link_attachment
                 (external_link_id, target_id, pass_run_id, pass_id,
@@ -700,8 +723,9 @@ impl ReviewWorkflowStore {
         .bind(next.provider().as_str())
         .bind(encode_external_object_kind(next.object_kind()))
         .bind(attachment.external_object().as_str())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        commit_mutation(transaction).await?;
         Ok(Some(next))
     }
 
@@ -719,6 +743,7 @@ impl ReviewWorkflowStore {
                 ReviewWorkflowTransitionError::ExternalLink(error),
             )
         })?;
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_external_link_observation
                 (external_link_id, observation_ordinal, target_id,
@@ -731,8 +756,9 @@ impl ReviewWorkflowStore {
         .bind(observation.pass().run().run().into_uuid())
         .bind(observation.pass().pass().into_uuid())
         .bind(encode_external_object_state(observation.state()))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        commit_mutation(transaction).await?;
         Ok(Some(next))
     }
 
@@ -745,10 +771,17 @@ impl ReviewWorkflowStore {
         let row = sqlx::query(
             "SELECT link.external_link_id, link.target_id,
                     link.association_kind, link.run_id, link.finding_id,
+                    canonical_target.target_id AS canonical_target_id,
+                    canonical_run.run_id AS canonical_run_id,
                     association_finding.producing_pass_id
                         AS finding_producing_pass_id,
                     link.provider_key, link.object_kind
                FROM review_external_link AS link
+               LEFT JOIN review_target AS canonical_target
+                 ON canonical_target.target_id = link.target_id
+               LEFT JOIN review_run AS canonical_run
+                 ON canonical_run.run_id = link.run_id
+                AND canonical_run.target_id = link.target_id
                LEFT JOIN review_finding AS association_finding
                  ON association_finding.finding_id = link.finding_id
                 AND association_finding.run_id = link.run_id
@@ -762,6 +795,20 @@ impl ReviewWorkflowStore {
             transaction.commit().await?;
             return Ok(None);
         };
+        require_joined_reference(
+            &row,
+            "canonical_target_id",
+            "review_external_link",
+            "referenced target row is missing",
+        )?;
+        if row.try_get::<Option<Uuid>, _>("run_id")?.is_some() {
+            require_joined_reference(
+                &row,
+                "canonical_run_id",
+                "review_external_link",
+                "referenced run row is missing",
+            )?;
+        }
         let (id, association, provider, kind) = decode_external_link_root(&row)?;
         let attachment = sqlx::query(
             "SELECT attachment.external_link_id, attachment.pass_run_id,
