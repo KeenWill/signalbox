@@ -45,6 +45,9 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
           WHERE session_id = $1
           FOR UPDATE";
 
+pub(crate) const REPLACE_SESSION_METADATA: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
+
 pub(crate) const OUTBOX_DELIVERY: &str = "SELECT delivered_through
            FROM outbox_delivery_state
           WHERE singleton

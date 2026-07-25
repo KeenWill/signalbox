@@ -11,6 +11,7 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod scheduler;
+mod session_metadata;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
@@ -58,6 +59,13 @@ pub use scheduler::{
     EligibilitySweepBatch, EligibilityWorkSource, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+};
+pub use session_metadata::{
+    ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
+    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    ReplaceSessionMetadataTransaction, SessionMetadataListItem, SessionMetadataListQuery,
+    SessionMetadataListQueryError, SessionMetadataLister, SessionMetadataPageReader,
+    SessionMetadataReader,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,

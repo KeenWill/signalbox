@@ -3545,6 +3545,155 @@ impl ReconstitutedReplaceSessionDefaults {
 }
 ```
 
+## domain: session_metadata
+
+```rust
+pub struct SessionMetadataContent { /* private */ }
+impl SessionMetadataContent {
+    pub const MAX_TOTAL_UTF8_BYTES: usize;
+    pub const MAX_INDEXED_UTF8_BYTES: usize;
+    pub const MAX_TAGS: usize;
+    pub const MAX_ATTRIBUTES: usize;
+    pub fn empty() -> Self;
+    pub fn try_new(
+        title: Option<String>,
+        tags: Vec<String>,
+        attributes: Vec<(String, String)>,
+        archived: bool,
+    ) -> Result<Self, SessionMetadataContentError>;
+    pub fn title(&self) -> Option<&str>;
+    pub fn tags(&self) -> impl ExactSizeIterator<Item = &str>;
+    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)>;
+    pub const fn archived(&self) -> bool;
+}
+
+pub enum SessionMetadataContentError {
+    EmptyTitle,
+    TitleContainsNul,
+    TooManyTags,
+    EmptyTag,
+    TagContainsNul,
+    TagExceedsIndexedUtf8Bytes,
+    DuplicateTag,
+    TooManyAttributes,
+    EmptyAttributeKey,
+    AttributeKeyContainsNul,
+    AttributeKeyExceedsIndexedUtf8Bytes,
+    AttributeValueContainsNul,
+    DuplicateAttributeKey,
+    TotalUtf8BytesExceeded,
+}
+
+pub struct SessionMetadataUpdatedAt(/* private */);
+impl SessionMetadataUpdatedAt {
+    pub const fn from_unix_micros(value: u64) -> Self;
+    pub const fn as_unix_micros(self) -> u64;
+}
+
+pub struct SessionMetadataLastWriter { /* private */ }
+impl SessionMetadataLastWriter {
+    pub const fn new(updated_at: SessionMetadataUpdatedAt, actor: Actor) -> Self;
+    // accessors: updated_at(), actor()
+}
+
+pub struct SessionMetadataSnapshot { /* private */ }
+impl SessionMetadataSnapshot {
+    pub fn initial(session: SessionId) -> Self;
+    pub fn from_recorded_write(
+        session: SessionId,
+        content: SessionMetadataContent,
+        last_writer: SessionMetadataLastWriter,
+    ) -> Self;
+    // accessors: session(), content(), last_writer()
+}
+
+pub struct ReplaceSessionMetadata { /* private */ }
+impl ReplaceSessionMetadata {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        replacement: SessionMetadataContent,
+    ) -> Self;
+    pub fn prepare_session_not_found(self) -> PreparedReplaceSessionMetadata;
+    pub fn prepare_applied(
+        self,
+        updated_at: SessionMetadataUpdatedAt,
+    ) -> PreparedReplaceSessionMetadata;
+    // accessors: command_id(), session(), actor(), replacement()
+}
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
+
+pub enum ReplaceSessionMetadataResult {
+    Applied(ReplaceSessionMetadataAppliedResult),
+    Rejected(ReplaceSessionMetadataRejectedResult),
+}
+
+pub struct ReplaceSessionMetadataAppliedResult { /* private */ }
+// sealed: live preparation and checked reconstitution
+impl ReplaceSessionMetadataAppliedResult {
+    // accessor: snapshot()
+}
+
+pub enum ReplaceSessionMetadataRejectedResult {
+    SessionNotFound(ReplaceSessionMetadataSessionNotFound),
+}
+
+pub struct ReplaceSessionMetadataSessionNotFound { /* private */ }
+// sealed: prepare_session_not_found and checked reconstitution
+impl ReplaceSessionMetadataSessionNotFound {
+    // accessor: session()
+}
+
+pub struct PreparedReplaceSessionMetadata { /* private */ }
+// sealed: ReplaceSessionMetadata preparation methods
+impl PreparedReplaceSessionMetadata {
+    pub fn into_parts(self) -> (ReplaceSessionMetadata, ReplaceSessionMetadataResult);
+    // accessors: command(), result()
+}
+
+pub struct ReplaceSessionMetadataReconstitutionInput { /* private */ }
+impl ReplaceSessionMetadataReconstitutionInput {
+    pub const fn applied(
+        command: ReplaceSessionMetadata,
+        command_actor: Actor,
+        result_session: SessionId,
+        result_updated_at: SessionMetadataUpdatedAt,
+        result_actor: Actor,
+    ) -> Self;
+    pub const fn rejected_session_not_found(
+        command: ReplaceSessionMetadata,
+        command_actor: Actor,
+        result_session: SessionId,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadataReconstitutionError>;
+    // accessor: command()
+}
+
+pub enum ReplaceSessionMetadataReconstitutionFailure {
+    CommandActorMismatch,
+    ResultSessionMismatch,
+    ResultActorMismatch,
+}
+
+pub struct ReplaceSessionMetadataReconstitutionError { /* private */ }
+// sealed: Err of ReplaceSessionMetadataReconstitutionInput::reconstitute
+impl ReplaceSessionMetadataReconstitutionError {
+    pub fn into_parts(self) -> (
+        ReplaceSessionMetadataReconstitutionInput,
+        ReplaceSessionMetadataReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub struct ReconstitutedReplaceSessionMetadata { /* private */ }
+// sealed: ReplaceSessionMetadataReconstitutionInput::reconstitute
+impl ReconstitutedReplaceSessionMetadata {
+    // accessors: command(), result()
+}
+```
+
 ## application: conversation_import
 
 ```rust
@@ -4431,6 +4580,133 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: session_metadata
+
+```rust
+pub struct ReplaceSessionMetadataRequest { /* private */ }
+impl ReplaceSessionMetadataRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        replacement: SessionMetadataContent,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), session(), replacement()
+}
+
+pub enum ReplaceSessionMetadataOutcome {
+    Recorded(ReplaceSessionMetadataResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+
+pub trait ReplaceSessionMetadataTransaction {
+    type Error;
+    fn handle(
+        &mut self,
+        command: ReplaceSessionMetadata,
+    ) -> impl Future<Output = Result<ReplaceSessionMetadataOutcome, Self::Error>> + Send;
+}
+
+pub struct ReplaceSessionMetadataService<Transaction> { /* private */ }
+impl<Transaction> ReplaceSessionMetadataService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+    pub fn into_transaction(self) -> Transaction;
+}
+impl<Transaction: ReplaceSessionMetadataTransaction> ReplaceSessionMetadataService<Transaction> {
+    pub async fn execute(
+        &mut self,
+        request: ReplaceSessionMetadataRequest,
+    ) -> Result<ReplaceSessionMetadataOutcome, Transaction::Error>;
+}
+
+pub trait SessionMetadataReader {
+    type Error;
+    fn load_session_metadata(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<Option<SessionMetadataSnapshot>, Self::Error>> + Send;
+}
+
+pub struct LoadSessionMetadataService<Reader> { /* private */ }
+impl<Reader> LoadSessionMetadataService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+    pub fn into_reader(self) -> Reader;
+}
+impl<Reader: SessionMetadataReader> LoadSessionMetadataService<Reader> {
+    pub async fn execute(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<SessionMetadataSnapshot>, Reader::Error>;
+}
+
+pub struct SessionMetadataListQuery { /* private */ }
+impl SessionMetadataListQuery {
+    pub const MAX_REQUIRED_TAGS: usize;
+    pub fn default_page() -> Self;
+    pub fn try_new(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+    ) -> Result<Self, SessionMetadataListQueryError>;
+    pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
+    // accessors: title_contains(), include_archived(), page_size(), after_session()
+}
+
+pub enum SessionMetadataListQueryError {
+    TooManyRequiredTags,
+    EmptyTag,
+    TagContainsNul,
+    TagExceedsIndexedUtf8Bytes,
+    DuplicateTag,
+    EmptyTitleSearch,
+    TitleSearchContainsNul,
+    TotalUtf8BytesExceeded,
+    PageSizeOutOfRange,
+}
+
+pub struct SessionMetadataListItem { /* private */ }
+impl SessionMetadataListItem {
+    pub fn new(
+        snapshot: &SessionMetadataSnapshot,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub fn title(&self) -> Option<&str>;
+    pub fn tags(&self) -> impl ExactSizeIterator<Item = &str>;
+    // accessors: session(), defaults_version(), defaults(), archived(), last_writer()
+}
+
+pub trait SessionMetadataPageReader {
+    type Error;
+    fn next_item(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<SessionMetadataListItem>, Self::Error>> + Send;
+    fn next_after_session(&self) -> Option<SessionId>;
+}
+
+pub trait SessionMetadataLister {
+    type Error;
+    type Page: SessionMetadataPageReader<Error = Self::Error>;
+    fn open_session_metadata_page(
+        &self,
+        query: SessionMetadataListQuery,
+    ) -> impl Future<Output = Result<Self::Page, Self::Error>> + Send;
+}
+
+pub struct ListSessionMetadataService<Lister> { /* private */ }
+impl<Lister> ListSessionMetadataService<Lister> {
+    pub const fn new(lister: Lister) -> Self;
+    pub fn into_lister(self) -> Lister;
+}
+impl<Lister: SessionMetadataLister> ListSessionMetadataService<Lister> {
+    pub async fn execute(
+        &self,
+        query: SessionMetadataListQuery,
+    ) -> Result<Lister::Page, Lister::Error>;
+}
+```
+
 ## application: operator_failure
 
 ```rust
@@ -4990,10 +5266,20 @@ pub enum ReviewTargetSubject {
     ChangeRequest(ReviewChangeRequestNumber),
     Commit,
 }
+pub struct ReviewTargetParentRef { /* target + canonical repository scope */ }
+impl ReviewTargetParentRef {
+    pub const fn new(
+        target: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+    ) -> Self;
+    // accessors: target(), provider(), repository()
+}
 pub struct ReviewTarget { /* immutable snapshot */ }
 pub enum ReviewTargetError {
     MissingChangeRequestBase { target: ReviewTargetId },
     SelfParent { target: ReviewTargetId },
+    ForeignParent { target: ReviewTargetId },
 }
 impl ReviewTarget {
     pub fn try_new(
@@ -5003,7 +5289,7 @@ impl ReviewTarget {
         subject: ReviewTargetSubject,
         head_revision: ReviewKey,
         base_revision: Option<ReviewKey>,
-        stack_parent: Option<ReviewTargetId>,
+        stack_parent: Option<ReviewTargetParentRef>,
     ) -> Result<Self, ReviewTargetError>;
     // accessors: id(), provider(), repository(), subject(), head_revision(),
     // base_revision(), stack_parent()
@@ -5042,10 +5328,14 @@ pub enum ReviewRunState {
     Blocked { blocking_pass: ReviewPassRef },
     Cancelled { last_pass: Option<ReviewPassRef> },
 }
-pub struct ReviewRunPassEvidence { /* canonical pass reference + state */ }
-impl ReviewRunPassEvidence {
-    pub const fn new(reference: ReviewPassRef, state: ReviewPassState) -> Self;
-    // accessors: reference(), state()
+pub struct ReviewPassEvidence { /* canonical pass reference + kind + state */ }
+impl ReviewPassEvidence {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        state: ReviewPassState,
+    ) -> Self;
+    // accessors: reference(), kind(), state()
 }
 pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
 impl ReviewRunReconstitutionInput {
@@ -5054,7 +5344,7 @@ impl ReviewRunReconstitutionInput {
         workflow: ReviewWorkflowKind,
         policy: ReviewPolicy,
         state: ReviewRunState,
-        pass_evidence: Option<ReviewRunPassEvidence>,
+        pass_evidence: Option<ReviewPassEvidence>,
     ) -> Self;
     // accessors: reference(), workflow(), policy(), state(), pass_evidence()
 }
@@ -5064,6 +5354,7 @@ pub enum ReviewRunEvidenceFailure {
     MissingPassEvidence,
     UnexpectedPassEvidence,
     PassMismatch,
+    PassKindMismatch,
     PassStateMismatch,
 }
 pub struct ReviewRunReconstitutionError { /* input + failure */ }
@@ -5087,7 +5378,7 @@ impl ReviewRun {
     pub fn transition(
         self,
         next: ReviewRunState,
-        pass_evidence: Option<ReviewRunPassEvidence>,
+        pass_evidence: Option<ReviewPassEvidence>,
     ) -> Result<Self, ReviewRunTransitionError>;
     // accessors: reference(), workflow(), policy(), state()
 }
@@ -5137,21 +5428,28 @@ impl ReviewPassReconstitutionInput {
     pub const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
+        workflow: ReviewWorkflowKind,
         session: SessionId,
         accepted_input: AcceptedInputId,
         accepted_input_session: SessionId,
         state: ReviewPassState,
         turn_evidence: Option<ReviewPassTurnEvidence>,
     ) -> Self;
-    // accessors: reference(), kind(), session(), accepted_input(),
+    // accessors: reference(), kind(), workflow(), session(), accepted_input(),
     // accepted_input_session(), state(), turn_evidence()
 }
 pub struct ReviewPass { /* reference + session input + state */ }
-pub struct ReviewPassConstructionError { /* rejected session association */ }
+pub enum ReviewPassConstructionFailure {
+    RunWorkflowMismatch,
+    AcceptedInputSessionMismatch,
+}
+pub struct ReviewPassConstructionError { /* rejected construction facts */ }
 impl ReviewPassConstructionError {
-    // accessors: reference(), kind(), sessions(), accepted_input()
+    // accessors: reference(), kind(), workflow(), sessions(), accepted_input(),
+    // failure()
 }
 pub enum ReviewPassReconstitutionFailure {
+    RunWorkflowMismatch,
     AcceptedInputSessionMismatch,
     MissingTurnEvidence,
     UnexpectedTurnEvidence,
@@ -5175,6 +5473,7 @@ impl ReviewPass {
     pub fn try_new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
+        workflow: ReviewWorkflowKind,
         session: SessionId,
         accepted_input: AcceptedInputId,
         accepted_input_session: SessionId,
@@ -5242,13 +5541,13 @@ pub struct ReviewFindingProposal { /* reference + producing pass + content */ }
 impl ReviewFindingProposal {
     pub fn try_new(
         reference: ReviewFindingRef,
-        producing_pass: ReviewPassRef,
+        producing_pass: ReviewPassEvidence,
         target: &ReviewTarget,
         content: ReviewFindingContent,
     ) -> Result<Self, ReviewFindingTransitionError>;
     // accessors: reference(), producing_pass(), content()
 }
-pub struct ReviewFindingExternalLinkRef { /* finding + link */ }
+pub struct ReviewFindingExternalLinkRef { /* finding + link + attachment pass */ }
 pub enum ReviewFindingExternalLinkFailure {
     ForeignAssociation,
     NotAttached,
@@ -5262,7 +5561,7 @@ impl ReviewFindingExternalLinkRef {
         finding: ReviewFindingRef,
         link: &ReviewExternalLink,
     ) -> Result<Self, ReviewFindingExternalLinkError>;
-    // accessors: finding(), link()
+    // accessors: finding(), link(), attachment_pass()
 }
 
 pub enum ReviewFindingEventKind {
@@ -5280,11 +5579,10 @@ impl ReviewFindingEvent {
     pub const fn new(
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassRef,
-        pass_kind: ReviewPassKind,
+        pass: ReviewPassEvidence,
         kind: ReviewFindingEventKind,
     ) -> Self;
-    // accessors: finding(), ordinal(), pass(), pass_kind(), kind()
+    // accessors: finding(), ordinal(), pass(), pass_evidence(), kind()
 }
 pub enum ReviewFindingStatus {
     Open,
@@ -5312,12 +5610,14 @@ pub enum ReviewFindingTransitionFailure {
     ForeignTarget,
     MissingDiffBase,
     ForeignProducingPass,
+    IncompatibleProducingPassEvidence,
     ForeignEventFinding,
     ForeignEventPass,
-    IncompatibleEventPassKind,
+    IncompatibleEventPassEvidence,
     ForeignReferencedFinding,
     SelfReference,
     ForeignExternalLink,
+    PublicationPassMismatch,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
     InvalidTransition { current: ReviewFindingStatus },
 }
@@ -5346,10 +5646,10 @@ pub struct ReviewExternalLinkAttachment { /* link + pass + external object key *
 impl ReviewExternalLinkAttachment {
     pub const fn new(
         link: ReviewExternalLinkId,
-        pass: ReviewPassRef,
+        pass: ReviewPassEvidence,
         external_object: ReviewKey,
     ) -> Self;
-    // accessors: link(), pass(), external_object()
+    // accessors: link(), pass(), pass_evidence(), external_object()
 }
 pub enum ReviewExternalObjectState {
     Current,
@@ -5361,10 +5661,10 @@ impl ReviewExternalLinkObservation {
     pub const fn new(
         link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassRef,
+        pass: ReviewPassEvidence,
         state: ReviewExternalObjectState,
     ) -> Self;
-    // accessors: link(), ordinal(), pass(), state()
+    // accessors: link(), ordinal(), pass(), pass_evidence(), state()
 }
 pub struct ReviewExternalLink { /* reservation + optional attachment + observations */ }
 impl ReviewExternalLink {
@@ -5394,6 +5694,8 @@ pub enum ReviewExternalLinkTransitionError {
     ForeignAttachmentLink,
     ForeignObservationLink,
     ForeignPass,
+    IncompatibleAttachmentPass,
+    IncompatibleObservationPass,
     NotAttached,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
 }
@@ -5428,8 +5730,9 @@ pub enum ReviewExternalLinkTransitionError {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 61                   |
-| **signalbox-domain total**                         | **416 (+1 free fn)** |
+| domain: review_workflow                            | 63                   |
+| domain: session_metadata                           | 15                   |
+| **signalbox-domain total**                         | **433 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
@@ -5438,10 +5741,11 @@ pub enum ReviewExternalLinkTransitionError {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 4 (incl. 1 trait)    |
+| application: session_metadata                      | 12 (incl. 4 traits)  |
 | application: scheduler                             | 12 (incl. 4 traits)  |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)   |
 | application: startup_scan                          | 7 (incl. 2 traits)   |
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **124**              |
+| **signalbox-application total**                    | **136**              |

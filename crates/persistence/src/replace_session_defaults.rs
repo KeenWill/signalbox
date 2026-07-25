@@ -208,7 +208,11 @@ impl ReplaceSessionDefaultsRepository {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
-            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
+            Some(
+                CommandKind::ReplaceSessionMetadata
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest,
+            ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -242,6 +246,7 @@ impl ReplaceSessionDefaultsRepository {
                 Some(
                     CommandKind::CreateSession
                     | CommandKind::CreateSessionFromImportedFrontier
+                    | CommandKind::ReplaceSessionMetadata
                     | CommandKind::SubmitInput
                     | CommandKind::DecideToolRequest,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
@@ -319,9 +324,11 @@ impl ReplaceSessionDefaultsRepository {
             Some(CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier) => {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
-            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
-                Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
-            }
+            Some(
+                CommandKind::ReplaceSessionMetadata
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest,
+            ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 }

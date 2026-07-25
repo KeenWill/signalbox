@@ -48,8 +48,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-three files, `202607180001` through
-`202607250001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-five files, `202607180001` through
+`202607260300` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -80,10 +80,13 @@ Implemented table families (across the forward-only migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
-  `replace_session_defaults_command`, `submit_input_command`,
-  `decide_tool_request_command`);
+  `replace_session_defaults_command`, `replace_session_metadata_command`,
+  `submit_input_command`, `decide_tool_request_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
+- `session_metadata` plus its current tag and attribute satellites,
+  `session_metadata_installation`, and the complete tag and attribute satellites
+  of `replace_session_metadata_command`;
 - `imported_raw_source_record`, `imported_conversation`,
   `imported_conversation_raw_record`, and `imported_transcript_entry`, whose
   exact append-only representation, idempotency, and completeness rules are
@@ -130,13 +133,37 @@ Representation rules, all enforced in the schema:
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
   imported-conversation headers and members, imported-frontier command records,
-  session seed projections, and every existing historical fact. Mutable
-  lifecycle tables carry guard triggers instead: `turn_lifecycle` rows must be
-  inserted `queued`, transition only monotonically, keep identity/origin/order
-  and written starts write-once, and become immutable at `terminal`;
-  `turn_attempt` rows are inserted `prepared` and an `ended` attempt is
-  immutable. Why: restart trusts durable rows as evidence, so the schema itself
-  must forbid rewriting them (INV-006, INV-007).
+  session seed projections, metadata replacement receipts, and every existing
+  historical fact. Metadata receipt satellites must be inserted before their
+  deferrable parent record; their `BEFORE INSERT` triggers lock the existing
+  owner-global command claim, require that claim, and reject insertion once the
+  parent seals the receipt. The parent and both receipt satellites also reject
+  `TRUNCATE`, which does not invoke row-level delete triggers. Mutable lifecycle
+  tables carry guard triggers instead: `turn_lifecycle` rows must be inserted
+  `queued`, transition only monotonically, keep identity/origin/order and
+  written starts write-once, and become immutable at `terminal`; `turn_attempt`
+  rows are inserted `prepared` and an `ended` attempt is immutable. Why: restart
+  trusts durable rows as evidence, so the schema itself must forbid rewriting
+  them (INV-006, INV-007).
+- The current `session_metadata` root remains mutable by complete replacement
+  but rejects deletion and any change to its `session_id`. Once a session has a
+  recorded metadata write, root absence can therefore never be reinterpreted as
+  the initial unwritten state, and the mutable fields cannot move to another
+  session. Its `source_command_id` names the exact immutable applied receipt.
+  Deferred constraint triggers compare every current root field and both
+  complete satellite sets to that receipt, so a partial direct insert, update,
+  or delete cannot commit. Current satellite updates are rejected outright. The
+  current root, tag, and attribute tables also reject `TRUNCATE`; complete
+  replacement through the adapter is their only admitted mutation. An
+  append-only `session_metadata_installation` row records each source receipt
+  when its applied receipt parent is sealed. Before admitting that evidence, an
+  immediate trigger requires the source to be current and compares the complete
+  current root and both satellite sets with the sealed receipt. Each
+  installation is therefore authenticated before another write in the same
+  transaction can supersede it. Deferred foreign keys bind both the final
+  current root and every applied receipt to the evidence. Reinstalling an older
+  receipt after a later replacement cannot commit, and installation evidence
+  cannot be updated, deleted, or truncated.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -169,9 +196,11 @@ Representation rules, all enforced in the schema:
   inside a transaction while every commit boundary sees the complete shape: each
   claimed registry row has exactly one typed command record, each
   `submit_input_command` terminal result correlates with exactly its committed
-  effects, each imported-conversation and context-frontier header has complete
-  contiguous ordered membership, each imported-frontier session names its exact
-  aggregate, boundary, and relationship and has exactly one immutable
+  effects, each applied metadata replacement receipt has a conditional foreign
+  key to the retained current root for its exact target while a rejection has no
+  such proof, each imported-conversation and context-frontier header has
+  complete contiguous ordered membership, each imported-frontier session names
+  its exact aggregate, boundary, and relationship and has exactly one immutable
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
@@ -179,6 +208,12 @@ Representation rules, all enforced in the schema:
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
+- Current and receipt metadata tag and attribute-key columns are bounded to
+  1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
+  admission boundary.
+- Current and applied-receipt metadata timestamps reject PostgreSQL positive and
+  negative infinity, so every admitted value reaches the checked
+  Unix-microsecond decoder.
 
 Some rules are deliberately enforced twice — typed domain transitions and
 database constraints — for the database-level invariants; a passing SQL row set
@@ -198,17 +233,18 @@ One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`submit_input`, `decide_tool_request`) and a kind-scoped `storage_version`.
-Defaults-bearing create/imported-create/replace records write version 2 and
-reconstitute version 1 with the disabled dangerous-tool posture, while submit
-and decision records use version 1. Each kind has one typed subordinate record
-keyed by `command_id` that stores every caller-supplied semantic field in typed,
-`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
-its typed result fields; result-shape `CHECK` constraints tie each rejection
-kind to exactly its fields, and deferred reverse constraints require exactly one
-typed record per claimed registry row at commit. Why: typed per-kind records
-keep replay semantics reviewable and constraint-checked, where a universal
-serialized payload would make the serializer a second semantic authority.
+`replace_session_metadata`, `submit_input`, `decide_tool_request`) and a
+kind-scoped `storage_version`. Defaults-bearing create, imported-create, and
+replace-defaults records write version 2 and reconstitute version 1 with the
+disabled dangerous-tool posture, while metadata, submit, and decision records
+use version 1. Each kind has one typed subordinate record keyed by `command_id`
+that stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns, plus the terminal `applied`/`rejected` result and its typed result
+fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
+fields, and deferred reverse constraints require exactly one typed record per
+claimed registry row at commit. Why: typed per-kind records keep replay
+semantics reviewable and constraint-checked, where a universal serialized
+payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -235,15 +271,21 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Schema triggers additionally lock
-their append roots: the deferred pending-steering source-turn trigger (migration
-`202607180005`) takes `FOR UPDATE` on the named `turn_lifecycle` row when a
-pending-steering `accepted_input` insert reaches commit; review finding events
-lock their `review_finding` root; and external-link observations lock their
-`review_external_link` root. Why: a single reviewed Rust inventory makes
-application lock ordering auditable instead of scattered through query strings;
-trigger-resident locks are recorded here because they fire outside the
-inventory's view.
+`crates/persistence/src/lock_inventory.rs`. Four explicit lock sites live in the
+schema instead:
+
+- the deferred pending-steering source-turn trigger (migration `202607180005`)
+  takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
+  `accepted_input` insert reaches commit; and
+- the metadata receipt-satellite insert trigger (migration `202607260101`) takes
+  `FOR UPDATE` on the already-claimed `durable_command` row before it checks
+  whether the typed receipt parent has sealed the command;
+- review finding events lock their `review_finding` root; and
+- external-link observations lock their `review_external_link` root.
+
+Why: a single reviewed inventory makes lock ordering auditable instead of
+scattered through query strings; trigger-resident locks are recorded here
+because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
 
@@ -283,6 +325,18 @@ Locks per transaction, in acquisition order:
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
+- **ReplaceSessionMetadata**: the target session row is locked
+  `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
+  serializes metadata writers without conflicting with the `KEY SHARE` lock
+  taken by foreign-key checks. After the lock is acquired, a separate statement
+  samples PostgreSQL statement time at microsecond precision; that exact value
+  is written to both the current root and the applied receipt. The unseen
+  handler already owns its `durable_command` claim from insertion before this
+  session lock; each nonempty receipt satellite later reacquires that same row
+  through its trigger before the typed parent seals the receipt. A point read
+  and each opened streaming list page use one read-only repeatable-read
+  transaction, so their root and satellite values come from one database
+  snapshot.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
@@ -353,17 +407,21 @@ semantics are owned by
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
-or dropped on load. Load paths do not panic on durable data; checked interrupt
-application produces the exact cancellation-requested or reconciliation-required
-transition, while a projection that cannot support that transition fails closed
-as typed corruption. Startup recovery operates only on successfully
-reconstituted projections (INV-034), and a successful reconstitution does not
-waive the guarded compare-and-set when a later transaction commits: every
-guarded write that matches zero rows is either benign staleness (reload and
-rederive) or, where the transaction's own premises made a match mandatory,
-corruption. Why: the dangerous corruption cases are rows that look individually
-valid while their cross-record correlations are not, so authority comes only
-from complete validated projections, never from raw identifiers.
+or dropped on load. An applied metadata receipt load also validates the stored
+current-root proof against both the command target and result target. A metadata
+list load validates the complete stored content, including attributes that its
+public summary deliberately omits, before it constructs the summary. Load paths
+do not panic on durable data; checked interrupt application produces the exact
+cancellation-requested or reconciliation-required transition, while a projection
+that cannot support that transition fails closed as typed corruption. Startup
+recovery operates only on successfully reconstituted projections (INV-034), and
+a successful reconstitution does not waive the guarded compare-and-set when a
+later transaction commits: every guarded write that matches zero rows is either
+benign staleness (reload and rederive) or, where the transaction's own premises
+made a match mandatory, corruption. Why: the dangerous corruption cases are rows
+that look individually valid while their cross-record correlations are not, so
+authority comes only from complete validated projections, never from raw
+identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
