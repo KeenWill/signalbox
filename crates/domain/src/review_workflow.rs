@@ -1293,6 +1293,20 @@ impl ReviewPass {
                 failure: ReviewPassTransitionFailure::Evidence(failure),
             });
         }
+        if self.state == ReviewPassState::Queued
+            && matches!(next, ReviewPassState::Running { .. })
+            && turn_evidence
+                .is_some_and(|evidence| evidence.outcome != ReviewPassTurnOutcome::Active)
+        {
+            return Err(ReviewPassTransitionError {
+                attempt: Box::new(ReviewPassTransitionAttempt {
+                    current: self.state,
+                    next,
+                    turn_evidence,
+                }),
+                failure: ReviewPassTransitionFailure::TurnNotActive,
+            });
+        }
         let same_turn = match (self.state.turn(), next.turn()) {
             (Some(current), Some(next)) => current == next,
             _ => true,
@@ -1392,6 +1406,13 @@ fn validate_pass_turn_evidence(
     }
     if evidence.accepted_input != accepted_input {
         return Some(ReviewPassReconstitutionFailure::TurnAcceptedInputMismatch);
+    }
+    let frontier_matches_outcome = match evidence.outcome {
+        ReviewPassTurnOutcome::Active => evidence.terminal_frontier.is_none(),
+        _ => evidence.terminal_frontier.is_some(),
+    };
+    if !frontier_matches_outcome {
+        return Some(ReviewPassReconstitutionFailure::TurnFrontierShapeMismatch);
     }
     if !pass_state_matches_turn_outcome(state, evidence.outcome) {
         return Some(ReviewPassReconstitutionFailure::TurnOutcomeMismatch);
@@ -1505,6 +1526,9 @@ pub enum ReviewPassReconstitutionFailure {
     TurnAcceptedInputMismatch,
     /// The canonical turn lifecycle outcome differs from the pass projection.
     TurnOutcomeMismatch,
+    /// The canonical turn's terminal frontier contradicts its outcome: a
+    /// terminal turn always carries one and an active turn never does.
+    TurnFrontierShapeMismatch,
     /// The successful output is not the canonical terminal frontier.
     OutputFrontierMismatch,
 }
@@ -1542,6 +1566,9 @@ pub enum ReviewPassTransitionFailure {
     InvalidTransition,
     /// The transition names a different turn.
     TurnChanged,
+    /// A queued pass starts only while its canonical turn is active; terminal
+    /// lag is reserved for a pass that already projected the running start.
+    TurnNotActive,
 }
 
 /// Rejected pass transition retaining both states.
@@ -3274,6 +3301,35 @@ mod tests {
     /// turn terminalizes.
     #[test]
     fn s29_inv040_running_pass_admits_terminal_turn_projection_lag() {
+        let lagging = ReviewPassState::Running { turn: turn_id(6) };
+        let input = ReviewPassReconstitutionInput::new(
+            pass_ref(3),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewWorkflowKind::ReadOnlyReview,
+            session_id(4),
+            accepted_input_id(5),
+            session_id(4),
+            lagging,
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::Completed,
+                Some(frontier_id(8)),
+            )),
+        );
+        assert_eq!(
+            ReviewPass::try_reconstitute(input)
+                .expect("a running pass may lag its terminal canonical turn")
+                .state(),
+            lagging
+        );
+    }
+
+    /// S29 / INV-040: a queued pass starts only while its canonical turn is
+    /// active; terminal outcomes cannot lead an unprojected start.
+    #[test]
+    fn s29_inv040_queued_pass_start_requires_active_turn() {
         let queued = ReviewPass::try_new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
@@ -3283,10 +3339,9 @@ mod tests {
             session_id(4),
         )
         .expect("accepted input belongs to the pass session");
-        let requested = ReviewPassState::Running { turn: turn_id(6) };
-        let running = queued
+        let error = queued
             .transition(
-                requested,
+                ReviewPassState::Running { turn: turn_id(6) },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(6),
                     session_id(4),
@@ -3295,8 +3350,8 @@ mod tests {
                     Some(frontier_id(8)),
                 )),
             )
-            .expect("terminal turn evidence may lead a lagging running pass");
-        assert_eq!(running.state(), requested);
+            .expect_err("a finished turn cannot lead an unprojected start");
+        assert_eq!(error.failure(), ReviewPassTransitionFailure::TurnNotActive);
     }
 
     /// S29 / INV-040: run reconstitution authenticates its state against the
@@ -3552,24 +3607,74 @@ mod tests {
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Failed,
-            None,
+            Some(frontier_id(8)),
         );
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Refused,
-            None,
+            Some(frontier_id(8)),
         );
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Blocked { turn: turn_id(6) },
             ReviewPassTurnOutcome::ReconciliationRequired,
-            None,
+            Some(frontier_id(8)),
         );
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Cancelled {
                 turn: Some(turn_id(6)),
             },
             ReviewPassTurnOutcome::Cancelled,
-            None,
+            Some(frontier_id(8)),
+        );
+    }
+
+    /// S29 / INV-040: a terminal canonical turn outcome always carries its
+    /// checked terminal frontier.
+    #[test]
+    fn s29_inv040_pass_evidence_rejects_terminal_outcome_without_frontier() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(5),
+                session_id(4),
+                ReviewPassState::Running { turn: turn_id(6) },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::Completed,
+                    None,
+                )),
+            ),
+            ReviewPassReconstitutionFailure::TurnFrontierShapeMismatch,
+        );
+    }
+
+    /// S29 / INV-040: an active canonical turn outcome never carries a
+    /// terminal frontier.
+    #[test]
+    fn s29_inv040_pass_evidence_rejects_active_outcome_with_frontier() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(5),
+                session_id(4),
+                ReviewPassState::Running { turn: turn_id(6) },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::Active,
+                    Some(frontier_id(8)),
+                )),
+            ),
+            ReviewPassReconstitutionFailure::TurnFrontierShapeMismatch,
         );
     }
 
