@@ -11,15 +11,19 @@ use std::{
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    InProcessEligibilityNudge, InProcessToolDispatchGate, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, SubmitInputTransaction, UuidV7SessionIdGenerator,
-    UuidV7SubmitInputIdGenerator,
+    InProcessEligibilityNudge, InProcessToolDispatchGate, ListSessionMetadataService,
+    LoadSessionMetadataService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, SessionMetadataListItem, SessionMetadataListQuery,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, CancelledModelCallTurnIdentities, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
-    PerInputConfigurationChoices, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SubmitInput, SubmitInputAppliedResult,
+    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
+    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput, SubmitInputAppliedResult,
     SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
 };
 use signalbox_persistence::{
@@ -36,6 +40,7 @@ use signalbox_persistence::{
         ProcessSessionAncestry, ProcessTranscriptEntry, ProcessTranscriptItem,
         ProcessTranscriptTurn, ProcessTurnState,
     },
+    session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
@@ -43,8 +48,9 @@ use signalbox_process_protocol::{
     ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
     FrameEncodeError, FrameValidationError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
     ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_FRAME_BYTES,
-    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
-    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState,
+    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata, ToolBatchState,
     TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments, decode_client_line,
     encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
@@ -472,6 +478,57 @@ where
             )
             .await
         }
+        ClientRequest::ListSessionMetadata {
+            required_tags,
+            title_contains,
+            include_archived,
+            page_size,
+            after_session_id,
+        } => {
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_list_session_metadata(
+                writer,
+                version,
+                request_id,
+                WireMetadataPageRequest {
+                    required_tags,
+                    title_contains,
+                    include_archived,
+                    page_size,
+                    after_session_id,
+                },
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
+        }
+        ClientRequest::ReadSessionMetadata { session_id } => {
+            handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
+                .await
+        }
+        ClientRequest::ReplaceSessionMetadata {
+            command_id,
+            session_id,
+            metadata,
+        } => {
+            handle_replace_session_metadata(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                metadata,
+                &services.pool,
+            )
+            .await
+        }
     }
 }
 
@@ -717,6 +774,331 @@ async fn spool_session_summaries(
         .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     Ok(SessionListSpool { file })
+}
+
+struct WireMetadataPageRequest {
+    required_tags: Vec<String>,
+    title_contains: Option<String>,
+    include_archived: bool,
+    page_size: CanonicalU64,
+    after_session_id: Option<CanonicalUuid>,
+}
+
+async fn handle_list_session_metadata<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: WireMetadataPageRequest,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let query = SessionMetadataListQuery::try_new(
+        request.required_tags,
+        request.title_contains,
+        request.include_archived,
+        request.page_size.value(),
+        request
+            .after_session_id
+            .map(|value| SessionId::from_uuid(value.into_uuid())),
+    );
+    let Ok(query) = query else {
+        drop(snapshot_permit);
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let spool_result = spool_session_metadata_page(
+        SessionMetadataRepository::new(pool.clone()),
+        query,
+        version,
+        request_id,
+    )
+    .await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(MetadataPageSpoolError::Read(error)) => {
+            return write_session_metadata_read_error(writer, version, request_id, error).await;
+        }
+        Err(MetadataPageSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut spool.file).await
+}
+
+enum MetadataPageSpoolError {
+    Read(SessionMetadataRepositoryError),
+    Spool(SnapshotSpoolError),
+}
+
+async fn spool_session_metadata_page(
+    repository: SessionMetadataRepository,
+    query: SessionMetadataListQuery,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<SessionListSpool, MetadataPageSpoolError> {
+    let mut page = ListSessionMetadataService::new(repository)
+        .execute(query)
+        .await
+        .map_err(MetadataPageSpoolError::Read)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(MetadataPageSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::SessionMetadataPageStart {},
+    )
+    .await
+    .map_err(MetadataPageSpoolError::Spool)?;
+    let mut session_count = 0_u64;
+    while let Some(item) = page
+        .next_item()
+        .await
+        .map_err(MetadataPageSpoolError::Read)?
+    {
+        let (title, tags, last_writer) = wire_list_metadata(&item);
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::SessionMetadataSummary {
+                session_id: wire_uuid(item.session().into_uuid()),
+                defaults_version: CanonicalU64::new(item.defaults_version().as_u64()),
+                model_selection: wire_domain_model_selection(item.defaults().model()),
+                title,
+                tags,
+                archived: item.archived(),
+                last_writer,
+            },
+        )
+        .await
+        .map_err(MetadataPageSpoolError::Spool)?;
+        session_count = session_count
+            .checked_add(1)
+            .ok_or(SnapshotSpoolError::EncodeInvariant)
+            .map_err(MetadataPageSpoolError::Spool)?;
+    }
+    let next_after_session_id = page
+        .next_after_session()
+        .map(|session| wire_uuid(session.into_uuid()));
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::SessionMetadataPageEnd {
+            session_count: CanonicalU64::new(session_count),
+            next_after_session_id,
+        },
+    )
+    .await
+    .map_err(MetadataPageSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(MetadataPageSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(MetadataPageSpoolError::Spool)?;
+    Ok(SessionListSpool { file })
+}
+
+async fn handle_read_session_metadata<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let service = LoadSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
+    match service
+        .execute(SessionId::from_uuid(session_id.into_uuid()))
+        .await
+    {
+        Ok(Some(snapshot)) => {
+            let (metadata, last_writer) =
+                wire_metadata_snapshot(&snapshot).ok_or(ProcessConnectionError::EncodeInvariant)?;
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionMetadata {
+                    session_id,
+                    metadata,
+                    last_writer,
+                },
+            )
+            .await
+        }
+        Ok(None) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await
+        }
+        Err(error) => write_session_metadata_read_error(writer, version, request_id, error).await,
+    }
+}
+
+async fn handle_replace_session_metadata<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    metadata: WireSessionMetadata,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let replacement = SessionMetadataContent::try_new(
+        metadata.title().map(str::to_owned),
+        metadata.tags().map(str::to_owned).collect(),
+        metadata
+            .attributes()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        metadata.archived(),
+    );
+    let Ok(replacement) = replacement else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request = ReplaceSessionMetadataRequest::try_new(
+        DurableCommandId::from_uuid(command_id),
+        SessionId::from_uuid(session_id.into_uuid()),
+        replacement,
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let mut service =
+        ReplaceSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
+    match service.execute(request).await {
+        Ok(ReplaceSessionMetadataOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
+            applied,
+        ))) => {
+            let (metadata, last_writer) = wire_metadata_snapshot(applied.snapshot())
+                .ok_or(ProcessConnectionError::EncodeInvariant)?;
+            let last_writer = last_writer.ok_or(ProcessConnectionError::EncodeInvariant)?;
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionMetadataReplaced {
+                    session_id,
+                    metadata,
+                    last_writer,
+                },
+            )
+            .await
+        }
+        Ok(ReplaceSessionMetadataOutcome::Recorded(ReplaceSessionMetadataResult::Rejected(
+            ReplaceSessionMetadataRejectedResult::SessionNotFound(rejected),
+        ))) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::SessionNotFound {
+                    session_id: wire_uuid(rejected.session().into_uuid()),
+                }),
+            )
+            .await
+        }
+        Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(SessionMetadataRepositoryError::Database(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await
+        }
+        Err(SessionMetadataRepositoryError::CommitAmbiguous(_)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await
+        }
+        Err(
+            SessionMetadataRepositoryError::DifferentCommandKind { .. }
+            | SessionMetadataRepositoryError::Corruption(_),
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await
+        }
+    }
+}
+
+async fn write_session_metadata_read_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: SessionMetadataRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let code = match error {
+        SessionMetadataRepositoryError::Database(_)
+        | SessionMetadataRepositoryError::CommitAmbiguous(_) => ErrorCode::Unavailable,
+        SessionMetadataRepositoryError::DifferentCommandKind { .. }
+        | SessionMetadataRepositoryError::Corruption(_) => ErrorCode::Internal,
+    };
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(code),
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -1716,6 +2098,63 @@ fn wire_model_selection(selection: ProcessModelSelection) -> WireModelSelection 
             alias_id: wire_uuid(alias.into_uuid()),
         },
     }
+}
+
+fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSelection {
+    match selection {
+        ModelSelectionRequest::Direct(selection) => WireModelSelection::Direct {
+            selection_id: wire_uuid(selection.into_uuid()),
+        },
+        ModelSelectionRequest::Alias(alias) => WireModelSelection::Alias {
+            alias_id: wire_uuid(alias.into_uuid()),
+        },
+    }
+}
+
+fn wire_list_metadata(
+    item: &SessionMetadataListItem,
+) -> (Option<String>, Vec<String>, Option<MetadataLastWriter>) {
+    (
+        item.title().map(str::to_owned),
+        item.tags().map(str::to_owned).collect(),
+        item.last_writer().map(wire_metadata_last_writer),
+    )
+}
+
+fn wire_metadata_snapshot(
+    snapshot: &SessionMetadataSnapshot,
+) -> Option<(WireSessionMetadata, Option<MetadataLastWriter>)> {
+    let content = snapshot.content();
+    let metadata = WireSessionMetadata::try_new(
+        content.title().map(str::to_owned),
+        content.tags().map(str::to_owned).collect(),
+        content
+            .attributes()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        content.archived(),
+    )
+    .ok()?;
+    Some((
+        metadata,
+        snapshot.last_writer().map(wire_metadata_last_writer),
+    ))
+}
+
+fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
+    MetadataLastWriter::new(
+        CanonicalU64::new(writer.updated_at().as_unix_micros()),
+        match writer.actor() {
+            Actor::Owner => MetadataActor::Owner {},
+            Actor::Recovery => MetadataActor::Recovery {},
+            Actor::Model { turn } => MetadataActor::Model {
+                turn_id: wire_uuid(turn.into_uuid()),
+            },
+            Actor::Tool { request } => MetadataActor::Tool {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            },
+        },
+    )
 }
 
 const fn wire_imported_source_speaker(

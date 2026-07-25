@@ -36,9 +36,10 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ErrorCode,
-    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, ModelSelection,
-    ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MetadataActor,
+    ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
+    SessionEvent, SessionMetadata, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_client_line,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -435,6 +436,305 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
     assert!(matches!(
         end.message(),
         ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012 / INV-033: version four maps complete metadata replacement through
+/// durable replay and exposes bounded archive-aware pages without changing the
+/// retained legacy request vocabulary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_inv033_process_runtime_serves_session_metadata_version_four()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let first_session = create_alias_session(&mut connection).await?;
+    let second_session = create_alias_session(&mut connection).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            10,
+            ClientRequest::ReadSessionMetadata {
+                session_id: first_session,
+            },
+        )
+        .await?;
+    let initial = response_within(&mut connection).await?;
+    assert_eq!(initial.version(), ProtocolVersion::Four);
+    assert!(matches!(
+        initial.message(),
+        ServerMessage::SessionMetadata {
+            session_id,
+            metadata,
+            last_writer: None,
+        } if *session_id == first_session && metadata == &SessionMetadata::empty()
+    ));
+
+    let replacement_command = command()?;
+    let replacement = SessionMetadata::try_new(
+        Some(String::from("Archived plan")),
+        vec![String::from("work"), String::from("daily")],
+        vec![(String::from("run"), String::from("17"))],
+        true,
+    )?;
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            11,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: replacement_command,
+                session_id: first_session,
+                metadata: replacement.clone(),
+            },
+        )
+        .await?;
+    let applied = response_within(&mut connection).await?;
+    assert!(matches!(
+        applied.message(),
+        ServerMessage::SessionMetadataReplaced {
+            session_id,
+            metadata,
+            last_writer,
+        } if *session_id == first_session
+            && metadata == &replacement
+            && matches!(last_writer.actor(), MetadataActor::Owner {})
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            12,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: replacement_command,
+                session_id: first_session,
+                metadata: replacement.clone(),
+            },
+        )
+        .await?;
+    let replay = response_within(&mut connection).await?;
+    assert_eq!(replay.message(), applied.message());
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            13,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: replacement_command,
+                session_id: first_session,
+                metadata: SessionMetadata::empty(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::ConflictingReuse,
+            ..
+        }
+    ));
+
+    let second_metadata = SessionMetadata::try_new(
+        Some(String::from("Active plan")),
+        vec![String::from("daily")],
+        Vec::new(),
+        false,
+    )?;
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            14,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command()?,
+                session_id: second_session,
+                metadata: second_metadata.clone(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataReplaced {
+            session_id,
+            metadata,
+            ..
+        } if *session_id == second_session && metadata == &second_metadata
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            15,
+            ClientRequest::ListSessionMetadata {
+                required_tags: vec![String::from("daily")],
+                title_contains: Some(String::from("Active")),
+                include_archived: false,
+                page_size: CanonicalU64::new(10),
+                after_session_id: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageStart {}
+    ));
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataSummary {
+            session_id,
+            title: Some(title),
+            tags,
+            archived: false,
+            ..
+        } if *session_id == second_session
+            && title == "Active plan"
+            && tags == &["daily"]
+    ));
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageEnd {
+            session_count,
+            next_after_session_id: None,
+        } if session_count.value() == 1
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            16,
+            ClientRequest::ListSessionMetadata {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: true,
+                page_size: CanonicalU64::new(1),
+                after_session_id: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageStart {}
+    ));
+    let first_page_session = match response_within(&mut connection).await?.message() {
+        ServerMessage::SessionMetadataSummary { session_id, .. } => *session_id,
+        message => {
+            return Err(io::Error::other(format!(
+                "unexpected first metadata-page summary: {message:?}"
+            ))
+            .into());
+        }
+    };
+    let next = match response_within(&mut connection).await?.message() {
+        ServerMessage::SessionMetadataPageEnd {
+            session_count,
+            next_after_session_id: Some(next),
+        } if session_count.value() == 1 => *next,
+        message => {
+            return Err(io::Error::other(format!(
+                "unexpected first metadata-page end: {message:?}"
+            ))
+            .into());
+        }
+    };
+    assert_eq!(next, first_page_session);
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            17,
+            ClientRequest::ListSessionMetadata {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: true,
+                page_size: CanonicalU64::new(1),
+                after_session_id: Some(next),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageStart {}
+    ));
+    let second_page_session = match response_within(&mut connection).await?.message() {
+        ServerMessage::SessionMetadataSummary { session_id, .. } => *session_id,
+        message => {
+            return Err(io::Error::other(format!(
+                "unexpected second metadata-page summary: {message:?}"
+            ))
+            .into());
+        }
+    };
+    assert_ne!(second_page_session, first_page_session);
+    assert!(
+        [first_page_session, second_page_session].contains(&first_session)
+            && [first_page_session, second_page_session].contains(&second_session)
+    );
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageEnd {
+            session_count,
+            next_after_session_id: None,
+        } if session_count.value() == 1
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            18,
+            ClientRequest::ReadSessionMetadata {
+                session_id: first_session,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadata {
+            session_id,
+            metadata,
+            last_writer: Some(last_writer),
+        } if *session_id == first_session
+            && metadata == &replacement
+            && matches!(last_writer.actor(), MetadataActor::Owner {})
+    ));
+
+    let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0xdead));
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            19,
+            ClientRequest::ReadSessionMetadata { session_id: absent },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::NotFound,
+            ..
+        }
+    ));
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            20,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command()?,
+                session_id: absent,
+                metadata: SessionMetadata::empty(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            detail,
+            ..
+        } if matches!(
+            detail.value(),
+            Some(RejectionDetail::SessionNotFound { session_id }) if session_id == absent
+        )
     ));
 
     drop(connection);
