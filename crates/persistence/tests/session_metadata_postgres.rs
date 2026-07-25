@@ -130,8 +130,8 @@ async fn collect_page(
 /// and list filters/page cursors observe one bounded snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv005_inv012_metadata_replay_listing_and_last_writer()
--> Result<(), Box<dyn Error>> {
+async fn inv002_inv005_inv012_metadata_replay_listing_and_last_writer() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
     for value in 0x701..=0x704 {
