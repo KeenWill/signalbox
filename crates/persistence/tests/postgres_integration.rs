@@ -3022,15 +3022,12 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-014: the forward-only nullable credential-reference column remains
-/// compatible with historical rows, while a reference pinned on a new model
-/// call cannot be replaced or cleared.
+/// INV-014: the credential-reference column is total; the migrated schema
+/// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
--> Result<(), Box<dyn Error>> {
+async fn inv014_model_call_credential_reference_is_total() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
 
     let is_nullable: String = sqlx::query_scalar(
         "SELECT is_nullable
@@ -3041,7 +3038,21 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(is_nullable, "YES");
+    assert_eq!(is_nullable, "NO");
+
+    pool.close().await;
+    drop(container);
+
+    Ok(())
+}
+
+/// INV-014: a reference pinned on a new model call cannot be replaced or
+/// cleared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
 
     let replacement = sqlx::query(
         "UPDATE model_call
@@ -3073,7 +3084,7 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
         Some("23514".into())
     );
 
-    let stored: Option<String> = sqlx::query_scalar(
+    let stored: String = sqlx::query_scalar(
         "SELECT credential_reference
            FROM model_call
           WHERE model_call_id = $1",
@@ -3081,10 +3092,7 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
     .bind(fixture.call.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        stored.as_deref(),
-        Some(model_credential_reference().as_str())
-    );
+    assert_eq!(stored, model_credential_reference().as_str());
 
     pool.close().await;
     drop(container);
