@@ -52,7 +52,10 @@ target whose canonical provider and repository equal the child snapshot's; its
 canonical head revision must equal the child's exact base revision. Construction
 and reconstitution reject self-parent, base-less parented targets,
 cross-repository edges, revision-disconnected edges, and any repeated target in
-the complete canonical parent chain. Review-target parentage is therefore
+the complete canonical parent chain. Two snapshots of the same change request,
+identified by equal canonical provider, repository, and positive change-request
+number, also cannot be parent and child or otherwise both appear in one chain:
+refresh history is not stack topology. Review-target parentage is therefore
 acyclic and always terminates at a root.
 
 Every `ReviewRun` names one target, one closed workflow kind, and one complete
@@ -154,22 +157,36 @@ The optional `result` is one closed `ReviewPassResult`:
   same result.
 - `ExternalLinkObservation` names the exact reservation, observation ordinal,
   and observed state.
+- `ExternalLinkNoChange` names the exact reservation and unchanged reported
+  state. It consumes a succeeded external-context-import pass without appending
+  a meaning-bearing observation.
+- `ExternalLinkPublicationBlocked` names the exact pending reservation and
+  nonempty reason for a blocked publication that does not use the
+  reservation-bearing finding event.
 
 The result variant must match the pass kind, terminal outcome, and admitted
 effect. `ProducedFindings` belongs only to succeeded read-only review;
 `FindingEvent` follows the finding machine's pass-kind and outcome table except
 for `Posted`; `ExternalLinkAttachment` belongs only to succeeded external
 publication or external-context import and carries `Posted` when that attachment
-posts a finding; and `ExternalLinkObservation` belongs only to succeeded
-external-context import. An effect-producing terminal pass may bind an absent
-result exactly once in the same transaction that admits the complete finding
-inventory, appends the event, attaches the external object, atomically attaches
-and posts, or appends the observation. That monotonic binding does not change
-the pass lifecycle state; a bound result is immutable. Equal replay observes the
-existing effect; no distinct later effect may cite that pass. A terminal pass
-that produced no typed effect may retain an absent result; a read-only-review
-pass that completed its output admission binds `ProducedFindings`, including an
-empty inventory when it produced none.
+posts a finding; `ExternalLinkObservation` and `ExternalLinkNoChange` belong
+only to succeeded external-context import; and `ExternalLinkPublicationBlocked`
+belongs only to blocked external publication. An effect-producing terminal pass
+may bind an absent result exactly once in the same transaction that admits the
+complete finding inventory, appends the event, attaches the external object,
+atomically attaches and posts, appends the observation, or proves the locked
+state comparison unchanged. That monotonic binding does not change the pass
+lifecycle state; a bound result is immutable. Equal replay observes the existing
+effect; no distinct later effect may cite that pass. A terminal pass that
+produced no typed effect may retain an absent result; a read-only-review pass
+that completed its output admission binds `ProducedFindings`, including an empty
+inventory when it produced none.
+
+Every blocked external-publication pass binds its exact pending reservation. A
+finding-associated operation that also blocks the finding uses the
+reservation-bearing `FindingEvent` result; every other blocked publication uses
+`ExternalLinkPublicationBlocked`. Reconciliation may attach only that same
+reservation.
 
 ## Finding machine
 
@@ -266,9 +283,12 @@ External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
 attachment containing the owning reservation identity, the exact external object
 identifier, and the producing pass. The attachment's reservation must equal the
-aggregate root. Its producing pass and canonical run evidence must agree and
-prove either succeeded external publication or, for the no-write read-only case,
-succeeded external-context import; the pass belongs to the target carried by the
+aggregate root. A blocked call consumes its pass with the exact pending
+reservation and reason, whether that reservation is associated with a target,
+run, or finding; reconciliation may attach only that same reservation. Its
+producing pass and canonical run evidence must agree and prove either succeeded
+external publication or, for the no-write read-only case, succeeded
+external-context import; the pass belongs to the target carried by the
 reservation's target, run, or finding association. If attachment publishes a
 finding, the same result and transaction commit its exact posted event; the
 reservation association names that finding and the object kind carries review
@@ -294,12 +314,14 @@ After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with the owning reservation identity, a same-target pass, and a
 contiguous ordinal. The observing pass and its canonical run agree on a
 succeeded external-context-import operation. A report equal to the latest
-recorded state is a semantic no-op: it appends no observation and binds no pass
-result. A changed report appends the next ordinal and binds that exact effect.
-Reconstitution rejects another reservation even when both share a target and
-rejects contradictory evidence reused under one pass identity across the
-attachment or observations. Observations describe the external object's reported
-state; they do not rewrite finding status.
+recorded state is a semantic no-op: it appends no observation but binds the
+observing pass's exact reservation and reported state as `ExternalLinkNoChange`,
+making that pass ineligible for any later effect. A changed report appends the
+next ordinal and binds that exact effect. Reconstitution rejects another
+reservation even when both share a target and rejects contradictory evidence
+reused under one pass identity across the attachment or observations.
+Observations describe the external object's reported state; they do not rewrite
+finding status.
 
 ## Store and reconstitution
 
