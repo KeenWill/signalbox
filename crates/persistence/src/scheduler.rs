@@ -96,7 +96,7 @@ impl PostgresEligibilitySweep {
                          FROM turn_lifecycle AS active
                         WHERE active.session_id = queued.session_id
                           AND active.state_kind = 'active'
-                   )
+                 )
                  GROUP BY queued.session_id
                 UNION
                 SELECT active.session_id

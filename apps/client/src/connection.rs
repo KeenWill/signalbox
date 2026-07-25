@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use signalbox_process_protocol::{
-    ClientFrame, ClientRequest, MAX_FRAME_BYTES, RequestId, ServerFrame, ServerMessage,
-    decode_server_line, encode_client_line,
+    ClientFrame, ClientRequest, MAX_FRAME_BYTES, PROTOCOL_VERSION, RequestId, ServerFrame,
+    ServerMessage, decode_server_line, encode_client_line,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -65,6 +65,7 @@ enum RequestDelivery {
 
 pub(crate) struct Connection {
     request_id: RequestId,
+    protocol_version: u64,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
@@ -80,6 +81,7 @@ impl Connection {
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
             request_id,
+            protocol_version: PROTOCOL_VERSION,
             reader: BufReader::new(reader),
             writer,
         };
@@ -109,6 +111,9 @@ impl Connection {
         let frame: ServerFrame = decode_server_line(&line)?;
         if frame.request_id() != self.request_id {
             return Err(ClientError::Protocol("response request identity mismatch"));
+        }
+        if frame.version() != self.protocol_version {
+            return Err(ClientError::Protocol("response protocol version mismatch"));
         }
         Ok(frame)
     }

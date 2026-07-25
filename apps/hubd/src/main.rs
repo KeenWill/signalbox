@@ -9,7 +9,9 @@
 
 use std::{
     env,
+    error::Error,
     ffi::OsString,
+    fmt,
     future::Future,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -17,10 +19,11 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnService, StartupScanService, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator,
+    ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, StartupScanService, ToolExecutionInvocation, ToolExecutor,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -49,6 +52,37 @@ const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug)]
+struct EmptyCatalogToolExecutor;
+
+#[derive(Clone, Copy, Debug)]
+struct EmptyCatalogToolExecution;
+
+impl fmt::Display for EmptyCatalogToolExecution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("empty production tool catalog dispatched an executor call")
+    }
+}
+
+impl Error for EmptyCatalogToolExecution {}
+
+impl ClassifyOperatorFailure for EmptyCatalogToolExecution {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::CallerOrHubBug
+    }
+}
+
+impl ToolExecutor for EmptyCatalogToolExecutor {
+    type Error = EmptyCatalogToolExecution;
+
+    async fn execute(
+        &mut self,
+        _invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        Err(EmptyCatalogToolExecution)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimePhase {
@@ -456,14 +490,16 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let process_runtime = ProcessRuntime::new(
         listener,
         scheduler_pool.clone(),
         eligibility_nudge,
+        tool_dispatch_gate.clone(),
         model_configuration,
     );
-    let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
                 scheduler_pool.clone(),
                 model_targets,
@@ -471,7 +507,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
-        ));
+        )
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, EmptyCatalogToolExecutor),
+    );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,

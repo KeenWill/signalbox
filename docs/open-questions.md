@@ -337,6 +337,9 @@ questions below remain open.
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
   browser protocol and product slice are measured. (S01, S02, S24)
+- **Client approval presentation.** How pending tool-approval prompts are
+  surfaced and owner decisions are collected across the terminal baseline and
+  later client forms remains undesigned. (S10, S11, S24)
 
 ## Destination features (target model)
 

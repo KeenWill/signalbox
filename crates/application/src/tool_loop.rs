@@ -603,6 +603,8 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     PreflightCommit(TransactionError),
     /// Executor work produced no trustworthy evidence.
     Executor(ExecutorError),
+    /// Executor evidence named a dispatch fence other than the invocation.
+    ExecutorCorrelationMismatch,
     /// Executor evidence could not commit.
     ObservationCommit(TransactionError),
     /// Retained executor evidence could not be reconciled with durable state.
@@ -644,6 +646,9 @@ where
                 write!(formatter, "tool preflight evidence commit failed: {error}")
             }
             Self::Executor(error) => write!(formatter, "tool executor failed: {error}"),
+            Self::ExecutorCorrelationMismatch => {
+                formatter.write_str("tool executor evidence carried a different dispatch fence")
+            }
             Self::ObservationCommit(error) => {
                 write!(formatter, "tool observation commit failed: {error}")
             }
@@ -688,7 +693,9 @@ where
             | Self::Continuation(error) => error.operator_failure_class(),
             Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
             Self::Executor(error) => error.operator_failure_class(),
-            Self::CatalogDrift => OperatorFailureClass::CallerOrHubBug,
+            Self::ExecutorCorrelationMismatch | Self::CatalogDrift => {
+                OperatorFailureClass::CallerOrHubBug
+            }
         }
     }
 }
@@ -900,45 +907,69 @@ where
                         self.execute_prepared(request.clone(), current.clone())
                             .await
                     }
-                    CurrentToolAttemptState::InFlight => loop {
-                        let identities = ToolCrashClosureIdentities::new(
-                            (0..batch.requests().len())
-                                .map(|_| self.ids.next_tool_semantic_entry_id())
-                                .collect(),
-                            self.ids.next_tool_context_frontier_id(),
-                            FailedModelCallTurnIdentities::new(
-                                self.ids.next_tool_semantic_entry_id(),
-                                self.ids.next_tool_context_frontier_id(),
-                            ),
-                        );
-                        let ids = &mut self.ids;
-                        match self
+                    CurrentToolAttemptState::InFlight => {
+                        let expected_attempt = current.attempt();
+                        let _dispatch_permit = self.gate.acquire(current.turn()).await;
+                        let Some(reloaded_batch) = self
                             .transaction
-                            .classify_crash_loss(
-                                current.session(),
-                                current.turn(),
-                                current.attempt(),
-                                identities,
-                                |_| ids.next_tool_turn_id(),
-                            )
+                            .load_active_batch(current.session(), current.turn())
                             .await
+                            .map_err(ToolExecutionServiceError::Load)?
+                        else {
+                            return Ok(ToolExecutionServiceOutcome::NoWork);
+                        };
+                        let Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) =
+                            reloaded_batch.attempt(request.id())
+                        else {
+                            return Ok(ToolExecutionServiceOutcome::NoWork);
+                        };
+                        if current.attempt() != expected_attempt
+                            || current.state() != CurrentToolAttemptState::InFlight
                         {
-                            Err(error)
-                                if error.operator_failure_class()
-                                    == OperatorFailureClass::IdentityCollision =>
+                            return Ok(ToolExecutionServiceOutcome::NoWork);
+                        }
+                        loop {
+                            let identities = ToolCrashClosureIdentities::new(
+                                (0..reloaded_batch.requests().len())
+                                    .map(|_| self.ids.next_tool_semantic_entry_id())
+                                    .collect(),
+                                self.ids.next_tool_context_frontier_id(),
+                                FailedModelCallTurnIdentities::new(
+                                    self.ids.next_tool_semantic_entry_id(),
+                                    self.ids.next_tool_context_frontier_id(),
+                                ),
+                            );
+                            let ids = &mut self.ids;
+                            match self
+                                .transaction
+                                .classify_crash_loss(
+                                    current.session(),
+                                    current.turn(),
+                                    current.attempt(),
+                                    identities,
+                                    |_| ids.next_tool_turn_id(),
+                                )
+                                .await
                             {
-                                continue;
-                            }
-                            Ok(outcome) => {
-                                break Ok(ToolExecutionServiceOutcome::CrashClassified(Box::new(
-                                    outcome,
-                                )));
-                            }
-                            Err(error) => {
-                                break Err(ToolExecutionServiceError::CrashClassification(error));
+                                Err(error)
+                                    if error.operator_failure_class()
+                                        == OperatorFailureClass::IdentityCollision =>
+                                {
+                                    continue;
+                                }
+                                Ok(outcome) => {
+                                    break Ok(ToolExecutionServiceOutcome::CrashClassified(
+                                        Box::new(outcome),
+                                    ));
+                                }
+                                Err(error) => {
+                                    break Err(ToolExecutionServiceError::CrashClassification(
+                                        error,
+                                    ));
+                                }
                             }
                         }
-                    },
+                    }
                 };
             }
         }
@@ -992,6 +1023,27 @@ where
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
+        let dispatch_permit = self.gate.acquire(prepared.turn()).await;
+        let Some(reloaded_batch) = self
+            .transaction
+            .load_active_batch(prepared.session(), prepared.turn())
+            .await
+            .map_err(ToolExecutionServiceError::Load)?
+        else {
+            return Ok(ToolExecutionServiceOutcome::NoWork);
+        };
+        let exact_prepared_attempt = matches!(
+            reloaded_batch.attempt(request.id()),
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current))
+                if current == &prepared && current.state() == CurrentToolAttemptState::Prepared
+        ) && reloaded_batch
+            .requests()
+            .iter()
+            .any(|candidate| candidate == &request);
+        if !exact_prepared_attempt {
+            return Ok(ToolExecutionServiceOutcome::NoWork);
+        }
+
         let definition = self.catalog.definition(request.name());
         let preflight = match definition.as_ref() {
             None => Some(ToolExecutionError::new(
@@ -1018,28 +1070,6 @@ where
                 ),
             },
         };
-        let dispatch_permit = self.gate.acquire(prepared.turn()).await;
-        let Some(revalidated_batch) = self
-            .transaction
-            .load_active_batch(prepared.session(), prepared.turn())
-            .await
-            .map_err(ToolExecutionServiceError::Load)?
-        else {
-            drop(dispatch_permit);
-            return Ok(ToolExecutionServiceOutcome::NoWork);
-        };
-        let Some(signalbox_domain::ReconstitutedToolAttempt::Current(revalidated)) =
-            revalidated_batch.attempt(request.id())
-        else {
-            drop(dispatch_permit);
-            return Ok(ToolExecutionServiceOutcome::NoWork);
-        };
-        if revalidated.attempt() != prepared.attempt()
-            || revalidated.state() != CurrentToolAttemptState::Prepared
-        {
-            return Err(ToolExecutionServiceError::CatalogDrift);
-        }
-        let prepared = revalidated.clone();
         if let Some(error) = preflight {
             let ended = self
                 .transaction
@@ -1121,6 +1151,7 @@ where
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
         let effect_class = definition.effect_class();
+        let expected_correlation = authorized.correlation();
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let evidence = self
@@ -1128,6 +1159,9 @@ where
             .execute(invocation)
             .await
             .map_err(ToolExecutionServiceError::Executor)?;
+        if evidence.correlation() != expected_correlation {
+            return Err(ToolExecutionServiceError::ExecutorCorrelationMismatch);
+        }
         let observation = admit_executor_evidence(evidence, effect_class);
         self.commit_executor_observation(observation, dispatch_permit)
             .await
@@ -1280,11 +1314,10 @@ mod tests {
 
     use super::*;
     use signalbox_domain::{
-        ResolvedContextFrontierReconstitutionInput, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
-        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration,
-        ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ResolvedContextFrontierReconstitutionInput, ToolApprovalResolutionReconstitutionInput,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDecisionSource,
+        ToolDispatchGeneration, ToolRequestOrdinal, ToolRequestReconstitutionInput,
     };
     use uuid::Uuid;
 
@@ -1313,12 +1346,12 @@ mod tests {
         )
     }
 
-    fn request(arguments: &str) -> ToolRequest {
+    fn request_with_seed(arguments: &str, seed: u128) -> ToolRequest {
         ToolRequestReconstitutionInput::new(
-            ToolRequestId::from_uuid(Uuid::from_u128(4)),
-            SessionId::from_uuid(Uuid::from_u128(1)),
-            TurnId::from_uuid(Uuid::from_u128(2)),
-            ModelCallId::from_uuid(Uuid::from_u128(3)),
+            ToolRequestId::from_uuid(Uuid::from_u128(seed + 4)),
+            SessionId::from_uuid(Uuid::from_u128(seed + 1)),
+            TurnId::from_uuid(Uuid::from_u128(seed + 2)),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 3)),
             ToolRequestOrdinal::from_u32(0),
             tool_name("known"),
             NormalizedToolArguments::try_from_provider_text(arguments.to_owned())
@@ -1327,17 +1360,18 @@ mod tests {
         .into_request()
     }
 
-    fn prepared_batch(arguments: &str, effect: ToolEffectClass) -> (ToolBatch, ToolAttemptId) {
-        let request = request(arguments);
-        let attempt_id = ToolAttemptId::from_uuid(Uuid::from_u128(6));
-        let turn_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(5));
-        let approval = ToolApprovalResolutionReconstitutionInput::new(
-            request.id(),
-            ToolApprovalDecision::Approve,
-            ToolDecisionSource::PolicyAuto,
-        )
-        .reconstitute()
-        .expect("implemented policy provenance reconstitutes");
+    fn batch_with_attempt_state(
+        arguments: &str,
+        effect: ToolEffectClass,
+        state: ToolAttemptReconstitutionState,
+        seed: u128,
+    ) -> (ToolBatch, ToolAttemptId) {
+        let request = request_with_seed(arguments, seed);
+        let attempt_id = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 6));
+        let turn_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 5));
+        let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+            .reconstitute()
+            .expect("implemented policy provenance reconstitutes");
         let attempt = ToolAttemptReconstitutionInput::new(
             attempt_id,
             request.id(),
@@ -1346,12 +1380,13 @@ mod tests {
             turn_attempt,
             effect,
             ToolDispatchGeneration::first(),
-            ToolAttemptReconstitutionState::Prepared,
+            state,
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("tool attempt fixture reconstitutes");
         let snapshot = ResolvedContextFrontierReconstitutionInput::new(
             request.session(),
-            signalbox_domain::ContextFrontierId::from_uuid(Uuid::from_u128(7)),
+            signalbox_domain::ContextFrontierId::from_uuid(Uuid::from_u128(seed + 7)),
             Vec::new(),
         )
         .reconstitute()
@@ -1367,8 +1402,17 @@ mod tests {
             ToolBatchPhaseReconstitutionInput::Executing { turn_attempt },
         )
         .reconstitute()
-        .expect("prepared fixture batch is correlated");
+        .expect("tool fixture batch is correlated");
         (batch, attempt_id)
+    }
+
+    fn prepared_batch(arguments: &str, effect: ToolEffectClass) -> (ToolBatch, ToolAttemptId) {
+        batch_with_attempt_state(
+            arguments,
+            effect,
+            ToolAttemptReconstitutionState::Prepared,
+            0,
+        )
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1403,12 +1447,12 @@ mod tests {
         batch: ToolBatch,
         prepared: signalbox_domain::CurrentToolAttempt,
         events: Arc<Mutex<Vec<&'static str>>>,
-        dispatch_consumed_after_first_load: bool,
-        load_count: usize,
         ambiguous_authorization: bool,
         authorization_committed: bool,
         commit_failures: usize,
         committed: bool,
+        load_results: VecDeque<Option<ToolBatch>>,
+        allow_crash_classification: bool,
     }
 
     impl ToolExecutionTransaction for FakeTransaction {
@@ -1419,11 +1463,10 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
         ) -> Result<Option<ToolBatch>, Self::Error> {
-            self.load_count += 1;
-            if self.dispatch_consumed_after_first_load && self.load_count > 1 {
-                return Ok(None);
-            }
-            Ok(Some(self.batch.clone()))
+            Ok(self
+                .load_results
+                .pop_front()
+                .unwrap_or_else(|| Some(self.batch.clone())))
         }
 
         async fn prepare_next_attempt(
@@ -1530,7 +1573,11 @@ mod tests {
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
-            panic!("prepared fixture is not a restart loss")
+            if !self.allow_crash_classification {
+                panic!("prepared fixture is not a restart loss");
+            }
+            self.events.lock().expect("event lock").push("classify");
+            Ok(self.prepared.clone().classify_crash_loss())
         }
 
         async fn prepare_continuation<NextSteering>(
@@ -1607,6 +1654,24 @@ mod tests {
     struct RecordingExecutor {
         events: Arc<Mutex<Vec<&'static str>>>,
         calls: usize,
+    }
+
+    struct FixedEvidenceExecutor {
+        evidence: Option<CorrelatedToolExecutorEvidence>,
+    }
+
+    impl ToolExecutor for FixedEvidenceExecutor {
+        type Error = FakeError;
+
+        async fn execute(
+            &mut self,
+            _invocation: ToolExecutionInvocation,
+        ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+            Ok(self
+                .evidence
+                .take()
+                .expect("fixture supplies one executor observation"))
+        }
     }
 
     impl ToolExecutor for RecordingExecutor {
@@ -1736,12 +1801,12 @@ mod tests {
             },
             batch: batch.clone(),
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: false,
-            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
             committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
         };
         let executor = RecordingExecutor {
             events: Arc::clone(&events),
@@ -1787,12 +1852,12 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: false,
-            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
             committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
         };
         let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
             definition(
@@ -1835,11 +1900,10 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-037: dispatch authority is reread after the shared gate,
-    /// so an interrupt that consumed the checkpoint while execution waited
-    /// leaves no executor work to perform.
+    /// INV-011: executor evidence from another valid dispatch fence is rejected
+    /// before persistence sees it.
     #[tokio::test]
-    async fn inv011_inv037_gate_wait_revalidates_interrupt_consumed_attempt() {
+    async fn inv011_cross_wired_executor_evidence_never_reaches_commit() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -1850,25 +1914,42 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: true,
-            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
             committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
         };
+        let definition = definition(
+            "known",
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        );
         let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
-            definition(
-                "known",
-                ToolPermissionDefault::Auto,
-                ToolEffectClass::EffectFree,
-            ),
+            definition.clone(),
             |_: &NormalizedToolArguments| Ok(()),
         )])
         .expect("one declaration is unambiguous");
-        let executor = RecordingExecutor {
-            events: Arc::clone(&events),
-            calls: 0,
+        let (foreign_batch, foreign_attempt) = batch_with_attempt_state(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Prepared,
+            100,
+        );
+        let foreign_authorized = foreign_batch
+            .authorize_attempt(foreign_attempt)
+            .expect("foreign fixture authorizes");
+        let foreign_invocation = ToolExecutionInvocation::try_new(
+            foreign_batch.requests()[0].clone(),
+            definition,
+            &foreign_authorized,
+        )
+        .expect("foreign invocation is internally correlated");
+        let executor = FixedEvidenceExecutor {
+            evidence: Some(foreign_invocation.bind(ToolExecutorEvidence::CompletedText(
+                String::from("foreign result"),
+            ))),
         };
         let mut service = ToolExecutionService::new(
             FixedIds::new(),
@@ -1878,22 +1959,17 @@ mod tests {
             InProcessToolDispatchGate::default(),
         );
 
-        assert_eq!(
-            service
-                .execute(batch.session(), batch.turn())
-                .await
-                .expect("consumed attempt is cleanly absent"),
-            ToolExecutionServiceOutcome::NoWork
-        );
-        let (_, _, _, executor, _, _) = service.into_parts();
-        assert_eq!(executor.calls, 0);
-        assert!(events.lock().expect("event lock").is_empty());
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Err(ToolExecutionServiceError::ExecutorCorrelationMismatch)
+        ));
+        assert_eq!(*events.lock().expect("event lock"), ["authorize"]);
     }
 
-    /// INV-011 / INV-037: pure preflight evidence shares the interrupt gate
-    /// and cannot commit against a checkpoint an interrupt already consumed.
+    /// INV-011 / INV-037: a prepared execution hint is revalidated after the
+    /// dispatch gate, so a winning interrupt becomes ordinary no-work.
     #[tokio::test]
-    async fn inv011_inv037_preflight_revalidates_interrupt_consumed_attempt() {
+    async fn inv011_inv037_stale_prepared_hint_after_gate_is_no_work() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = match batch.attempt(batch.requests()[0].id()) {
@@ -1904,35 +1980,91 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: true,
-            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
             committed: false,
+            load_results: [Some(batch.clone()), None].into(),
+            allow_crash_classification: false,
         };
         let executor = RecordingExecutor {
             events: Arc::clone(&events),
             calls: 0,
         };
-        let mut service = ToolExecutionService::new(
-            FixedIds::new(),
-            transaction,
-            NoToolCatalog,
-            executor,
-            InProcessToolDispatchGate::default(),
-        );
+        let gate = InProcessToolDispatchGate::default();
+        let blocking_permit = gate.acquire(batch.turn()).await;
+        let mut service =
+            ToolExecutionService::new(FixedIds::new(), transaction, NoToolCatalog, executor, gate);
+        let execution = service.execute(batch.session(), batch.turn());
+        tokio::pin!(execution);
 
-        assert_eq!(
-            service
-                .execute(batch.session(), batch.turn())
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut execution)
                 .await
-                .expect("consumed preflight checkpoint is cleanly absent"),
+                .is_err(),
+            "prepared work waits behind the dispatch gate"
+        );
+        drop(blocking_permit);
+        assert_eq!(
+            execution.await.expect("stale hint is not an error"),
             ToolExecutionServiceOutcome::NoWork
         );
-        let (_, _, _, executor, _, _) = service.into_parts();
-        assert_eq!(executor.calls, 0);
         assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-024: an in-flight attempt is not classified as
+    /// prior-process loss until the same-turn dispatch permit is available and
+    /// authoritative state has been reloaded.
+    #[tokio::test]
+    async fn inv011_inv024_crash_classification_waits_for_dispatch_gate() {
+        let (batch, _) = batch_with_attempt_state(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::InFlight,
+            0,
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let current = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one in-flight attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared: current,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: true,
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let gate = InProcessToolDispatchGate::default();
+        let blocking_permit = gate.acquire(batch.turn()).await;
+        let mut service =
+            ToolExecutionService::new(FixedIds::new(), transaction, NoToolCatalog, executor, gate);
+        let execution = service.execute(batch.session(), batch.turn());
+        tokio::pin!(execution);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut execution)
+                .await
+                .is_err(),
+            "live executor ownership must block crash classification"
+        );
+        assert!(events.lock().expect("event lock").is_empty());
+        drop(blocking_permit);
+        assert!(matches!(
+            execution
+                .await
+                .expect("released gate permits classification"),
+            ToolExecutionServiceOutcome::CrashClassified(_)
+        ));
+        assert_eq!(*events.lock().expect("event lock"), ["classify"]);
     }
 
     #[track_caller]
@@ -1995,12 +2127,12 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: false,
-            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 0,
             committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
         };
         let definition_reads = Arc::new(AtomicUsize::new(0));
         let catalog = OneShotCatalog {
@@ -2049,12 +2181,12 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: false,
-            load_count: 0,
             ambiguous_authorization: true,
             authorization_committed: false,
             commit_failures: 0,
             committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
         };
         let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
             definition(
@@ -2105,12 +2237,12 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
-            dispatch_consumed_after_first_load: false,
-            load_count: 0,
             ambiguous_authorization: false,
             authorization_committed: false,
             commit_failures: 1,
             committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
         };
         let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
             definition(
