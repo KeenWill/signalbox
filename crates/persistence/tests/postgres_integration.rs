@@ -1,8 +1,9 @@
 #![allow(
     clippy::expect_used,
     clippy::panic,
+    clippy::unreachable,
     clippy::unwrap_used,
-    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+    reason = "this standalone integration-test crate uses assertion panics, explicit fixture expectations, and impossible fixture branches; the workspace gate remains active for production targets"
 )]
 
 mod support;

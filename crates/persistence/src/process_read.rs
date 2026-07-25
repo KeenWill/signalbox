@@ -1743,7 +1743,12 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     disposition: match disposition {
                         "known_failed" => ProcessFailedModelCallDisposition::KnownFailed,
                         "cancelled" => ProcessFailedModelCallDisposition::Cancelled,
-                        _ => unreachable!("the pattern closes failed call dispositions"),
+                        _ => {
+                            return Err(ProcessReadCorruption::Inconsistent(
+                                "failed terminal model call disposition",
+                            )
+                            .into());
+                        }
                     },
                 }),
             },
