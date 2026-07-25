@@ -58,8 +58,9 @@ vocabulary reaches `crates/process-protocol`, persistence internals, and most
 `docs/spec/` pages, not just `apps/hubd` — so it runs effectively solo and waits
 for the current stacks. "Hub" survives only as occasional prose metaphor, never
 as the name of a binary, crate, module, or protocol concept. The Swift client's
-LLMHub-prefixed naming is not this entry's job — the native client rewire
-replaces those names wholesale.
+naming is not this entry's job — it was renamed to Signalbox-prefixed names in
+its own pass, and the native client rewire owns any protocol-driven renames that
+remain.
 
 Owner direction, 2026-07-25: the point previously deferred here is settled — the
 server renames to `signalboxd`, and future runner processes are a separate

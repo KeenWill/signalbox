@@ -10,6 +10,13 @@
 
 reviews:
   request_changes_workflow: true
+  # Path-specific guidance. Files opening with the non-authoritative-planning
+  # banner (owned as a class by AGENTS.md and stamped on the file itself, e.g.
+  # docs/agents/backlog.md) decide nothing and are not statements of record.
+  path_instructions:
+    - path: "docs/agents/backlog.md"
+      instructions: |-
+        This file opens with a non-authoritative-planning banner: it is the owner's working scratchpad, decides nothing, and is not a statement of record. Do NOT review it for normative-statement placement, decision weight, or PR-description accuracy, and do NOT flag its prose for cross-document consistency, single-source-of-record duplication, or normative wording (must/never/only). Its entries are deliberately loose and are superseded by the owning docs/spec/ page, docs/decisions.md, or docs/open-questions.md when an item is picked up. Treat findings only for plainly broken Markdown or dead repository-relative links.
   pre_merge_checks:
     # Only requested reviewers (not the PR author) may override failing checks.
     override_requested_reviewers_only: true
@@ -52,7 +59,7 @@ reviews:
       - name: "Normative statements live in one place"
         mode: warning
         instructions: |-
-          Scope: Markdown prose added or modified under docs/ or in README.md. Pass immediately if none changed.
+          Scope: Markdown prose added or modified under docs/ or in README.md, excluding any file that already carried the non-authoritative-planning banner at its head on the PR's base branch (e.g. docs/agents/backlog.md) and still carries it at the PR head, and any file this PR adds as a new file opening with that banner — a banner file states nothing of record, so drop it from this check's scope file by file rather than skipping the check whenever such a file is present. A banner this PR stamps onto a file that already existed without one does not exempt that file, and neither does a banner this PR removes: in both directions the reclassification and the prose around it stay in scope. Pass immediately if no in-scope prose changed.
           Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning docs/spec/ page, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/agents/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
           Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the decision-weight criteria (owned by AGENTS.md), or spec-owned semantics restated into docs/architecture.md or docs/glossary.md.
           Pass when: the new text is itself the statement of record (a new or updated owning spec-page section, invariant row, or decision entry); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
@@ -92,7 +99,7 @@ reviews:
           Fail if the diff modifies, renames, or deletes any file under crates/persistence/migrations/ that exists on the PR's base branch. Every base-branch migration file is immutable; corrections ship as a new migration file.
           For files the PR adds under that directory:
           1. The filename must match the existing pattern: a 12-digit numeric prefix, an underscore, a snake_case name, ending in .sql.
-          2. The numeric prefix must be strictly greater than the highest prefix on the base branch, and no two files added by this PR may share a prefix.
+          2. The numeric prefix must be strictly greater than the highest prefix on the base branch, and no two files added by this PR may share a prefix. One carve-out applies to that base-branch comparison in a stack: ignore a prefix the base branch carries only because a sibling branch merged into it, since a stack reserves a disjoint prefix block up front (see docs/spec/persistence-protocol.md). Prefixes the stack's own ancestor branches added still bind — an added prefix must be strictly greater than every one of them, and a prefix equal to any prefix already present on the base branch is a duplicate and always a Fail, because _sqlx_migrations keys applied migrations by version. A prefix at or below the highest prefix on the ultimate main-merge target is out of order regardless of any reservation.
           Exception: a migration file this same PR introduced (present in the PR's commits but absent from the base branch) may still be edited within the PR — that is not a violation.
           Pass when no base-branch migration file is touched and all added filenames order correctly. Report each violation with the filename and whether it is an edit of a merged migration or an ordering conflict.
 

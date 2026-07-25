@@ -715,15 +715,9 @@ impl ActiveTurnSchedulingReconstitutionInput {
             );
         }
         let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt?);
-        #[expect(
-            clippy::expect_used,
-            reason = "temporary ledger site: reconstitution validates the stored attempt transition; typed conversion is commissioned by the 2026-07-20 audit"
-        )]
         let current_attempt = match &self.state {
             StoredActiveTurnPhase::Prepared => current_attempt,
-            StoredActiveTurnPhase::Running => current_attempt
-                .begin_running()
-                .expect("a stored running attempt starts from the validated prepared value"),
+            StoredActiveTurnPhase::Running => current_attempt.begin_running().ok()?,
             StoredActiveTurnPhase::StopRequested { interrupt, .. } => current_attempt
                 .begin_running()
                 .and_then(|attempt| attempt.request_cancellation(interrupt.proof()))
@@ -4733,15 +4727,13 @@ fn reconstitute_active_acceptance_tail(
         );
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "temporary ledger site: the active record is inserted before tail validation; typed conversion is commissioned by the 2026-07-20 audit"
-    )]
     let latest_known_origin_position = records_by_turn
         .values()
         .map(|record| record.order.acceptance_position())
-        .max()
-        .expect("the active turn is present in the scheduling inventory");
+        .fold(
+            active_record.order.acceptance_position(),
+            SessionInputPosition::max,
+        );
     if latest_known_origin_position > candidate.observed_last_position {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailLastPositionMismatch {
