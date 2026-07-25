@@ -185,8 +185,7 @@ provider/kind/object identity and one attachment per reservation. A reservation
 without an attachment is explicitly pending; it is never interpreted as proof
 that the external effect did not occur and is not automatically retried
 (INV-025, INV-026). Read-only import may reserve and attach in one local
-transaction because it issues no external write. transaction because it issues
-no external write (INV-041).
+transaction because it issues no external write (INV-041).
 
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with the owning reservation identity, a same-target pass, and a
