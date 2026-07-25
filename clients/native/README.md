@@ -109,10 +109,11 @@ under that decision, not normative claims.
   design of the earlier protocol; the rewire's local-socket protocol eliminates
   it).
 - Plain-HTTP server URLs are accepted for non-loopback hosts. App Transport
-  Security blocks those non-local plaintext requests on Apple platforms,
-  mitigating credential transmission, but input validation still permits a
-  configuration that cannot connect (same legacy transport; gone with the
-  rewire).
+  Security blocks non-local plaintext requests to public hostnames, mitigating
+  credential exposure there, but the local-network exception permits numeric IP
+  addresses and those configurations can still send bearer credentials in
+  cleartext. Input validation therefore permits both unsafe and nonconnecting
+  configurations (same legacy transport; gone with the rewire).
 - Templates are missing from compact-width iOS navigation.
 - The Create button stays enabled while session creation is pending, so a double
   tap can create duplicate sessions.
