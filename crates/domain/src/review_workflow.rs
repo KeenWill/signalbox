@@ -611,19 +611,23 @@ impl ReviewRunState {
 pub struct ReviewPassEvidence {
     reference: ReviewPassRef,
     kind: ReviewPassKind,
+    policy: ReviewPolicy,
     state: ReviewPassState,
 }
 
 impl ReviewPassEvidence {
-    /// Supplies one independently stored pass reference, kind, and current state.
+    /// Supplies one independently stored pass reference, kind, run policy, and
+    /// current state.
     pub const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
+        policy: ReviewPolicy,
         state: ReviewPassState,
     ) -> Self {
         Self {
             reference,
             kind,
+            policy,
             state,
         }
     }
@@ -636,6 +640,11 @@ impl ReviewPassEvidence {
     /// Returns the canonical pass kind.
     pub const fn kind(self) -> ReviewPassKind {
         self.kind
+    }
+
+    /// Returns the complete policy frozen by the pass's run.
+    pub const fn policy(self) -> ReviewPolicy {
+        self.policy
     }
 
     /// Returns the canonical pass state.
@@ -764,6 +773,11 @@ impl ReviewRun {
         let permitted = match (self.state, next) {
             (ReviewRunState::Queued, ReviewRunState::Running { .. }) => true,
             (ReviewRunState::Queued, ReviewRunState::Cancelled { last_pass: None }) => true,
+            (ReviewRunState::Queued, ReviewRunState::Cancelled { last_pass: Some(_) }) => {
+                pass_evidence.is_some_and(|evidence| {
+                    matches!(evidence.state(), ReviewPassState::Cancelled { turn: None })
+                })
+            }
             (
                 ReviewRunState::Running {
                     active_pass: current,
@@ -891,7 +905,7 @@ fn run_state_matches_pass(run: ReviewRunState, pass: ReviewPassState) -> bool {
             ReviewPassState::Blocked { .. }
         ) | (
             ReviewRunState::Cancelled { last_pass: Some(_) },
-            ReviewPassState::Cancelled { turn: Some(_) }
+            ReviewPassState::Cancelled { .. }
         )
     )
 }
@@ -2085,6 +2099,12 @@ impl ReviewFinding {
                 failure: ReviewFindingTransitionFailure::ForeignEventPass,
             });
         }
+        if event.pass.policy() != self.proposal.producing_pass.policy() {
+            return Err(ReviewFindingTransitionError {
+                event: Some(Box::new(event)),
+                failure: ReviewFindingTransitionFailure::EventPolicyMismatch,
+            });
+        }
         if !finding_event_matches_pass_evidence(&event.kind, event.pass) {
             return Err(ReviewFindingTransitionError {
                 event: Some(Box::new(event)),
@@ -2218,7 +2238,7 @@ fn finding_event_matches_pass_evidence(
             ReviewPassKind::Dedupe
         ) | (
             ReviewFindingEventKind::Posted { .. },
-            ReviewPassKind::Publish
+            ReviewPassKind::Publish | ReviewPassKind::ImportExternalContext
         ) | (ReviewFindingEventKind::Fixed, ReviewPassKind::Fix)
             | (
                 ReviewFindingEventKind::BlockedWithReason { .. },
@@ -2248,6 +2268,8 @@ pub enum ReviewFindingTransitionFailure {
     ForeignEventFinding,
     /// An event pass belongs to another target.
     ForeignEventPass,
+    /// An event pass's run carries a different policy from the finding.
+    EventPolicyMismatch,
     /// The event kind or outcome cannot be produced by the canonical pass.
     IncompatibleEventPassEvidence,
     /// A duplicate or successor finding belongs to another run.
@@ -2679,6 +2701,7 @@ mod tests {
         ReviewPassEvidence::new(
             pass_ref(value),
             kind,
+            ReviewPolicy::version_one(),
             ReviewPassState::Succeeded {
                 turn: turn_id(value + 100),
                 output_frontier: frontier_id(value + 200),
@@ -2690,6 +2713,7 @@ mod tests {
         ReviewPassEvidence::new(
             pass_ref(value),
             kind,
+            ReviewPolicy::version_one(),
             ReviewPassState::Blocked {
                 turn: turn_id(value + 100),
             },
@@ -3093,6 +3117,7 @@ mod tests {
             ReviewPassEvidence::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                ReviewPolicy::version_one(),
                 ReviewPassState::Failed { turn: turn_id(6) },
             ),
             &target,
@@ -3124,6 +3149,7 @@ mod tests {
                 Some(ReviewPassEvidence::new(
                     foreign,
                     ReviewPassKind::ReadOnlyReview,
+                    ReviewPolicy::version_one(),
                     ReviewPassState::Running { turn: turn_id(6) },
                 )),
             )
@@ -3152,6 +3178,7 @@ mod tests {
                 Some(ReviewPassEvidence::new(
                     pass_ref(3),
                     ReviewPassKind::Publish,
+                    ReviewPolicy::version_one(),
                     ReviewPassState::Running { turn: turn_id(6) },
                 )),
             )
@@ -3160,6 +3187,33 @@ mod tests {
             error.failure(),
             ReviewRunTransitionFailure::Evidence(ReviewRunEvidenceFailure::PassKindMismatch)
         );
+    }
+
+    /// INV-040: queued cancellation retains an already-recorded pass and its
+    /// canonical pre-start cancellation.
+    #[test]
+    fn inv040_queued_run_cancellation_retains_cancelled_pass() {
+        let pass = pass_ref(3);
+        let next = ReviewRunState::Cancelled {
+            last_pass: Some(pass),
+        };
+        let cancelled = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        )
+        .transition(
+            next,
+            Some(ReviewPassEvidence::new(
+                pass,
+                ReviewPassKind::ReadOnlyReview,
+                ReviewPolicy::version_one(),
+                ReviewPassState::Cancelled { turn: None },
+            )),
+        )
+        .expect("pre-start cancellation retains its recorded pass");
+
+        assert_eq!(cancelled.state(), next);
     }
 
     /// INV-040: queued pass construction authenticates its accepted-input
@@ -3315,6 +3369,7 @@ mod tests {
             Some(ReviewPassEvidence::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                ReviewPolicy::version_one(),
                 ReviewPassState::Succeeded {
                     turn: turn_id(6),
                     output_frontier: frontier_id(8),
@@ -3336,6 +3391,7 @@ mod tests {
             Some(ReviewPassEvidence::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                ReviewPolicy::version_one(),
                 ReviewPassState::Failed { turn: turn_id(6) },
             )),
         );
@@ -3872,6 +3928,40 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
+    /// INV-040: every event pass uses the exact policy frozen by the finding's
+    /// producing run.
+    #[test]
+    fn inv040_finding_history_rejects_event_policy_mismatch() {
+        let later_policy = ReviewPolicy::try_new(
+            ReviewPolicyVersion::try_new(2).expect("positive version"),
+            ReviewConfidence::try_from_basis_points(7_000).expect("in range"),
+            ReviewConfidence::try_from_basis_points(8_000).expect("in range"),
+        )
+        .expect("ordered later policy");
+        let event = ReviewFindingEvent::new(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            ReviewPassEvidence::new(
+                pass_ref(20),
+                ReviewPassKind::Judge,
+                later_policy,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(120),
+                    output_frontier: frontier_id(220),
+                },
+            ),
+            ReviewFindingEventKind::Accepted,
+        );
+        let error = ReviewFinding::new(proposal())
+            .apply(event)
+            .expect_err("event policy must equal the finding policy");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::EventPolicyMismatch
+        );
+    }
+
     /// INV-040: a compatible pass kind cannot author a finding event after a
     /// failed outcome.
     #[test]
@@ -3882,6 +3972,7 @@ mod tests {
             ReviewPassEvidence::new(
                 pass_ref(20),
                 ReviewPassKind::Judge,
+                ReviewPolicy::version_one(),
                 ReviewPassState::Failed { turn: turn_id(120) },
             ),
             ReviewFindingEventKind::Accepted,
@@ -3923,8 +4014,8 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: reconciliation may post a publication-blocked
-    /// finding once a later publication pass attaches the object.
+    /// INV-040 / INV-041: a no-write import pass may reconcile a
+    /// publication-blocked finding after attaching the external object.
     #[test]
     fn inv040_publication_blocked_finding_can_reconcile_to_posted() {
         let finding = ReviewFinding::new(proposal())
@@ -3947,12 +4038,12 @@ mod tests {
             .apply(ReviewFindingEvent::new(
                 finding_ref(10),
                 ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
-                succeeded_pass(21, ReviewPassKind::Publish),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
                 ReviewFindingEventKind::Posted {
                     link: finding_link_ref_with_pass(
                         finding_ref(10),
                         link_id(31),
-                        succeeded_pass(21, ReviewPassKind::Publish),
+                        succeeded_pass(21, ReviewPassKind::ImportExternalContext),
                     ),
                 },
             ))

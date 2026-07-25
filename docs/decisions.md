@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Bind finding event passes to one frozen policy
+
+**Context.** A run admits one pass of the matching workflow kind, so judgment
+and deduplication for one finding use separate run identities. Merely storing a
+policy on each run permits those event-producing runs to select different policy
+versions, contradicting the recorded requirement that both operations consume
+one frozen policy.
+
+**Decision.** Canonical pass evidence carries the complete policy of its run.
+Every finding event pass must carry the exact policy frozen by the finding's
+producing run. Domain construction, reconstitution, and persistence reject a
+different tuple while retaining separate one-pass run identities.
+
+**Rejected alternatives.** Allowing event runs to select independent policies
+makes one finding's classifications irreproducible. Copying policy into every
+event creates a competing authority. Reopening the run aggregate to multiple
+pass kinds weakens the one-pass projection without an orchestration need.
+
+**Affects.** Review pass evidence, finding-event admission and reconstitution,
+the [review-workflows specification](spec/review-workflows.md), and the
+`2026072602xx` persistence slice.
+
 ## 2026-07-25 — Authenticate review effects with canonical pass outcomes
 
 **Context.** A same-target pass identity and compatible kind do not prove that
