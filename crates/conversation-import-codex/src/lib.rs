@@ -603,7 +603,7 @@ fn normalize_named_tool_call(
         source_call_id: text_attestation(payload, "call_id")
             .map_err(|()| invalid_tool_call(line))?,
         name: text_attestation(payload, "name").map_err(|()| invalid_tool_call(line))?,
-        input: structured_attestation(payload, input_field)
+        input: string_structured_attestation(payload, input_field)
             .map_err(|()| invalid_tool_call(line))?,
         caller: ImportedSourceAttestation::NotAttested,
     };
@@ -856,6 +856,20 @@ fn structured_attestation(
         None => Ok(ImportedSourceAttestation::NotAttested),
         Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
         Some(value) => Ok(ImportedSourceAttestation::Attested(value.clone())),
+    }
+}
+
+fn string_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
+    match unique_field(members, name)? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(value @ ImportedStructuredValue::String(_)) => {
+            Ok(ImportedSourceAttestation::Attested(value.clone()))
+        }
+        Some(_) => Err(()),
     }
 }
 
@@ -1135,5 +1149,26 @@ mod tests {
             CodexRolloutJsonlConversionFailure::InvalidMessageRole { line: 1 }
         );
         assert_eq!(error.to_string(), "Codex rollout JSONL conversion failed");
+    }
+
+    #[test]
+    fn s28_inv038_rejects_non_string_named_tool_inputs() {
+        for source in [
+            br#"{"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"lookup","arguments":{"key":"value"}}}"#
+                .as_slice(),
+            br#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"lookup","input":[1]}}"#
+                .as_slice(),
+        ] {
+            let error = CodexRolloutJsonlConverter
+                .convert(conversation(), source, || {
+                    ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
+                })
+                .expect_err("non-string named-tool input must fail");
+
+            assert_eq!(
+                error.failure(),
+                CodexRolloutJsonlConversionFailure::InvalidToolCall { line: 1 }
+            );
+        }
     }
 }

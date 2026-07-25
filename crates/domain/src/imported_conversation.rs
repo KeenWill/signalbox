@@ -2381,7 +2381,7 @@ fn project_codex_named_tool_call(
         ImportedTranscriptContent::ToolCall {
             source_call_id: projected_text_attestation(payload, "call_id")?,
             name: projected_text_attestation(payload, "name")?,
-            input: projected_structured_attestation(payload, input_field)?,
+            input: projected_string_structured_attestation(payload, input_field)?,
             caller: ImportedSourceAttestation::NotAttested,
         },
     )
@@ -2924,6 +2924,20 @@ fn projected_structured_attestation(
     }
 }
 
+fn projected_string_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
+    match unique_structured_field(members, name)? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(value @ ImportedStructuredValue::String(_)) => {
+            Ok(ImportedSourceAttestation::Attested(value.clone()))
+        }
+        Some(_) => Err(()),
+    }
+}
+
 fn projected_media_source_attestation(
     members: &[ImportedStructuredObjectMember],
     name: &str,
@@ -3010,7 +3024,7 @@ mod tests {
         ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
         ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
         ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
-        ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+        ImportedTranscriptEntryInput, ImportedTranscriptPosition, projected_entries,
     };
     use crate::{ImportedConversationId, ImportedTranscriptEntryId};
     use uuid::Uuid;
@@ -3056,6 +3070,31 @@ mod tests {
             value = ImportedStructuredValue::Array(vec![value].into_boxed_slice());
         }
         value
+    }
+
+    #[test]
+    fn s28_inv038_codex_reprojection_rejects_non_string_named_tool_input() {
+        let normalized = object_with_members(vec![
+            (
+                "type",
+                ImportedStructuredValue::String(text("response_item")),
+            ),
+            (
+                "payload",
+                object_with_members(vec![
+                    (
+                        "type",
+                        ImportedStructuredValue::String(text("function_call")),
+                    ),
+                    ("arguments", object(("key", ImportedStructuredValue::Null))),
+                ]),
+            ),
+        ]);
+
+        assert!(
+            projected_entries(ImportedConversationFormat::CodexRolloutJsonlV1, &normalized)
+                .is_err()
+        );
     }
 
     /// S28 / INV-002 / INV-038: cloning an unvalidated source value is

@@ -12,3 +12,16 @@ ALTER TABLE imported_conversation
                 'codex_rollout_jsonl'
             )
         );
+
+ALTER TABLE imported_conversation
+    ADD CONSTRAINT imported_conversation_format_version_supported
+        CHECK (
+            (
+                source_format = 'claude_code_session_jsonl'
+                AND converter_version IN (1, 2)
+            )
+            OR (
+                source_format = 'codex_rollout_jsonl'
+                AND converter_version = 1
+            )
+        );
