@@ -10,6 +10,46 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Bind blocked publication to its attempted reservation
+
+**Context.** A blocked external-publication pass can follow an ambiguous write
+after reserving a link. A reason alone does not identify the attempted write
+when the finding has more than one pending reservation, so later reconciliation
+could attach and post through a different reservation.
+
+**Decision.** An external-publication `BlockedWithReason` event commits the
+exact pending reservation associated with its finding. A later reconciled
+`Posted` transition must attach and consume that reservation. A finding-repair
+block carries no reservation.
+
+**Rejected alternatives.** Inferring the reservation from the finding is
+ambiguous. Selecting any later attachment can attribute the external write to
+the wrong attempt. Requiring reservations for repair blocks invents external
+evidence where no publication occurred.
+
+**Affects.** Review finding-event payloads, pass results, publication
+reconciliation, the [review-workflows specification](spec/review-workflows.md),
+and the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Do not record unchanged external observations
+
+**Context.** Polling a long-lived external review object can repeatedly report
+the same state. Persisting each unchanged report makes complete aggregate loads
+grow with polling frequency rather than with meaning-bearing state changes.
+
+**Decision.** An external state equal to the latest recorded observation is a
+semantic no-op. It appends no observation and binds no pass result. A changed
+state appends the next contiguous ordinal and binds that exact observation.
+
+**Rejected alternatives.** A fixed lifetime count eventually rejects legitimate
+state changes. Paginated or snapshotted history adds a new loading contract not
+needed for the current state vocabulary. Retaining every poll preserves no
+additional domain fact.
+
+**Affects.** External-link observation admission and reconstitution, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
 ## 2026-07-25 — Give each review pass one accepted input
 
 **Context.** A session accepted input executes through one canonical turn.
@@ -464,6 +504,162 @@ evidence can justify it.
 external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
+
+**Context.** The specification states that hubd reads exactly four deployment
+values from the process environment, with `DATABASE_URL` as the whole database
+channel. The SQLx driver does not honor that: it builds connection options from
+the libpq-style `PG*` variables first and lets the URL override only what the
+URL states. Anything the URL omits — host, port, user, database, TLS material,
+application name, runtime options — silently comes from the environment, and
+`PGPASSWORD`/`PGPASSFILE` form an undocumented second database-credential
+channel. URL parsing additionally ends in SQLx's `apply_pgpass`, which falls
+back to libpq's default `~/.pgpass` whenever the URL carries no password and
+`PGPASSFILE` is unset, so a deployment image holding that file supplies a
+credential without any variable being set. Neither refusal reaches the last
+channel: with the variables gone, SQLx still completes an incomplete URL from
+the process account and the host filesystem, taking an omitted user name from
+`whoami` and an omitted host from a probe of the local socket directories that
+falls back to `localhost`. Only `sslmode` was already neutralized, by forcing
+`verify-full` after parsing. The `PG*` set is also not the whole environment
+surface: this crate selects SQLx's `tls-rustls-ring-native-roots` feature, so
+roots come from `rustls-native-certs`, which loads them only from what
+`SSL_CERT_FILE` and `SSL_CERT_DIR` name whenever either is set, in place of the
+platform store — and SQLx adds an `sslrootcert` the URL states to that store
+rather than replacing it, so a root named by the environment verifies the
+production server even under an explicit root certificate. Refusing
+`PGSSLROOTCERT` while admitting those two closed the named channel and left the
+unnamed one open.
+
+**Decision.** The production connection path fails closed when any of the
+thirteen consulted `PG*` variables or either certificate-store variable is
+present in the environment, whatever its value, when the default `~/.pgpass`
+exists under the process home directory, and when the URL states no user name or
+no host — in its authority or in the `user`, `host`, and `hostaddr` query
+parameters SQLx reads for them. The passfile refusal turns on presence alone;
+the file is never opened, so no credential is read to decide. The trust-store
+refusal carries its own message, because the remedy differs: a connection
+parameter belongs in the URL, while the roots belong to the platform store the
+host already keeps, and no URL parameter can displace an environment-named root.
+Port and database name are left to SQLx and the server, which derive them from
+the URL alone once the variables are refused: an omitted port is the fixed 5432,
+and an omitted database name is the user name the URL states. The error names
+the offending channel and never its contents, and the refusal precedes any
+database contact. The local test connection path keeps SQLx's behavior; it is a
+development and test channel by intent, and no check confines the URL it is
+given, so this decision protects production through the refusals above rather
+than through that separation. Two narrower channels stay open, both accepted: a
+URL whose host is a socket directory (`?host=/path`) leaves the name TLS
+verifies against at whatever SQLx's own probe yields, accepted because the
+connection target is itself URL-stated and a name that does not match fails the
+handshake closed — requiring an explicit host alongside a socket path is a later
+refinement; and the Windows password-file location
+(`%APPDATA%\postgresql\pgpass.conf`) is not checked, accepted because this
+repository claims no Windows support to check it for.
+
+**Rejected alternatives.** Documenting the fallback set would make the
+environment surface honest while leaving an unmanaged credential channel and a
+connection whose target depends on ambient state. Rebuilding options field by
+field from a self-parsed URL would put a libpq connection-string parser in this
+repository to work around one driver default; asking what the URL states is not
+that, and uses `url`, the parser SQLx itself feeds into `PgConnectOptions`, so
+the check sees exactly what the driver will. Requiring a database name as well
+would refuse a URL whose omitted name the server resolves to that URL's own user
+name, which never leaves the URL. Ignoring the variables silently would leave an
+operator who set them without any signal that they did nothing. Constructing
+options through a passfile-free path is not available: SQLx 0.9 exposes
+`new_without_pgpass` only for the no-URL constructor, and its URL parser is
+private, so the passfile lookup cannot be skipped or the resulting field
+cleared. Refusing only URLs that omit a password would close the same hole at
+its trigger, but it also forbids certificate and peer authentication, which the
+still-open database-credential decision may want.
+
+**Affects.** `production_connection_options`, hubd's production startup, the
+process-configuration section of
+[configuration and credentials](spec/configuration-and-credentials.md), and a
+direct `url` dependency for `signalbox-persistence` — already in the tree as
+SQLx's own URL parser, so it adds an edge rather than a crate.
+
+## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
+
+**Context.** The native client holds an API credential, and an error-path test
+can prove that today's surfaced errors omit one synthetic credential but cannot
+prevent a future shipping source from logging credentials or surrounding request
+state. The existing privacy scan is the native client's automated gate for
+prohibited data-collection and disclosure mechanisms.
+
+**Decision.** Make the native privacy scan reject direct Swift logging
+primitives and standard instance logging methods anywhere under shipping
+`Sources`. Exercise the instance-method detector with a synthetic fixture every
+time the scan runs so changes to the expression cannot silently reopen that
+path. Keep credentials out of diagnostic output instead of attempting to redact
+them after logging.
+
+**Rejected alternatives.** Manual review alone does not continuously enforce the
+rule. Searching for current credential variable names misses aliases and future
+names. An allow-list makes the protection depend on reviewers proving that every
+permitted call can never receive credential-bearing data.
+
+**Affects.** `clients/native/scripts/check-privacy.sh` and future additions to
+the native client's shipping Swift sources.
+
+## 2026-07-25 — Bound native-client heartbeat silence to 45 seconds
+
+**Context.** The native client acknowledges server heartbeat frames, but an open
+WebSocket that stops delivering frames can otherwise remain connected
+indefinitely. The stream needs a finite quiet deadline that tolerates ordinary
+scheduling and network jitter while still correcting stale connection state.
+
+**Decision.** Start a 45-second liveness deadline when the WebSocket connection
+attempt begins. Before the first acknowledged heartbeat, expiry surfaces a
+connection-timeout error. Restart the deadline after each acknowledged
+heartbeat; a later expiry surfaces a connection-quiet error. Both failures close
+the transport. Keep the deadline injectable so tests can exercise the watchdog
+without wall-clock delays.
+
+**Rejected alternatives.** Relying on platform request timeouts does not detect
+an already-open but silent WebSocket. Waiting indefinitely preserves stale
+connected state. A much shorter fixed deadline raises false disconnect risk
+without a recorded server heartbeat cadence that justifies it.
+
+**Affects.** The native client's `SignalboxWebSocketStream` liveness behavior
+and its unit-test seam; the wire protocol and heartbeat acknowledgment remain
+unchanged.
+
+## 2026-07-25 — Run Swift client CI on the wired unit-test bundle
+
+**Context.** The native-client snapshot import deferred Swift CI wholesale,
+parking the Tart VM scripts inert "with the rest of Swift CI" because
+GitHub-hosted macOS runners lack nested virtualization. Meanwhile nothing
+mechanical checks `clients/native` at all: a change can break the Xcode build,
+the privacy boundary, the Tart script contracts, or the screenshot manifest with
+no signal until someone builds locally. The imported `Tests/SignalboxAppTests`,
+`Tests/SignalboxClientTests`, and `Tests/SignalboxModelsTests` are still not
+wired as Xcode targets, so `SignalboxNativeTests` is the only unit-test bundle
+that can run today.
+
+**Decision.** Land a macOS workflow now for what a hosted runner can actually do
+— the Debug simulator build, the wired `SignalboxNativeTests` bundle, and the
+privacy, Tart dry-run, and screenshot-golden-hash script checks — pinned to the
+image's Xcode 26.6 rather than its rolling default. The UI and
+screenshot-capture bundles are excluded through a new
+`SIGNALBOX_NATIVE_SKIP_TESTING` option on `test-xcode.sh`, and the real-server
+smoke test stays out; both need an interactive session or a live server and
+credential. This supersedes the blanket Swift-CI deferral for the build and
+script surface only. Restoring the unreachable test targets remains the rewire's
+first task, and the Tart device matrix stays deferred pending self-hosted Apple
+Silicon or a managed Tart service.
+
+**Rejected alternatives.** Waiting for the rewire leaves `clients/native`
+unchecked through the milestone that changes it most. Running the UI and
+screenshot-capture suites in CI trades a real signal for a flaky one, and the
+golden hashes already catch manifest drift without a simulator. Following the
+image's default Xcode would let a runner-image bump change the toolchain under a
+project created against a pinned one.
+
+**Affects.** `.github/workflows/swift.yml` (new),
+`clients/native/scripts/test-xcode.sh`.
 
 ## 2026-07-25 — Adopt house style guide (literal provenance, label discipline)
 

@@ -9,7 +9,7 @@ final class SignalboxAPIClientTests: XCTestCase {
         )
     }
 
-    func testListTemplatesUsesBearerAuthorizationWithoutPrintingSecret() async throws {
+    func testListTemplatesUsesBearerAuthorization() async throws {
         let transport = MockSignalboxHTTPTransport()
         await transport.setJSONResponse(
             path: "/api/v1/templates",

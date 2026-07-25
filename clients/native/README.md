@@ -103,16 +103,17 @@ under that decision, not normative claims.
 - The session stream does not reconnect after a transient WebSocket drop; the
   session must be closed and reopened.
 - A failed message submission clears the composer, so the draft is lost.
-- `EventNormalizer.toolCard` takes the first function-call/response parts
-  instead of matching `toolCallID`, showing the wrong arguments/output for
-  multi-tool-call messages.
 - `turn_failed` events render a failure card even when `visible_to_user` is
   false, exposing internal-only failure reasons in the timeline.
 - The WebSocket stream carries the API key as a `token` URL query parameter (a
   design of the earlier protocol; the rewire's local-socket protocol eliminates
   it).
-- Plain-HTTP server URLs are accepted for non-loopback hosts, sending the bearer
-  key in cleartext (same legacy transport; gone with the rewire).
+- Plain-HTTP server URLs are accepted for non-loopback hosts. App Transport
+  Security blocks non-local plaintext requests to public hostnames, mitigating
+  credential exposure there, but the local-network exception permits numeric IP
+  addresses and those configurations can still send bearer credentials in
+  cleartext. Input validation therefore permits both unsafe and nonconnecting
+  configurations (same legacy transport; gone with the rewire).
 - Templates are missing from compact-width iOS navigation.
 - The Create button stays enabled while session creation is pending, so a double
   tap can create duplicate sessions.
