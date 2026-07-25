@@ -183,7 +183,12 @@ A metadata object has exactly `title` (string or null), `tags` (string array),
 Present titles, tags, and attribute keys are nonempty; every metadata string
 rejects U+0000. Attribute values may be empty. Duplicate tags and duplicate
 decoded attribute member names are invalid requests. Tag order and attribute
-member order do not affect durable command equality.
+member order do not affect durable command equality. Wire validation enforces
+the domain capacity contract: at most 262,144 total UTF-8 bytes across the
+object, and at most 1,024 UTF-8 bytes in each tag or attribute key. That bound
+leaves response-envelope and worst-case JSON-escaping headroom below the 8 MiB
+frame limit when a complete accepted object is echoed by a read or replacement
+receipt.
 
 `list_session_metadata` admits one through 100 results. `required_tags` is an
 exact AND-filter, a present `title_contains` is nonempty and applies an exact
@@ -191,7 +196,9 @@ case-sensitive substring filter, `include_archived = false` selects the default
 all-non-archived view, and `after_session_id` is an exclusive keyset cursor. An
 empty tag array, null title query, false archive switch, page size 50, and null
 cursor form the ordinary default request; the wire carries every field
-explicitly.
+explicitly. Required tags are nonempty, reject U+0000, and carry at most 1,024
+UTF-8 bytes each; a title query rejects U+0000; and all required tags plus the
+title query carry at most 262,144 UTF-8 bytes.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
 treatment in all four versions. If a turn is already active, the normal typed
@@ -201,7 +208,8 @@ interrupt, steering, or after-current treatment.
 Versions two and three admit the same request vocabulary as version one and add
 no new mutation authority. Version four retains that vocabulary and adds only
 the three metadata requests. A metadata request carried under version one, two,
-or three fails frame validation; it never reaches application construction. A
+or three is classified as `malformed_frame` because its supported version does
+not admit that request variant; it never reaches application construction. A
 version-one `submit_input`, `read_transcript`, or `follow_session` request that
 selects imported ancestry returns a version-one `unsupported_version` error
 naming version two before mutation or snapshot construction.
@@ -264,12 +272,13 @@ Version four's metadata list is a bounded sequence:
    session-identity order; and
 3. `session_metadata_page_end { session_count, next_after_session_id }`.
 
-Each summary carries `session_id`, current `defaults_version` and
-`model_selection`, `title`, sorted `tags`, `archived`, and `last_writer`.
-Attributes are intentionally absent from the list projection. The end cursor is
-null when no later match existed in the page snapshot; otherwise it equals the
-last emitted session identity. The page sequence is spooled before output and
-becomes authoritative only after its count, ordering, and cursor validate.
+Each summary carries `session_id`, current `defaults_version`,
+`model_selection`, `dangerous_tool_auto_approval`, `title`, sorted `tags`,
+`archived`, and `last_writer`. Attributes are intentionally absent from the list
+projection. The end cursor is null when no later match existed in the page
+snapshot; otherwise it equals the last emitted session identity. The page
+sequence is spooled before output and becomes authoritative only after its
+count, ordering, and cursor validate.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry
@@ -282,14 +291,15 @@ microseconds since the Unix epoch) and one closed actor object: `owner`,
 provenance, not wire authentication or authorization.
 
 An application rejection is an `error` with `code = "rejected"` and a required
-`detail` object whose variants are closed. For the version-one treatment, its
-exact variants are `session_not_found { session_id }`,
+`detail` object whose variants are closed. The version-one input treatment
+admits `session_not_found { session_id }`,
 `active_turn_present { session_id, active_turn_id }`,
 `defaults_version_mismatch { session_id, expected, current }`,
 `unknown_model_alias { session_id, alias_id }`, and
-`acceptance_position_exhausted { session_id, last }`. Other error codes have no
-`detail`. An equal replay returns the same success or rejection projection as
-the first handling.
+`acceptance_position_exhausted { session_id, last }`. A version-four
+`replace_session_metadata` rejection admits exactly
+`session_not_found { session_id }`. Other error codes have no `detail`. An equal
+replay returns the same success or rejection projection as the first handling.
 
 The error-code set in all four versions is:
 

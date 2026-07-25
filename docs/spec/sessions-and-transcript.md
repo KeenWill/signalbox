@@ -259,12 +259,24 @@ caller order; duplicate tags or attribute keys fail construction rather than
 silently selecting a winner. Tags are human-facing organization and attributes
 are machine-facing provenance; neither shape substitutes for the other.
 
+A snapshot carries at most 262,144 total UTF-8 bytes across its present title,
+tags, attribute keys, and attribute values. Each tag and attribute key carries
+at most 1,024 UTF-8 bytes so its composite PostgreSQL index entry remains
+representable. Construction rejects either excess before command handling; the
+exact provisional capacity choice is recorded in the
+[metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
+
 The root `session_metadata` row and normalized
 `session_metadata_tag`/`session_metadata_attribute` rows (migration
 `202607260101_session_metadata.sql`) exist only after the first metadata write.
 Their absence is the canonical initial projection: no title, no tags or
 attributes, not archived, and no last-writer stamp. Creation therefore does not
 fabricate an actor that its command does not carry.
+
+A single-session metadata read collects the root, tags, and attributes in one
+read-only repeatable-read transaction. It therefore returns either the complete
+initial projection or one complete committed replacement, never a combination of
+separately committed snapshots.
 
 `ReplaceSessionMetadata` carries durable command identity, target session,
 actor, and one complete replacement snapshot. Its replay equality covers every
@@ -292,12 +304,14 @@ replacement operation with `archived = false`; it has no lifecycle target to
 reconstruct. Destructive retention remains a separate open question.
 
 The paginated list projection joins current defaults with metadata but does not
-reconstitute the `Session` aggregate. Each result carries session identity,
-current defaults, title, tags, archive state, and optional last-writer stamp;
-attributes remain available through the single-session metadata read. A query
-has an exact tag set, optional exact case-sensitive title substring,
-`include_archived`, a page size from 1 through 100, and an exclusive
-`after_session_id` cursor:
+reconstitute the `Session` aggregate. Each result carries session identity, the
+complete current defaults (model selection and dangerous-tool auto-approval
+flag), title, tags, archive state, and optional last-writer stamp; attributes
+remain available through the single-session metadata read. A query has an exact
+tag set, optional exact case-sensitive title substring, `include_archived`, a
+page size from 1 through 100, and an exclusive `after_session_id` cursor.
+Required tags use the metadata tag rules, a title substring rejects U+0000, and
+all filter strings together carry at most 262,144 UTF-8 bytes:
 
 - every requested tag must exist (AND-match); an empty set matches all;
 - a title query matches only a present title containing that exact scalar

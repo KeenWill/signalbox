@@ -10,38 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-25 — Stage creation-derived visibility behind attributed creation
+## 2026-07-25 — Bound session metadata for storage and process frames
 
-**Status.** Proposed foundation decision; owner acceptance is the merge of this
-specification diff together with its implementing stack. This stack implements
-only the current all-non-archived default view.
+**Context.** Metadata is echoed in complete read and replacement frames, while
+tags and attribute keys are stored in composite PostgreSQL B-tree indexes.
+Unbounded valid domain values could therefore exceed either the 8 MiB process
+frame or a finite index-entry capacity only after mutation handling.
 
-**Context.** Session visibility must eventually keep automation-created work out
-of the interactive default view without introducing a parallel session-kind
-taxonomy. Only `OwnerInitiated` creation is constructible today, and
-`CreateSession` carries no actor, so neither future automation cause nor its
-authority can be truthfully derived yet.
+**Decision.** Admit at most 262,144 total UTF-8 bytes across a metadata
+snapshot, counting title, every tag, and every attribute key and value.
+Additionally bound each indexed tag and attribute key to 1,024 UTF-8 bytes.
+Apply the same 262,144 byte aggregate bound to list-filter strings and the same
+per-tag bound to each required tag. These are provisional capacity limits
+enforced before mutation or database access and by storage checks where one row
+owns the bounded value.
 
-**Decision.** Before another creation cause becomes constructible, add actor
-attribution to every creation command and make the cause derive from its
-authorized creation boundary. The eventual default interactive view derives from
-owner-initiated cause plus not-archived state. Admit one nullable creation-time
-override, settable only by `Actor::Owner`, for explicit inclusion or exclusion;
-monitor projections ignore that interactive-view selection. Until that
-dependency lands, store no visibility taxonomy or override and define the
-default view as every non-archived session.
+**Rejected alternatives.** Relying on the inbound frame cap leaves no headroom
+for response envelopes and worst-case JSON escaping. Depending on PostgreSQL to
+reject oversized index tuples turns a valid domain value into infrastructure
+failure. Hash-only indexes would change exact-match and corruption semantics for
+a capacity problem that explicit bounds solve.
 
-**Rejected alternatives.** A mutable visibility enum duplicates derivable
-provenance and can drift from it. Inferring owner agency from the only current
-cause launders a missing command fact. Letting model, tool, or recovery actors
-set the exception grants organizational authority that actor attribution alone
-does not carry.
-
-**Affects.** The current metadata list contract in
-[sessions-and-transcript](spec/sessions-and-transcript.md); future creation
-commands, creation causes, automation entry points, and the default-view
-override remain blocked on this proposal's owner acceptance and later
-implementation.
+**Affects.** Session-metadata domain construction, list-query admission,
+protocol version four, migration `202607260101`, and their boundary tests.
 
 ## 2026-07-25 — Add session-metadata protocol version four
 

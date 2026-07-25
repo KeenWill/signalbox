@@ -112,12 +112,12 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Session organization, visibility, and retention
 
-- **Creation-attributed default visibility.** The proposed dependency and
-  authority rule are recorded in
-  [decisions.md](decisions.md#2026-07-25--stage-creation-derived-visibility-behind-attributed-creation).
-  Implementation waits for attributed creation commands and additional
-  constructible creation causes; the current default is every non-archived
-  session.
+- **Creation-attributed default visibility.** The current default is every
+  non-archived session. Creation commands carry no actor and only
+  `OwnerInitiated` is constructible, so later creation causes cannot yet support
+  a truthful narrower derivation. Decide derivation, override shape and
+  authority, and monitor inclusion together with the attributed-creation
+  implementation; none is fixed by the current metadata slice.
 - **Expressive metadata filters.** The implemented query is exact tag AND-match
   plus exact case-sensitive title substring. OR, negation, attribute predicates,
   case folding, and a general query language remain later scope.
