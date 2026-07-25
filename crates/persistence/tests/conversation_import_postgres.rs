@@ -1041,6 +1041,320 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     Ok(())
 }
 
+/// S28 / INV-038: appending Claude Code records creates a distinct exact
+/// snapshot while shared raw records remain content-addressed once and source
+/// session evidence groups both snapshots without identifying them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_grown_claude_source_is_new_snapshot_with_shared_lineage()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let leading_record = concat!(
+        "{\"sessionId\":\"claude-lineage\",\"uuid\":\"record-1\",",
+        "\"type\":\"user\",\"message\":{\"content\":\"first\"}}"
+    );
+    let appended_record = concat!(
+        "{\"sessionId\":\"claude-lineage\",\"uuid\":\"record-2\",",
+        "\"type\":\"assistant\",\"message\":{\"content\":\"second\"}}"
+    );
+    let grown_source = format!("{leading_record}\n{appended_record}");
+    let first_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x1100));
+    let grown_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x1200));
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x1100, 0x1200], [0x1110, 0x1210, 0x1211]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+
+    assert_eq!(
+        service.execute(leading_record.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: first_snapshot
+        }
+    );
+    assert_eq!(
+        service.execute(grown_source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: grown_snapshot
+        }
+    );
+    assert_ne!(first_snapshot, grown_snapshot);
+
+    let (_, _, repository) = service.into_parts();
+    let first = repository
+        .load(first_snapshot)
+        .await?
+        .expect("the leading Claude snapshot must reconstitute");
+    let grown = repository
+        .load(grown_snapshot)
+        .await?
+        .expect("the grown Claude snapshot must reconstitute");
+    assert_eq!(first.raw_records().len(), 1);
+    assert_eq!(first.entries().len(), 1);
+    assert_eq!(first.raw_records()[0].bytes(), leading_record.as_bytes());
+    assert_eq!(grown.raw_records().len(), 2);
+    assert_eq!(grown.entries().len(), 2);
+    assert_eq!(grown.raw_records()[0], first.raw_records()[0]);
+    assert_eq!(grown.raw_records()[1].bytes(), appended_record.as_bytes());
+    assert_ne!(first.source_digest(), grown.source_digest());
+
+    let storage_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_conversation_raw_record)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(storage_counts, (2, 2, 3));
+    let lineage: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT imported_conversation_id
+           FROM imported_conversation
+          WHERE source_session_id = $1
+          ORDER BY imported_conversation_id",
+    )
+    .bind(b"claude-lineage".as_slice())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        lineage,
+        vec![first_snapshot.into_uuid(), grown_snapshot.into_uuid()]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-038: appending Codex records creates a distinct exact snapshot
+/// while shared raw records remain content-addressed once and source session
+/// evidence groups both snapshots without identifying them.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_grown_codex_source_is_new_snapshot_with_shared_lineage()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let leading_record = concat!(
+        "{\"timestamp\":\"t0\",\"type\":\"response_item\",\"payload\":",
+        "{\"id\":\"item-1\",\"session_id\":\"codex-lineage\",",
+        "\"type\":\"message\",\"role\":\"user\",\"content\":\"first\"}}"
+    );
+    let appended_record = concat!(
+        "{\"timestamp\":\"t1\",\"type\":\"response_item\",\"payload\":",
+        "{\"id\":\"item-2\",\"session_id\":\"codex-lineage\",",
+        "\"type\":\"message\",\"role\":\"assistant\",\"content\":\"second\"}}"
+    );
+    let grown_source = format!("{leading_record}\n{appended_record}");
+    let first_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x2100));
+    let grown_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x2200));
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x2100, 0x2200], [0x2110, 0x2210, 0x2211]),
+        CodexRolloutJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+
+    assert_eq!(
+        service.execute(leading_record.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: first_snapshot
+        }
+    );
+    assert_eq!(
+        service.execute(grown_source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: grown_snapshot
+        }
+    );
+    assert_ne!(first_snapshot, grown_snapshot);
+
+    let (_, _, repository) = service.into_parts();
+    let first = repository
+        .load(first_snapshot)
+        .await?
+        .expect("the leading Codex snapshot must reconstitute");
+    let grown = repository
+        .load(grown_snapshot)
+        .await?
+        .expect("the grown Codex snapshot must reconstitute");
+    assert_eq!(first.raw_records().len(), 1);
+    assert_eq!(first.entries().len(), 1);
+    assert_eq!(first.raw_records()[0].bytes(), leading_record.as_bytes());
+    assert_eq!(grown.raw_records().len(), 2);
+    assert_eq!(grown.entries().len(), 2);
+    assert_eq!(grown.raw_records()[0], first.raw_records()[0]);
+    assert_eq!(grown.raw_records()[1].bytes(), appended_record.as_bytes());
+    assert_ne!(first.source_digest(), grown.source_digest());
+
+    let storage_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_conversation_raw_record)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(storage_counts, (2, 2, 3));
+    let lineage: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT imported_conversation_id
+           FROM imported_conversation
+          WHERE source_session_id = $1
+          ORDER BY imported_conversation_id",
+    )
+    .bind(b"codex-lineage".as_slice())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        lineage,
+        vec![first_snapshot.into_uuid(), grown_snapshot.into_uuid()]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28: source-session lineage remains unknown when no record attests an
+/// identifier or when records attest conflicting identifiers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_source_session_lineage_is_null_without_one_consistent_attestation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let missing_source = "{\"type\":\"summary\",\"value\":\"missing\"}";
+    let conflicting_source = concat!(
+        "{\"sessionId\":\"lineage-a\",\"type\":\"summary\",\"value\":\"first\"}\n",
+        "{\"sessionId\":\"lineage-b\",\"type\":\"summary\",\"value\":\"second\"}"
+    );
+    let missing_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x3100));
+    let conflicting_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x3200));
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x3100, 0x3200], [0x3110, 0x3210, 0x3211]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+
+    assert_eq!(
+        service.execute(missing_source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: missing_snapshot
+        }
+    );
+    assert_eq!(
+        service.execute(conflicting_source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: conflicting_snapshot
+        }
+    );
+    let evidence: Vec<(Uuid, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT imported_conversation_id, source_session_id
+           FROM imported_conversation
+          ORDER BY imported_conversation_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        evidence,
+        vec![
+            (missing_snapshot.into_uuid(), None),
+            (conflicting_snapshot.into_uuid(), None),
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-002 / INV-038: checked loading and exact reingestion reject
+/// non-null lineage evidence that disagrees with the reconstructed entries.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv038_corrupt_source_session_lineage_fails_closed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = concat!(
+        "{\"sessionId\":\"lineage-original\",\"uuid\":\"record-1\",",
+        "\"type\":\"user\",\"message\":{\"content\":\"first\"}}"
+    );
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x3300));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut initial_import = ImportConversationService::new(
+        FixedIds::new(&[0x3300], [0x3310]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    assert_eq!(
+        initial_import.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+
+    sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation
+            SET source_session_id = $1
+          WHERE imported_conversation_id = $2",
+    )
+    .bind(b"lineage-corrupt".as_slice())
+    .bind(winner.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        repository
+            .load(winner)
+            .await
+            .expect_err("corrupt lineage evidence must not load"),
+        ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::SourceSessionLineageMismatch
+        )
+    ));
+
+    let mut exact_reingestion = ImportConversationService::new(
+        FixedIds::new(&[0x3400], [0x3410]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    assert!(matches!(
+        exact_reingestion
+            .execute(source.as_bytes())
+            .await
+            .expect_err("exact reingestion must expose corrupt lineage evidence"),
+        ImportConversationError::Store(ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::SourceSessionLineageMismatch
+        ))
+    ));
+
+    sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation
+            SET source_session_id = NULL
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(winner.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(
+        repository.load(winner).await?.is_some(),
+        "NULL lineage must remain unknown for rows predating the column"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S28 / INV-038: Codex rollout entries use the same append-only,
 /// content-addressed persistence boundary as every imported conversation.
 #[tokio::test(flavor = "multi_thread")]

@@ -927,6 +927,7 @@ those tests.
   no other review pass owns that input, and project the pass from that exact
   origin turn; bind each effect-producing pass once to its exact bounded finding
   inventory, complete finding-event payload, attachment, or observation result;
+  an attachment that posts a finding commits both effects in that one result;
   and append each proposed finding's own contiguous event history. Duplicate and
   superseded events authenticate an open or accepted referenced finding before
   committing. Acceptance and posting enforce the finding's frozen judgment and
@@ -947,12 +948,12 @@ those tests.
   future orchestration coordinates adapters.
 - **Failure behavior:** A reused or foreign accepted input, turn, pass, finding,
   pass-result commitment, referenced-finding status, external-link provider or
-  logical target, frontier, non-origin input, unknown policy version,
-  below-threshold transition, or lifecycle outcome fails reconstitution as
-  corruption. Finding-reference cycles fail at admission. A pending external
-  reservation does not prove absence of an external effect and is not retried
-  automatically. No transcript content or general-purpose artifact is copied
-  into workflow rows.
+  logical target, frontier, non-origin input, unknown policy version, cyclic
+  target parent, below-threshold transition, or lifecycle outcome fails
+  reconstitution as corruption. Finding-reference cycles fail at admission. A
+  pending external reservation does not prove absence of an external effect and
+  is not retried automatically. No transcript content or general-purpose
+  artifact is copied into workflow rows.
 - **Required invariants:** INV-001, INV-002, INV-007, INV-025, INV-026, INV-040,
   INV-041.
 - **Remaining questions:** Application commands, scheduling, prompts,

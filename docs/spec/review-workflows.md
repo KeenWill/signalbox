@@ -26,7 +26,7 @@ run and target; and a `ReviewFindingRef` binds a finding to its exact producing
 pass and therefore its run and target. Child records carry those complete
 references. Why: complete typed ownership facts make a cross-wired
 target/run/pass/finding combination unconstructible in normal domain use and
-rejectable during reconstitution (INV-001, INV-002, INV-040).
+rejectable during reconstitution (INV-001, INV-040).
 
 Key-like and narrative values preserve their exact UTF-8 content without
 trimming or normalization. Construction rejects empty values, U+0000, and values
@@ -51,7 +51,9 @@ that snapshot, not permission to rewrite either branch. It must be a distinct
 target whose canonical provider and repository equal the child snapshot's; its
 canonical head revision must equal the child's exact base revision. Construction
 and reconstitution reject self-parent, base-less parented targets,
-cross-repository edges, and revision-disconnected edges.
+cross-repository edges, revision-disconnected edges, and any repeated target in
+the complete canonical parent chain. Review-target parentage is therefore
+acyclic and always terminates at a root.
 
 Every `ReviewRun` names one target, one closed workflow kind, and one complete
 `ReviewPolicy`. The implemented workflow kinds are external-context import,
@@ -141,27 +143,31 @@ The optional `result` is one closed `ReviewPassResult`:
 - `FindingEvent` names one exact finding, event ordinal, and projected event
   payload. The payload commits the discriminator and every meaning-bearing
   value: rejection or blocking reason, referenced finding identity plus its
-  authenticated admission status for duplicate or superseded, or external-link
-  identity for posted.
+  authenticated admission status for duplicate or superseded. `Posted` is the
+  one finding event committed by the attachment result instead, because its pass
+  is also the attachment producer.
 - `ExternalLinkAttachment` names the exact reservation and canonical external
-  object key.
+  object key. When attachment also posts a finding, it additionally commits that
+  exact finding, event ordinal, `Posted` discriminator, and reservation in the
+  same result.
 - `ExternalLinkObservation` names the exact reservation, observation ordinal,
   and observed state.
 
 The result variant must match the pass kind, terminal outcome, and admitted
 effect. `ProducedFindings` belongs only to succeeded read-only review;
-`FindingEvent` follows the finding machine's pass-kind and outcome table;
-`ExternalLinkAttachment` belongs only to succeeded external publication or
-external-context import; and `ExternalLinkObservation` belongs only to succeeded
+`FindingEvent` follows the finding machine's pass-kind and outcome table except
+for `Posted`; `ExternalLinkAttachment` belongs only to succeeded external
+publication or external-context import and carries `Posted` when that attachment
+posts a finding; and `ExternalLinkObservation` belongs only to succeeded
 external-context import. An effect-producing terminal pass may bind an absent
 result exactly once in the same transaction that admits the complete finding
-inventory, appends the event, attaches the external object, or appends the
-observation. That monotonic binding does not change the pass lifecycle state; a
-bound result is immutable. Equal replay observes the existing effect; no
-distinct later effect may cite that pass. A terminal pass that produced no typed
-effect may retain an absent result; a read-only-review pass that completed its
-output admission binds `ProducedFindings`, including an empty inventory when it
-produced none.
+inventory, appends the event, attaches the external object, atomically attaches
+and posts, or appends the observation. That monotonic binding does not change
+the pass lifecycle state; a bound result is immutable. Equal replay observes the
+existing effect; no distinct later effect may cite that pass. A terminal pass
+that produced no typed effect may retain an absent result; a read-only-review
+pass that completed its output admission binds `ProducedFindings`, including an
+empty inventory when it produced none.
 
 ## Finding machine
 
@@ -213,9 +219,10 @@ pass's canonical run supplies its workflow and the exact `ReviewPolicy` frozen
 by the finding's producing run, so judgment, deduplication, and every later
 classification remain under one policy even though their one-pass workflows use
 separate run identities. The pass's terminal result commits to the event's exact
-finding, ordinal, and projected payload. Event and pass kinds are compatible
-only as follows: accepted, rejected, and stale events name a judgment pass;
-duplicate and superseded events name a deduplication pass; posted names an
+finding, ordinal, and projected payload; a posted event is committed inside that
+pass's attachment result. Event and pass kinds are compatible only as follows:
+accepted, rejected, and stale events name a judgment pass; duplicate and
+superseded events name a deduplication pass; posted names an
 external-publication or external-context-import pass; fixed names a
 finding-repair pass; and blocked-with-reason names either an
 external-publication or finding-repair pass. Every event except
@@ -258,22 +265,24 @@ identifier, and the producing pass. The attachment's reservation must equal the
 aggregate root. Its producing pass and canonical run evidence must agree and
 prove either succeeded external publication or, for the no-write read-only case,
 succeeded external-context import; the pass belongs to the target carried by the
-reservation's target, run, or finding association. Construction and
-reconstitution reject another same-target reservation. The identifier is an
-opaque canonical provider-wide key. An adapter qualifies a repository-scoped
-host identifier with the canonical repository key before constructing it. The
-store uniquely admits one attachment per reservation and one attached
-provider/kind/object identity per exact target snapshot. The first attachment
-also establishes that object's logical target identity. Another snapshot may
-attach the same canonical object only when both snapshots are change requests
-with the same canonical provider, repository, and positive change-request
-number; their exact revisions may differ. A commit or an unrelated change
-request cannot reassociate the object. Every refreshed snapshot uses its own
-reservation and succeeded import or publication pass. A reservation without an
-attachment is explicitly pending; it is never interpreted as proof that the
-external effect did not occur and is not automatically retried (INV-025,
-INV-026). Read-only import may reserve and attach in one local transaction
-because it issues no external write (INV-041).
+reservation's target, run, or finding association. If attachment publishes a
+finding, the same result and transaction commit its exact posted event; the
+reservation association names that finding and the object kind carries review
+content. Construction and reconstitution reject another same-target reservation.
+The identifier is an opaque canonical provider-wide key. An adapter qualifies a
+repository-scoped host identifier with the canonical repository key before
+constructing it. The store uniquely admits one attachment per reservation and
+one attached provider/kind/object identity per exact target snapshot. The first
+attachment also establishes that object's logical target identity. Another
+snapshot may attach the same canonical object only when both snapshots are
+change requests with the same canonical provider, repository, and positive
+change-request number; their exact revisions may differ. A commit or an
+unrelated change request cannot reassociate the object. Every refreshed snapshot
+uses its own reservation and succeeded import or publication pass. A reservation
+without an attachment is explicitly pending; it is never interpreted as proof
+that the external effect did not occur and is not automatically retried
+(INV-025, INV-026). Read-only import may reserve and attach in one local
+transaction because it issues no external write (INV-041).
 
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with the owning reservation identity, a same-target pass, and a
@@ -303,7 +312,7 @@ discriminators and assembles domain reconstitution inputs; the domain validates
 ownership, state shape, event order, and transitions. A missing referenced
 record, unknown discriminator, incomplete history, or failed domain check is
 reported as corruption rather than normalized into a plausible aggregate
-(INV-002, INV-040, INV-041).
+(INV-040, INV-041).
 
 The first store surface creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, and appends external

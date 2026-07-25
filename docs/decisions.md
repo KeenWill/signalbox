@@ -50,15 +50,20 @@ the same transaction that admits its effect; a bound result is immutable. A
 read-only result is a canonical identity-ordered inventory of at most 32 exact
 finding references, whose immutable canonical rows supply their content. Event,
 attachment, and observation results commit every meaning-bearing identity,
-ordinal, state, or reason. Duplicate and superseded events freeze the referenced
-finding's canonically authenticated `Open` or `Accepted` status. Persistence
-locks both finding roots in identity order before appending that durable
-admission fact; terminal classification prevents a later reverse edge.
+ordinal, state, or reason. Because a posted event's pass also produces its
+external attachment, the attachment result optionally commits that complete
+posted event and both records are admitted atomically; a separate finding-event
+result cannot claim the same pass. Duplicate and superseded events freeze the
+referenced finding's canonically authenticated `Open` or `Accepted` status.
+Persistence locks both finding roots in identity order before appending that
+durable admission fact; terminal classification prevents a later reverse edge.
 
 **Rejected alternatives.** Pass kind and outcome alone do not identify an
 effect. Copying finding content into the result creates a second content
 authority. An unbounded finding inventory has no defensive admission budget.
-Detecting reference cycles only while loading allows invalid history to commit.
+Splitting one posting pass across independently bindable attachment and event
+results defeats one-result immutability. Detecting reference cycles only while
+loading allows invalid history to commit.
 
 **Affects.** Pass outcomes, finding and external-effect admission,
 reconstitution, the [review-workflows specification](spec/review-workflows.md),
@@ -180,15 +185,18 @@ parent. The child already freezes its exact comparison revision.
 **Decision.** A parented target requires an exact child base revision, and the
 canonical parent target's head revision must equal that base. Construction,
 reconstitution, and persistence validate identity, scope, and revision
-continuity from the canonical parent snapshot.
+continuity from the canonical parent snapshot. Reconstitution validates the
+complete canonical parent chain and rejects any repeated target identity, so
+parentage always terminates at a root.
 
 **Rejected alternatives.** Scope-only validation admits false stack topology.
 Copying unverified parent scope or revision strings into a detached reference
 does not authenticate the named target. Resolving a moving host branch while
-loading would make old topology time-dependent.
+loading would make old topology time-dependent. Checking only the immediate edge
+admits corrupt cyclic ancestry whose traversal never reaches a stack root.
 
-**Affects.** `ReviewTarget`, stack propagation prerequisites, target
-persistence, and the
+**Affects.** `ReviewTarget`, stack propagation prerequisites, target persistence
+and reconstitution, and the
 [review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy).
 
 ## 2026-07-25 — Bind finding event passes to one frozen policy
@@ -456,6 +464,60 @@ evidence can justify it.
 external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Adopt house style guide (literal provenance, label discipline)
+
+**Context.** [docs/agents/testing-style.md](agents/testing-style.md) owns how a
+test body reads, but two disciplines that bind production and test code alike
+had no owning document: whether a literal visible at a use site is load-bearing
+or merely needs to exist, and when positional structure — runs of same-typed
+positions, and bare booleans worst of all — must become labeled structure.
+Reviews raised both case by case with no citable rule.
+
+**Decision.** Adopt [docs/style.md](style.md) as a normative companion to the
+testing style guide, owner-approved. It states five principles with a Rust
+mechanics appendix worked against real excerpts from this repository, and cites
+testing style rules as TS-*n* rather than restating them. It binds new and
+modified code; existing code is brought along only when already being changed
+for another reason.
+
+**Rejected alternatives.** Extending the testing style guide would put rules
+that bind production code inside a document scoped to tests. Filing the guide
+under `docs/agents/` would classify a rule binding all code as an agent process
+document. Leaving the discipline implicit keeps review feedback uncitable and
+inconsistent between reviewers.
+
+**Affects.** `docs/style.md`, the normative-surface inventory and style pointer
+in `AGENTS.md`, and review practice for new and modified code.
+
+## 2026-07-25 — Index imported snapshots by attested source session
+
+**Context.** Exact source-content identity correctly makes an appended source a
+new immutable imported conversation, but the header had no queryable evidence
+for grouping snapshots that attest the same external session. Source-session
+text is already extracted independently on every normalized record and may be
+absent, explicit null, conflicting, empty, or contain U+0000.
+
+**Decision.** Add nullable `imported_conversation.source_session_id` evidence.
+On new insertion, store the exact UTF-8 bytes when at least one record attests
+an identifier and all attested identifiers agree; otherwise store `NULL`. Index
+non-null values with a non-unique PostgreSQL hash index for exact-equality
+lineage queries without imposing B-tree entry-size limits. Keep the
+format/converter/source-digest unique constraint and every identity rule
+unchanged. Checked loads reject non-null lineage evidence that disagrees with
+the reconstituted entries; `NULL` remains unknown so the migration does not
+reinterpret older rows. Never derive lineage evidence from filenames or import
+context.
+
+**Rejected alternatives.** Using the source session as identity would collapse
+distinct grown snapshots. A unique lineage index would permit only one snapshot
+per external session. PostgreSQL `text` cannot preserve U+0000, and a direct
+B-tree over unbounded evidence can reject otherwise valid identifiers. Inferring
+missing evidence from a path would turn caller context into false provenance.
+
+**Affects.** Migration `202607270001`, imported-conversation insertion and
+checked loading, synthetic Postgres snapshot-lineage and corruption tests, and
+[conversation-import](spec/conversation-import.md).
 
 ## 2026-07-25 — Route review requests for every path to the owner
 
