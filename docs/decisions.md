@@ -551,6 +551,33 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Bound isolated PostgreSQL integration concurrency to four tests
+
+**Context.** Across the latest fifteen successful `main` runs after the
+cross-suite matrix landed, the Rust workflow took a median 8m44s. Persistence
+was the critical path at 8m36s, versus 2m32s for validation, 2m37s for hubd, and
+50s for the terminal client; its test step consumed about 95 percent of the job
+while cache handling took about 18s. Harness inspection found no shared database
+to protect: 214 ignored tests start fresh pinned PostgreSQL containers, use
+Docker-assigned ports, migrate their own databases, and retain their container
+handles for the test scope. The single-thread setting was conservative.
+
+**Decision.** Run up to four tests concurrently inside each PostgreSQL
+integration binary, matching the four CPUs of the public Ubuntu runner while
+keeping an explicit resource bound. Retain every per-test container and
+migration call, including migration-prefix tests, so SQLx checksum validation
+and test isolation remain unchanged.
+
+**Rejected alternatives.** Additional matrix shards repeat checkout and cache
+setup without improving isolation. A shared server with template databases would
+require database-scoping cluster-wide lock probes and dedicated handling for
+server-loss and migration-prefix tests. Cache changes target seconds rather than
+the eight-minute critical path. Libtest's runner-dependent default would leave
+Docker concurrency implicit.
+
+**Affects.** `.github/workflows/rust.yml` test scheduling only; no test,
+database, schema, migration, or checksum semantics change.
+
 ## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
 
 **Context.** The specification states that hubd reads exactly four deployment

@@ -14,6 +14,15 @@ use crate::{
     wire::{ChatCompletion, WireResponseToolCall, WireUsage},
 };
 
+/// Whether the request declared caller stop sequences, which decides how a
+/// provider `stop` token is read (see [`map_finish`]). If the decoders ever
+/// need the declared sequences themselves, they belong in [`Self::Declared`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StopSequences {
+    Declared,
+    NotDeclared,
+}
+
 /// Maps the provider's `finish_reason` token to the normalized vocabulary.
 ///
 /// `content_filter` maps to [`FinishReason::Refusal`]: the provider filtered
@@ -27,9 +36,9 @@ use crate::{
 /// collapsing those distinct dispositions would invent evidence. The legacy
 /// `function_call` token is unrecognized because this adapter never requests
 /// legacy functions.
-pub(crate) fn map_finish(token: &str, stop_sequences_declared: bool) -> FinishReason {
+pub(crate) fn map_finish(token: &str, stop_sequences: StopSequences) -> FinishReason {
     match token {
-        "stop" if !stop_sequences_declared => FinishReason::EndTurn,
+        "stop" if stop_sequences == StopSequences::NotDeclared => FinishReason::EndTurn,
         "tool_calls" => FinishReason::ToolUse,
         "content_filter" => FinishReason::Refusal,
         other => FinishReason::Unrecognized {
@@ -106,7 +115,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     exchange: ExchangeFacts,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
-    stop_sequences_declared: bool,
+    stop_sequences: StopSequences,
 ) -> TerminalEvidence {
     if let Err(error) = validate_provider_json_nesting(body) {
         return unintelligible(
@@ -258,7 +267,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         );
     };
-    let mut finish = map_finish(finish_token, stop_sequences_declared);
+    let mut finish = map_finish(finish_token, stop_sequences);
     if matches!(finish, FinishReason::Unrecognized { .. }) {
         return unintelligible_after_finish(
             "success response carries an unrecognized finish_reason".to_string(),
@@ -366,7 +375,7 @@ mod tests {
         TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
-    use super::{decode_buffered_response, map_finish};
+    use super::{StopSequences, decode_buffered_response, map_finish};
 
     fn exchange() -> ExchangeFacts {
         ExchangeFacts {
@@ -378,12 +387,12 @@ mod tests {
     /// Decodes the body against canonical exchange facts, collecting
     /// observations correlated to `"call-1"`.
     fn decode(body: &str) -> (TerminalEvidence, Vec<Observation<String>>) {
-        decode_with_stop_sequences(body, false)
+        decode_with_stop_sequences(body, StopSequences::NotDeclared)
     }
 
     fn decode_with_stop_sequences(
         body: &str,
-        stop_sequences_declared: bool,
+        stop_sequences: StopSequences,
     ) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut observations: Vec<Observation<String>> = Vec::new();
         let evidence = decode_buffered_response(
@@ -391,7 +400,7 @@ mod tests {
             exchange(),
             &"call-1".to_string(),
             &mut observations,
-            stop_sequences_declared,
+            stop_sequences,
         );
         (evidence, observations)
     }
@@ -901,7 +910,7 @@ mod tests {
             r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
                 "choices":[{"index":0,"message":{"role":"assistant","content":"partial"},
                 "finish_reason":"stop"}]}"#,
-            true,
+            StopSequences::Declared,
         );
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
@@ -931,7 +940,7 @@ mod tests {
             .iter()
             .map(|token| FinishRow {
                 token,
-                finish: format!("{:?}", map_finish(token, false)),
+                finish: format!("{:?}", map_finish(token, StopSequences::NotDeclared)),
             })
             .collect()
     }
