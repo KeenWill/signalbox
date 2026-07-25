@@ -10,6 +10,82 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
+
+**Context.** The specification states that hubd reads exactly four deployment
+values from the process environment, with `DATABASE_URL` as the whole database
+channel. The SQLx driver does not honor that: it builds connection options from
+the libpq-style `PG*` variables first and lets the URL override only what the
+URL states. Anything the URL omits — host, port, user, database, TLS material,
+application name, runtime options — silently comes from the environment, and
+`PGPASSWORD`/`PGPASSFILE` form an undocumented second database-credential
+channel. URL parsing additionally ends in SQLx's `apply_pgpass`, which falls
+back to libpq's default `~/.pgpass` whenever the URL carries no password and
+`PGPASSFILE` is unset, so a deployment image holding that file supplies a
+credential without any variable being set. Neither refusal reaches the last
+channel: with the variables gone, SQLx still completes an incomplete URL from
+the process account and the host filesystem, taking an omitted user name from
+`whoami` and an omitted host from a probe of the local socket directories that
+falls back to `localhost`. Only `sslmode` was already neutralized, by forcing
+`verify-full` after parsing. The `PG*` set is also not the whole environment
+surface: this crate selects SQLx's `tls-rustls-ring-native-roots` feature, so
+roots come from `rustls-native-certs`, which loads them only from what
+`SSL_CERT_FILE` and `SSL_CERT_DIR` name whenever either is set, in place of the
+platform store — and SQLx adds an `sslrootcert` the URL states to that store
+rather than replacing it, so a root named by the environment verifies the
+production server even under an explicit root certificate. Refusing
+`PGSSLROOTCERT` while admitting those two closed the named channel and left the
+unnamed one open.
+
+**Decision.** The production connection path fails closed when any of the
+thirteen consulted `PG*` variables or either certificate-store variable is
+present in the environment, whatever its value, when the default `~/.pgpass`
+exists under the process home directory, and when the URL states no user name or
+no host — in its authority or in the `user`, `host`, and `hostaddr` query
+parameters SQLx reads for them. The passfile refusal turns on presence alone;
+the file is never opened, so no credential is read to decide. The trust-store
+refusal carries its own message, because the remedy differs: a connection
+parameter belongs in the URL, while the roots belong to the platform store the
+host already keeps, and no URL parameter can displace an environment-named root.
+Port and database name are left to SQLx and the server, which derive them from
+the URL alone once the variables are refused: an omitted port is the fixed 5432,
+and an omitted database name is the user name the URL states. The error names
+the offending channel and never its contents, and the refusal precedes any
+database contact. The local test connection path keeps SQLx's behavior; it is a
+development and test channel by intent, and no check confines the URL it is
+given, so this decision protects production through the refusals above rather
+than through that separation. Two narrower channels stay open, both accepted: a
+URL whose host is a socket directory (`?host=/path`) leaves the name TLS
+verifies against at whatever SQLx's own probe yields, accepted because the
+connection target is itself URL-stated and a name that does not match fails the
+handshake closed — requiring an explicit host alongside a socket path is a later
+refinement; and the Windows password-file location
+(`%APPDATA%\postgresql\pgpass.conf`) is not checked, accepted because this
+repository claims no Windows support to check it for.
+
+**Rejected alternatives.** Documenting the fallback set would make the
+environment surface honest while leaving an unmanaged credential channel and a
+connection whose target depends on ambient state. Rebuilding options field by
+field from a self-parsed URL would put a libpq connection-string parser in this
+repository to work around one driver default; asking what the URL states is not
+that, and uses `url`, the parser SQLx itself feeds into `PgConnectOptions`, so
+the check sees exactly what the driver will. Requiring a database name as well
+would refuse a URL whose omitted name the server resolves to that URL's own user
+name, which never leaves the URL. Ignoring the variables silently would leave an
+operator who set them without any signal that they did nothing. Constructing
+options through a passfile-free path is not available: SQLx 0.9 exposes
+`new_without_pgpass` only for the no-URL constructor, and its URL parser is
+private, so the passfile lookup cannot be skipped or the resulting field
+cleared. Refusing only URLs that omit a password would close the same hole at
+its trigger, but it also forbids certificate and peer authentication, which the
+still-open database-credential decision may want.
+
+**Affects.** `production_connection_options`, hubd's production startup, the
+process-configuration section of
+[configuration and credentials](spec/configuration-and-credentials.md), and a
+direct `url` dependency for `signalbox-persistence` — already in the tree as
+SQLx's own URL parser, so it adds an edge rather than a crate.
+
 ## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
 
 **Context.** The native client holds an API credential, and an error-path test
