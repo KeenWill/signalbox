@@ -44,10 +44,10 @@ gates. Binary-local floating-point defaults would neither reconstruct the policy
 used by an old run nor provide one exact relational representation.
 
 **Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
-integer basis-point thresholds from zero through 10,000. Version one requires at
-least 7,000 basis points for judgment and 8,000 for unattended publication; the
-publication threshold may not be lower than the judgment threshold. Dedupe and
-judge passes consume the same frozen run policy.
+integer basis-point thresholds from zero through 10,000. Version one fixes
+exactly 7,000 basis points for judgment and exactly 8,000 for unattended
+publication; the publication threshold may not be lower than the judgment
+threshold. Dedupe and judge passes consume the same frozen run policy.
 
 **Rejected alternatives.** Process-wide defaults make old decisions depend on
 current configuration. Binary floating point admits storage/JSON comparison
@@ -58,6 +58,30 @@ version prevents intentional later evolution.
 **Affects.** `ReviewPolicy`, `ReviewConfidence`, run persistence, the
 [review-workflows specification](spec/review-workflows.md), and later judgment,
 deduplication, and publication orchestration.
+
+## 2026-07-25 — Bound exact review-workflow text by UTF-8 bytes
+
+**Context.** Review targets and external links retain opaque code-host keys,
+while findings retain exact generated narrative. Leaving either family unbounded
+would admit disproportionate in-memory and relational values; counting
+characters would not give the domain and PostgreSQL one shared storage measure.
+
+**Decision.** Review-workflow key-like values are nonempty, exclude U+0000, and
+admit at most 1,024 UTF-8 bytes. This family includes provider, repository,
+revision, file-path, category, and external-object keys. Narrative titles,
+bodies, reasons, and recommended fixes use the same exact-content rules with a
+65,536-byte maximum. Both limits are provisional admission budgets enforced by
+domain construction and relational checks.
+
+**Rejected alternatives.** Unbounded strings provide no defensive admission
+budget. Character-count limits diverge from byte-oriented storage checks.
+Different provisional limits for every field add policy surface before usage
+evidence can justify it.
+
+**Affects.** Review-workflow value types, target and finding construction,
+external-link evidence, the
+[review-workflows specification](spec/review-workflows.md), and relational
+checks in the `2026072602xx` persistence slice.
 
 ## 2026-07-24 — Preserve accepted IANA time-zone identifiers
 
