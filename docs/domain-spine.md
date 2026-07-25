@@ -4980,6 +4980,7 @@ pub enum ReviewTargetSubject {
 }
 pub struct ReviewTarget { /* immutable snapshot */ }
 pub enum ReviewTargetError {
+    MissingChangeRequestBase { target: ReviewTargetId },
     SelfParent { target: ReviewTargetId },
 }
 impl ReviewTarget {
@@ -5029,12 +5030,39 @@ pub enum ReviewRunState {
     Blocked { blocking_pass: ReviewPassRef },
     Cancelled { last_pass: Option<ReviewPassRef> },
 }
+pub struct ReviewRunPassEvidence { /* canonical pass reference + state */ }
+impl ReviewRunPassEvidence {
+    pub const fn new(reference: ReviewPassRef, state: ReviewPassState) -> Self;
+    // accessors: reference(), state()
+}
+pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
+impl ReviewRunReconstitutionInput {
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+        state: ReviewRunState,
+        pass_evidence: Option<ReviewRunPassEvidence>,
+    ) -> Self;
+    // accessors: reference(), workflow(), policy(), state(), pass_evidence()
+}
 pub struct ReviewRun { /* reference + kind + policy + state */ }
-pub enum ReviewRunTransitionFailure {
+pub enum ReviewRunEvidenceFailure {
     ForeignPass,
+    MissingPassEvidence,
+    UnexpectedPassEvidence,
+    PassMismatch,
+    PassStateMismatch,
+}
+pub struct ReviewRunReconstitutionError { /* input + failure */ }
+impl ReviewRunReconstitutionError {
+    // accessors: failure(), input(), into_input()
+}
+pub enum ReviewRunTransitionFailure {
+    Evidence(ReviewRunEvidenceFailure),
     InvalidTransition,
 }
-pub struct ReviewRunTransitionError { /* current + next + failure */ }
+pub struct ReviewRunTransitionError { /* states + canonical pass + failure */ }
 impl ReviewRun {
     pub const fn new(
         reference: ReviewRunRef,
@@ -5042,17 +5070,17 @@ impl ReviewRun {
         policy: ReviewPolicy,
     ) -> Self;
     pub fn try_reconstitute(
-        reference: ReviewRunRef,
-        workflow: ReviewWorkflowKind,
-        policy: ReviewPolicy,
-        state: ReviewRunState,
+        input: ReviewRunReconstitutionInput,
+    ) -> Result<Self, ReviewRunReconstitutionError>;
+    pub fn transition(
+        self,
+        next: ReviewRunState,
+        pass_evidence: Option<ReviewRunPassEvidence>,
     ) -> Result<Self, ReviewRunTransitionError>;
-    pub fn transition(self, next: ReviewRunState)
-        -> Result<Self, ReviewRunTransitionError>;
     // accessors: reference(), workflow(), policy(), state()
 }
 impl ReviewRunTransitionError {
-    // accessors: failure(), states()
+    // accessors: failure(), states(), pass_evidence()
 }
 
 pub enum ReviewPassKind {
@@ -5072,15 +5100,25 @@ pub enum ReviewPassState {
     Blocked { turn: TurnId },
     Cancelled { turn: Option<TurnId> },
 }
-pub struct ReviewPassTurnEvidence { /* canonical turn ownership + frontier */ }
+pub enum ReviewPassTurnOutcome {
+    Active,
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    ReconciliationRequired,
+}
+pub struct ReviewPassTurnEvidence { /* canonical turn ownership + outcome */ }
 impl ReviewPassTurnEvidence {
     pub const fn new(
         turn: TurnId,
         session: SessionId,
         accepted_input: AcceptedInputId,
+        outcome: ReviewPassTurnOutcome,
         terminal_frontier: Option<ContextFrontierId>,
     ) -> Self;
-    // accessors: turn(), session(), accepted_input(), terminal_frontier()
+    // accessors: turn(), session(), accepted_input(), outcome(),
+    // terminal_frontier()
 }
 pub struct ReviewPassReconstitutionInput { /* pass row + canonical evidence */ }
 impl ReviewPassReconstitutionInput {
@@ -5108,6 +5146,7 @@ pub enum ReviewPassReconstitutionFailure {
     TurnMismatch,
     TurnSessionMismatch,
     TurnAcceptedInputMismatch,
+    TurnOutcomeMismatch,
     OutputFrontierMismatch,
 }
 pub struct ReviewPassReconstitutionError { /* input + failure */ }
@@ -5115,10 +5154,11 @@ impl ReviewPassReconstitutionError {
     // accessors: failure(), input(), into_input()
 }
 pub enum ReviewPassTransitionFailure {
+    Evidence(ReviewPassReconstitutionFailure),
     InvalidTransition,
     TurnChanged,
 }
-pub struct ReviewPassTransitionError { /* current + next + failure */ }
+pub struct ReviewPassTransitionError { /* states + canonical turn + failure */ }
 impl ReviewPass {
     pub fn try_new(
         reference: ReviewPassRef,
@@ -5130,12 +5170,15 @@ impl ReviewPass {
     pub fn try_reconstitute(
         input: ReviewPassReconstitutionInput,
     ) -> Result<Self, ReviewPassReconstitutionError>;
-    pub fn transition(self, next: ReviewPassState)
-        -> Result<Self, ReviewPassTransitionError>;
+    pub fn transition(
+        self,
+        next: ReviewPassState,
+        turn_evidence: Option<ReviewPassTurnEvidence>,
+    ) -> Result<Self, ReviewPassTransitionError>;
     // accessors: reference(), kind(), session(), accepted_input(), state()
 }
 impl ReviewPassTransitionError {
-    // accessors: failure(), states()
+    // accessors: failure(), states(), turn_evidence()
 }
 
 pub enum ReviewFindingDiffSide {
@@ -5156,7 +5199,7 @@ impl ReviewFindingLocation {
     pub const fn new(
         file_path: ReviewKey,
         line_range: Option<ReviewLineRange>,
-        diff_side: ReviewFindingDiffSide,
+        diff_side: Option<ReviewFindingDiffSide>,
     ) -> Self;
     // accessors: file_path(), line_range(), diff_side()
 }
@@ -5188,6 +5231,7 @@ impl ReviewFindingProposal {
     pub fn try_new(
         reference: ReviewFindingRef,
         producing_pass: ReviewPassRef,
+        target: &ReviewTarget,
         content: ReviewFindingContent,
     ) -> Result<Self, ReviewFindingTransitionError>;
     // accessors: reference(), producing_pass(), content()
@@ -5219,14 +5263,15 @@ pub enum ReviewFindingEventKind {
     Fixed,
     BlockedWithReason { reason: ReviewText },
 }
-pub struct ReviewFindingEvent { /* ordinal + pass + kind */ }
+pub struct ReviewFindingEvent { /* finding + ordinal + pass + kind */ }
 impl ReviewFindingEvent {
     pub const fn new(
+        finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassRef,
         kind: ReviewFindingEventKind,
     ) -> Self;
-    // accessors: ordinal(), pass(), kind()
+    // accessors: finding(), ordinal(), pass(), kind()
 }
 pub enum ReviewFindingStatus {
     Open,
@@ -5251,7 +5296,10 @@ impl ReviewFinding {
     // accessors: proposal(), events(), status()
 }
 pub enum ReviewFindingTransitionFailure {
+    ForeignTarget,
+    MissingDiffBase,
     ForeignProducingPass,
+    ForeignEventFinding,
     ForeignEventPass,
     ForeignReferencedFinding,
     SelfReference,
@@ -5359,8 +5407,8 @@ pub enum ReviewExternalLinkTransitionError {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 56                   |
-| **signalbox-domain total**                         | **411 (+1 free fn)** |
+| domain: review_workflow                            | 61                   |
+| **signalbox-domain total**                         | **416 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

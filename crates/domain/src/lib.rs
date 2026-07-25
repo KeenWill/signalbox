@@ -130,10 +130,12 @@ pub use review_workflow::{
     ReviewLineRangeError, ReviewPass, ReviewPassConstructionError, ReviewPassKind,
     ReviewPassReconstitutionError, ReviewPassReconstitutionFailure, ReviewPassReconstitutionInput,
     ReviewPassRef, ReviewPassState, ReviewPassTransitionError, ReviewPassTransitionFailure,
-    ReviewPassTurnEvidence, ReviewPolicy, ReviewPolicyError, ReviewPolicyVersion,
-    ReviewPositiveNumberError, ReviewRun, ReviewRunRef, ReviewRunState, ReviewRunTransitionError,
-    ReviewRunTransitionFailure, ReviewTarget, ReviewTargetError, ReviewTargetSubject, ReviewText,
-    ReviewValueError, ReviewValueFailure, ReviewWorkflowKind,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyError,
+    ReviewPolicyVersion, ReviewPositiveNumberError, ReviewRun, ReviewRunEvidenceFailure,
+    ReviewRunPassEvidence, ReviewRunReconstitutionError, ReviewRunReconstitutionInput,
+    ReviewRunRef, ReviewRunState, ReviewRunTransitionError, ReviewRunTransitionFailure,
+    ReviewTarget, ReviewTargetError, ReviewTargetSubject, ReviewText, ReviewValueError,
+    ReviewValueFailure, ReviewWorkflowKind,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{

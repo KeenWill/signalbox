@@ -339,6 +339,17 @@ questions below remain open.
   surfaced and owner decisions are collected across the terminal baseline and
   later client forms remains undesigned. (S10, S11, S24)
 
+## General-purpose artifacts
+
+Artifact identity, ownership, lifecycle, content addressing, and retention have
+no accepted aggregate boundary. Review workflows therefore retain typed
+references to their session, turn, frontier, findings, and external objects;
+they do not copy model output, tool results, workspace snapshots, or a
+general-purpose artifact record into workflow state. A future foundation
+decision must define the artifact aggregate and its authority before a workflow
+can attach one. This blocks general-purpose workflow artifacts, not the
+implemented session and external-link evidence.
+
 ## Destination features (target model)
 
 These unresolved foundation requirements are authoritative here. The
