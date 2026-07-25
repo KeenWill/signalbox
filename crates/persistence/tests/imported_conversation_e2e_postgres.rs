@@ -776,3 +776,133 @@ async fn s28_inv009_inv015_long_frontier_projection_uses_linear_physical_deltas(
     pool.close().await;
     Ok(())
 }
+
+/// S28 / INV-039: the process reader preserves the exact order, identities,
+/// and content of one transcript with hundreds of entries.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv039_process_read_preserves_long_imported_transcript() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let identity = |family: u128, index: usize| {
+        Uuid::from_u128(
+            0x7e00_0000_0000_0000_0000_0000_0000_0000
+                + family * 0x1_0000
+                + u128::try_from(index).expect("the long fixture length fits u128"),
+        )
+    };
+    let conversation = ImportedConversationId::from_uuid(identity(1, 0));
+    let imported_entries = (0..384)
+        .map(|index| ImportedTranscriptEntryId::from_uuid(identity(2, index)))
+        .collect::<Vec<_>>();
+    let source = (0..384)
+        .map(|index| {
+            format!("{{\"type\":\"user\",\"message\":{{\"content\":\"entry {index}\"}}}}\n")
+        })
+        .collect::<String>();
+    let mut import_service = ImportConversationService::new(
+        FixedImportIds {
+            conversations: [conversation].into(),
+            entries: imported_entries.clone().into(),
+        },
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    assert_eq!(
+        import_service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted { conversation }
+    );
+    let (_, _, import_repository) = import_service.into_parts();
+    let stored = import_repository
+        .load(conversation)
+        .await?
+        .expect("the long imported conversation is durable");
+    let selected_frontier = stored
+        .frontiers()
+        .last()
+        .expect("the complete imported transcript is addressable");
+
+    let session = SessionId::from_uuid(identity(3, 0));
+    let seed_entries = (0..384)
+        .map(|index| SemanticTranscriptEntryId::from_uuid(identity(4, index)))
+        .collect::<Vec<_>>();
+    let seed_frontier = ContextFrontierId::from_uuid(identity(5, 0));
+    let selection = DirectModelSelection::from_uuid(identity(6, 0));
+    let mut seed_service = CreateSessionFromImportedFrontierService::new(
+        FixedImportedSessionIds {
+            sessions: [session].into(),
+            semantic_entries: seed_entries.clone().into(),
+            frontiers: [seed_frontier].into(),
+        },
+        ImportedSessionRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        seed_service
+            .execute(CreateSessionFromImportedFrontierRequest::try_new(
+                DurableCommandId::from_uuid(identity(7, 0)),
+                selected_frontier,
+                ImportedSessionRelationship::Resume,
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+            )?)
+            .await?,
+        CreateSessionFromImportedFrontierOutcome::Applied(_)
+    ));
+
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the long imported transcript remains process-readable");
+    assert!(transcript.turns().is_empty());
+    assert_eq!(transcript.entries().len(), 384);
+    assert!(matches!(
+        &transcript.entries()[0],
+        ProcessTranscriptEntry::ImportedText {
+            entry_index: 0,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker: ProcessImportedSourceSpeaker::User,
+            content,
+        } if *source_session == session
+            && *entry == seed_entries[0]
+            && *imported_conversation == conversation
+            && *imported_entry == imported_entries[0]
+            && content == "entry 0"
+    ));
+    assert!(matches!(
+        &transcript.entries()[191],
+        ProcessTranscriptEntry::ImportedText {
+            entry_index: 191,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker: ProcessImportedSourceSpeaker::User,
+            content,
+        } if *source_session == session
+            && *entry == seed_entries[191]
+            && *imported_conversation == conversation
+            && *imported_entry == imported_entries[191]
+            && content == "entry 191"
+    ));
+    assert!(matches!(
+        &transcript.entries()[383],
+        ProcessTranscriptEntry::ImportedText {
+            entry_index: 383,
+            source_session,
+            entry,
+            imported_conversation,
+            imported_entry,
+            source_speaker: ProcessImportedSourceSpeaker::User,
+            content,
+        } if *source_session == session
+            && *entry == seed_entries[383]
+            && *imported_conversation == conversation
+            && *imported_entry == imported_entries[383]
+            && content == "entry 383"
+    ));
+
+    pool.close().await;
+    Ok(())
+}
