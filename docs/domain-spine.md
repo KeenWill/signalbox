@@ -5356,6 +5356,7 @@ pub enum ReviewRunEvidenceFailure {
     UnexpectedPassEvidence,
     PassMismatch,
     PassKindMismatch,
+    PassPolicyMismatch,
     PassStateMismatch,
 }
 pub struct ReviewRunReconstitutionError { /* input + failure */ }
@@ -5429,6 +5430,7 @@ impl ReviewPassReconstitutionInput {
     pub const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
+        workflow_run: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         session: SessionId,
         accepted_input: AcceptedInputId,
@@ -5436,8 +5438,8 @@ impl ReviewPassReconstitutionInput {
         state: ReviewPassState,
         turn_evidence: Option<ReviewPassTurnEvidence>,
     ) -> Self;
-    // accessors: reference(), kind(), workflow(), session(), accepted_input(),
-    // accepted_input_session(), state(), turn_evidence()
+    // accessors: reference(), kind(), workflow_run(), workflow(), session(),
+    // accepted_input(), accepted_input_session(), state(), turn_evidence()
 }
 pub struct ReviewPass { /* reference + session input + state */ }
 pub enum ReviewPassConstructionFailure {
@@ -5450,6 +5452,7 @@ impl ReviewPassConstructionError {
     // failure()
 }
 pub enum ReviewPassReconstitutionFailure {
+    ForeignWorkflowRun,
     RunWorkflowMismatch,
     AcceptedInputSessionMismatch,
     MissingTurnEvidence,
