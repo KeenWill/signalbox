@@ -32,6 +32,28 @@ and cannot guarantee adapter agreement.
 **Affects.** The [review-workflows specification](spec/review-workflows.md),
 review-workflow domain reconstitution, and the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Bind review children to their exact aggregate owners
+
+**Context.** A finding identity paired only with its run cannot authenticate the
+pass that produced it. Likewise, an external-link attachment or observation that
+carries only a same-target pass can be cross-wired to another reservation for
+that target during construction or reconstitution.
+
+**Decision.** `ReviewFindingRef` carries the exact producing `ReviewPassRef`.
+Every external-link attachment and observation carries its owning
+`ReviewExternalLinkId`. Domain transitions and complete-projection
+reconstitution reject a different owner even when the run or target matches.
+
+**Rejected alternatives.** Recovering producing-pass ancestry only from storage
+makes the public domain reference incomplete. Trusting the aggregate through
+which a child value happens to be applied leaves detached values transferable
+between same-target aggregates. Target-only checks authenticate scope, not the
+claimed owner.
+
+**Affects.** The [review-workflows specification](spec/review-workflows.md),
+review-workflow domain references and transitions, and the `2026072602xx`
+persistence slice.
+
 ## 2026-07-25 — Freeze comparison revisions for diff-relative review
 
 **Context.** A change-request number and head revision do not identify one
