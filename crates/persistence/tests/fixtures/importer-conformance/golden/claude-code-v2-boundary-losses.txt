@@ -1,0 +1,19 @@
+format: ClaudeCodeSessionJsonlV2
+raw_records: 3
+  1: "{\"type\":\"user\",\"uuid\":\"observed-middle\",\"parentUuid\":\"missing-before-fixture\",\"message\":{\"role\":\"user\",\"content\":\"Retained suffix.\"}}"
+  2: "{\"type\":\"assistant\",\"uuid\":\"observed-after-gap\",\"parentUuid\":\"missing-inside-fixture\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"future_block\",\"payload\":{\"nested\":[1,1.0,1e0]}},{\"type\":\"text\",\"text\":\"Retained after gap.\"}]}}"
+  3: "{\"type\":\"user\",\"uuid\":null,\"parentUuid\":\"observed-after-gap\",\"message\":{\"role\":\"user\",\"content\":null}}"
+entries: 4
+  1: raw=1.1 speaker=Attested(User)
+    content=Text(Attested(ImportedText { utf8_len: 16, .. }))
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 15, .. }), parent_record_id: Attested(ImportedText { utf8_len: 22, .. }), source_session_id: NotAttested, timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(User) }
+  2: raw=2.1 speaker=Attested(Assistant)
+    content=SourceMessageBlock { source_type: Attested(ImportedText { utf8_len: 12, .. }) }
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 18, .. }), parent_record_id: Attested(ImportedText { utf8_len: 22, .. }), source_session_id: NotAttested, timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
+  3: raw=2.2 speaker=Attested(Assistant)
+    content=Text(Attested(ImportedText { utf8_len: 19, .. }))
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 18, .. }), parent_record_id: Attested(ImportedText { utf8_len: 22, .. }), source_session_id: NotAttested, timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
+  4: raw=3.1 speaker=Attested(User)
+    content=MessageContentAbsent(ContentAttestedAbsent)
+    source=ImportedSourceMetadata { record_id: AttestedAbsent, parent_record_id: Attested(ImportedText { utf8_len: 18, .. }), source_session_id: NotAttested, timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(User) }
+addressable_frontiers: 4

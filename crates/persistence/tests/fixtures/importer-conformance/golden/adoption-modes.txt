@@ -1,0 +1,13 @@
+import_only:
+  format: ClaudeCodeSessionJsonlV2
+  raw_records: 3
+  entries: 4
+  selected_through_position: 4
+adopt_resume:
+  relationship: Resume
+  seed_entries: 4
+  imported_unchanged: true
+adopt_fork:
+  relationship: Fork
+  seed_entries: 4
+  imported_unchanged: true

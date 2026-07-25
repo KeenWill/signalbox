@@ -1,0 +1,31 @@
+format: ClaudeCodeSessionJsonlV1
+raw_records: 6
+  1: "{\"type\":\"system\",\"uuid\":\"legacy-0\",\"sessionId\":\"legacy-session\",\"timestamp\":\"2025-01-01T00:00:00Z\",\"subtype\":\"init\"}"
+  2: "{\"type\":\"user\",\"uuid\":\"legacy-1\",\"parentUuid\":\"legacy-0\",\"sessionId\":\"legacy-session\",\"message\":{\"role\":\"user\",\"content\":\"Inspect synthetic.txt\"}}"
+  3: "{\"type\":\"assistant\",\"uuid\":\"legacy-2\",\"parentUuid\":\"legacy-1\",\"sessionId\":\"legacy-session\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Need inspect.\",\"signature\":\"sig-synthetic\"},{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"read_file\",\"input\":{\"path\":\"synthetic.txt\",\"line\":1},\"caller\":{\"kind\":\"assistant\"}}]}}"
+  4: "{\"type\":\"user\",\"uuid\":\"legacy-3\",\"parentUuid\":\"legacy-2\",\"sessionId\":\"legacy-session\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"is_error\":false,\"content\":[{\"type\":\"text\",\"text\":\"fixture body\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"AA==\"}},{\"type\":\"tool_reference\",\"tool_name\":\"read_file\"}]}]}}"
+  5: "{\"type\":\"assistant\",\"uuid\":\"legacy-4\",\"parentUuid\":\"legacy-3\",\"sessionId\":\"legacy-session\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"fallback\",\"reason\":\"synthetic-model-switch\"}]}}"
+  6: "{\"type\":\"assistant\",\"uuid\":\"legacy-5\",\"parentUuid\":\"legacy-4\",\"sessionId\":\"legacy-session\",\"message\":{\"role\":\"assistant\",\"content\":\"Done.\"}}"
+entries: 7
+  1: raw=1.1 speaker=NotAttested
+    content=SourceEvent { source_type: Attested(ImportedText { utf8_len: 6, .. }) }
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: NotAttested, source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
+  2: raw=2.1 speaker=Attested(User)
+    content=Text(Attested(ImportedText { utf8_len: 21, .. }))
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: Attested(ImportedText { utf8_len: 8, .. }), source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(User) }
+  3: raw=3.1 speaker=Attested(Assistant)
+    content=Thinking { thinking: Attested(ImportedText { utf8_len: 13, .. }), signature: Attested(ImportedText { utf8_len: 13, .. }) }
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: Attested(ImportedText { utf8_len: 8, .. }), source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
+  4: raw=3.2 speaker=Attested(Assistant)
+    content=ToolCall { source_call_id: Attested(ImportedText { utf8_len: 6, .. }), name: Attested(ImportedText { utf8_len: 9, .. }), input: Attested(Object([ImportedStructuredObjectMember { name: ImportedText { utf8_len: 4, .. }, value: String(ImportedText { utf8_len: 13, .. }) }, ImportedStructuredObjectMember { name: ImportedText { utf8_len: 4, .. }, value: Number(ImportedJsonNumber { utf8_len: 1, .. }) }])), caller: Attested(Object([ImportedStructuredObjectMember { name: ImportedText { utf8_len: 4, .. }, value: String(ImportedText { utf8_len: 9, .. }) }])) }
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: Attested(ImportedText { utf8_len: 8, .. }), source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
+  5: raw=4.1 speaker=Attested(User)
+    content=ToolResult { source_call_id: Attested(ImportedText { utf8_len: 6, .. }), content: Attested(Blocks([Text(Attested(ImportedText { utf8_len: 12, .. })), Image(Attested(ImportedMediaSource { kind: Attested(ImportedText { utf8_len: 6, .. }), media_type: Attested(ImportedText { utf8_len: 9, .. }), data: Attested(ImportedText { utf8_len: 4, .. }) })), ToolReference { tool_name: Attested(ImportedText { utf8_len: 9, .. }) }])), is_error: Attested(false) }
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: Attested(ImportedText { utf8_len: 8, .. }), source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(User) }
+  6: raw=5.1 speaker=Attested(Assistant)
+    content=SourceMessageBlock { source_type: Attested(ImportedText { utf8_len: 8, .. }) }
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: Attested(ImportedText { utf8_len: 8, .. }), source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
+  7: raw=6.1 speaker=Attested(Assistant)
+    content=Text(Attested(ImportedText { utf8_len: 5, .. }))
+    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 8, .. }), parent_record_id: Attested(ImportedText { utf8_len: 8, .. }), source_session_id: Attested(ImportedText { utf8_len: 14, .. }), timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
+addressable_frontiers: 7
