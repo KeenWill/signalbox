@@ -3,10 +3,14 @@
 The baseline Signalbox process protocol version one and the terminal client that
 consumes it were verified through PR #177 (`agent/terminal-client`). The
 conversation-import stack adds protocol version two for the conservative
-imported transcript-snapshot projection described here; version one's closed
-message vocabulary remains unchanged. This page is the normative boundary
-between a local client process and `signalbox-hubd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+imported transcript-snapshot projection described here. The tool-loop stack adds
+protocol version three for tool-bearing projection; versions one and two retain
+their closed message vocabularies unchanged. Version three is protocol law ahead
+of the wire implementation; the implementation in this stack speaks versions one
+and two, and its terminal client selects `PROTOCOL_VERSION = 2`. This page is
+the normative boundary between a local client process and `signalbox-hubd`;
+domain values, PostgreSQL records, and wire messages remain distinct
+representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -14,8 +18,8 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-Versions one and two use one Unix domain stream socket. The hub requires its
-path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
+All three versions use one Unix domain stream socket. The hub requires its path
+in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
 `signalbox-hubd` binds the socket with owner-only `0600` permissions. The
 configured path must be absolute and must end in an explicit filename component;
@@ -74,9 +78,9 @@ still names this hub's socket and removes that path, then releases the identity
 link and path lock.
 
 The transport is local-machine and single-user only. The process protocol's lack
-of authentication is provisional; neither version has an authorization exchange
-or remote transport. Socket filesystem access is the deployment boundary; it is
-not represented as application-level owner proof.
+of authentication is provisional; none of the versions has an authorization
+exchange or remote transport. Socket filesystem access is the deployment
+boundary; it is not represented as application-level owner proof.
 
 The hub owns at most 128 accepted connection tasks. At that limit it leaves new
 connections in the bounded listener backlog until an active task exits, then
@@ -110,7 +114,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1` or `2`;
+- `version`: JSON integer `1`, `2`, or `3`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -122,17 +126,18 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one or two produces an
-`unsupported_version` error naming the supported versions, then the server
-closes the connection. Every response uses the request's admitted version; when
-no version can be admitted, the server error uses version one as the
-pre-admission fallback. The version-two terminal client admits that version-one
-fallback only for `malformed_frame` or `unsupported_version`, then applies the
-ordinary request-identity check; every other response-version mismatch fails
-locally. A server error uses `request_id = "0"` only when the incoming frame
-prevents recovery of a valid nonzero identity; zero is never a valid client
-identity or success-response identity. Leading zeroes, a plus sign, whitespace,
-and any spelling other than the shortest ASCII decimal form are invalid.
+spellings decode to the same name. A version other than one, two, or three
+produces an `unsupported_version` error naming the supported versions, then the
+server closes the connection. Every response uses the request's admitted
+version; when no version can be admitted, the server error uses version one as
+the pre-admission fallback. The version-two terminal client admits that
+version-one fallback only for `malformed_frame` or `unsupported_version`, then
+applies the ordinary request-identity check; every other response-version
+mismatch fails locally. A server error uses `request_id = "0"` only when the
+incoming frame prevents recovery of a valid nonzero identity; zero is never a
+valid client identity or success-response identity. Leading zeroes, a plus sign,
+whitespace, and any spelling other than the shortest ASCII decimal form are
+invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -169,18 +174,29 @@ version, and treatment; changing any of them is a conflicting reuse, not
 recovery.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in both versions. If a turn is already active, the normal typed
+treatment in all three versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
-Version two admits the same request vocabulary and adds no new mutation
-authority. A version-one `submit_input`, `read_transcript`, or `follow_session`
-request that selects imported ancestry returns a version-one
+Versions two and three admit the same request vocabulary as version one and add
+no new mutation authority. A version-one `submit_input`, `read_transcript`, or
+`follow_session` request that selects imported ancestry returns a version-one
 `unsupported_version` error naming version two before mutation or snapshot
-construction. Native sessions remain readable and mutable through either
-version. This per-request gate lets an upgraded hub continue serving existing
-version-one clients without emitting a version-two transcript variant they would
-reject.
+construction.
+
+Tool-free native sessions remain readable and mutable through every version. A
+version-one or version-two `read_transcript` or `follow_session` request whose
+snapshot requires a tool-only state or entry returns an error in its admitted
+version with `code = "unsupported_version"` naming version three before any
+snapshot frame. If an already-followed tool-free session first commits a
+tool-only event, a version-one or version-two follower receives that same error
+and the connection closes before the event is emitted. A version-one or
+version-two `submit_input` request targeting a session whose existing history
+contains a tool-only state or entry returns that same error naming version three
+before mutation. This gate lets an upgraded hub continue serving old clients
+without sending a tagged variant their accepted version requires them to reject.
+Version three adds tool observation but no approval, cancellation, or other
+mutation request.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
 before application construction or mutation and returns `invalid_request` when
@@ -227,20 +243,20 @@ exact variants are `session_not_found { session_id }`,
 `detail`. An equal replay returns the same success or rejection projection as
 the first handling.
 
-The error-code set in versions one and two is:
+The error-code set in all three versions is:
 
-| Code                  | Meaning                                                                                |
-| --------------------- | -------------------------------------------------------------------------------------- |
-| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                |
-| `unsupported_version` | The frame version is unsupported, or the selected representation requires version two. |
-| `invalid_request`     | A boundary value cannot construct the requested application input.                     |
-| `not_found`           | The selected session does not exist.                                                   |
-| `conflicting_reuse`   | A durable command identity already names different intent.                             |
-| `rejected`            | The canonical command was durably rejected by current typed state.                     |
-| `resync_required`     | A follower fell behind the bounded process-local event fan-out.                        |
-| `unavailable`         | Infrastructure failed; no requested mutation may have committed.                       |
-| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                      |
-| `internal`            | Fail-closed corruption or a hub defect stopped the request.                            |
+| Code                  | Meaning                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                              |
+| `unsupported_version` | The frame version is unsupported, or the selected representation requires a newer supported version. |
+| `invalid_request`     | A boundary value cannot construct the requested application input.                                   |
+| `not_found`           | The selected session does not exist.                                                                 |
+| `conflicting_reuse`   | A durable command identity already names different intent.                                           |
+| `rejected`            | The canonical command was durably rejected by current typed state.                                   |
+| `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                      |
+| `unavailable`         | Infrastructure failed; no requested mutation may have committed.                                     |
+| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                    |
+| `internal`            | Fail-closed corruption or a hub defect stopped the request.                                          |
 
 For `create_session` and `submit_input`, a lost commit response maps to
 `commit_ambiguous`; the client retries the exact command identity and payload to
@@ -301,7 +317,8 @@ admission that reserves application-pool capacity for non-snapshot work. The
 exact reservation is owned by the
 [snapshot-resource decision](../decisions.md#2026-07-23--bound-process-snapshot-construction-resources).
 
-Each `transcript_turn` has `turn_id` and one closed `state` object:
+In versions one and two, each `transcript_turn` has `turn_id` and one of these
+closed `state` objects:
 
 - `queued { accepted_input_id, content }`;
 - `active_running { current_attempt_id, current_model_call }`, where
@@ -321,10 +338,22 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
   before a call was prepared; or
 - `reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
 
-Each non-text native frontier member is one `transcript_entry` with
-`entry_index`, `source_session_id`, `entry_id`, and one closed `entry` object:
-`turn_completed { turn_id }`, `turn_failed { turn_id }`, or
-`turn_cancelled { turn_id }`. A native text member begins with
+Version three preserves all of those model-call shapes unchanged and adds
+`active_awaiting_tool_approval { tool_request_id }`,
+`active_awaiting_tool_recovery { ended_attempt_id, recovery_tool_attempt_id }`,
+and
+`tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
+The distinct tool variant avoids changing the older `reconciliation_required`
+object.
+
+In every version, each non-text native frontier member is one `transcript_entry`
+with `entry_index`, `source_session_id`, `entry_id`, and one closed `entry`
+object: `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
+`turn_cancelled { turn_id }`. Version three also admits
+`assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
+`tool_execution_result { tool_request_id, tool_attempt_id, content }`,
+`tool_denied { tool_request_id, content }`, and
+`tool_closed { tool_request_id, content }`. A native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -337,8 +366,24 @@ boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
 final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
 limit even when every byte requires worst-case JSON escaping.
 
-The following imported-entry variants exist only in protocol version two. An
-imported semantic entry always identifies its source with
+In version three, the tool-entry `arguments` and `content` members are JSON
+strings, never nested untyped JSON values. `arguments` contains the exact
+normalized JSON text or credential-scrubbed undecodable text stored on the
+request. `content` contains the exact provider-visible result string: admitted
+success text, or the compact closed error object serialized as text by the
+provider bridge. Tool entry discriminators and identifiers determine the
+semantic arm; clients never infer it by reparsing either string.
+
+The version-three process projection resolves the domain's reference-only tool
+entries before crossing the wire. Tool use carries the exact checked name and
+exact normalized-or-scrubbed-undecodable arguments. Execution, denial, and
+closure carry the same provider-neutral success text or compact typed failure
+JSON defined by [tool-loop](tool-loop.md#provider-bridge-and-current_time). A
+client therefore never needs private storage access to reconstruct tool-bearing
+conversation history.
+
+The following imported-entry variants exist in protocol versions two and three.
+An imported semantic entry always identifies its source with
 `imported_conversation_id` and `imported_entry_id` and carries the exact
 `source_speaker` attestation. That attestation is one closed object:
 `not_attested`, `attested_absent`, or `attested { speaker }`, where `speaker` is
@@ -438,8 +483,8 @@ followers does not block durable cursor advancement: reconnecting clients use a
 fresh authoritative snapshot. A follower that overruns the bounded fan-out
 receives `resync_required` and reconnects for another snapshot.
 
-Each `session_event` message carries `cursor`, `session_id`, and exactly one of
-these closed `event` objects:
+Each `session_event` message carries `cursor`, `session_id`, and exactly one
+closed `event` object. Every version admits these unchanged event shapes:
 
 | Event                          | Additional members                                                            |
 | ------------------------------ | ----------------------------------------------------------------------------- |
@@ -452,6 +497,13 @@ these closed `event` objects:
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 | `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+
+Version three additionally admits
+`tool_batch_transition { turn_id, producing_model_call_id, state }`, where
+`state` is exactly `proposed { frontier_id }`,
+`results_projected { frontier_id }`, or `recovery_required { tool_attempt_id }`,
+and
+`turn_tool_reconciliation_required { turn_id, tool_attempt_id, terminal_frontier_id }`.
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is
@@ -474,41 +526,52 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-Versions one and two forward durable transition events only. Provider token
-deltas remain transient inside the model-runtime boundary and are not added to
-the outbox. The terminal `send` command follows the submitted turn, accepts
-terminal state from the initial snapshot or waits for its durable terminal
-event, rereads the authoritative transcript, and prints the committed assistant
-text. A client that observes `active_awaiting_model_call_recovery` in the
-initial snapshot exits with a typed nonzero recovery-required diagnostic:
-neither version has a writer that can complete that wait. When the selected turn
-instead emits a live terminal `ambiguous` model-call transition, `send` rereads
-the authoritative snapshot and produces that same diagnostic if the turn has
-entered the recovery wait. A client disconnect never cancels model work. After
-each terminal turn event, `follow` uses a separate connection to read and
-validate a fresh authoritative transcript before it resumes printing later
-followed events. That side reread does not advance the follow connection's
-observed cursor: only events consumed from the subscribed connection do so, and
-every buffered event remains eligible for ordered presentation. Although the
-reread may have a cursor later than the triggering event, it makes presentation
-eligible only the previously undisplayed semantic material attributable to that
-exact terminal event: assistant text from its named turn and model call plus the
-exact completion marker for `turn_completed`, the exact failure marker for
-`turn_failed`, the exact cancellation marker for `turn_cancelled`, and no
-semantic material for `turn_refused` or `turn_reconciliation_required`, whose
-terminalization creates no content entry. It does not present material
-introduced by any later cursor. Such material remains ordered behind its
-buffered followed event, or behind a new authoritative snapshot after
-`resync_required`. Final durable content is deduplicated by source-qualified
-semantic-entry identity while transition-only events remain visible instead of
-being suppressed by a newer side snapshot.
+All three versions forward durable transition events only. Provider token deltas
+remain transient inside the model-runtime boundary and are not added to the
+outbox. The terminal `send` command follows the submitted turn, accepts terminal
+state from the initial snapshot or waits for its durable terminal event, rereads
+the authoritative transcript, and prints the committed assistant text. Every
+version exits with a typed nonzero recovery-required diagnostic after observing
+`active_awaiting_model_call_recovery` or a live terminal `ambiguous` model-call
+transition followed by that authoritative state.
+
+Version three applies the same behavior to `active_awaiting_tool_recovery` and
+to `tool_batch_transition { recovery_required }` followed by that state. Neither
+recovery wait has a process-protocol writer that can complete it. An
+`active_awaiting_tool_approval` turn remains an ordinary nonterminal wait. A
+client disconnect never cancels model or tool work.
+
+Version three rereads after each `tool_batch_transition { proposed }` and
+`tool_batch_transition { results_projected }`; every version rereads after a
+terminal turn event. `follow` uses a separate connection to read and validate a
+fresh authoritative transcript before it resumes printing later followed events.
+That side reread does not advance the follow connection's observed cursor: only
+events consumed from the subscribed connection do so, and every buffered event
+remains eligible for ordered presentation. Although the reread may have a cursor
+later than the triggering event, it makes presentation eligible only the
+previously undisplayed semantic material attributable to that exact event:
+assistant text and tool-use entries for the named producing call at `proposed`;
+proposal-correlated tool-result entries at `results_projected`; assistant text
+from the terminal event's named turn and model call plus the exact completion
+marker for `turn_completed`; the exact failure marker and any immediately
+preceding terminal tool-result suffix for `turn_failed`; the exact cancellation
+marker and any immediately preceding terminal tool-result suffix for
+`turn_cancelled`; and the exact terminal tool-result suffix for
+`turn_tool_reconciliation_required`. It presents no semantic material for
+`turn_refused`, model-call `turn_reconciliation_required`, or
+`recovery_required`. It does not present material introduced by any later
+cursor. Such material remains ordered behind its buffered followed event, or
+behind a new authoritative snapshot after `resync_required`. Final durable
+content is deduplicated by source-qualified semantic-entry identity while
+transition-only events remain visible instead of being suppressed by a newer
+side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version two; pre-stack version-one
-clients remain supported for native sessions as described above. It accepts a
-global `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and
-provides:
+The `signalbox` binary in this stack uses version two; older clients remain
+supported for representations admitted by their declared version as described
+above. It accepts a global `--socket <path>` override or reads
+`SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;

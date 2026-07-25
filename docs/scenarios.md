@@ -68,12 +68,13 @@ those tests.
   frontier; resolve and pin the exact model target; only then create a model
   call; finally commit the complete ordered assistant-text and logical
   tool-use-reference sequence with its producing-call provenance and the call
-  outcome. If the aggregate completes, the same transaction ends the attempt and
-  turn and appends the explicit completed-turn marker last.
+  outcome. A tool-using response yields the attempt but retains the same turn;
+  result projection and continuation create later rounds. Only a response with
+  no tools ends the attempt and turn and appends the completed-turn marker last.
 - **State transitions:** Turn queued with derived eligibility → active/running
-  with exactly one current attempt → terminal/completed only after the call is
-  classified and the attempt ends; model call prepared → in flight →
-  terminal/completed.
+  with exactly one current attempt → zero or more tool-yield/wait/continuation
+  rounds → terminal/completed only after a no-tool call is classified and its
+  attempt ends; each model call is prepared → in flight → terminal/completed.
 - **Transient updates:** Client presentation follows the durable-update and
   authoritative-replacement contract in
   [process-protocol](spec/process-protocol.md#follow-synchronization).
@@ -204,20 +205,20 @@ those tests.
 - **Durable commands:** Create and authorize a logical tool request; create a
   tool attempt; dispatch with runner, execution-boundary snapshot, and
   generation; classify the disconnect.
-- **State transitions:** Tool attempt dispatched → known failed when evidence
-  proves no effect occurred, otherwise ambiguous when the effect cannot be
-  established; tool request → retry-eligible only if policy classifies it as
-  safely repeatable.
+- **State transitions:** Prepared or effect-free in-flight tool attempt →
+  terminal/known-failed after crash loss; the abandoned turn attempt ends lost
+  and the turn fails after proposal-ordered `ToolClosed` materialization for
+  every request without an ordinary result.
 - **Transient updates:** Runner heartbeat, command progress, and partial stdout
   may disappear.
 - **Owning component:** Hub owns policy and recovery; runner owns physical
   execution; scheduler owns dispatch selection.
-- **Failure behavior:** A new physical attempt may be permitted for a proven
-  read-only operation. A late first result is stale and cannot overwrite the
-  current attempt.
+- **Failure behavior:** Version one performs no automatic retry, even for an
+  effect-free operation. A late result is stale and cannot overwrite terminal
+  evidence.
 - **Required invariants:** INV-011, INV-021, INV-024–INV-026, INV-034.
-- **Remaining questions:** Risk/effect taxonomy, evidence needed for
-  harmlessness, output deduplication, and fencing representation.
+- **Remaining questions:** Future explicit retry commands, runner evidence,
+  output deduplication, and remote fencing representation.
 
 ## S06 — Runner disconnects during a potentially irreversible tool
 
@@ -231,24 +232,19 @@ those tests.
   `...Ambiguous` branch. If the hub crashes before classification, startup makes
   the tool attempt terminal/ambiguous while ending the abandoned turn attempt in
   the matching `...Lost` branch. The physical tool outcome remains `Ambiguous`
-  in both cases. Only when neither an applied interrupt nor fatal mismatch
-  prohibits continuation does the turn retain its slot in
-  `AwaitingRecoveryDecision` carrying that tool-attempt reference until explicit
-  owner action or resolving evidence continues the turn or gives it
-  `ReconciliationRequired` with an applied stop-choice proof and that exact wait
-  set. An applied interrupt or fatal mismatch instead preserves the ambiguity
-  while terminalizing with the exact set and matching typed reason.
+  in both cases. When neither an applied interrupt nor fatal mismatch prohibits
+  continuation, the turn retains its slot in `AwaitingRecoveryDecision` carrying
+  that tool-attempt reference. The implemented applied-interrupt path preserves
+  the ambiguity while terminalizing as `ReconciliationRequired` with the exact
+  attempt and proof.
 - **Transient updates:** Last progress text may be shown only as
   non-authoritative evidence.
 - **Owning component:** Hub classifies and blocks automatic retry; the selected
   runner may later provide evidence; the owner resolves uncertainty.
 - **Failure behavior:** No blind retry and no claim that interrupt or disconnect
-  undid the effect. With several ambiguous operations, separately recorded
-  evidence refines the wait to the exact nonempty remainder without rewriting
-  the terminal tool or turn attempt; only resolving evidence for all references
-  or an exact-set owner decision can leave it. Any authorization to continue
-  preserves ambiguous records, adds an accepted-risk marker visible to successor
-  context, and follows the later tool-effect policy.
+  undid the effect. Version one has no writer for resolving evidence or
+  accepted-risk continuation; the parked wait retains its slot until an applied
+  interrupt terminalizes it.
 - **Required invariants:** INV-009, INV-019, INV-021, INV-025, INV-026, INV-029,
   INV-034.
 - **Remaining questions:** Reconciliation workflow, idempotency-key support,
@@ -272,23 +268,28 @@ those tests.
   terminal/cancelled and exact applied-interrupt proof. `Running` → directly
   ended/cancelled only when every guard already holds, otherwise
   `StopRequested(CancellationOnly)` with that proof while retaining the exact
-  attempt and slot. Approval wait → cancelled with the same proof; recovery wait
-  → reconciliation-required with that proof and the wait's exact operation set.
-  Every direct terminal path atomically records the interrupt-created immediate
-  successor and reclassifies pending steering before releasing the slot. If
-  fatal mismatch already requested stop, the first interrupt populates its
-  interrupt field without reauthorizing work; either event order preserves both
-  facts. A running predecessor then uses the common precedence: unacknowledged
-  ambiguity yields the exact interrupt/fatal reconciliation marker; otherwise
-  sufficient outcome-authoritative non-mismatched completion or atomic refusal
-  controls only without fatal stop, followed by known failure or
-  applied-and-confirmed interrupt cancellation. A raced completion/refusal under
-  fatal stop remains non-authoritative. Resolving mismatch evidence after
-  terminal ambiguity preserves that operation state, producing failure when no
-  other ambiguity remains and exact fatal reconciliation otherwise. An already
-  accepted ambiguity risk remains marked while interruption is classified
-  normally. The interrupt-created turn is always the immediate queued successor;
-  no standalone active-turn cancellation exists in the baseline.
+  attempt and slot. An approval wait remains parked until its canonical decision
+  command resolves the approval obligation; deny-and-end records the denial
+  first, then applies the interrupt after decision progression opens execution.
+  The two commands are not one atomic selection; after execution opens, the
+  ordinary dispatch-gate race determines whether remaining work or the interrupt
+  commits first. Recovery wait → reconciliation-required with that proof and the
+  wait's exact operation set. Every direct terminal path atomically records the
+  interrupt-created immediate successor and reclassifies pending steering before
+  releasing the slot. If fatal mismatch already requested stop, the first
+  interrupt populates its interrupt field without reauthorizing work; either
+  event order preserves both facts. A running predecessor then uses the common
+  precedence: unacknowledged ambiguity yields the exact interrupt/fatal
+  reconciliation marker; otherwise sufficient outcome-authoritative
+  non-mismatched completion or atomic refusal controls only without fatal stop,
+  followed by known failure or applied-and-confirmed interrupt cancellation. A
+  raced completion/refusal under fatal stop remains non-authoritative. Resolving
+  mismatch evidence after terminal ambiguity preserves that operation state,
+  producing failure when no other ambiguity remains and exact fatal
+  reconciliation otherwise. An already accepted ambiguity risk remains marked
+  while interruption is classified normally. The interrupt-created turn is
+  always the immediate queued successor; no standalone active-turn cancellation
+  exists in the baseline.
 - **Transient updates:** Cancellation signals to provider or runner and
   “stopping” progress.
 - **Owning component:** Hub owns ordering and state; adapters attempt prompt
@@ -377,11 +378,11 @@ those tests.
 ## S10 — Approve a risky tool
 
 - **User intent:** Permit one clearly presented risky operation.
-- **Durable commands:** Create the exact tool request; record policy result
-  `confirmation_required`; persist owner approval bound to the request,
-  normalized arguments, and material constraints; then create a new turn attempt
-  for the authorized-but-not-yet-dispatched request. Tool-attempt identity is
-  created only at later physical dispatch.
+- **Durable commands:** Create the exact content-authoritative tool request;
+  record fail-closed `confirmation_required`; persist an owner-global approval
+  command bound to that request; then create a new turn attempt for the
+  authorized-but-not-yet-dispatched batch. Tool-attempt identity is created only
+  at later physical dispatch.
 - **State transitions:** Tool request proposed under the running turn's required
   current attempt → every previously issued operation is terminally classified →
   that attempt yields and the turn retains its active slot while awaiting
@@ -398,32 +399,36 @@ those tests.
   a later model call until the request has a durable outcome.
 - **Required invariants:** INV-009, INV-010, INV-012, INV-019, INV-020, INV-024,
   INV-027.
-- **Remaining questions:** Approval expiry, risk classification, scoped standing
-  grants, material constraints, and automated-judge influence.
+- **Remaining questions:** Approval expiry, per-tool session overrides and
+  high-risk guardrails, material constraints, and automated-judge mechanics.
 
 ## S11 — Deny a risky tool
 
 - **User intent:** Prevent the proposed effect while allowing the conversation
   to continue safely.
-- **Durable commands:** Persist denial bound to the exact request and make the
-  denial/result available to orchestration history under the eventual
-  representation.
+- **Durable commands:** Persist denial bound to the exact request. At the
+  continuation or stop boundary append a reference-only denial result entry in
+  proposal order.
 - **State transitions:** Awaiting approval → denial closes the exact wait and
-  atomically creates a new turn attempt with the denial committed to turn
-  history → orchestration continues without a tool attempt and later reaches an
-  ordinary terminal disposition.
+  atomically creates a new turn attempt when the batch is decision-complete →
+  the continuation boundary commits proposal-ordered result history without a
+  tool attempt → orchestration later reaches an ordinary terminal disposition.
 - **Transient updates:** Prompt closes and clients receive status.
 - **Owning component:** Hub owns denial and prevents dispatch; client captures
   the owner's decision.
 - **Failure behavior:** No physical tool attempt is created. The new turn
   attempt exists only to continue conversational orchestration with the denial
   outcome. Duplicate or delayed approval messages cannot reverse the denial
-  without an explicit new decision path.
+  without an explicit new decision path. Deny-and-end records this same denial
+  and resolves every earlier approval-order obligation, then composes the
+  existing applied-interrupt stop path after decision progression opens
+  execution; it does not invent a second cancellation authority or treat an
+  interrupt as an approval decision. The composition does not promise that an
+  interrupt submitted after execution opens prevents already-eligible work.
 - **Required invariants:** INV-009, INV-012, INV-019, INV-020, INV-027.
-- **Remaining questions:** Whether future reconsideration creates a new request,
-  and the exact semantic rendering of the committed denial. Baseline
-  continuation in a new turn attempt is decided by the accepted lifecycle design
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
+- **Remaining questions:** Whether future reconsideration creates a new request.
+  Baseline continuation in a new turn attempt is decided by
+  [tool-loop](spec/tool-loop.md).
 
 ## S12 — Receive a stale or duplicated runner result
 
@@ -495,7 +500,8 @@ those tests.
 - **User intent:** Use a centrally available integration such as documentation
   lookup.
 - **Durable commands:** Create a logical tool request, evaluate hub policy,
-  create a hub-local attempt, and persist its result/outcome.
+  create and fence a hub-local attempt, and persist its result/outcome once. The
+  initial `current_time` tool defaults to auto approval and is effect-free.
 - **State transitions:** Tool request → authorized/denied → hub-local in flight
   → terminal; turn consumes the durable logical result.
 - **Transient updates:** Search progress or partial presentation that is not
@@ -505,8 +511,8 @@ those tests.
 - **Failure behavior:** Adapter loss is classified with the same known/ambiguous
   distinction; central placement does not imply safe automatic retry.
 - **Required invariants:** INV-019, INV-024–INV-027, INV-035.
-- **Remaining questions:** Credential scoping, hub executor isolation, effect
-  classification, and whether centrally hosted MCP is one adapter type.
+- **Remaining questions:** Credential scoping, hub executor isolation, and
+  whether centrally hosted MCP is one adapter type.
 
 ## S16 — Execute a runner-local tool
 
@@ -841,13 +847,15 @@ those tests.
 - **User intent:** Preserve an independently ambiguous effect exactly while
   allowing a fully closed fatal mismatch to release the session slot without a
   ceremonial stopping phase.
-- **Durable commands:** A running attempt owns provider call X and tool attempt
-  Y. Y is already physically `Ambiguous`, while X is the last unclassified
-  issued operation. One serialized transition records trusted target-mismatch
-  evidence for X, classifies X `KnownFailed`, adds its exact failure to the
-  complete fatal causes F, records any required best-effort cancellation intent,
-  closes or makes non-dispatchable every logical dependency, and reclassifies
-  pending steering.
+- **Durable commands:** This is a domain-algebra fixture for a future aggregate
+  that can own independently issued operations; the implemented serialized tool
+  executor cannot produce a live provider call X and tool attempt Y together.
+  Given such a running attempt, Y is already physically `Ambiguous`, while X is
+  the last unclassified issued operation. One serialized transition records
+  trusted target-mismatch evidence for X, classifies X `KnownFailed`, adds its
+  exact failure to the complete fatal causes F, records any required best-effort
+  cancellation intent, closes or makes non-dispatchable every logical
+  dependency, and reclassifies pending steering.
 - **State transitions:** With every terminal guard now satisfied and the exact
   unacknowledged ambiguity set U equal to `{Y}`, the same transaction ends the
   attempt `AfterFatalMismatch(Ambiguous)` and terminalizes the turn
@@ -872,8 +880,9 @@ those tests.
   effects or rewrite the terminal turn.
 - **Required invariants:** INV-006, INV-009, INV-014, INV-025, INV-026, INV-034.
 - **Remaining questions:** Provider-target identity evidence and trust, exact
-  cancellation delivery and acknowledgement mechanics, and whether direct
-  interrupt-only reconciliation is ever added.
+  cancellation delivery and acknowledgement mechanics, the execution strategy
+  that could produce independently issued provider and tool operations, and
+  whether direct interrupt-only reconciliation is ever added.
 
 ## S28 — Import an external conversation and continue natively
 
