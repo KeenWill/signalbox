@@ -336,6 +336,7 @@ impl ReviewWorkflowStore {
         let pass_evidence = ReviewPassEvidence::new(
             transitioned_pass.reference(),
             transitioned_pass.kind(),
+            current_run.policy(),
             transitioned_pass.state(),
         );
         let run_pass_evidence = match next_run {
@@ -477,7 +478,13 @@ impl ReviewWorkflowStore {
                     producing_pass.state_kind AS producing_pass_state_kind,
                     producing_pass.turn_id AS producing_pass_turn_id,
                     producing_pass.output_frontier_id
-                        AS producing_pass_output_frontier_id
+                        AS producing_pass_output_frontier_id,
+                    producing_run.policy_version
+                        AS producing_policy_version,
+                    producing_run.minimum_judge_confidence
+                        AS producing_minimum_judge_confidence,
+                    producing_run.minimum_publication_confidence
+                        AS producing_minimum_publication_confidence
                FROM review_finding AS finding
                LEFT JOIN review_target AS target
                  ON target.target_id = finding.target_id
@@ -487,6 +494,9 @@ impl ReviewWorkflowStore {
                  ON producing_pass.pass_id = finding.producing_pass_id
                 AND producing_pass.run_id = finding.run_id
                 AND producing_pass.target_id = finding.target_id
+               LEFT JOIN review_run AS producing_run
+                 ON producing_run.run_id = producing_pass.run_id
+                AND producing_run.target_id = producing_pass.target_id
               WHERE finding.finding_id = $1",
         )
         .bind(finding.into_uuid())
@@ -519,6 +529,11 @@ impl ReviewWorkflowStore {
                     event_pass.turn_id AS event_pass_turn_id,
                     event_pass.output_frontier_id
                         AS event_pass_output_frontier_id,
+                    event_run.policy_version AS event_policy_version,
+                    event_run.minimum_judge_confidence
+                        AS event_minimum_judge_confidence,
+                    event_run.minimum_publication_confidence
+                        AS event_minimum_publication_confidence,
                     event.event_kind, event.reason,
                     event.referenced_finding_id, event.external_link_id,
                     referenced_finding.producing_pass_id
@@ -542,6 +557,12 @@ impl ReviewWorkflowStore {
                     attachment_pass.turn_id AS attachment_pass_turn_id,
                     attachment_pass.output_frontier_id
                         AS attachment_pass_output_frontier_id,
+                    attachment_run.policy_version
+                        AS attachment_policy_version,
+                    attachment_run.minimum_judge_confidence
+                        AS attachment_minimum_judge_confidence,
+                    attachment_run.minimum_publication_confidence
+                        AS attachment_minimum_publication_confidence,
                     attachment.external_object_key
                         AS attachment_external_object_key
                FROM review_finding_event AS event
@@ -549,6 +570,9 @@ impl ReviewWorkflowStore {
                  ON event_pass.pass_id = event.event_pass_id
                 AND event_pass.run_id = event.event_pass_run_id
                 AND event_pass.target_id = event.target_id
+               LEFT JOIN review_run AS event_run
+                 ON event_run.run_id = event_pass.run_id
+                AND event_run.target_id = event_pass.target_id
                LEFT JOIN review_finding AS referenced_finding
                  ON referenced_finding.finding_id =
                     event.referenced_finding_id
@@ -567,6 +591,9 @@ impl ReviewWorkflowStore {
                  ON attachment_pass.pass_id = attachment.pass_id
                 AND attachment_pass.run_id = attachment.pass_run_id
                 AND attachment_pass.target_id = attachment.target_id
+               LEFT JOIN review_run AS attachment_run
+                 ON attachment_run.run_id = attachment_pass.run_id
+                AND attachment_run.target_id = attachment_pass.target_id
               WHERE event.finding_id = $1
               ORDER BY event.event_ordinal",
         )
@@ -743,12 +770,20 @@ impl ReviewWorkflowStore {
                     pass.pass_kind, pass.state_kind AS pass_state_kind,
                     pass.turn_id AS pass_turn_id,
                     pass.output_frontier_id AS pass_output_frontier_id,
+                    pass_run.policy_version AS pass_policy_version,
+                    pass_run.minimum_judge_confidence
+                        AS pass_minimum_judge_confidence,
+                    pass_run.minimum_publication_confidence
+                        AS pass_minimum_publication_confidence,
                     attachment.external_object_key
                FROM review_external_link_attachment AS attachment
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = attachment.pass_id
                 AND pass.run_id = attachment.pass_run_id
                 AND pass.target_id = attachment.target_id
+               LEFT JOIN review_run AS pass_run
+                 ON pass_run.run_id = pass.run_id
+                AND pass_run.target_id = pass.target_id
               WHERE attachment.external_link_id = $1",
         )
         .bind(link.into_uuid())
@@ -772,12 +807,20 @@ impl ReviewWorkflowStore {
                     pass.pass_id AS canonical_observation_pass_id,
                     pass.pass_kind, pass.state_kind AS pass_state_kind,
                     pass.turn_id AS pass_turn_id,
-                    pass.output_frontier_id AS pass_output_frontier_id
+                    pass.output_frontier_id AS pass_output_frontier_id,
+                    pass_run.policy_version AS pass_policy_version,
+                    pass_run.minimum_judge_confidence
+                        AS pass_minimum_judge_confidence,
+                    pass_run.minimum_publication_confidence
+                        AS pass_minimum_publication_confidence
                FROM review_external_link_observation AS observation
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = observation.pass_id
                 AND pass.run_id = observation.pass_run_id
                 AND pass.target_id = observation.target_id
+               LEFT JOIN review_run AS pass_run
+                 ON pass_run.run_id = pass.run_id
+                AND pass_run.target_id = pass.target_id
               WHERE observation.external_link_id = $1
               ORDER BY observation.observation_ordinal",
         )
@@ -983,16 +1026,13 @@ fn decode_run_facts(
         target_id(row.try_get("target_id")?),
         run_id(row.try_get("run_id")?),
     );
-    let version = positive_u32(row.try_get("policy_version")?, "review_run")?;
-    let judge = confidence(row.try_get("minimum_judge_confidence")?, "review_run")?;
-    let publication = confidence(row.try_get("minimum_publication_confidence")?, "review_run")?;
-    let policy = ReviewPolicy::try_new(
-        ReviewPolicyVersion::try_new(version)
-            .map_err(|_| corruption("review_run", String::from("zero policy version")))?,
-        judge,
-        publication,
-    )
-    .map_err(|error| corruption("review_run", format!("{error:?}")))?;
+    let policy = decode_review_policy(
+        row,
+        "policy_version",
+        "minimum_judge_confidence",
+        "minimum_publication_confidence",
+        "review_run",
+    )?;
     let workflow: String = row.try_get("workflow_kind")?;
     let state_kind: String = row.try_get("state_kind")?;
     let state_pass: Option<Uuid> = row.try_get("state_pass_id")?;
@@ -1019,6 +1059,13 @@ fn decode_run_pass_evidence(
                     pass_id(pass),
                 ),
                 decode_pass_kind(&kind)?,
+                decode_review_policy(
+                    row,
+                    "policy_version",
+                    "minimum_judge_confidence",
+                    "minimum_publication_confidence",
+                    "review_run",
+                )?,
                 decode_pass_state(&state_kind, turn, frontier)?,
             )))
         }
@@ -1062,6 +1109,7 @@ fn projected_current_run_pass_evidence(
     Ok(Some(ReviewPassEvidence::new(
         canonical.reference(),
         canonical.kind(),
+        canonical.policy(),
         projected,
     )))
 }
@@ -1215,6 +1263,13 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
     let producing_pass = ReviewPassEvidence::new(
         producing_pass_reference,
         decode_pass_kind(&row.try_get::<String, _>("producing_pass_kind")?)?,
+        decode_review_policy(
+            row,
+            "producing_policy_version",
+            "producing_minimum_judge_confidence",
+            "producing_minimum_publication_confidence",
+            "review_finding",
+        )?,
         decode_pass_state(
             &row.try_get::<String, _>("producing_pass_state_kind")?,
             row.try_get("producing_pass_turn_id")?,
@@ -1288,6 +1343,13 @@ fn decode_finding_event(
     let pass = ReviewPassEvidence::new(
         pass_reference,
         decode_pass_kind(&row.try_get::<String, _>("event_pass_kind")?)?,
+        decode_review_policy(
+            row,
+            "event_policy_version",
+            "event_minimum_judge_confidence",
+            "event_minimum_publication_confidence",
+            "review_finding_event",
+        )?,
         decode_pass_state(
             &row.try_get::<String, _>("event_pass_state_kind")?,
             row.try_get("event_pass_turn_id")?,
@@ -1478,6 +1540,13 @@ fn decode_finding_external_link(
                     pass_id(pass),
                 ),
                 decode_pass_kind(&kind)?,
+                decode_review_policy(
+                    row,
+                    "attachment_policy_version",
+                    "attachment_minimum_judge_confidence",
+                    "attachment_minimum_publication_confidence",
+                    "review_finding_event",
+                )?,
                 decode_pass_state(&state, attachment_pass_turn, attachment_pass_frontier)?,
             ),
             review_key(object, "review_external_link_attachment")?,
@@ -1566,6 +1635,13 @@ fn decode_external_link_attachment(
                 pass_id(row.try_get("pass_id")?),
             ),
             decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
+            decode_review_policy(
+                row,
+                "pass_policy_version",
+                "pass_minimum_judge_confidence",
+                "pass_minimum_publication_confidence",
+                "review_external_link_attachment",
+            )?,
             decode_pass_state(
                 &row.try_get::<String, _>("pass_state_kind")?,
                 row.try_get("pass_turn_id")?,
@@ -1603,6 +1679,13 @@ fn decode_external_link_observation(
                 pass_id(row.try_get("pass_id")?),
             ),
             decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
+            decode_review_policy(
+                row,
+                "pass_policy_version",
+                "pass_minimum_judge_confidence",
+                "pass_minimum_publication_confidence",
+                "review_external_link_observation",
+            )?,
             decode_pass_state(
                 &row.try_get::<String, _>("pass_state_kind")?,
                 row.try_get("pass_turn_id")?,
@@ -1997,6 +2080,25 @@ fn confidence(
         .map_err(|_| corruption(aggregate, format!("invalid confidence {value}")))?;
     ReviewConfidence::try_from_basis_points(value)
         .map_err(|error| corruption(aggregate, format!("{error:?}")))
+}
+
+fn decode_review_policy(
+    row: &PgRow,
+    version_column: &str,
+    judge_column: &str,
+    publication_column: &str,
+    aggregate: &'static str,
+) -> Result<ReviewPolicy, ReviewWorkflowStoreError> {
+    let version = positive_u32(row.try_get(version_column)?, aggregate)?;
+    let judge = confidence(row.try_get(judge_column)?, aggregate)?;
+    let publication = confidence(row.try_get(publication_column)?, aggregate)?;
+    ReviewPolicy::try_new(
+        ReviewPolicyVersion::try_new(version)
+            .map_err(|_| corruption(aggregate, String::from("zero policy version")))?,
+        judge,
+        publication,
+    )
+    .map_err(|error| corruption(aggregate, format!("{error:?}")))
 }
 
 fn positive_u32(value: i64, aggregate: &'static str) -> Result<u32, ReviewWorkflowStoreError> {

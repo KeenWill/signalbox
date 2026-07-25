@@ -24,8 +24,8 @@ use signalbox_domain::{
     ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionFailure,
     ReviewKey, ReviewLineRange, ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
     ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId,
-    ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId,
+    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget,
+    ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId,
     UserContent,
@@ -103,6 +103,7 @@ fn succeeded_pass(reference: ReviewPassRef, kind: ReviewPassKind) -> ReviewPassE
     ReviewPassEvidence::new(
         reference,
         kind,
+        ReviewPolicy::version_one(),
         ReviewPassState::Succeeded {
             turn: TurnId::from_uuid(uuid(0x203)),
             output_frontier: ContextFrontierId::from_uuid(uuid(0x131)),
@@ -356,14 +357,31 @@ async fn insert_pass_for_target(
     session: SessionId,
     accepted_input: AcceptedInputId,
 ) -> ReviewPassRef {
+    insert_pass_for_target_with_policy(
+        store,
+        target,
+        identity,
+        kind,
+        session,
+        accepted_input,
+        ReviewPolicy::version_one(),
+    )
+    .await
+}
+
+async fn insert_pass_for_target_with_policy(
+    store: &ReviewWorkflowStore,
+    target: ReviewTargetId,
+    identity: u128,
+    kind: ReviewPassKind,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    policy: ReviewPolicy,
+) -> ReviewPassRef {
     let run = ReviewRunRef::new(target, ReviewRunId::from_uuid(uuid(identity + 0x1000)));
     let pass = ReviewPassRef::new(run, ReviewPassId::from_uuid(uuid(identity)));
     store
-        .insert_run(&ReviewRun::new(
-            run,
-            workflow_for_pass(kind),
-            ReviewPolicy::version_one(),
-        ))
+        .insert_run(&ReviewRun::new(run, workflow_for_pass(kind), policy))
         .await
         .expect("additional fixture run persists");
     store
@@ -457,6 +475,12 @@ async fn conclude_review_pass(
     reference: ReviewPassRef,
     next_pass: ReviewPassState,
 ) -> ReviewPassEvidence {
+    let policy = store
+        .load_run(reference.run().run())
+        .await
+        .expect("fixture run loads")
+        .expect("fixture run exists")
+        .policy();
     let next_run = match next_pass {
         ReviewPassState::Succeeded { .. } => ReviewRunState::Succeeded {
             concluding_pass: reference,
@@ -480,7 +504,7 @@ async fn conclude_review_pass(
         .await
         .expect("run/pass conclusion persists")
         .expect("fixture run and pass exist");
-    ReviewPassEvidence::new(pass.reference(), pass.kind(), pass.state())
+    ReviewPassEvidence::new(pass.reference(), pass.kind(), policy, pass.state())
 }
 
 async fn succeed_fixture_passes(
@@ -1096,7 +1120,12 @@ async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), 
             ReviewFindingEvent::new(
                 finding_ref,
                 ReviewEventOrdinal::one(),
-                ReviewPassEvidence::new(publish_pass, ReviewPassKind::Judge, evidence[1].state()),
+                ReviewPassEvidence::new(
+                    publish_pass,
+                    ReviewPassKind::Judge,
+                    evidence[1].policy(),
+                    evidence[1].state(),
+                ),
                 ReviewFindingEventKind::Accepted,
             ),
         )
@@ -1106,6 +1135,56 @@ async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), 
         panic!("canonical pass-kind mismatch must be a database rejection");
     };
     assert_sqlstate(&error, "23514");
+    Ok(())
+}
+
+/// INV-040: finding events cannot cross the frozen policy boundary of the
+/// producing review run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_event_rejects_different_run_policy() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let policy_two = ReviewPolicy::try_new(
+        ReviewPolicyVersion::try_new(2).expect("version two is positive"),
+        ReviewConfidence::try_from_basis_points(7_500).expect("confidence is bounded"),
+        ReviewConfidence::try_from_basis_points(8_500).expect("confidence is bounded"),
+    )
+    .expect("version-two fixture policy is ordered");
+    let judge_pass = insert_pass_for_target_with_policy(
+        &fixture.store,
+        fixture.target,
+        0x3340,
+        ReviewPassKind::Judge,
+        SessionId::from_uuid(uuid(0x201)),
+        AcceptedInputId::from_uuid(uuid(0x202)),
+        policy_two,
+    )
+    .await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, judge_pass]).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x3341)));
+    fixture
+        .store
+        .insert_finding(&finding(finding_ref, evidence[0], &fixture.target_snapshot))
+        .await?;
+
+    let mismatch = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, external_link_id,
+             external_link_association_kind)
+         VALUES ($1, 1, $2, $3, $4, $5, 'accepted', NULL, NULL, NULL, NULL)",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(judge_pass.pass().into_uuid())
+    .bind(judge_pass.run().run().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("event policy must equal the finding producer policy");
+    assert_sqlstate(&mismatch, "23514");
     Ok(())
 }
 
@@ -1316,6 +1395,7 @@ async fn inv040_run_insert_requires_queued_state() -> Result<(), Box<dyn Error>>
             Some(ReviewPassEvidence::new(
                 fixture.pass,
                 ReviewPassKind::ReadOnlyReview,
+                ReviewPolicy::version_one(),
                 ReviewPassState::Running {
                     turn: TurnId::from_uuid(uuid(0x203)),
                 },
@@ -2221,12 +2301,19 @@ async fn inv040_queued_run_and_pass_cancel_together() -> Result<(), Box<dyn Erro
         .transition_run_and_pass(
             fixture.run.run(),
             fixture.pass.pass(),
-            ReviewRunState::Cancelled { last_pass: None },
+            ReviewRunState::Cancelled {
+                last_pass: Some(fixture.pass),
+            },
             ReviewPassState::Cancelled { turn: None },
         )
         .await?
         .expect("queued run and pass exist");
-    assert_eq!(run.state(), ReviewRunState::Cancelled { last_pass: None });
+    assert_eq!(
+        run.state(),
+        ReviewRunState::Cancelled {
+            last_pass: Some(fixture.pass),
+        }
+    );
     assert_eq!(pass.state(), ReviewPassState::Cancelled { turn: None });
     Ok(())
 }
@@ -2427,7 +2514,7 @@ async fn inv041_observation_rejects_queued_import_pass() -> Result<(), Box<dyn E
 }
 
 /// INV-040 / INV-041: a publication-blocked finding reconciles only through
-/// the succeeded publication pass that produced the attached object.
+/// the succeeded pass that produced the attached object.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
@@ -2435,7 +2522,8 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x70c, ReviewPassKind::Judge).await;
-    let attaching_pass = insert_fixture_pass(&fixture, 0x70d, ReviewPassKind::Publish).await;
+    let attaching_pass =
+        insert_fixture_pass(&fixture, 0x70d, ReviewPassKind::ImportExternalContext).await;
     let other_publish_pass = insert_fixture_pass(&fixture, 0x70e, ReviewPassKind::Publish).await;
 
     let blocked_session = SessionId::from_uuid(uuid(0x731));

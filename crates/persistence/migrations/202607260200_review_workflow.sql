@@ -311,10 +311,7 @@ BEGIN
     IF OLD.state_kind = 'queued' THEN
         IF NOT (
             NEW.state_kind = 'running'
-            OR (
-                NEW.state_kind = 'cancelled'
-                AND NEW.state_pass_id IS NULL
-            )
+            OR NEW.state_kind = 'cancelled'
         ) THEN
             RAISE EXCEPTION 'invalid queued review run transition'
                 USING ERRCODE = '23514';
@@ -533,7 +530,7 @@ BEGIN
         END IF;
     ELSIF NEW.state_kind = 'cancelled' AND NEW.turn_id IS NULL THEN
         IF canonical_run_state IS DISTINCT FROM 'cancelled'
-           OR canonical_run_pass IS NOT NULL
+           OR canonical_run_pass IS DISTINCT FROM NEW.pass_id
         THEN
             RAISE EXCEPTION
                 'pre-start cancelled pass contradicts its run projection'
@@ -580,14 +577,9 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
     ELSIF NEW.state_kind = 'cancelled' AND NEW.state_pass_id IS NULL THEN
-        IF canonical_pass_id IS NOT NULL
-           AND (
-               canonical_pass_state IS DISTINCT FROM 'cancelled'
-               OR canonical_pass_turn IS NOT NULL
-           )
-        THEN
+        IF canonical_pass_id IS NOT NULL THEN
             RAISE EXCEPTION
-                'pre-start cancelled run has a non-cancelled pass'
+                'cancelled run without pass projection has a recorded pass'
                 USING ERRCODE = '23514';
         END IF;
     ELSIF canonical_pass_id IS DISTINCT FROM NEW.state_pass_id
@@ -1017,22 +1009,55 @@ AS $$
 DECLARE
     event_pass_kind text;
     event_pass_state text;
+    event_policy_version bigint;
+    event_judge_confidence integer;
+    event_publication_confidence integer;
+    finding_policy_version bigint;
+    finding_judge_confidence integer;
+    finding_publication_confidence integer;
     previous_kind text;
     previous_pass_kind text;
     previous_status text;
     expected_ordinal bigint;
 BEGIN
-    PERFORM 1
-      FROM review_finding
-     WHERE finding_id = NEW.finding_id
-     FOR NO KEY UPDATE;
+    SELECT producing_run.policy_version,
+           producing_run.minimum_judge_confidence,
+           producing_run.minimum_publication_confidence
+      INTO finding_policy_version,
+           finding_judge_confidence,
+           finding_publication_confidence
+      FROM review_finding AS finding
+      JOIN review_run AS producing_run
+        ON producing_run.run_id = finding.run_id
+       AND producing_run.target_id = finding.target_id
+     WHERE finding.finding_id = NEW.finding_id
+     FOR NO KEY UPDATE OF finding;
 
-    SELECT pass_kind, state_kind
-      INTO event_pass_kind, event_pass_state
-      FROM review_pass
-     WHERE pass_id = NEW.event_pass_id
-       AND run_id = NEW.event_pass_run_id
-       AND target_id = NEW.target_id;
+    SELECT pass.pass_kind, pass.state_kind,
+           event_run.policy_version,
+           event_run.minimum_judge_confidence,
+           event_run.minimum_publication_confidence
+      INTO event_pass_kind, event_pass_state,
+           event_policy_version,
+           event_judge_confidence,
+           event_publication_confidence
+      FROM review_pass AS pass
+      JOIN review_run AS event_run
+        ON event_run.run_id = pass.run_id
+       AND event_run.target_id = pass.target_id
+     WHERE pass.pass_id = NEW.event_pass_id
+       AND pass.run_id = NEW.event_pass_run_id
+       AND pass.target_id = NEW.target_id;
+
+    IF event_policy_version IS DISTINCT FROM finding_policy_version
+       OR event_judge_confidence IS DISTINCT FROM finding_judge_confidence
+       OR event_publication_confidence
+            IS DISTINCT FROM finding_publication_confidence
+    THEN
+        RAISE EXCEPTION
+            'finding event pass policy differs from finding policy'
+            USING ERRCODE = '23514';
+    END IF;
 
     IF event_pass_kind IS NULL
        OR NOT (
@@ -1046,7 +1071,10 @@ BEGIN
            )
            OR (
                NEW.event_kind = 'posted'
-               AND event_pass_kind = 'publish'
+               AND event_pass_kind IN (
+                   'publish',
+                   'import_external_context'
+               )
            )
            OR (
                NEW.event_kind = 'fixed'
