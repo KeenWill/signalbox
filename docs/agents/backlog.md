@@ -59,10 +59,13 @@ vocabulary reaches `crates/process-protocol`, persistence internals, and most
 for the current stacks. "Hub" survives only as occasional prose metaphor, never
 as the name of a binary, crate, module, or protocol concept. The Swift client's
 LLMHub-prefixed naming is not this entry's job — the native client rewire
-replaces those names wholesale. Open point deferred to the runner-protocol
-design pass: whether future runner processes are the same binary in a different
-role or a separate `signalbox-runner` binary; this entry renames the server only
-and does not pre-decide that.
+replaces those names wholesale.
+
+Owner direction, 2026-07-25: the point previously deferred here is settled — the
+server renames to `signalboxd`, and future runner processes are a separate
+`signalbox-runner` binary (thin binaries over shared workspace crates), not the
+same binary in a different role. This pass renames the server and carries no
+open questions; the runner-protocol entry below records the runner texture.
 
 ## Owner-to-user rename [blocked-on: in-flight stacks landing; inventory step] [size: M]
 
@@ -255,6 +258,36 @@ subscription accounts, the cost texture of multi-account spreading — an owner
 call, the same bucket as the owner-revisit parking on the reimplementation
 track.
 
+Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
+carries the real design and its decision-log entries): the owner set the
+reaction doctrine per evidence kind, answering open tensions (1) and (2) above.
+RateLimited and Overloaded get platform-owned deferred retry — a durable
+cooldown window, bounded re-attempts, and each re-attempt is a new prepared
+call, so the one-dispatch-per-prepared-call evidence law holds unmodified.
+QuotaExhausted never auto-retries on the same credential — billing state, not
+weather — and instead marks the credential failover-eligible. CredentialRejected
+and PermissionDenied fail closed with no failover: silently rotating past a
+misconfigured credential would hide the problem from the owner. All other kinds
+keep today's behavior.
+
+On failover granularity, refining the per-session affinity direction above: the
+session pins a credential at creation to preserve provider-side prompt-cache
+prefixes — the stated point of pinning — and automatic failover is permitted
+only at attempt boundaries, and only when the pinned credential is cooling down
+or quota-exhausted, the case where the cache is going cold anyway. Every call
+still pins the credential it actually used, keeping history truthful. Automatic
+pools are same-provider only.
+
+On limit-state durability: per-credential cooldown/limit state lives in durable
+rows fed by the rate-limit evidence already captured, consulted at dispatch time
+— restart-safe, and displayable by future monitor surfaces.
+
+One boundary clarification the owner recorded alongside: user-driven
+model/provider switching mid-session — selecting a different model between
+turns, or ending a turn, switching, and continuing — is a wanted first-class
+capability and deliberately separate from automatic failover. This entry does
+not own it; see the mid-session model selection entry below.
+
 ## Native client rewire, macOS first [blocked-on: client stack + snapshot import merges] [size: L]
 
 Owns: `clients/native`, possibly additive process-protocol frames.
@@ -323,6 +356,19 @@ owns the metadata and listing contract,
 and
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention)
 owns deferred visibility and filter design.
+
+## Mid-session model selection [blocked-on: owner commission call] [size: S-M]
+
+Owns: an additive protocol affordance and client UI surface. Collides-with:
+little. Owner-wanted capability: change the session's model target between turns
+from the client — pick a different model for the next turn, or end a turn,
+switch, and continue in place. The server-side mechanism already exists: session
+defaults carry the model-selection request, and the existing
+`ReplaceSessionDefaults` command installs a new defaults version affecting only
+origin input accepted afterward — this entry exposes that machinery to clients
+rather than inventing a new one. Distinct from automatic failover by owner call:
+this is the user choosing, not the platform routing around a limit; the
+account-pools entry above records that boundary and does not own this.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 
@@ -438,6 +484,20 @@ Owns: runner registry, outbound runner connection protocol, dispatch fencing
 completion, placement. Collides-with: tool loop machinery. Carries the remote
 tool catalog; runner auth (separate credentials, allowlists, no
 permission-downgrade on re-registration) is designed in from day one.
+
+Owner direction, 2026-07-25 (orientation only; the design pass still carries the
+real design and its decision-log entries): runners are the processes that host
+goal runs and automation sessions, and they ship as a separate
+`signalbox-runner` binary — a thin binary over shared workspace crates, distinct
+from `signalboxd` — so this entry also owns that binary when it is built. The
+lifetime spectrum is a design input: some deployments run persistent daemon
+runners on owner machines, others run short-lived dynamically-registered runners
+(ephemeral cloud sandboxes) that register with the server, work, and disconnect.
+Consequences the design pass takes as given: registration and deregistration are
+first-class protocol flows, runner identity is not machine-pinned, and
+authentication must work for a runner that did not exist minutes earlier — which
+sharpens the standing design-runner-authentication-in-from-day-one caution.
+Everything else stays with the design pass.
 
 ## Delegation and child sessions [blocked-on: delegation cause decision; tool loop; selectable transcript-frontier decision (fork selection)] [size: L]
 
