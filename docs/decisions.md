@@ -35,6 +35,192 @@ testcontainers lifecycle already owned by each test.
 **Affects.** GitHub Actions integration-test coverage, feedback latency,
 required-check compatibility, and Docker-backed PostgreSQL test execution.
 
+## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
+
+**Context.** The finished-pull-request rules required push-time reviewer
+replies, but expressed the requirement inside a dense paragraph. An agent could
+incorrectly treat the disposition round as stack-wide batching and move to a
+child pull request after pushing fixes without replying on the reviewed pull
+request.
+
+**Decision.** Make the existing timing operationally explicit in
+[AGENTS.md](../AGENTS.md): accepted findings are replied to after their fixing
+commits are pushed; declined findings may be answered immediately or with the
+pull request's disposition round; and all replies and eligible resolutions are
+complete before work moves to another pull request, propagates a stack, or
+requests another review wave.
+
+**Rejected alternatives.** Retaining the compact wording leaves the sequencing
+easy to overlook. Requiring immediate replies to declined findings prevents a
+useful single disposition round without improving traceability.
+
+**Affects.** The finished-pull-request workflow and every future review loop. It
+changes no code, review-wave limit, merge authority, or validation rule.
+
+## 2026-07-24 — Version tool-bearing process projection as protocol three
+
+**Context.** Process protocol versions one and two use closed tagged unions.
+Emitting tool wait states, tool transcript entries, tool-batch events, or a
+changed reconciliation payload under either accepted version would make an
+upgraded hub send frames that an existing client must reject.
+
+**Decision.** Preserve versions one and two byte-for-byte for native model-call
+states and events, and add protocol version three for tool-bearing projection.
+Version three is a superset of version two, keeps the existing model-call
+reconciliation shapes, and adds distinct tool reconciliation state and event
+variants. A version-one or version-two read/follow request selecting existing
+tool history, or a live follow that first encounters a tool-only event, returns
+`unsupported_version` naming version three before emitting an unknown variant.
+The stack's terminal client uses version three. See
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Extending an older closed union violates its
+compatibility contract. Replacing the model-call reconciliation payload with a
+tagged operation would break old clients even for tool-free sessions. Removing
+older versions would unnecessarily drop their supported projections.
+
+**Affects.** INV-033; process wire types, hub projection gates, terminal-client
+decoding, transcript snapshots, durable follow events, and compatibility tests.
+
+## 2026-07-24 — Complete tool rounds inside one hub-owned turn
+
+**Context.** The owner fixed the tool-loop semantics on 2026-07-23. The
+model-runtime vocabulary already carries tool definitions, tool-call parts,
+results, and a tool-use finish reason, while the durable transcript reserves
+`AssistantToolUse` and the active-turn algebra reserves `AwaitingApproval`.
+Storage deliberately blocks both. Shipping the first tool requires the request,
+approval, physical-attempt, result, continuation, and restart boundaries to land
+together; otherwise a provider response could create unowned work or a side
+effect could outlive its evidence. Interrupts must also order against the
+in-process executor boundary without making an interrupt an approval decision.
+
+**Decision.** Adopt the complete hub-owned loop specified by
+[tool-loop](spec/tool-loop.md): tool-using model completions yield within the
+same logical turn; requests and reference-only semantic entries commit
+atomically; approval sources remain explicit; the dangerous session blanket is
+versioned, stored by every defaults-bearing command family, and frozen per turn;
+execution is serialized behind catalog/executor ports and durably fenced; a
+process-shared turn dispatch gate orders execution against interrupts;
+deny-and-end records the canonical denial before applying the separately durable
+interrupt from execution, with the ordinary dispatch race after execution opens;
+interrupting an ambiguous tool recovery wait retains that exact ambiguity in the
+proof-bearing terminal boundary; 1 MiB bounds both normalized arguments and
+admitted text results; crash classification follows recorded effect class, and a
+known crash failure materializes its exact result evidence plus proposal-ordered
+closure for the remaining requests before `TurnFailed`; and the proposal-ordered
+all-resolved boundary atomically projects results, consumes steering, and
+prepares the next model call. `current_time` is the first effect-free auto tool,
+with an injected clock and IANA conversion supplied by the focused `jiff`
+dependency.
+
+**Rejected alternatives.** Making each round a new turn would fragment one
+conversational outcome and misplace `TurnCompleted`. Process-local approvals or
+results would disappear across restart. Copying request/result content into
+semantic entries would create competing authorities. Concurrent execution now
+would weaken two simple database guards before evidence justified the extra
+state space. Auto-retrying effect-free crash loss would introduce retry policy
+instead of reporting the version-one known failure. Treating blanket, policy, or
+judge decisions as owner approval would violate INV-020.
+
+**Affects.** S02, S05, S06, S07, S10–S12, and S15; INV-004–INV-006,
+INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-036,
+and INV-037; the tool-loop page and linked sibling specifications;
+session-default command storage versions; domain/application spines;
+model/provider bridge, persistence, hubd composition, and offline proof tests.
+
+## 2026-07-24 — Expose durable tool-batch presentation boundaries
+
+**Context.** Tool proposals and all-resolved results become semantic history
+while a turn remains nonterminal, and external-effect ambiguity parks the turn
+without a terminal writer. Model-call and terminal-turn events alone therefore
+cannot identify every exact cursor boundary a connected follower or `send`
+client must observe.
+
+**Decision.** Add one closed `tool_batch_transition` outbox and process event
+family. Its `proposed` state names the yielded assistant/tool-use frontier,
+`results_projected` names the all-resolved result frontier, and
+`recovery_required` names the exact ambiguous attempt. Followers reread only
+semantic material attributable to the named boundary; `send` treats the recovery
+state like model-call recovery.
+
+**Rejected alternatives.** Waiting for terminalization hides live tool history
+and never terminates `send` for a parked ambiguity. Rereading all undisplayed
+content on an unrelated event can expose material committed after that event.
+Transient process-only notification loses the crash-safe cursor contract.
+
+**Affects.** Transactional outbox storage, process protocol events, terminal
+client follow/send behavior, tool result projection, and recovery entry.
+
+## 2026-07-24 — Bound automatic tool rounds within one turn
+
+**Context.** A model can repeatedly request another tool after receiving the
+prior batch's results. The all-resolved continuation barrier bounds each batch
+but, without a turn-wide limit, a provider-controlled sequence can retain the
+session slot and consume resources indefinitely.
+
+**Decision.** Admit at most 32 tool requests in one completed provider response
+and at most 32 tool-using provider rounds in one turn. A response exceeding the
+request bound closes its model call as a known failure without materializing a
+partial batch. After the thirty-second admitted batch resolves, prepare the
+ordinary continuation checkpoint but close it as a known failure before provider
+preparation or send. Count distinct producing calls for the turn, not requests,
+so a multi-request batch consumes one round and inherited history from earlier
+turns consumes none.
+
+**Rejected alternatives.** An elapsed-time limit makes durable replay depend on
+wall-clock timing. Counting requests as rounds penalizes bounded parallel
+proposals instead of repeated model continuation. A 128-request response bound
+still permits one serialized batch to retain up to 128 MiB of admitted result
+text. Unbounded batches or rounds leave availability under provider control. A
+configurable first version adds policy surface without evidence for another
+value.
+
+**Affects.** Tool-loop continuation, model-call execution, the current turn's
+failure boundary, and application/offline proofs.
+
+## 2026-07-24 — Close terminal tool batches in the semantic frontier
+
+**Context.** A provider conversation containing `AssistantToolUse` remains
+structurally incomplete until every request has a corresponding logical result.
+Terminalizing an ambiguous tool-recovery wait on an equal-content frontier
+preserved the physical uncertainty but left an unpaired tool request that a
+later turn could not render back to a provider.
+
+**Decision.** A proof-bearing interrupt of a tool-recovery wait retains the
+exact ambiguous physical attempt in the reconciliation marker while extending
+the frontier with exactly one proposal-ordered reference-only result per
+request. Completed and known-failed attempts use `ToolExecutionResult`, denials
+use `ToolDenied`, and the ambiguous request plus any request without an ordinary
+result use `ToolClosed`. The result entries make the logical conversation
+closed; they neither reinterpret nor resolve the physical ambiguity.
+
+**Rejected alternatives.** Keeping an equal-content frontier strands an
+unrenderable dependency. Rendering a synthetic execution failure would erase
+uncertainty. Omitting the terminal frontier from later context would make
+recovery-specific history policy implicit in provider adapters.
+
+**Affects.** S06/S07, INV-005/INV-006/INV-025/INV-029/INV-037, tool recovery,
+terminal transcript projection, persistence assertions, and provider rendering.
+
+## 2026-07-24 — Bound and sanitize persisted tool-error detail
+
+**Context.** Executor failures may carry useful diagnostic detail into durable
+attempt evidence, but an unspecified “bounded sanitized” value would leave each
+adapter to invent incompatible admission and could persist terminal controls or
+unbounded content.
+
+**Decision.** Admit optional tool-error detail only when it is 1–4,096 UTF-8
+bytes, contains no control character, and has no leading or trailing POSIX
+whitespace. Preserve every other admitted scalar exactly. Enforce the same rule
+in domain construction and the relational constraint.
+
+**Rejected alternatives.** Omitting detail loses focused diagnostics. Reusing
+the 1 MiB result bound retains far more untrusted failure text than needed.
+Normalizing whitespace would rewrite evidence instead of validating it.
+
+**Affects.** Tool execution-error construction, `tool_attempt.error_detail`
+storage, reconstitution, and the tool-loop specification.
+
 ## 2026-07-24 — Keep ordinary imported-session loads bounded
 
 **Context.** Imported seed correctness requires full comparison with the

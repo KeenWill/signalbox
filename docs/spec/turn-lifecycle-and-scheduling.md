@@ -1,8 +1,7 @@
 # Turn lifecycle and scheduling
 
-The baseline turn behavior was verified through PR #175 (`agent/stop-requests`).
-This page covers turns, turn attempts, eligibility derivation, the scheduler,
-and startup recovery. Code homes:
+This page specifies the implemented behavior of turns, turn attempts,
+eligibility derivation, the scheduler, and startup recovery. Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -38,14 +37,17 @@ The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`, and
 `AwaitingRecoveryDecision { ambiguous_operations }`. Every active phase retains
 the session's progressing slot (`retains_progressing_slot()` is unconditionally
-true; INV-009). Storage and reconstitution admit the `running` and
-`awaiting_model_call_recovery` phases; `AwaitingRecoveryDecision` is
-reconstituted from an `ambiguous` terminal model call correlated with its ended
-attempt (`ambiguous` from a live loss, `lost` from startup recovery).
-`StopRequested` is a stored current-attempt state inside the `running` active
-phase and reconstitutes only from its exact applied-interrupt proof;
-`AwaitingApproval` has no storage row or production constructor (see
-[Evidence-bearing reconstitution](#evidence-bearing-reconstitution)).
+true; INV-009). Storage and reconstitution admit `running`,
+`awaiting_tool_approval`, `awaiting_model_call_recovery`, and
+`awaiting_tool_recovery`; the domain `AwaitingApproval` phase maps to the exact
+stored `awaiting_tool_approval` discriminator. `AwaitingRecoveryDecision` is
+reconstituted from either an `ambiguous` terminal model call or an ambiguous
+external-effect tool attempt correlated with its exact ended attempt
+(`ambiguous` from a live loss, `lost` from startup recovery). `StopRequested` is
+a stored current-attempt state inside the `running` active phase and
+reconstitutes only from its exact applied-interrupt proof; `AwaitingApproval`
+reconstitutes only from the exact earliest undecided request of a complete tool
+batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
 
 At most one turn per session is `active`. Enforcement is layered:
 
@@ -114,7 +116,10 @@ predecessor needed to reconstruct `CancellationOnly`; the correlated call is
 durably `cancellation_requested`. `turn_attempt` storage enforces one initial
 attempt per turn (`turn_attempt_one_initial_per_turn`), at most one live attempt
 per turn (`turn_attempt_one_live_per_turn`, `WHERE state_kind <> 'ended'` — the
-durable form of exclusive tenure), and a unique continuation chain.
+durable form of exclusive tenure), and a unique continuation chain. A completed
+tool-using model round ends the current attempt as a tool-round yield; approval
+completion creates the next attempt in that chain, which owns serialized tools
+and the next model call without creating a new logical turn.
 
 ## Eligibility derivation
 
@@ -222,14 +227,15 @@ the sweep (INV-007).
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
-- **Sweep (backstop).** `PostgresEligibilitySweep` finds sessions with a queued
-  turn and no active turn — the storage shape of the eligibility precondition;
-  the `turn_lifecycle_queued_by_session` partial index is created for exactly
-  this query shape, though planner adoption is not pinned by any test — paged 16
-  sessions per query with a fixed per-cycle bound; continuation pages run
-  immediately. The baseline interval is one second; missed ticks are delayed,
-  not burst. A failed sweep is logged with its operator classification and
-  retried at the next interval.
+- **Sweep (backstop).** `PostgresEligibilitySweep` finds sessions with either a
+  queued turn and no active turn — the storage shape of the activation
+  precondition — or an active tool round in the running phase. The
+  `turn_lifecycle_queued_by_session` partial index is created for the queued
+  query shape, though planner adoption is not pinned by any test. Results are
+  paged 16 sessions per query with a fixed per-cycle bound; continuation pages
+  run immediately. The baseline interval is one second; missed ticks are
+  delayed, not burst. A failed sweep is logged with its operator classification
+  and retried at the next interval.
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes, deduplicates hints for a session already in flight (recording one
   rerun), and keeps an in-progress sweep read alive across pass completions. A
@@ -237,14 +243,19 @@ the sweep (INV-007).
   nothing is lost because the rows are the queue.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
-scheduler after startup recovery. Activation returns the activated turn
+scheduler after startup recovery. Each authoritative pass first asks its
+execution composition to reconcile any active running tool round for the hinted
+session, then runs ordinary queued-turn activation. A parked approval returns
+from the pass immediately and therefore retains no scheduler worker capacity.
+Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
 activates and then drives the turn's model call. hubd depends on
 `model-runtime`/`model-runtime-anthropic` through the `model-provider-runtime`
 bridge; application and persistence still declare no runtime-crate dependency.
-Tool-attempt storage still does not exist.
+The same execution composition drives approval, tool attempts, and continuation
+through the ports owned by [tool-loop](tool-loop.md).
 
 ## Startup scan and recovery
 
@@ -278,17 +289,28 @@ end (INV-034):
   `cancellation_requested` call ends the call `ambiguous` and the attempt
   `AfterCancellation(Lost)`, then terminalizes `ReconciliationRequired` with the
   call as its exact ambiguity set, an equal-content terminal frontier, and the
-  interrupt reason.
+  interrupt reason;
+- an approval wait remains parked unchanged, with no fabricated decision or live
+  attempt; and
+- a running tool attempt follows its stored effect class: prepared or
+  effect-free work closes known-failed, appends the exact proposal-ordered
+  result suffix plus `TurnFailed`, and fails the turn, while in-flight
+  external-effect work closes ambiguous and parks on that exact attempt; and
+- a running tool batch whose requests are all already resolved and which has no
+  current attempt is returned as resumable work, so a scheduler pass projects
+  its results and prepares the next call without relying on a lost local wake.
 
-In the two failing branches only: one `TurnFailed` semantic entry is appended.
+In the three failing branches only, one `TurnFailed` semantic entry is appended.
 The evidence-free branch extends the starting frontier; the prepared-call branch
 extends that call's exact source frontier, which already contains every steering
-entry consumed when the call was prepared. The turn terminalizes `Failed`,
-releasing the slot via one guarded attempt-end update and one guarded lifecycle
-update, each required to match exactly one row; and a `turn_failed` outbox
-record is appended in the same transaction (entry payloads are
-[sessions-and-transcript](sessions-and-transcript.md) scope; outbox mechanics
-are [persistence-protocol](persistence-protocol.md) scope).
+entry consumed when the call was prepared; and the prepared/effect-free tool
+branch extends the yielded tool-use frontier by exactly one correlated result
+entry per request in proposal order before the failure marker. The turn
+terminalizes `Failed`, releasing the slot via one guarded attempt-end update and
+one guarded lifecycle update, each required to match exactly one row; and a
+`turn_failed` outbox record is appended in the same transaction (entry payloads
+are [sessions-and-transcript](sessions-and-transcript.md) scope; outbox
+mechanics are [persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
@@ -391,14 +413,15 @@ remains unimplemented. `TranscriptFrontier` itself is
 Evidence validation is implemented for the scheduling seam: stored active phases
 are conclusions derived from complete owner facts, never trusted discriminators.
 
-- `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
-  facts (an `ambiguous` terminal call correlated with its ended attempt —
-  `ambiguous` from a live loss, `lost` from startup recovery). A `StopRequested`
-  current attempt reconstructs only when its stored interrupt command,
-  predecessor, configured immediate successor, applied result, and
-  cancellation-requested call form the exact proof. `AwaitingApproval` still has
-  no production constructor (compile-fail-tested); a bare wait subject cannot
-  become a phase until a complete correlated owner projection exists.
+- `AwaitingRecoveryDecision` reconstitutes from complete operation-owner facts:
+  an `ambiguous` terminal model call or tool attempt correlated with its ended
+  turn attempt (`ambiguous` from a live loss, `lost` from startup recovery). A
+  `StopRequested` current attempt reconstructs only when its stored interrupt
+  command, predecessor, configured immediate successor, applied result, and
+  cancellation-requested call form the exact proof. `AwaitingApproval`
+  reconstructs only from the complete tool batch proving its earliest undecided
+  request and absence of a live attempt; a bare wait subject cannot become a
+  phase.
 - A failed terminal turn that ended through a physical attempt durably names its
   exact ended attempt and optional terminal call
   (`turn_lifecycle.terminal_attempt_id`, `terminal_model_call_id`, backfilled
@@ -415,12 +438,20 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   as the turn disposition. It names either no call, proving direct cancellation
   before any call was prepared, or its one correlated terminal `cancelled` call.
   Its terminal frontier must extend the starting or call frontier by exactly the
+  correlated `TurnCancelled` marker. When the cancellation terminalized a tool
+  round, the input instead names the batch's `completed` producing call, and the
+  terminal frontier extends that call's yielded frontier by exactly one
+  batch-correlated result entry per request in proposal order before the
   correlated `TurnCancelled` marker.
-- A reconciliation-required terminal turn names its exact ended attempt and
-  required terminal `ambiguous` call. The attempt end is either
-  `WithoutStop(Ambiguous|Lost)` with a later turn-correlated applied interrupt,
-  or `AfterCancellation(Ambiguous|Lost)` carrying that same proof. Its terminal
-  frontier is an equal-content boundary over the ambiguous call's frontier. The
+- A reconciliation-required terminal turn names its exact ended turn attempt and
+  exactly one required terminal `ambiguous` model call or tool attempt. The
+  attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
+  turn-correlated applied interrupt, or `AfterCancellation(Ambiguous|Lost)`
+  carrying that same proof. A model-call reconciliation terminal frontier is an
+  equal-content boundary over the ambiguous call's source frontier. A
+  tool-attempt reconciliation terminal frontier extends the producing call's
+  yielded frontier by exactly one batch-correlated result entry per request in
+  proposal order, with the ambiguous request represented as `ToolClosed`. The
   checked scheduling input validates those correlations before the turn can
   serve as a terminal predecessor.
 - Every active turn's projection must carry a session-scoped acceptance tail
@@ -483,13 +514,10 @@ clones over the shared pool; no shared locked service instance exists.
 
 ## Open edges
 
-- `AwaitingApproval` has no storage or reconstitution; evidence-bearing
-  reconstitution requires a complete owner projection before that phase lands.
 - Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing is partially implemented: `model_call` storage, the
-  `AttemptDispatchGate`, and the hubd dispatch path now exist; only tool-attempt
-  storage and tool dispatch remain absent.
+- Dispatch fencing covers model calls and tool attempts; runner transport and
+  remote result envelopes remain deferred.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
@@ -497,14 +525,12 @@ clones over the shared pool; no shared locked service instance exists.
   (`UnsupportedSessionAncestry`); selecting and resolving native fork boundaries
   is unimplemented. Imported-conversation ancestry has its own exact
   selected-prefix frontier path and does not close that fork question.
-- Continuation safe points after a call or tool result are not implemented; the
-  current execution slice consumes steering only while preparing its one initial
-  call. Source terminalization and evidence-free startup recovery reclassify any
-  input that remains pending.
+- Continuation safe points after tool results consume pending steering through
+  the atomic boundary in [tool-loop](tool-loop.md).
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
-  `awaiting_model_call_recovery`); wait reconstruction for remaining phases
-  still awaits their slices.
+  `awaiting_model_call_recovery`) and tool-loop evidence; delegated-result waits
+  remain deferred with delegation.
 - Per-session scan gating, sweep interval, and fairness tuning remain
   operational open questions; the process-wide advisory singleton guard is
   specified by [process-protocol](process-protocol.md).

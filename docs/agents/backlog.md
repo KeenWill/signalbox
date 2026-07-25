@@ -98,6 +98,14 @@ must add the enum/factory. The adapter-author conformance checklist and the
 loopback test pattern from the runtime-adapter study are the reusable body of
 each goal prompt.
 
+Further prior art, for the design rather than the code: an earlier unmerged
+prototype from the owner holds a working dual-runtime reference —
+runtime-backend plus capability-snapshot routing with fail-explicit rejection (a
+session requiring tools cannot land on a backend lacking them), a
+provider-neutral agent event vocabulary spanning both CLIs, and
+none/import_only/adopt_resume/adopt_fork adoption modes for provider-owned
+external sessions held as durable pointers.
+
 ### Codex CLI wrap [blocked-on: INV-025/026 request-boundary reconciliation] [size: S-M]
 
 The lead track of the three once unblocked. `codex exec --json`; the
@@ -143,9 +151,10 @@ with the build-system exclusion (see the import's known-issues list). The
 mock-fixture screenshot harness ports first — it is how the app iterates. iOS
 waits for remote transport.
 
-## Tool loop foundation [blocked-on: owner design pass] [size: XL]
+## Tool loop foundation [in-flight] [size: XL]
 
-Owner-flagged: the next major milestone — schedule the design pass first.
+Owner-flagged: the next major milestone. The owner design pass completed on
+2026-07-23; implementation is running as a solo turn-side goal session.
 
 Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra
@@ -154,6 +163,17 @@ Collides-with: everything turn-side — runs solo. The gate for the entire tool
 economy (catalog, permissions, confirm/deny, shared tools, delegation). This
 foundation is the hub-side approval algebra plus the first hub-local tool; the
 client approval surface is a separate later milestone whose UX is settled then.
+
+## Durable approval waits [blocked-on: tool loop design pass] [size: M]
+
+Owns: a waiting-for-confirmation turn state, dedupe-keyed resume commands in the
+outbox, replay eligibility on the executor path. Collides-with: turn machinery —
+these are the wait mechanics the tool loop's approval flow will need, so it
+lands with or just behind that foundation. Closes the spec's open edge for
+tool/approval waits. The reference design is an earlier unmerged prototype from
+the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
+outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
+executors, with replay eligibility conditioned on turn state.
 
 ## Session metadata, tags, and visibility [blocked-on: owner design pass] [size: M-L]
 
@@ -261,6 +281,22 @@ from input conditions (mail arriving, schedules, watched states). The owner's
 private integrations stay outside the repo as plugins; Signalbox owns the
 trigger seam, session provenance, and the visibility classification they rely
 on.
+
+## Review-workflow tier [blocked-on: tool loop (fix workflows)] [size: XL]
+
+Owns: a new workflow bounded context above sessions —
+Target/Run/Pass/Finding/ExternalLink aggregates, their store, and a
+workflow-facing protocol surface. Collides-with: nothing current; it sits above
+the existing spec surface. A destination-tier item: standing review workflows
+with sessions as the execution substrate — workflow passes traced as session
+transcripts, workflow conflicts escalating into first-class interactive
+sessions. The reference design carries a nine-state finding machine;
+reservation-row idempotent external posting (pending ledger row before the API
+call, mapping onto the outbox/durable-command idempotency doctrine); judge and
+dedupe confidence policy versioned as data (accept ≥0.70, publish ≥0.80 in the
+reference); model and workspace providers behind protocol seams; and merge-based
+stack propagation. Port the design, not the code. Prior art: an earlier unmerged
+prototype from the owner — implemented and unit-tested, never production-smoked.
 
 ## Client SDK [blocked-on: protocol stabilization] [size: M]
 
