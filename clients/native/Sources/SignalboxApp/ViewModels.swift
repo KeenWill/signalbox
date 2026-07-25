@@ -472,7 +472,7 @@ final class SessionDetailViewModel: ObservableObject {
         case .streamHello(let hello):
             session = hello.session
             status = hello.status
-            replaceEvents(with: hello.events)
+            mergeEvents(with: hello.events)
         case .eventAppended(let mutation), .eventUpdated(let mutation):
             upsert(event: SignalboxStoredEvent(eventID: mutation.eventID, event: mutation.event))
         case .eventDeleted(let eventID):
@@ -549,6 +549,11 @@ final class SessionDetailViewModel: ObservableObject {
 
     private func replaceEvents(with events: [SignalboxStoredEvent]) {
         eventNormalizer.replaceAll(with: events)
+        publishNormalizedEvents()
+    }
+
+    private func mergeEvents(with events: [SignalboxStoredEvent]) {
+        eventNormalizer.upsert(contentsOf: events)
         publishNormalizedEvents()
     }
 

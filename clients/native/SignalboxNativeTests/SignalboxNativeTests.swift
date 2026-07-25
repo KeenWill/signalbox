@@ -232,6 +232,35 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
+    func testStreamHelloReusesFullyLoadedHistory() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+
+        await viewModel.load()
+        XCTAssertEqual(viewModel.events, fixture.historyEvents)
+
+        viewModel.connectStream()
+        await service.waitForStreamInvocation()
+        let streamStopped = observeCurrentStreamStopped(on: viewModel)
+        service.sendStreamHelloAndFinish()
+        await fulfillment(
+            of: [streamStopped.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertEqual(viewModel.events, fixture.expectedMergedEvents)
+        XCTAssertEqual(
+            viewModel.timelineItems,
+            SignalboxEventNormalizer.normalize(fixture.expectedMergedEvents)
+        )
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedListEventsCallCount
+        )
+        withExtendedLifetime(streamStopped.cancellable) {}
+    }
+
     func testWebSocketStreamAcknowledgesHeartbeatBeforeYieldingNextFrame() async throws {
         let heartbeatSentAt = "2026-05-10T12:00:00Z"
         let expectedSentAt = try SignalboxJSONCoding.decoder().decode(
@@ -654,6 +683,27 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
+    private func streamHelloHistoryReuseFixture() async throws -> StreamHelloHistoryReuseFixture {
+        let sourceService = MockSignalboxService()
+        let sessions = try await sourceService.listSessions(archived: false)
+        let approvalSessionID = SignalboxSessionID(rawValue: MockSignalboxFixtures.approvalSessionID)
+        let session = try XCTUnwrap(sessions.first { $0.id == approvalSessionID })
+        let historyEvents = try await sourceService.listEvents(sessionID: session.id)
+        let expectedMergedEvents = try SignalboxJSONCoding.decoder().decode(
+            [SignalboxStoredEvent].self,
+            from: Data(MockSignalboxFixtures.approvedToolEvents.utf8)
+        )
+        let helloEvents = Array(
+            expectedMergedEvents.suffix(StreamHelloHistoryReuseFixture.helloWindowEventCount)
+        )
+        return StreamHelloHistoryReuseFixture(
+            session: session,
+            historyEvents: historyEvents,
+            helloEvents: helloEvents,
+            expectedMergedEvents: expectedMergedEvents
+        )
+    }
+
     /// A visible user message whose identity and text derive from its event ID.
     private func longSequenceRecord(
         eventID: Int,
@@ -795,6 +845,25 @@ private struct LongSequenceComparison {
     let incrementalTimeline: [SignalboxTimelineItem]
     let naiveMetrics: SignalboxEventNormalizationMetrics
     let incrementalMetrics: SignalboxEventNormalizationMetrics
+}
+
+private struct StreamHelloHistoryReuseFixture {
+    /// The hello contains the changed invocation and its new response, while
+    /// the preceding records exist only in the paginated history.
+    static let helloWindowEventCount = 2
+
+    /// Loading history once and then applying hello must not fetch it again.
+    static let expectedListEventsCallCount = 1
+
+    /// A local actor handoff should comfortably complete within this bound.
+    static let observationTimeout: TimeInterval = 1
+
+    static let streamHelloKind = "stream_hello"
+
+    let session: SignalboxSessionMetadata
+    let historyEvents: [SignalboxStoredEvent]
+    let helloEvents: [SignalboxStoredEvent]
+    let expectedMergedEvents: [SignalboxStoredEvent]
 }
 
 private struct PublishedObservation {
@@ -957,6 +1026,131 @@ private final class ControlledSignalboxWebSocketScheduledAction:
 
 private enum StubSignalboxWebSocketTransportError: Error {
     case endOfStream
+}
+
+private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol, @unchecked Sendable {
+    /// This service intentionally models no artifacts on either load.
+    private static let noArtifacts: [SignalboxArtifact] = []
+
+    private let fixture: StreamHelloHistoryReuseFixture
+    private let lock = NSLock()
+    private var lockedListEventsCallCount = 0
+    private var streamContinuation: AsyncThrowingStream<SignalboxServerMessage, Error>.Continuation?
+    private var streamInvocationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(fixture: StreamHelloHistoryReuseFixture) {
+        self.fixture = fixture
+    }
+
+    var listEventsCallCount: Int {
+        lock.withLock {
+            lockedListEventsCallCount
+        }
+    }
+
+    func waitForStreamInvocation() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if streamContinuation != nil {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                streamInvocationWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func sendStreamHelloAndFinish() {
+        let continuation = lock.withLock {
+            guard let continuation = streamContinuation else {
+                preconditionFailure("No stream invocation is ready")
+            }
+            streamContinuation = nil
+            return continuation
+        }
+        continuation.yield(
+            .streamHello(
+                SignalboxStreamHello(
+                    kind: StreamHelloHistoryReuseFixture.streamHelloKind,
+                    session: fixture.session,
+                    status: SignalboxSessionStatus(state: .waitingForConfirmation),
+                    events: fixture.helloEvents
+                )
+            )
+        )
+        continuation.finish()
+    }
+
+    func testConnection() async throws {
+        throw unexpectedCall()
+    }
+    func listTemplates() async throws -> [SignalboxTemplate] {
+        throw unexpectedCall()
+    }
+    func listRunners() async throws -> [SignalboxRunner] {
+        throw unexpectedCall()
+    }
+    func listSessions(archived: Bool) async throws -> [SignalboxSessionMetadata] {
+        throw unexpectedCall()
+    }
+    func createSession(request: SignalboxCreateSessionRequest) async throws -> SignalboxSessionView {
+        throw unexpectedCall()
+    }
+    func patchSessionArchive(
+        sessionID: SignalboxSessionID,
+        isArchived: Bool
+    ) async throws -> SignalboxSessionMetadata {
+        throw unexpectedCall()
+    }
+    func listEvents(sessionID: SignalboxSessionID) async throws -> [SignalboxStoredEvent] {
+        lock.withLock {
+            lockedListEventsCallCount += 1
+        }
+        return fixture.historyEvents
+    }
+    func appendUserMessage(
+        sessionID: SignalboxSessionID,
+        text: String
+    ) async throws -> SignalboxAppendUserMessageResponse {
+        throw unexpectedCall()
+    }
+    func confirmInvocation(
+        sessionID: SignalboxSessionID,
+        invocationID: SignalboxToolInvocationID
+    ) async throws {
+        throw unexpectedCall()
+    }
+    func denyInvocation(
+        sessionID: SignalboxSessionID,
+        invocationID: SignalboxToolInvocationID,
+        reason: String?
+    ) async throws {
+        throw unexpectedCall()
+    }
+    func listArtifacts(sessionID: SignalboxSessionID) async throws -> [SignalboxArtifact] {
+        Self.noArtifacts
+    }
+    func listMonitorSessions() async throws -> [SignalboxMonitorSessionSummary] {
+        throw unexpectedCall()
+    }
+
+    func streamMessages(
+        sessionID: SignalboxSessionID
+    ) -> AsyncThrowingStream<SignalboxServerMessage, Error> {
+        AsyncThrowingStream { continuation in
+            lock.lock()
+            streamContinuation = continuation
+            let waiters = streamInvocationWaiters
+            streamInvocationWaiters = []
+            lock.unlock()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    private func unexpectedCall() -> SignalboxClientError {
+        .requestFailed("Unexpected history-reuse fixture call")
+    }
 }
 
 private final class UnknownFrameSignalboxService: SignalboxClientProtocol, @unchecked Sendable {

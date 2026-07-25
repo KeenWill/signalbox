@@ -387,6 +387,12 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         }
     }
 
+    public mutating func upsert(contentsOf records: [SignalboxStoredEvent]) {
+        for record in records {
+            upsert(record)
+        }
+    }
+
     public mutating func remove(eventID: SignalboxEventID) {
         guard let removedEvent = recordsByID.removeValue(forKey: eventID) else {
             return
