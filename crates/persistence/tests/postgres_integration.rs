@@ -3174,6 +3174,94 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     Ok(())
 }
 
+/// S02 / S07 / S11 / INV-006 / INV-037: the terminal shape committed when a
+/// stop request races a tool-using response reloads through the scheduling
+/// projection, so the interrupt successor activates instead of leaving the
+/// session permanently unloadable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_successor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7d00;
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 21));
+    let (fixture, model_repository, _prepared, authorized) =
+        authorize_checkpointed_model_call_with_prepared(&pool, seed).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 19,
+                seed + 1,
+                "stop tool response",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(successor),
+        )
+        .await?;
+
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("first_tool")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the fixture contains one tool proposal");
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                }),
+            ModelCallTerminalIdentities::StoppedToolRound(
+                StoppedToolRoundModelCallIdentities::new(
+                    vec![StoppedToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                        signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 22)),
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
+                    )],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+                ),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        ModelCallTerminalOutcome::CancelledWithToolResponse(_)
+    ));
+
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            fixture.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 33)),
+            ),
+        )
+        .await?;
+    assert!(
+        matches!(
+            activation,
+            StartEligibleTurnOutcome::Activated(ref activated) if activated.turn() == successor
+        ),
+        "the committed stopped tool round must reload as a terminal predecessor"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Error>> {
