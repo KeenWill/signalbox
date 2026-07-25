@@ -17,8 +17,8 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     session_metadata::{
-        ReplaceSessionMetadataHandlingOutcome, SessionMetadataRepository,
-        SessionMetadataRepositoryError,
+        ReplaceSessionMetadataHandlingOutcome, SessionMetadataCorruption,
+        SessionMetadataRepository, SessionMetadataRepositoryError,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -125,21 +125,26 @@ async fn collect_page(
     Ok((items, page.next_after_session()))
 }
 
-/// INV-002 / INV-005 / INV-012 / INV-013: metadata remains a normalized
-/// satellite, durable replay is exact and owner-global, archiving affects only
-/// discoverability, concurrent replacements serialize, and list filters/page
-/// cursors observe one bounded snapshot.
+#[track_caller]
+fn assert_check_violation(error: &sqlx::Error) {
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+}
+
+/// INV-002: a created session with no metadata write has the canonical
+/// unwritten snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
--> Result<(), Box<dyn Error>> {
+async fn s01_inv002_initial_metadata_read_returns_unwritten_snapshot() -> Result<(), Box<dyn Error>>
+{
     let (container, pool) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
-    for value in 0x701..=0x704 {
-        create_repository
-            .handle(creation(value + 0x100, value))
-            .await?;
-    }
+    create_repository.handle(creation(0x801, 0x701)).await?;
     let repository = SessionMetadataRepository::new(pool.clone());
 
     let initial = repository
@@ -149,6 +154,17 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     assert_eq!(initial.content(), &SessionMetadataContent::empty());
     assert_eq!(initial.last_writer(), None);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: a missing-session rejection is durable and equal replay returns it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
     let absent = replacement(0x901, 0x799, metadata(Some("absent"), &[], &[], false));
     let absent_outcome = repository.handle(absent.clone()).await?;
     assert!(matches!(
@@ -159,6 +175,22 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     ));
     assert_eq!(repository.handle(absent).await?, absent_outcome);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-005 / INV-012: one applied command retains its exact receipt, equal
+/// replay, and conflicting-reuse classification without changing current state.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
     let first_content = metadata(
         Some("Planning"),
         &["daily", "work"],
@@ -213,18 +245,31 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
         &first_content
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn metadata_list_applies_exact_tag_and_title_filters() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    create_repository.handle(creation(0x801, 0x701)).await?;
+    create_repository.handle(creation(0x802, 0x702)).await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
     repository
         .handle(replacement(
             0x903,
-            0x702,
+            0x701,
             metadata(Some("Alpha planning"), &["blue", "daily"], &[], false),
         ))
         .await?;
     repository
         .handle(replacement(
             0x904,
-            0x703,
-            metadata(Some("Alpha"), &["daily"], &[], true),
+            0x702,
+            metadata(Some("Alpha"), &["daily"], &[], false),
         ))
         .await?;
 
@@ -239,10 +284,34 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     let (items, continuation) = collect_page(&repository, filtered).await?;
     assert_eq!(
         items.iter().map(|item| item.session()).collect::<Vec<_>>(),
-        [session(0x702)]
+        [session(0x701)]
     );
     assert_eq!(items[0].tags().collect::<Vec<_>>(), ["blue", "daily"]);
     assert_eq!(continuation, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-013: the default metadata list hides archived sessions without changing
+/// the inclusive organizational view.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv013_metadata_list_hides_archived_sessions_by_default() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    create_repository.handle(creation(0x801, 0x701)).await?;
+    create_repository.handle(creation(0x802, 0x702)).await?;
+    create_repository.handle(creation(0x803, 0x703)).await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0x901,
+            0x702,
+            metadata(Some("archived"), &[], &[], true),
+        ))
+        .await?;
 
     let archived_hidden =
         signalbox_application::SessionMetadataListQuery::try_new(Vec::new(), None, false, 10, None)
@@ -250,10 +319,35 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     let (items, continuation) = collect_page(&repository, archived_hidden).await?;
     assert_eq!(
         items.iter().map(|item| item.session()).collect::<Vec<_>>(),
-        [session(0x701), session(0x702), session(0x704)]
+        [session(0x701), session(0x703)]
     );
     assert_eq!(continuation, None);
 
+    let archived_included =
+        signalbox_application::SessionMetadataListQuery::try_new(Vec::new(), None, true, 10, None)
+            .expect("fixture page is valid");
+    let (items, continuation) = collect_page(&repository, archived_included).await?;
+    assert_eq!(
+        items.iter().map(|item| item.session()).collect::<Vec<_>>(),
+        [session(0x701), session(0x702), session(0x703)]
+    );
+    assert_eq!(continuation, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn metadata_list_uses_bounded_keyset_pages() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    create_repository.handle(creation(0x801, 0x701)).await?;
+    create_repository.handle(creation(0x802, 0x702)).await?;
+    create_repository.handle(creation(0x803, 0x703)).await?;
+    create_repository.handle(creation(0x804, 0x704)).await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
     let first_page =
         signalbox_application::SessionMetadataListQuery::try_new(Vec::new(), None, true, 2, None)
             .expect("fixture page is valid");
@@ -278,6 +372,21 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     );
     assert_eq!(continuation, None);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: the atomic race contract requires both distinct writes to record,
+/// one exact serialized current winner, and replay of both receipts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_concurrent_replacements_serialize_and_replay() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
     let left = replacement(0x905, 0x701, metadata(Some("left"), &["left"], &[], false));
     let right = replacement(
         0x906,
@@ -321,6 +430,26 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
         ReplaceSessionMetadataHandlingOutcome::Recorded(_)
     ));
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-005: a sealed metadata receipt parent cannot be rewritten.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv005_metadata_receipt_parent_rejects_update() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    SessionMetadataRepository::new(pool.clone())
+        .handle(replacement(
+            0x902,
+            0x701,
+            metadata(Some("immutable"), &[], &[], false),
+        ))
+        .await?;
     let immutable = sqlx::query(
         "UPDATE replace_session_metadata_command
          SET result_kind = result_kind
@@ -330,36 +459,62 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     .execute(&pool)
     .await
     .expect_err("durable metadata receipts are append-only");
-    assert_eq!(
-        immutable
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23514")
-    );
+    assert_check_violation(&immutable);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: a written metadata root cannot return to the initial absent state.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_written_metadata_root_rejects_delete() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let written = metadata(Some("guarded"), &["retained"], &[], false);
+    repository
+        .handle(replacement(0x902, 0x701, written.clone()))
+        .await?;
     let deleted_root = sqlx::query("DELETE FROM session_metadata WHERE session_id = $1")
         .bind(Uuid::from_u128(0x701))
         .execute(&pool)
         .await
         .expect_err("written current metadata cannot return to absent state");
-    assert_eq!(
-        deleted_root
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23514")
-    );
+    assert_check_violation(&deleted_root);
     assert_eq!(
         repository
             .load_session_metadata(session(0x701))
             .await?
             .expect("guarded metadata remains readable")
             .content()
-            .title(),
-        Some(final_title.as_str())
+            .clone(),
+        written
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-005: sealed receipt satellites cannot gain either kind of late member.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv005_metadata_receipt_satellites_reject_late_inserts() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    SessionMetadataRepository::new(pool.clone())
+        .handle(replacement(
+            0x902,
+            0x701,
+            metadata(Some("sealed"), &[], &[], false),
+        ))
+        .await?;
     let late_tag = sqlx::query(
         "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
          VALUES ($1, 'late')",
@@ -368,13 +523,7 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     .execute(&pool)
     .await
     .expect_err("a committed receipt cannot gain a later tag");
-    assert_eq!(
-        late_tag
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23514")
-    );
+    assert_check_violation(&late_tag);
 
     let late_attribute = sqlx::query(
         "INSERT INTO replace_session_metadata_command_attribute
@@ -385,14 +534,18 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     .execute(&pool)
     .await
     .expect_err("a committed receipt cannot gain a later attribute");
-    assert_eq!(
-        late_attribute
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23514")
-    );
+    assert_check_violation(&late_attribute);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: the applied receipt shape always carries its actor evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
     let missing_applied_actor = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
@@ -407,14 +560,23 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
     .execute(&pool)
     .await
     .expect_err("an applied receipt must name its result actor");
-    assert_eq!(
-        missing_applied_actor
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23514")
-    );
+    assert_check_violation(&missing_applied_actor);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: an owner-global identifier claimed by another command kind is a
+/// conflict, never an absent metadata command.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_cross_kind_reuse_is_conflict() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
     let cross_kind = replacement(0x801, 0x701, SessionMetadataContent::empty());
     assert_eq!(
         repository.handle(cross_kind).await?,
@@ -426,6 +588,97 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
         repository.load_command(command(0x801)).await,
         Err(SessionMetadataRepositoryError::DifferentCommandKind { .. })
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: a list item validates the complete stored metadata even though its
+/// public projection intentionally omits attributes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_metadata_list_validates_omitted_attributes() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0x901,
+            0x701,
+            metadata(Some("checked"), &[], &[("payload", "")], false),
+        ))
+        .await?;
+    let oversized = "x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES);
+    sqlx::query(
+        "UPDATE session_metadata_attribute
+         SET attribute_value = $2
+         WHERE session_id = $1 AND attribute_key = 'payload'",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .bind(oversized)
+    .execute(&pool)
+    .await?;
+
+    let query = signalbox_application::SessionMetadataListQuery::default_page();
+    let mut page = repository.open_page(query).await?;
+    assert!(matches!(
+        page.next_item().await,
+        Err(SessionMetadataRepositoryError::Corruption(
+            SessionMetadataCorruption::InvalidContent(_)
+        ))
+    ));
+    drop(page);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-005: bulk truncation cannot bypass metadata current-state or sealed
+/// receipt guards.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv005_metadata_tables_reject_truncate() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+
+    let current_root = sqlx::query("TRUNCATE session_metadata CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("current metadata roots are not truncatable");
+    assert_check_violation(&current_root);
+
+    let current_tags = sqlx::query("TRUNCATE session_metadata_tag")
+        .execute(&pool)
+        .await
+        .expect_err("current metadata tags are not truncatable");
+    assert_check_violation(&current_tags);
+
+    let current_attributes = sqlx::query("TRUNCATE session_metadata_attribute")
+        .execute(&pool)
+        .await
+        .expect_err("current metadata attributes are not truncatable");
+    assert_check_violation(&current_attributes);
+
+    let receipt_parent = sqlx::query("TRUNCATE replace_session_metadata_command CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("metadata receipt parents are not truncatable");
+    assert_check_violation(&receipt_parent);
+
+    let receipt_tags = sqlx::query("TRUNCATE replace_session_metadata_command_tag")
+        .execute(&pool)
+        .await
+        .expect_err("metadata receipt tags are not truncatable");
+    assert_check_violation(&receipt_tags);
+
+    let receipt_attributes = sqlx::query("TRUNCATE replace_session_metadata_command_attribute")
+        .execute(&pool)
+        .await
+        .expect_err("metadata receipt attributes are not truncatable");
+    assert_check_violation(&receipt_attributes);
 
     pool.close().await;
     drop(container);

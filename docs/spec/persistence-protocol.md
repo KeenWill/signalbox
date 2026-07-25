@@ -136,15 +136,19 @@ Representation rules, all enforced in the schema:
   historical fact. Metadata receipt satellites must be inserted before their
   deferrable parent record; their `BEFORE INSERT` triggers lock the existing
   owner-global command claim, require that claim, and reject insertion once the
-  parent seals the receipt. Mutable lifecycle tables carry guard triggers
-  instead: `turn_lifecycle` rows must be inserted `queued`, transition only
-  monotonically, keep identity/origin/order and written starts write-once, and
-  become immutable at `terminal`; `turn_attempt` rows are inserted `prepared`
-  and an `ended` attempt is immutable. Why: restart trusts durable rows as
-  evidence, so the schema itself must forbid rewriting them (INV-006, INV-007).
+  parent seals the receipt. The parent and both receipt satellites also reject
+  `TRUNCATE`, which does not invoke row-level delete triggers. Mutable lifecycle
+  tables carry guard triggers instead: `turn_lifecycle` rows must be inserted
+  `queued`, transition only monotonically, keep identity/origin/order and
+  written starts write-once, and become immutable at `terminal`; `turn_attempt`
+  rows are inserted `prepared` and an `ended` attempt is immutable. Why: restart
+  trusts durable rows as evidence, so the schema itself must forbid rewriting
+  them (INV-006, INV-007).
 - The current `session_metadata` root remains mutable by complete replacement
   but rejects deletion. Once a session has a recorded metadata write, root
   absence can therefore never be reinterpreted as the initial unwritten state.
+  The current root, tag, and attribute tables also reject `TRUNCATE`; complete
+  replacement through the adapter is their only admitted bulk mutation.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -372,17 +376,20 @@ semantics are owned by
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
-or dropped on load. Load paths do not panic on durable data; checked interrupt
-application produces the exact cancellation-requested or reconciliation-required
-transition, while a projection that cannot support that transition fails closed
-as typed corruption. Startup recovery operates only on successfully
-reconstituted projections (INV-034), and a successful reconstitution does not
-waive the guarded compare-and-set when a later transaction commits: every
-guarded write that matches zero rows is either benign staleness (reload and
-rederive) or, where the transaction's own premises made a match mandatory,
-corruption. Why: the dangerous corruption cases are rows that look individually
-valid while their cross-record correlations are not, so authority comes only
-from complete validated projections, never from raw identifiers.
+or dropped on load. A metadata list load validates the complete stored content,
+including attributes that its public summary deliberately omits, before it
+constructs the summary. Load paths do not panic on durable data; checked
+interrupt application produces the exact cancellation-requested or
+reconciliation-required transition, while a projection that cannot support that
+transition fails closed as typed corruption. Startup recovery operates only on
+successfully reconstituted projections (INV-034), and a successful
+reconstitution does not waive the guarded compare-and-set when a later
+transaction commits: every guarded write that matches zero rows is either benign
+staleness (reload and rederive) or, where the transaction's own premises made a
+match mandatory, corruption. Why: the dangerous corruption cases are rows that
+look individually valid while their cross-record correlations are not, so
+authority comes only from complete validated projections, never from raw
+identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn

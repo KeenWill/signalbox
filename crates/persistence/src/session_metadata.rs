@@ -458,7 +458,25 @@ impl PostgresSessionMetadataPage {
                          ORDER BY tag.tag
                     ),
                     ARRAY[]::text[]
-                ) AS tags
+                ) AS tags,
+                COALESCE(
+                    ARRAY(
+                        SELECT attribute.attribute_key
+                          FROM session_metadata_attribute AS attribute
+                         WHERE attribute.session_id = session_row.session_id
+                         ORDER BY attribute.attribute_key
+                    ),
+                    ARRAY[]::text[]
+                ) AS attribute_keys,
+                COALESCE(
+                    ARRAY(
+                        SELECT attribute.attribute_value
+                          FROM session_metadata_attribute AS attribute
+                         WHERE attribute.session_id = session_row.session_id
+                         ORDER BY attribute.attribute_key
+                    ),
+                    ARRAY[]::text[]
+                ) AS attribute_values
                FROM session AS session_row
                LEFT JOIN session_current_defaults AS current_defaults
                  ON current_defaults.session_id = session_row.session_id
@@ -949,19 +967,28 @@ fn decode_list_item(
         required(row, "dangerous_tool_auto_approval")?,
     )?;
     let metadata_session: Option<Uuid> = row.try_get("metadata_session_id")?;
+    let tags: Vec<String> = required(row, "tags")?;
+    let attribute_keys: Vec<String> = required(row, "attribute_keys")?;
+    let attribute_values: Vec<String> = required(row, "attribute_values")?;
     let snapshot = if let Some(metadata_session) = metadata_session {
         if session_id_from_uuid(metadata_session) != session {
             return Err(SessionMetadataCorruption::Inconsistent("list metadata identity").into());
         }
         let content = decode_content(
             row.try_get("title")?,
-            required(row, "tags")?,
-            Vec::new(),
-            Vec::new(),
+            tags,
+            attribute_keys,
+            attribute_values,
             required(row, "archived")?,
         )?;
         SessionMetadataSnapshot::from_recorded_write(session, content, decode_writer(row)?)
     } else {
+        if !tags.is_empty() || !attribute_keys.is_empty() || !attribute_values.is_empty() {
+            return Err(SessionMetadataCorruption::Inconsistent(
+                "list metadata satellites without root",
+            )
+            .into());
+        }
         SessionMetadataSnapshot::initial(session)
     };
     Ok(SessionMetadataListItem::new(&snapshot, version, defaults))

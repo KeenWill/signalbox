@@ -330,6 +330,48 @@ BEFORE UPDATE OR DELETE ON replace_session_metadata_command_attribute
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE FUNCTION reject_session_metadata_table_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION
+        'session metadata table % is not truncatable',
+        TG_TABLE_NAME
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE TRIGGER session_metadata_truncate_is_rejected
+BEFORE TRUNCATE ON session_metadata
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
+CREATE TRIGGER session_metadata_tag_truncate_is_rejected
+BEFORE TRUNCATE ON session_metadata_tag
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
+CREATE TRIGGER session_metadata_attribute_truncate_is_rejected
+BEFORE TRUNCATE ON session_metadata_attribute
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
+CREATE TRIGGER replace_session_metadata_command_truncate_is_rejected
+BEFORE TRUNCATE ON replace_session_metadata_command
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
+CREATE TRIGGER replace_session_metadata_command_tag_truncate_is_rejected
+BEFORE TRUNCATE ON replace_session_metadata_command_tag
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
+CREATE TRIGGER replace_session_metadata_command_attribute_truncate_is_rejected
+BEFORE TRUNCATE ON replace_session_metadata_command_attribute
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
 CREATE OR REPLACE FUNCTION require_durable_command_typed_record()
 RETURNS trigger
 LANGUAGE plpgsql
