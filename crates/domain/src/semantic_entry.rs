@@ -72,12 +72,25 @@ pub enum SemanticTranscriptEntryPayload {
         value: AssistantText,
     },
     /// One logical tool request named by a definitive assistant response.
-    ///
-    /// Construction remains gated until the reserved tool decisions land.
     AssistantToolUse {
         /// The outcome-authoritative call that supplied this request.
         producing_call: ModelCallId,
         /// The logical request derived from that response.
+        request: ToolRequestId,
+    },
+    /// Executed success or error evidence owned by one physical attempt.
+    ToolExecutionResult {
+        /// The exact terminal physical attempt.
+        attempt: crate::ToolAttemptId,
+    },
+    /// A durable denial owned by one logical request's approval decision.
+    ToolDenied {
+        /// The exact denied logical request.
+        request: ToolRequestId,
+    },
+    /// An undecided request closed because its turn terminalized.
+    ToolClosed {
+        /// The exact closed logical request.
         request: ToolRequestId,
     },
     /// The explicit final marker for a completed turn.

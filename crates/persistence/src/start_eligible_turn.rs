@@ -345,6 +345,9 @@ async fn insert_prepared_activation(
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+        | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+        | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+        | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared origin-entry payload",
