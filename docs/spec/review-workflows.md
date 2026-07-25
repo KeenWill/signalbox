@@ -62,10 +62,12 @@ confidence values. Confidence is an exact integer count of basis points from
 zero through 10,000. Version one's exact thresholds and ordering are fixed by
 the
 [basis-point policy decision](../decisions.md#2026-07-25--store-review-confidence-as-versioned-basis-point-policy);
-construction enforces both exact version-one thresholds and their ordering. A
-later policy version changes only later runs. Why: stored exact policy data
-makes the reason for unattended judgment and publication reconstructible without
-depending on the executing binary's defaults.
+construction and reconstitution admit only version one and enforce its exact
+thresholds and ordering. An unknown version fails closed until a later recorded
+decision adds its exact tuple; support for that later version changes only later
+runs. Why: stored exact policy data makes the reason for unattended judgment and
+publication reconstructible without depending on the executing binary's
+defaults.
 
 Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`, with
@@ -89,11 +91,15 @@ is therefore recorded only after its orchestration input has been durably
 accepted; an optional session identifier is not a substitute for execution
 evidence. The accepted input must belong to the pass session; construction,
 persistence, and reconstitution reject a cross-wired pair even when no turn has
-started. One accepted input is owned by at most one review pass. A pass may
-enter `Running` or a post-start terminal state only in the same relational
-transaction that projects its run through the corresponding state. A queued pass
-may be cancelled before start. Executable orchestration is not implemented; see
-[Open edges](#open-edges).
+started. Its canonical scheduling projection must already classify it as the
+origin of its own queued turn. Pending or consumed steering cannot back a pass;
+a next-safe-point input becomes eligible only after canonical reclassification
+creates its successor origin turn. The turn later named by the pass must be that
+exact origin turn. One accepted input is owned by at most one review pass. A
+pass may enter `Running` or a post-start terminal state only in the same
+relational transaction that projects its run through the corresponding state. A
+queued pass may be cancelled before start. Executable orchestration is not
+implemented; see [Open edges](#open-edges).
 
 Pass state is:
 

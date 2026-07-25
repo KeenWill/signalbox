@@ -19,13 +19,19 @@ commits no such pass inventory.
 
 **Decision.** One accepted input is owned by at most one review pass.
 Persistence enforces the global identity claim in addition to checking that the
-input belongs to the pass session. Executable admission coordination remains
-owned by the review-workflow open question.
+input belongs to the pass session. Pass admission additionally requires the
+input's canonical scheduling projection to classify it as the origin of its own
+queued turn. Pending or consumed steering is not pass input; a next-safe-point
+input becomes eligible only after canonical reclassification creates its
+successor origin turn. Executable admission coordination remains owned by the
+review-workflow open question.
 
 **Rejected alternatives.** Treating one turn as implicit evidence for several
 passes attributes results the session aggregate never recorded. Adding a
 pass-identity set to session execution moves the review boundary into the
-session model without an orchestration design.
+session model without an orchestration design. Accepting a pending steering
+input admits a pass that has no canonical turn and may instead be consumed by an
+unrelated active turn.
 
 **Affects.** Review-pass construction and persistence, exact turn evidence, the
 [review-workflows specification](spec/review-workflows.md), and the
@@ -405,7 +411,9 @@ used by an old run nor provide one exact relational representation.
 **Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
 integer basis-point thresholds from zero through 10,000. Version one fixes
 exactly 7,000 basis points for judgment and exactly 8,000 for publication; the
-publication threshold may not be lower than the judgment threshold. Dedupe and
+publication threshold may not be lower than the judgment threshold. Version one
+is the only supported version; construction and reconstitution reject every
+other ordinal until a later recorded decision adds its exact tuple. Dedupe and
 judge passes consume the same frozen run policy. An `Accepted` event requires
 the finding's confidence to meet the judgment threshold; a `Posted` event
 requires it to meet the publication threshold. This foundation defines no
@@ -418,6 +426,8 @@ findings under inconsistent gates. Recording thresholds without enforcing them
 turns policy into unauthenticated metadata. A hidden override makes
 reconstitution depend on evidence the aggregate does not carry. Hard-coding
 policy without storing its version prevents intentional later evolution.
+Admitting unknown versions lets binaries assign different semantics to one
+persisted ordinal.
 
 **Affects.** `ReviewPolicy`, `ReviewConfidence`, run persistence, the
 [review-workflows specification](spec/review-workflows.md), and later judgment,
