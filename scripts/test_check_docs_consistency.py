@@ -118,6 +118,24 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("cited file does not exist", failures[0].message)
 
+    def test_missing_invariant_file_fragment_is_not_double_reported(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[`src/missing.rs`](../src/missing.rs#L1). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-citation"],
+        )
+        self.assertIn("cited file does not exist", failures[0].message)
+
     def test_named_test_must_appear_in_its_cited_file(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"
@@ -337,6 +355,14 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_forbidden_bare_destination_character_is_ignored(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[literal](missing<file.md)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_well_formed_inline_link_title_is_checked(self) -> None:
         (self.root / "AGENTS.md").write_text(
             '# Agent guidance\n\n[Missing](missing.md "A title")\n',
@@ -380,6 +406,24 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_ordered_list_closing_fence_stops_masking(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "100. ```\n"
+            "     [Code sample](ignored.md)\n"
+            "     ```\n\n"
+            "[Missing](missing.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
 
     def test_invalid_backtick_fence_does_not_hide_link(self) -> None:
         (self.root / "AGENTS.md").write_text(
@@ -477,6 +521,21 @@ class DocsConsistencyTests(unittest.TestCase):
             "Verified through PR #12 (`agent/example`).\n\n"
             "## [Reference heading][heading-label]\n\n"
             "[heading-label]: https://example.com/heading\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_nested_link_label_heading_uses_its_visible_label(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Heading](docs/spec/example.md#outer-inner)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "## [Outer [inner]](https://example.com)\n",
             encoding="utf-8",
         )
 
@@ -681,6 +740,24 @@ class DocsConsistencyTests(unittest.TestCase):
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
             "The certificate is verified locally. Historical discussion: "
+            "PR #42 (`agent/history`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_semicolon_separates_verified_fact_from_historical_pr(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "The certificate is verified locally; historical discussion: "
             "PR #42 (`agent/history`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",

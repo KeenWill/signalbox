@@ -86,6 +86,7 @@ REFERENCE_DEFINITION = re.compile(
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])(?P<spacing>[ \t]+)"
 )
+FENCE_LIST_CONTAINER = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
 DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
 PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
@@ -94,7 +95,9 @@ PR_TOKEN = re.compile(
 )
 VERIFICATION_LEAD = re.compile(
     r"\bverified\b"
-    r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])).)*?"
+    r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])|;).)*?"
+    r"\b(?:against|through)\b"
+    r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])|;).)*?"
     r"(?P<pr>\bPR[ \t]*#)",
     re.IGNORECASE | re.DOTALL,
 )
@@ -194,22 +197,72 @@ def mask_block_quote_prefixes(text: str) -> str:
     return "".join(buffer)
 
 
+def strip_fence_opening_containers(line: str) -> tuple[str, int]:
+    """Strip quote/list markers and return the list continuation indentation."""
+    continuation_indent = 0
+    while True:
+        quote = BLOCK_QUOTE_CONTAINER.match(line)
+        if quote is not None:
+            line = line[quote.end() :]
+            continue
+        item = FENCE_LIST_CONTAINER.match(line)
+        if item is not None:
+            continuation_indent += indentation_columns(item.group(0))
+            line = line[item.end() :]
+            continue
+        return line, continuation_indent
+
+
+def remove_indentation(line: str, columns: int) -> str:
+    """Remove exactly ``columns`` leading indentation columns when present."""
+    position = 0
+    consumed = 0
+    while position < len(line) and consumed < columns:
+        character = line[position]
+        if character not in " \t":
+            return line
+        next_column = (
+            consumed + 4 - (consumed % 4)
+            if character == "\t"
+            else consumed + 1
+        )
+        if next_column > columns:
+            return line
+        consumed = next_column
+        position += 1
+    return line[position:] if consumed == columns else line
+
+
 def mask_fenced_code(text: str) -> str:
     """Replace fenced code with spaces while preserving offsets and lines."""
     buffer = list(text)
     offset = 0
     fence_char: str | None = None
     fence_length = 0
+    fence_container_indent = 0
     for line in text.splitlines(keepends=True):
-        container_content = strip_heading_containers(line)
-        match = FENCE.match(container_content)
-        if fence_char is None and match:
+        if fence_char is None:
+            container_content, container_indent = strip_fence_opening_containers(
+                line
+            )
+            match = FENCE.match(container_content)
+        else:
+            quoted_content = strip_block_quote_containers(line)
+            container_content = remove_indentation(
+                quoted_content,
+                fence_container_indent,
+            )
+            container_indent = 0
+            match = None
+
+        if fence_char is None and match is not None:
             fence = match.group("fence")
             if fence[0] == "`" and "`" in container_content[match.end() :]:
                 offset += len(line)
                 continue
             fence_char = fence[0]
             fence_length = len(fence)
+            fence_container_indent = container_indent
             mask_range(buffer, offset, offset + len(line))
         elif fence_char is not None:
             mask_range(buffer, offset, offset + len(line))
@@ -221,6 +274,7 @@ def mask_fenced_code(text: str) -> str:
             if closing:
                 fence_char = None
                 fence_length = 0
+                fence_container_indent = 0
         offset += len(line)
     return "".join(buffer)
 
@@ -525,6 +579,8 @@ def parse_inline_link_at(
             if character == "\\":
                 position += 2
                 continue
+            if character in "<>":
+                return None
             if character == "(":
                 depth += 1
             elif character == ")":
@@ -735,11 +791,61 @@ def is_inside(root: Path, path: Path) -> bool:
     return path == root or root in path.parents
 
 
+def render_link_labels(text: str) -> str:
+    """Replace inline/reference link syntax with its balanced visible label."""
+    rendered: list[str] = []
+    copy_from = 0
+    index = 0
+    while index < len(text):
+        image = text[index : index + 2] == "!["
+        label_open = index + 1 if image else index
+        if (
+            text[label_open : label_open + 1] != "["
+            or is_escaped(text, index)
+        ):
+            index += 1
+            continue
+
+        label_end = find_closing_bracket(text, label_open)
+        if label_end is None:
+            index += 1
+            continue
+        end = label_end + 1
+        if end < len(text) and text[end] == "(":
+            parsed = parse_inline_link_at(text, label_open)
+            if parsed is None:
+                index += 1
+                continue
+            link, closing = parsed
+            end = closing + 1
+        elif end < len(text) and text[end] == "[":
+            reference_end = find_closing_bracket(text, end)
+            if reference_end is None:
+                index += 1
+                continue
+            link = MarkdownLink(
+                label=text[label_open + 1 : label_end],
+                destination="",
+                offset=label_open,
+            )
+            end = reference_end + 1
+        else:
+            index += 1
+            continue
+
+        rendered.append(text[copy_from:index])
+        rendered.append(link.label)
+        copy_from = end
+        index = end
+
+    rendered.append(text[copy_from:])
+    return "".join(rendered)
+
+
 def render_heading_text(text: str) -> str:
     text = html.unescape(text)
     text = re.sub(r"`+([^`]*)`+", r"\1", text)
-    text = re.sub(r"!?\[([^\]]*)\]\[[^\]]*\]", r"\1", text)
-    text = re.sub(r"!?\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = render_link_labels(text)
     text = AUTOLINK.sub(r"\1", text)
     text = re.sub(r"<[^>]*>", "", text)
     text = re.sub(r"\\(.)", r"\1", text)
@@ -980,11 +1086,15 @@ def check_relative_links(
             if resolved is None:
                 continue
             target, fragment = resolved
-            if (
+            enforcement_citation = (
                 source.resolve() == invariant_path
                 and (line, link.destination) in enforcement_links
-                and not fragment
+            )
+            if enforcement_citation and (
+                not is_inside(root, target) or not target.is_file()
             ):
+                continue
+            if enforcement_citation and not fragment:
                 continue
             source_label = repository_path(root, source)
             if not is_inside(root, target):
