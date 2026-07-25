@@ -24,10 +24,7 @@ final class AppCoordinator: ObservableObject {
         self.isMockMode = shouldInstallMockService
         if resetPersistedSettings {
             UserDefaults.standard.removeObject(forKey: NativeAppConstants.serverURLDefaultsKey)
-            KeychainSecretStore().deleteSecret(
-                service: NativeAppConstants.serviceName,
-                account: NativeAppConstants.apiKeyAccount
-            )
+            KeychainSecretStore().deleteSecret()
         }
         self.settings = SignalboxSettingsViewModel()
         if resetPersistedSettings {

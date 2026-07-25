@@ -18,7 +18,10 @@ final class SignalboxNativeTests: XCTestCase {
 
     func testSettingsRejectsInvalidServerURL() {
         let settings = SignalboxSettingsViewModel(
-            keychain: KeychainSecretStore(),
+            keychain: KeychainSecretStore(
+                service: "co.rdwd.SignalboxNativeTests.invalid-url",
+                account: "synthetic-api-key"
+            ),
             userDefaults: UserDefaults(suiteName: "SignalboxNativeTests")!
         )
         settings.serverURLText = "not a url"
@@ -27,6 +30,32 @@ final class SignalboxNativeTests: XCTestCase {
         guard case .failure = settings.configurationResult() else {
             return XCTFail("Expected invalid URL failure")
         }
+    }
+
+    func testSettingsKeychainUsesInjectedIdentity() throws {
+        let service = "co.rdwd.SignalboxNativeTests.injected-identity"
+        let account = "synthetic-api-key"
+        let keychain = KeychainSecretStore(service: service, account: account)
+        let defaultsSuite = "SignalboxNativeTests.injected-keychain-identity"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        keychain.deleteSecret()
+        userDefaults.removePersistentDomain(forName: defaultsSuite)
+        defer {
+            keychain.deleteSecret()
+            userDefaults.removePersistentDomain(forName: defaultsSuite)
+        }
+        try keychain.writeSecret("synthetic-existing-api-key")
+        let settings = SignalboxSettingsViewModel(
+            keychain: keychain,
+            userDefaults: userDefaults
+        )
+
+        XCTAssertEqual(settings.apiKey, "synthetic-existing-api-key")
+
+        settings.apiKey = "synthetic-saved-api-key"
+        settings.save()
+
+        XCTAssertEqual(keychain.readSecret(), "synthetic-saved-api-key")
     }
 
     func testApprovalCardsShowTheirMatchedConcurrentToolCallActions() throws {
