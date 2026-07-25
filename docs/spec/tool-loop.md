@@ -34,10 +34,12 @@ hyphen. `NormalizedToolArguments` has two closed arms. `Json` stores a decoded
 JSON value as compact text with object keys in lexical order; `Undecodable`
 stores the exact bounded UTF-8 text emitted by the provider adapter after that
 adapter applies its preparation-time credential scrub when JSON decoding fails.
-Both arms must fit within 1 MiB before and after normalization. This preserves
-malformed arguments as bounded, identity-safe evidence without pretending they
-are JSON. An undecodable value, or valid JSON that does not decode against the
-selected tool's argument type, becomes a typed execution error later.
+Undecodable text must also exclude U+0000, mirroring the result-content
+admission. Both arms must fit within 1 MiB before and after normalization. This
+preserves malformed arguments as bounded, identity-safe evidence without
+pretending they are JSON. An undecodable value, or valid JSON that does not
+decode against the selected tool's argument type, becomes a typed execution
+error later.
 
 The same transaction that classifies the producing call `Completed` appends one
 `AssistantText` or `AssistantToolUse { producing_call, request }` semantic entry
@@ -144,14 +146,15 @@ provider call is in flight therefore cannot upgrade a proposal from `Confirm` to
 unattended execution.
 
 The registry is advisory input to policy and execution, never request-content
-authority. A model may propose an unknown name; fail-closed policy requires
-confirmation, and an approved unknown request produces a typed `UnknownTool`
-error without invoking an executor. Because the attempt schema requires a closed
-effect class, preparation records `EffectFree` as a non-dispatching sentinel
-when no declaration exists. The preflight transaction closes that attempt before
-authorization and before the executor boundary; the sentinel is not a claim that
-an unknown tool is safe to run. A declaration added or removed after the request
-was recorded does not rewrite its name or arguments.
+authority. A model may propose an unknown name; absent a frozen `ApproveAll`
+blanket, fail-closed policy requires confirmation, and an approved unknown
+request produces a typed `UnknownTool` error without invoking an executor.
+Because the attempt schema requires a closed effect class, preparation records
+`EffectFree` as a non-dispatching sentinel when no declaration exists. The
+preflight transaction closes that attempt before authorization and before the
+executor boundary; the sentinel is not a claim that an unknown tool is safe to
+run. A declaration added or removed after the request was recorded does not
+rewrite its name or arguments.
 
 Effect class controls crash classification, not permission identity. A
 crash-lost prepared attempt, or an in-flight attempt declared `EffectFree`,
