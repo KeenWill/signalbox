@@ -43,11 +43,10 @@ use signalbox_process_protocol::{
     ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
     FrameEncodeError, FrameValidationError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
     ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_FRAME_BYTES,
-    ModelCallDisposition, ModelCallState,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame,
-    ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
-    content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+    TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments, decode_client_line,
+    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -2038,7 +2037,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1, 2"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -2533,8 +2532,8 @@ mod tests {
             DispatchedReconciliationOperation, DispatchedToolBatchState,
         },
         process_read::{
-            ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReconciliationOperation,
-            ProcessTranscriptEntry, ProcessTurnState,
+            ProcessImportedContentKind, ProcessImportedSourceSpeaker,
+            ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};

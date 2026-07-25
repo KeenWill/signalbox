@@ -58,7 +58,7 @@ impl TranscriptSnapshot {
         for message in messages {
             let frame =
                 ServerFrame::try_new_for_version(ProtocolVersion::Three, request_id, message)
-                .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
+                    .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
         }
         spool.flush()?;

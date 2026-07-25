@@ -140,7 +140,10 @@ impl From<sqlx::Error> for ToolLoopRepositoryError {
         {
             return match database.constraint() {
                 Some(
-                    "semantic_transcript_entry_pkey" | "tool_attempt_pkey" | "turn_attempt_pkey",
+                    "semantic_transcript_entry_pk"
+                    | "semantic_transcript_entry_id_global"
+                    | "tool_attempt_pkey"
+                    | "turn_attempt_pkey",
                 ) => Self::IdentityCollision,
                 _ => Self::Corruption(ToolLoopCorruption::Inconsistent(
                     "logical uniqueness constraint",

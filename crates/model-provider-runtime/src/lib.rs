@@ -22,11 +22,11 @@ use signalbox_domain::{
     ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, ConversationMessage, ConversationRole, CredentialReference,
-    MessagePart, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName,
-    ToolResultRecord, UnsentCause,
+    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
+    CredentialReference, MessagePart, ModelOperation, ModelRuntime, ModelSettings, Observation,
+    ObservationFact, ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget,
+    ResolvedTarget, TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition,
+    ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
 };
 
 fn render_conversation_message(message: &ModelConversationMessage) -> ConversationMessage {
@@ -671,6 +671,7 @@ fn classify_terminal(
 
     match evidence {
         TerminalEvidence::Completed(completion) => {
+            let finish = completion.finish;
             let mut response_parts = Vec::with_capacity(completion.content.len());
             let mut contains_tool_call = false;
             for part in completion.content {
@@ -703,12 +704,20 @@ fn classify_terminal(
                 }
             }
             if contains_tool_call {
+                // docs/spec/model-call-execution.md: tool-call parts are
+                // accepted only with a matching `ToolUse` finish reason.
+                if !matches!(finish, CompletionFinish::ToolUse) {
+                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                }
                 let Ok(response) = ToolUsingAssistantResponse::try_from_parts(response_parts)
                 else {
                     return Ok(ModelCallTerminalObservation::KnownFailed);
                 };
                 Ok(ModelCallTerminalObservation::CompletedWithTools { response })
             } else {
+                if matches!(finish, CompletionFinish::ToolUse) {
+                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                }
                 let assistant_text = response_parts
                     .into_iter()
                     .map(|part| match part {
@@ -842,11 +851,19 @@ mod tests {
     }
 
     fn completion(model: &str, content: Vec<AssistantPart>) -> TerminalEvidence {
+        completion_with_finish(model, CompletionFinish::EndTurn, content)
+    }
+
+    fn completion_with_finish(
+        model: &str,
+        finish: CompletionFinish,
+        content: Vec<AssistantPart>,
+    ) -> TerminalEvidence {
         TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new(model)),
-            finish: CompletionFinish::EndTurn,
+            finish,
             content,
             usage: TokenUsage::unreported(),
         })
@@ -1177,8 +1194,9 @@ mod tests {
 
         assert_eq!(
             classify_terminal(
-                completion(
+                completion_with_finish(
                     "model-exact",
+                    CompletionFinish::ToolUse,
                     vec![
                         AssistantPart::Text(String::from("before")),
                         AssistantPart::ToolCall(RuntimeToolCallProposal {
@@ -1196,6 +1214,43 @@ mod tests {
             ModelCallTerminalObservation::CompletedWithTools {
                 response: expected_response,
             }
+        );
+    }
+
+    /// S10 / INV-002: tool-call content and the `ToolUse` finish reason must
+    /// agree before either terminal completion observation is constructed.
+    #[test]
+    fn s10_inv002_mismatched_tool_finish_is_known_failed() {
+        assert_eq!(
+            classify_terminal(
+                completion(
+                    "model-exact",
+                    vec![AssistantPart::ToolCall(RuntimeToolCallProposal {
+                        id: ToolCallId::new("provider-call-1"),
+                        name: RuntimeToolName::new("current_time"),
+                        arguments_json: String::from("{}"),
+                    })],
+                ),
+                &[],
+                "model-exact",
+            )
+            .expect("mismatched finish still classifies"),
+            ModelCallTerminalObservation::KnownFailed,
+            "tool calls without a ToolUse finish are not an admitted batch"
+        );
+        assert_eq!(
+            classify_terminal(
+                completion_with_finish(
+                    "model-exact",
+                    CompletionFinish::ToolUse,
+                    vec![AssistantPart::Text(String::from("no call"))],
+                ),
+                &[],
+                "model-exact",
+            )
+            .expect("mismatched finish still classifies"),
+            ModelCallTerminalObservation::KnownFailed,
+            "a ToolUse finish without a tool call is not an ordinary completion"
         );
     }
 

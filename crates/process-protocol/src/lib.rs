@@ -2145,10 +2145,13 @@ mod tests {
         expected_message_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let request_id_value = request_id.value();
-        let frame = ServerFrame::try_new(request_id, message)?;
+        let minimum = message.minimum_protocol_version();
+        let version = ProtocolVersion::from_u64(minimum)
+            .expect("every closed message names one admitted minimum version");
+        let frame = ServerFrame::try_new_for_version(version, request_id, message)?;
         let encoded = encode_server_line(&frame)?;
         let expected = format!(
-            "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
+            "{{\"version\":{minimum},\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
             expected_message_json
         );
         assert_eq!(String::from_utf8(encoded.clone())?, expected);
@@ -2881,8 +2884,11 @@ mod tests {
                 Err(FrameValidationError::MessageRequiresNewerVersion)
             );
         }
-        let frame =
-            ServerFrame::try_new_for_version(ProtocolVersion::Three, request(2)?, tool_reconciliation)?;
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::Three,
+            request(2)?,
+            tool_reconciliation,
+        )?;
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
         Ok(())
     }
