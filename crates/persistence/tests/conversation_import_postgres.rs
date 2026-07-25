@@ -54,18 +54,31 @@ struct FixedIds {
 }
 
 impl FixedIds {
-    fn new(conversations: &[u128], entries: impl IntoIterator<Item = u128>) -> Self {
+    /// Supplies conversation identities the test has already named, so an
+    /// expectation states the fixture's own identity instead of restating the
+    /// seed behind it.
+    fn for_conversations(
+        conversations: impl IntoIterator<Item = ImportedConversationId>,
+        entries: impl IntoIterator<Item = u128>,
+    ) -> Self {
         Self {
-            conversations: conversations
-                .iter()
-                .copied()
-                .map(|value| ImportedConversationId::from_uuid(Uuid::from_u128(value)))
-                .collect(),
+            conversations: conversations.into_iter().collect(),
             entries: entries
                 .into_iter()
                 .map(|value| ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(value)))
                 .collect(),
         }
+    }
+
+    /// Mints conversation identities from seeds for tests that never name them.
+    fn new(conversations: &[u128], entries: impl IntoIterator<Item = u128>) -> Self {
+        Self::for_conversations(
+            conversations
+                .iter()
+                .copied()
+                .map(|value| ImportedConversationId::from_uuid(Uuid::from_u128(value))),
+            entries,
+        )
     }
 }
 
@@ -1061,7 +1074,7 @@ async fn s28_inv038_grown_claude_source_is_new_snapshot_with_shared_lineage()
     let first_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x1100));
     let grown_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x1200));
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x1100, 0x1200], [0x1110, 0x1210, 0x1211]),
+        FixedIds::for_conversations([first_snapshot, grown_snapshot], [0x1110, 0x1210, 0x1211]),
         ClaudeCodeJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -1148,7 +1161,7 @@ async fn s28_inv038_grown_codex_source_is_new_snapshot_with_shared_lineage()
     let first_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x2100));
     let grown_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x2200));
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x2100, 0x2200], [0x2110, 0x2210, 0x2211]),
+        FixedIds::for_conversations([first_snapshot, grown_snapshot], [0x2110, 0x2210, 0x2211]),
         CodexRolloutJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -1228,7 +1241,10 @@ async fn s28_source_session_lineage_is_null_without_one_consistent_attestation()
     let missing_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x3100));
     let conflicting_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x3200));
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x3100, 0x3200], [0x3110, 0x3210, 0x3211]),
+        FixedIds::for_conversations(
+            [missing_snapshot, conflicting_snapshot],
+            [0x3110, 0x3210, 0x3211],
+        ),
         ClaudeCodeJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -1279,7 +1295,7 @@ async fn s28_inv002_inv038_corrupt_source_session_lineage_fails_closed()
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x3300));
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut initial_import = ImportConversationService::new(
-        FixedIds::new(&[0x3300], [0x3310]),
+        FixedIds::for_conversations([winner], [0x3310]),
         ClaudeCodeJsonlConverter,
         repository.clone(),
     );
