@@ -2140,6 +2140,7 @@ pub enum ReviewExternalObjectState {
 /// One append-only external-state observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkObservation {
+    link: ReviewExternalLinkId,
     ordinal: ReviewEventOrdinal,
     pass: ReviewPassRef,
     state: ReviewExternalObjectState,
@@ -2148,15 +2149,22 @@ pub struct ReviewExternalLinkObservation {
 impl ReviewExternalLinkObservation {
     /// Constructs one observation.
     pub const fn new(
+        link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassRef,
         state: ReviewExternalObjectState,
     ) -> Self {
         Self {
+            link,
             ordinal,
             pass,
             state,
         }
+    }
+
+    /// Returns the observed external-link reservation.
+    pub const fn link(self) -> ReviewExternalLinkId {
+        self.link
     }
 
     /// Returns the contiguous one-based ordinal.
@@ -2246,6 +2254,9 @@ impl ReviewExternalLink {
         if self.attachment.is_none() {
             return Err(ReviewExternalLinkTransitionError::NotAttached);
         }
+        if observation.link != self.id {
+            return Err(ReviewExternalLinkTransitionError::ForeignObservationLink);
+        }
         if observation.pass.target() != self.association.target() {
             return Err(ReviewExternalLinkTransitionError::ForeignPass);
         }
@@ -2296,6 +2307,8 @@ impl ReviewExternalLink {
 pub enum ReviewExternalLinkTransitionError {
     /// A second attachment was attempted.
     AlreadyAttached,
+    /// An observation belongs to another external-link reservation.
+    ForeignObservationLink,
     /// Attachment or observation evidence belongs to another target.
     ForeignPass,
     /// An observation was supplied before attachment.
@@ -3225,6 +3238,7 @@ mod tests {
         let premature = pending
             .clone()
             .observe(ReviewExternalLinkObservation::new(
+                link_id(30),
                 ReviewEventOrdinal::one(),
                 pass_ref(20),
                 ReviewExternalObjectState::Current,
@@ -3239,6 +3253,7 @@ mod tests {
             ))
             .expect("same-target pass may attach the reservation")
             .observe(ReviewExternalLinkObservation::new(
+                link_id(30),
                 ReviewEventOrdinal::one(),
                 pass_ref(21),
                 ReviewExternalObjectState::Current,
@@ -3247,6 +3262,35 @@ mod tests {
         assert_eq!(
             attached.attachment().map(|value| value.external_object()),
             Some(&key("external-comment-42"))
+        );
+    }
+
+    /// INV-040: an observation from another same-target link cannot be
+    /// attributed to the loaded aggregate.
+    #[test]
+    fn inv040_external_link_rejects_foreign_observation_owner() {
+        let attached = ReviewExternalLink::reserve(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding_ref(10)),
+            key("code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            pass_ref(20),
+            key("external-comment-42"),
+        ))
+        .expect("same-target pass may attach the reservation");
+        let error = attached
+            .observe(ReviewExternalLinkObservation::new(
+                link_id(31),
+                ReviewEventOrdinal::one(),
+                pass_ref(21),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect_err("observation owner must match the aggregate link");
+        assert_eq!(
+            error,
+            ReviewExternalLinkTransitionError::ForeignObservationLink
         );
     }
 

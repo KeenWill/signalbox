@@ -166,8 +166,10 @@ as proof that the external effect did not occur and is not automatically retried
 local transaction because it issues no external write.
 
 After attachment, append-only observations record `Current`, `Outdated`, or
-`Resolved` with a same-target pass and contiguous ordinal. Observations describe
-the external object's reported state; they do not rewrite finding status.
+`Resolved` with the owning external-link identity, a same-target pass, and a
+contiguous ordinal. Reconstitution rejects an observation from another link,
+even when both reservations share a target. Observations describe the external
+object's reported state; they do not rewrite finding status.
 
 ## Store and reconstitution
 

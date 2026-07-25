@@ -5338,14 +5338,15 @@ pub enum ReviewExternalObjectState {
     Outdated,
     Resolved,
 }
-pub struct ReviewExternalLinkObservation { /* ordinal + pass + state */ }
+pub struct ReviewExternalLinkObservation { /* link + ordinal + pass + state */ }
 impl ReviewExternalLinkObservation {
     pub const fn new(
+        link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassRef,
         state: ReviewExternalObjectState,
     ) -> Self;
-    // accessors: ordinal(), pass(), state()
+    // accessors: link(), ordinal(), pass(), state()
 }
 pub struct ReviewExternalLink { /* reservation + optional attachment + observations */ }
 impl ReviewExternalLink {
@@ -5372,6 +5373,7 @@ impl ReviewExternalLink {
 }
 pub enum ReviewExternalLinkTransitionError {
     AlreadyAttached,
+    ForeignObservationLink,
     ForeignPass,
     NotAttached,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
