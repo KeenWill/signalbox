@@ -3896,7 +3896,21 @@ fn reconstitute_inner(
                 )?;
                 let mut expected = source.ordered_entries().collect::<Vec<_>>();
                 expected.push(failed_entry);
-                if terminal.ordered_entries().ne(expected.iter().copied()) {
+                let ordinary_terminal_matches =
+                    terminal.ordered_entries().eq(expected.iter().copied());
+                let tool_round_terminal_matches = terminal_execution
+                    .as_ref()
+                    .is_some_and(|execution| execution.ended_call.is_none())
+                    && tool_round_terminal_matches(
+                        turn,
+                        &terminal,
+                        failed_entry,
+                        &model_calls,
+                        &assistant_by_call,
+                        &snapshots,
+                        &semantic_entries,
+                    );
+                if !ordinary_terminal_matches && !tool_round_terminal_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
                             turn,
@@ -4250,7 +4264,18 @@ fn reconstitute_inner(
                 )?;
                 let mut expected = source.ordered_entries().collect::<Vec<_>>();
                 expected.push(cancellation_entry);
-                if terminal.ordered_entries().ne(expected) {
+                let ordinary_terminal_matches = terminal.ordered_entries().eq(expected);
+                let tool_round_terminal_matches = terminal_execution.ended_call.is_none()
+                    && tool_round_terminal_matches(
+                        turn,
+                        &terminal,
+                        cancellation_entry,
+                        &model_calls,
+                        &assistant_by_call,
+                        &snapshots,
+                        &semantic_entries,
+                    );
+                if !ordinary_terminal_matches && !tool_round_terminal_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
                             turn,
@@ -5133,6 +5158,98 @@ fn completed_terminal_matches(
                     }) if *producing_call == completing_call
                 )
         })
+}
+
+fn tool_round_terminal_matches(
+    turn: TurnId,
+    terminal: &ResolvedContextFrontierSnapshot,
+    terminal_marker: SemanticTranscriptEntryRef,
+    model_calls: &BTreeMap<crate::ModelCallId, ReconstitutedModelCall>,
+    assistant_by_call: &BTreeMap<crate::ModelCallId, BTreeSet<SemanticTranscriptEntryRef>>,
+    snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
+    semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
+) -> bool {
+    let terminal_entries = terminal.ordered_entries().collect::<Vec<_>>();
+    let Some((last, before_marker)) = terminal_entries.split_last() else {
+        return false;
+    };
+    if *last != terminal_marker {
+        return false;
+    }
+
+    model_calls
+        .iter()
+        .filter(|(call_id, candidate)| {
+            let ReconstitutedModelCall::Ended(call) = candidate else {
+                return false;
+            };
+            if call.turn() != turn || call.disposition() != ModelCallDisposition::Completed {
+                return false;
+            }
+            let Some(source) = snapshots.get(&call.frontier().snapshot()) else {
+                return false;
+            };
+            let source_entries = source.ordered_entries().collect::<Vec<_>>();
+            if !before_marker.starts_with(&source_entries) {
+                return false;
+            }
+            let Some(assistant_entries) = assistant_by_call.get(call_id) else {
+                return false;
+            };
+            let remainder = &before_marker[source_entries.len()..];
+            if remainder.len() < assistant_entries.len() {
+                return false;
+            }
+            let (assistant_suffix, result_suffix) = remainder.split_at(assistant_entries.len());
+            if !assistant_suffix
+                .iter()
+                .all(|entry| assistant_entries.contains(entry))
+            {
+                return false;
+            }
+
+            let mut requests = Vec::new();
+            for entry in assistant_suffix {
+                match semantic_entries
+                    .get(entry)
+                    .map(SemanticTranscriptEntry::payload)
+                {
+                    Some(SemanticTranscriptEntryPayload::AssistantText {
+                        producing_call, ..
+                    }) if producing_call == *call_id => {}
+                    Some(SemanticTranscriptEntryPayload::AssistantToolUse {
+                        producing_call,
+                        request,
+                    }) if producing_call == *call_id => requests.push(*request),
+                    _ => return false,
+                }
+            }
+            if requests.is_empty()
+                || requests.iter().copied().collect::<BTreeSet<_>>().len() != requests.len()
+                || result_suffix.len() != requests.len()
+            {
+                return false;
+            }
+
+            let mut observed_attempts = BTreeSet::new();
+            result_suffix.iter().zip(requests).all(|(entry, request)| {
+                match semantic_entries
+                    .get(entry)
+                    .map(SemanticTranscriptEntry::payload)
+                {
+                    Some(SemanticTranscriptEntryPayload::ToolExecutionResult { attempt }) => {
+                        observed_attempts.insert(*attempt)
+                    }
+                    Some(
+                        SemanticTranscriptEntryPayload::ToolDenied { request: actual }
+                        | SemanticTranscriptEntryPayload::ToolClosed { request: actual },
+                    ) => *actual == request,
+                    _ => false,
+                }
+            })
+        })
+        .count()
+        == 1
 }
 
 fn prepare_active_turn_lost_failure(
@@ -7078,6 +7195,270 @@ mod tests {
         assert_eq!(
             frontier_collision.failure(),
             AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists
+        );
+    }
+
+    /// S02 / S07 / S11 / INV-005 / INV-006 / INV-037: scheduling
+    /// reconstitution accepts the exact terminal shape written when an
+    /// interrupt closes a yielded tool round.
+    #[test]
+    fn s02_s07_s11_inv005_inv006_inv037_cancelled_tool_round_reconstitutes() {
+        let session = current_session();
+        let cancelled = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let origin_entry = semantic_entry(30);
+        let tool_use_entry = semantic_entry(31);
+        let result_entry = semantic_entry(32);
+        let cancellation_entry = semantic_entry(33);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let producing_call = model_call_id(50);
+        let producing_attempt = turn_attempt_id(51);
+        let terminal_attempt = turn_attempt_id(52);
+        let request = tool_request_id(60);
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            cancelled.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(70),
+            session.id(),
+            cancelled.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
+        )
+        .expect("the terminal interrupt is exactly correlated");
+        let cancelled_record = cancelled.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                terminal_execution: CancelledTurnExecutionReconstitutionInput::new(
+                    cancelled.turn(),
+                    terminal_attempt,
+                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                        CancellationStopDisposition::Cancelled,
+                        interrupt,
+                    ),
+                    None,
+                    interrupt,
+                ),
+                terminal_frontier: terminal_frontier.id(),
+            },
+        );
+        let successor_record = successor.record_with(
+            &session,
+            OriginRecordFacts {
+                order: successor_order,
+                delivery: DeliveryRequest::Interrupt {
+                    expected_active_turn: cancelled.turn(),
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
+        );
+        let semantic_entries = vec![
+            cancelled.entry(&session, origin_entry),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                tool_use_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call,
+                    request,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                result_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ToolDenied { request },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                cancellation_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::TurnCancelled {
+                    turn: cancelled.turn(),
+                },
+            ),
+        ];
+        let target = ResolvedProviderTarget::naming(provider_model_identity(80));
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![cancelled_record, successor_record],
+            semantic_entries,
+            vec![
+                starting_frontier.snapshot(&session, &[origin_entry]),
+                terminal_frontier.snapshot(
+                    &session,
+                    &[
+                        origin_entry,
+                        tool_use_entry,
+                        result_entry,
+                        cancellation_entry,
+                    ],
+                ),
+            ],
+            None,
+        )
+        .with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                cancelled.turn(),
+                target,
+            )],
+            vec![ModelCallReconstitutionInput::new(
+                producing_call,
+                cancelled.turn(),
+                producing_attempt,
+                FrozenModelSelection::Direct(direct(1)),
+                target,
+                starting_frontier.id(),
+                ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+            )],
+        );
+
+        let projection = input
+            .reconstitute()
+            .expect("the writer-produced cancelled tool-round shape reconstitutes");
+
+        assert_eq!(
+            projection
+                .turn(cancelled.turn())
+                .expect("the cancelled turn remains present")
+                .status(),
+            AcceptedInputTurnSchedulingStatus::TerminalCancelled
+        );
+        assert_eq!(
+            projection
+                .earliest_queued_turn()
+                .expect("the interrupt successor remains queued")
+                .turn(),
+            successor.turn()
+        );
+    }
+
+    /// S02 / S03 / S11 / INV-005 / INV-006 / INV-034: scheduling
+    /// reconstitution accepts the exact terminal shape written when a
+    /// crash-lost tool round closes the turn as failed.
+    #[test]
+    fn s02_s03_s11_inv005_inv006_inv034_failed_tool_round_reconstitutes() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let first_tool_use = semantic_entry(31);
+        let second_tool_use = semantic_entry(32);
+        let first_result = semantic_entry(33);
+        let second_result = semantic_entry(34);
+        let failure_entry = semantic_entry(35);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let producing_call = model_call_id(50);
+        let producing_attempt = turn_attempt_id(51);
+        let terminal_attempt = turn_attempt_id(52);
+        let first_request = tool_request_id(60);
+        let second_request = tool_request_id(61);
+        let failed_record = failed.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                terminal_execution: Some(FailedTurnExecutionReconstitutionInput::attempt_only(
+                    failed.turn(),
+                    terminal_attempt,
+                    UnstoppedAttemptDisposition::KnownFailure,
+                )),
+                terminal_frontier: terminal_frontier.id(),
+            },
+        );
+        let semantic_entries = vec![
+            failed.entry(&session, origin_entry),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                first_tool_use.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call,
+                    request: first_request,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                second_tool_use.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call,
+                    request: second_request,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                first_result.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ToolExecutionResult {
+                    attempt: tool_attempt_id(70),
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                second_result.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ToolClosed {
+                    request: second_request,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                failure_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::TurnFailed {
+                    turn: failed.turn(),
+                },
+            ),
+        ];
+        let target = ResolvedProviderTarget::naming(provider_model_identity(80));
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![failed_record],
+            semantic_entries,
+            vec![
+                starting_frontier.snapshot(&session, &[origin_entry]),
+                terminal_frontier.snapshot(
+                    &session,
+                    &[
+                        origin_entry,
+                        first_tool_use,
+                        second_tool_use,
+                        first_result,
+                        second_result,
+                        failure_entry,
+                    ],
+                ),
+            ],
+            None,
+        )
+        .with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                failed.turn(),
+                target,
+            )],
+            vec![ModelCallReconstitutionInput::new(
+                producing_call,
+                failed.turn(),
+                producing_attempt,
+                FrozenModelSelection::Direct(direct(1)),
+                target,
+                starting_frontier.id(),
+                ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+            )],
+        );
+
+        let projection = input
+            .reconstitute()
+            .expect("the writer-produced failed tool-round shape reconstitutes");
+
+        assert_eq!(
+            projection
+                .turn(failed.turn())
+                .expect("the failed turn remains present")
+                .status(),
+            AcceptedInputTurnSchedulingStatus::TerminalFailed
         );
     }
 

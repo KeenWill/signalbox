@@ -5,7 +5,9 @@ consumes it were verified through PR #177 (`agent/terminal-client`). The
 conversation-import stack adds protocol version two for the conservative
 imported transcript-snapshot projection described here. The tool-loop stack adds
 protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. This page is the normative boundary
+their closed message vocabularies unchanged. Versions two and three are protocol
+law ahead of the wire implementation, which currently speaks the single version
+`PROTOCOL_VERSION = 1` with no negotiation. This page is the normative boundary
 between a local client process and `signalbox-hubd`; domain values, PostgreSQL
 records, and wire messages remain distinct representations.
 
@@ -184,10 +186,13 @@ snapshot requires a tool-only state or entry returns an error in its admitted
 version with `code = "unsupported_version"` naming version three before any
 snapshot frame. If an already-followed tool-free session first commits a
 tool-only event, a version-one or version-two follower receives that same error
-and the connection closes before the event is emitted. This gate lets an
-upgraded hub continue serving old clients without sending a tagged variant their
-accepted version requires them to reject. Version three adds tool observation
-but no approval, cancellation, or other mutation request.
+and the connection closes before the event is emitted. A version-one or
+version-two `submit_input` request targeting a session whose existing history
+contains a tool-only state or entry returns that same error naming version three
+before mutation. This gate lets an upgraded hub continue serving old clients
+without sending a tagged variant their accepted version requires them to reject.
+Version three adds tool observation but no approval, cancellation, or other
+mutation request.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
 before application construction or mutation and returns `invalid_request` when
@@ -588,9 +593,9 @@ printed command identity; `send` then also requires the exact
 `--defaults-version`, and the two flags are rejected unless supplied together.
 The client never silently substitutes a new command identity for an ambiguous
 attempt. It uses a fresh nonzero request identity per connection, renders only
-known version-two messages, and exits nonzero on protocol or application errors
-other than the follow-specific `resync_required` control case, which reconnects
-for a fresh snapshot.
+known version-three messages, and exits nonzero on protocol or application
+errors other than the follow-specific `resync_required` control case, which
+reconnects for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn
