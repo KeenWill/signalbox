@@ -95,7 +95,9 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             canonical_turn.terminal_disposition_kind
                 AS turn_terminal_disposition_kind,
             canonical_turn.terminal_frontier_id
-                AS turn_terminal_frontier_id
+                AS turn_terminal_frontier_id,
+            canonical_run.run_id AS canonical_run_id,
+            canonical_run.target_id AS canonical_run_target_id
        FROM review_pass AS workflow_pass
        JOIN review_run AS canonical_run
          ON canonical_run.run_id = workflow_pass.run_id
