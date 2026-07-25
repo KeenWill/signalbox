@@ -50,15 +50,20 @@ the same transaction that admits its effect; a bound result is immutable. A
 read-only result is a canonical identity-ordered inventory of at most 32 exact
 finding references, whose immutable canonical rows supply their content. Event,
 attachment, and observation results commit every meaning-bearing identity,
-ordinal, state, or reason. Duplicate and superseded events freeze the referenced
-finding's canonically authenticated `Open` or `Accepted` status. Persistence
-locks both finding roots in identity order before appending that durable
-admission fact; terminal classification prevents a later reverse edge.
+ordinal, state, or reason. Because a posted event's pass also produces its
+external attachment, the attachment result optionally commits that complete
+posted event and both records are admitted atomically; a separate finding-event
+result cannot claim the same pass. Duplicate and superseded events freeze the
+referenced finding's canonically authenticated `Open` or `Accepted` status.
+Persistence locks both finding roots in identity order before appending that
+durable admission fact; terminal classification prevents a later reverse edge.
 
 **Rejected alternatives.** Pass kind and outcome alone do not identify an
 effect. Copying finding content into the result creates a second content
 authority. An unbounded finding inventory has no defensive admission budget.
-Detecting reference cycles only while loading allows invalid history to commit.
+Splitting one posting pass across independently bindable attachment and event
+results defeats one-result immutability. Detecting reference cycles only while
+loading allows invalid history to commit.
 
 **Affects.** Pass outcomes, finding and external-effect admission,
 reconstitution, the [review-workflows specification](spec/review-workflows.md),

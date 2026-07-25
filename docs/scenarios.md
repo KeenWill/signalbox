@@ -927,6 +927,7 @@ those tests.
   no other review pass owns that input, and project the pass from that exact
   origin turn; bind each effect-producing pass once to its exact bounded finding
   inventory, complete finding-event payload, attachment, or observation result;
+  an attachment that posts a finding commits both effects in that one result;
   and append each proposed finding's own contiguous event history. Duplicate and
   superseded events authenticate an open or accepted referenced finding before
   committing. Acceptance and posting enforce the finding's frozen judgment and
