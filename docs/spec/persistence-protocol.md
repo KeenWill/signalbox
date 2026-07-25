@@ -1,15 +1,16 @@
 # Persistence protocol
 
 The baseline persistence protocol was verified through PR #175
-(`agent/stop-requests`). This page covers the Postgres representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+(`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
+(`agent/review-process-amendments`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -62,6 +63,21 @@ fence migration's first installation is the sole case without a prior fenced
 pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
+
+Prefix reservation across concurrent stacks: the bottom pull request of any
+stack that will add migrations declares a reserved prefix block — a date plus a
+slot range — in its description, and sibling stacks pick disjoint blocks. Once a
+stack holds a reserved block, renumbering its migrations after a base merges is
+forbidden as long as the reserved prefix still exceeds the highest prefix on
+`main`; the ordering guarantee — a strictly greater prefix than the stack's
+ultimate `main`-merge target — is checked against that target rather than
+against a prefix the immediate parent branch carries only because a sibling
+merged into it. Within a stack the guarantee still binds against the stack's own
+migrations: a prefix a child pull request adds strictly exceeds every prefix its
+ancestor branches add, because `_sqlx_migrations` keys applied migrations by
+version, so a repeated prefix collides and a lower one applies out of order.
+Why: parallel migration-bearing stacks would otherwise collide on the next free
+prefix and churn-renumber each time a sibling merges.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
@@ -393,9 +409,11 @@ The scheduling load proves its own completeness — it counts
 than trusting whichever rows a filter returned. It also walks the union of the
 required frontier prefix chains once, loads each reachable header and delta
 once, and reconstitutes shared prefixes without rebuilding their complete
-membership. Active-phase, terminal-evidence, and acceptance-tail validation
-semantics are owned by
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+membership. A process transcript read likewise opens one database cursor over
+one resolution of the selected frontier chain, validates its declared count and
+contiguous positions while advancing, and decodes at most one entry row at a
+time. Active-phase, terminal-evidence, and acceptance-tail validation semantics
+are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
