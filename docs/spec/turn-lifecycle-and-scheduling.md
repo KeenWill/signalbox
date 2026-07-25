@@ -297,8 +297,10 @@ end (INV-034):
   result suffix plus `TurnFailed`, and fails the turn, while in-flight
   external-effect work closes ambiguous and parks on that exact attempt; and
 - a running tool batch whose requests are all already resolved and which has no
-  current attempt is returned as resumable work, so a scheduler pass projects
-  its results and prepares the next call without relying on a lost local wake.
+  current tool attempt is returned as resumable work — its continuation turn
+  attempt remains current, `Prepared` or `Running` ([tool-loop](tool-loop.md)) —
+  so a scheduler pass projects its results and prepares the next call without
+  relying on a lost local wake.
 
 In the three failing branches only, one `TurnFailed` semantic entry is appended.
 The evidence-free branch extends the starting frontier; the prepared-call branch
