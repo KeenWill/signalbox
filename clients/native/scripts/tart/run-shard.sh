@@ -78,6 +78,8 @@ Environment:
   SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
                         Mounted into the guest through a temporary env file;
                         never embedded in the Tart command line.
+  SIGNALBOX_NATIVE_SKIP_TESTING
+                        Space-separated Xcode test identifiers to skip.
   SCREENSHOT_STATE_NAMES
   SCREENSHOT_DEVICE_NAMES
 EOF
@@ -274,6 +276,9 @@ remote_guest_command() {
 	fi
 	if [[ -n "${SCREENSHOT_DEVICE_NAMES:-}" ]]; then
 		environment_arguments+=("SCREENSHOT_DEVICE_NAMES=$SCREENSHOT_DEVICE_NAMES")
+	fi
+	if [[ -n "${SIGNALBOX_NATIVE_SKIP_TESTING:-}" ]]; then
+		environment_arguments+=("SIGNALBOX_NATIVE_SKIP_TESTING=$SIGNALBOX_NATIVE_SKIP_TESTING")
 	fi
 
 	printf 'cd %q && ' "$guest_root"
