@@ -59,10 +59,13 @@ vocabulary reaches `crates/process-protocol`, persistence internals, and most
 for the current stacks. "Hub" survives only as occasional prose metaphor, never
 as the name of a binary, crate, module, or protocol concept. The Swift client's
 LLMHub-prefixed naming is not this entry's job — the native client rewire
-replaces those names wholesale. Open point deferred to the runner-protocol
-design pass: whether future runner processes are the same binary in a different
-role or a separate `signalbox-runner` binary; this entry renames the server only
-and does not pre-decide that.
+replaces those names wholesale.
+
+Owner direction, 2026-07-25: the point previously deferred here is settled — the
+server renames to `signalboxd`, and future runner processes are a separate
+`signalbox-runner` binary (thin binaries over shared workspace crates), not the
+same binary in a different role. This pass renames the server and carries no
+open questions; the runner-protocol entry below records the runner texture.
 
 ## Owner-to-user rename [blocked-on: in-flight stacks landing; inventory step] [size: M]
 
@@ -481,6 +484,20 @@ Owns: runner registry, outbound runner connection protocol, dispatch fencing
 completion, placement. Collides-with: tool loop machinery. Carries the remote
 tool catalog; runner auth (separate credentials, allowlists, no
 permission-downgrade on re-registration) is designed in from day one.
+
+Owner direction, 2026-07-25 (orientation only; the design pass still carries the
+real design and its decision-log entries): runners are the processes that host
+goal runs and automation sessions, and they ship as a separate
+`signalbox-runner` binary — a thin binary over shared workspace crates, distinct
+from `signalboxd` — so this entry also owns that binary when it is built. The
+lifetime spectrum is a design input: some deployments run persistent daemon
+runners on owner machines, others run short-lived dynamically-registered runners
+(ephemeral cloud sandboxes) that register with the server, work, and disconnect.
+Consequences the design pass takes as given: registration and deregistration are
+first-class protocol flows, runner identity is not machine-pinned, and
+authentication must work for a runner that did not exist minutes earlier — which
+sharpens the standing design-runner-authentication-in-from-day-one caution.
+Everything else stays with the design pass.
 
 ## Delegation and child sessions [blocked-on: delegation cause decision; tool loop; selectable transcript-frontier decision (fork selection)] [size: L]
 
