@@ -28,6 +28,14 @@ facts make a cross-wired target/run/pass/finding combination unconstructible in
 normal domain use and rejectable during reconstitution (INV-001, INV-002,
 INV-040).
 
+Key-like values preserve their exact UTF-8 content without trimming or
+normalization. Construction rejects empty values, U+0000, and values longer than
+1,024 UTF-8 bytes for provider, repository, revision, file-path, category, and
+external-object keys. Narrative finding titles, bodies, reasons, and recommended
+fixes have the same exact-content rules with a 65,536-byte limit. These
+provisional admission budgets are enforced in both domain construction and
+relational checks.
+
 ## Targets and frozen policy
 
 A `ReviewTarget` is one immutable snapshot:
