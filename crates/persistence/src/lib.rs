@@ -31,6 +31,7 @@ use sqlx::{
     migrate::{MigrateError, Migrator},
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
+use url::Url;
 
 /// The reviewed, forward-only migration set embedded in this crate.
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -89,14 +90,49 @@ fn default_passfile_is_present() -> bool {
     std::env::home_dir().is_some_and(|home| home.join(".pgpass").exists())
 }
 
+/// Names the connection parameters SQLx would take from outside the URL
+/// because this URL omits them: the user name from the process account
+/// (`whoami`), and the host from a probe of the local PostgreSQL socket
+/// directories that falls back to `localhost`. Each may be stated in the URL's
+/// authority or in the query parameter SQLx reads for it — `user` for the user
+/// name, `host` or `hostaddr` for the host. Port and database name are left to
+/// SQLx: an omitted port is the fixed 5432, and an omitted database name lets
+/// the server apply the user name the URL states, so neither reaches outside
+/// the URL once the ambient variables are refused.
+fn parameters_taken_from_outside_the_url(url: &Url) -> Vec<&'static str> {
+    let mut host_is_stated = url.host_str().is_some_and(|host| !host.is_empty());
+    let mut user_is_stated = !url.username().is_empty();
+    for (parameter, value) in url.query_pairs() {
+        if value.is_empty() {
+            continue;
+        }
+        match &*parameter {
+            "host" | "hostaddr" => host_is_stated = true,
+            "user" => user_is_stated = true,
+            _ => {}
+        }
+    }
+
+    let mut taken = Vec::new();
+    if !host_is_stated {
+        taken.push("host");
+    }
+    if !user_is_stated {
+        taken.push("user");
+    }
+    taken
+}
+
 /// Parses production connection options with certificate and hostname checks.
 ///
 /// The database URL is the only supported configuration channel for the
 /// production connection: when any ambient libpq-style `PG*` variable is
-/// present in the process environment (even with an empty value), or when the
-/// default `~/.pgpass` password file exists, parsing fails closed instead of
-/// letting the environment silently seed connection defaults or credentials.
-/// The error names the offending channel, never its contents.
+/// present in the process environment (even with an empty value), when the
+/// default `~/.pgpass` password file exists, or when the URL omits a parameter
+/// SQLx would then take from the process account or the host filesystem,
+/// parsing fails closed instead of letting the environment silently seed
+/// connection defaults or credentials. The error names the offending channel,
+/// never its contents.
 pub fn production_connection_options(database_url: &str) -> Result<PgConnectOptions, Error> {
     production_connection_options_with_environment(
         database_url,
@@ -133,6 +169,20 @@ fn production_connection_options_with_environment(
                 .into(),
         ));
     }
+    let url = Url::parse(database_url).map_err(Error::config)?;
+    let taken = parameters_taken_from_outside_the_url(&url);
+    if !taken.is_empty() {
+        return Err(Error::Configuration(
+            format!(
+                "the process account and host filesystem would supply production connection \
+                 parameters the database URL omits: {}; state every connection parameter in the \
+                 database URL",
+                taken.join(", ")
+            )
+            .into(),
+        ));
+    }
+
     PgConnectOptions::from_str(database_url).map(|options| options.ssl_mode(PgSslMode::VerifyFull))
 }
 
@@ -211,6 +261,43 @@ mod tests {
         .expect_err("the default passfile is a second credential channel and must fail closed");
 
         expect!["error with configuration: the default PostgreSQL password file would supply the production credential: `~/.pgpass` is present; remove it and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_reject_a_url_the_process_account_would_complete() {
+        let error = production_connection_options_with_environment(
+            "postgres:///signalbox",
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect_err("a URL SQLx would complete from outside must fail closed");
+
+        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: host, user; state every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_reject_a_url_that_states_only_the_host() {
+        let error = production_connection_options_with_environment(
+            "postgres://database.example/signalbox",
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect_err("a URL without a user name must fail closed");
+
+        expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: user; state every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_accept_parameters_stated_in_the_query() {
+        let options = production_connection_options_with_environment(
+            "postgres:///signalbox?host=database.example&user=signalbox",
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect("SQLx reads these query parameters, so the URL states both");
+
+        assert_eq!(options.get_host(), "database.example");
+        assert_eq!(options.get_username(), "signalbox");
     }
 
     #[test]

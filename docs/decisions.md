@@ -10,7 +10,7 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-25 — Refuse ambient PostgreSQL environment variables in production
+## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
 
 **Context.** The specification states that hubd reads exactly four deployment
 values from the process environment, with `DATABASE_URL` as the whole database
@@ -22,34 +22,48 @@ application name, runtime options — silently comes from the environment, and
 channel. URL parsing additionally ends in SQLx's `apply_pgpass`, which falls
 back to libpq's default `~/.pgpass` whenever the URL carries no password and
 `PGPASSFILE` is unset, so a deployment image holding that file supplies a
-credential without any variable being set. Only `sslmode` was already
-neutralized, by forcing `verify-full` after parsing.
+credential without any variable being set. Neither refusal reaches the last
+channel: with the variables gone, SQLx still completes an incomplete URL from
+the process account and the host filesystem, taking an omitted user name from
+`whoami` and an omitted host from a probe of the local socket directories that
+falls back to `localhost`. Only `sslmode` was already neutralized, by forcing
+`verify-full` after parsing.
 
 **Decision.** The production connection path fails closed when any of the
 thirteen consulted variables is present in the environment, whatever its value,
-and likewise when the default `~/.pgpass` exists under the process home
-directory. The passfile refusal turns on presence alone; the file is never
-opened, so no credential is read to decide. The error names the offending
-channel and never its contents, and the refusal precedes any database contact.
-The local test connection path keeps SQLx's behavior; it never reaches a
-production cluster.
+when the default `~/.pgpass` exists under the process home directory, and when
+the URL states no user name or no host — in its authority or in the `user`,
+`host`, and `hostaddr` query parameters SQLx reads for them. The passfile
+refusal turns on presence alone; the file is never opened, so no credential is
+read to decide. Port and database name are left to SQLx and the server, which
+derive them from the URL alone once the variables are refused: an omitted port
+is the fixed 5432, and an omitted database name is the user name the URL states.
+The error names the offending channel and never its contents, and the refusal
+precedes any database contact. The local test connection path keeps SQLx's
+behavior; it never reaches a production cluster.
 
 **Rejected alternatives.** Documenting the fallback set would make the
 environment surface honest while leaving an unmanaged credential channel and a
 connection whose target depends on ambient state. Rebuilding options field by
 field from a self-parsed URL would put a libpq connection-string parser in this
-repository to work around one driver default. Ignoring the variables silently
-would leave an operator who set them without any signal that they did nothing.
-Constructing options through a passfile-free path is not available: SQLx 0.9
-exposes `new_without_pgpass` only for the no-URL constructor, and its URL parser
-is private, so the passfile lookup cannot be skipped or the resulting field
+repository to work around one driver default; asking what the URL states is not
+that, and uses `url`, the parser SQLx itself feeds into `PgConnectOptions`, so
+the check sees exactly what the driver will. Requiring a database name as well
+would refuse a URL whose omitted name the server resolves to that URL's own user
+name, which never leaves the URL. Ignoring the variables silently would leave an
+operator who set them without any signal that they did nothing. Constructing
+options through a passfile-free path is not available: SQLx 0.9 exposes
+`new_without_pgpass` only for the no-URL constructor, and its URL parser is
+private, so the passfile lookup cannot be skipped or the resulting field
 cleared. Refusing only URLs that omit a password would close the same hole at
 its trigger, but it also forbids certificate and peer authentication, which the
 still-open database-credential decision may want.
 
-**Affects.** `production_connection_options`, hubd's production startup, and the
+**Affects.** `production_connection_options`, hubd's production startup, the
 process-configuration section of
-[configuration and credentials](spec/configuration-and-credentials.md).
+[configuration and credentials](spec/configuration-and-credentials.md), and a
+direct `url` dependency for `signalbox-persistence` — already in the tree as
+SQLx's own URL parser, so it adds an edge rather than a crate.
 
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 

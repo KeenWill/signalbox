@@ -34,11 +34,18 @@ channel — so the production connection path refuses to parse when any of them 
 present in the environment, whatever its value. The driver also falls back to
 libpq's default password file when the URL carries no password and `PGPASSFILE`
 is unset, so the same path refuses when `~/.pgpass` exists under the process
-home directory; presence alone decides and the file is never opened. The refusal
-names the offending channel and never its contents, and it happens before any
-database contact. A deployment carries every connection parameter in the URL;
-the local test connection path is unaffected because it never reaches a
-production cluster.
+home directory; presence alone decides and the file is never opened. With both
+closed the driver still completes an incomplete URL from outside it — an omitted
+user name from the process account, an omitted host by probing the local socket
+directories and then `localhost` — so the same path refuses a URL that states
+either nowhere the driver reads it: the authority, or the `user`, `host`, and
+`hostaddr` query parameters. Port and database name stay with the driver and the
+server, which derive them from the URL alone: an omitted port is the fixed 5432,
+and an omitted database name is the user name the URL states. The refusal names
+the offending channel and never its contents, and it happens before any database
+contact. A deployment carries every connection parameter in the URL; the local
+test connection path is unaffected because it never reaches a production
+cluster.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,
