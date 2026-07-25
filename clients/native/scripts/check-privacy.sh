@@ -3,7 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PATTERN='Analytics|AdMob|Firebase|ATTrackingManager|SKAdNetwork|RevenueCat|telemetry|remote config|tracking'
-LOGGING_PATTERN='(^|[^[:alnum:]_])(print|debugPrint|dump|NSLog|os_log|Logger)[[:space:]]*\('
+LOGGING_PATTERN='(^|[^[:alnum:]_])(print|debugPrint|dump|NSLog|os_log|Logger)[[:space:]]*\(|\.[[:space:]]*(trace|debug|info|notice|warning|error|critical|log)[[:space:]]*\('
+INSTANCE_LOGGING_FIXTURE='logger.info("synthetic message")'
+
+if ! printf '%s\n' "$INSTANCE_LOGGING_FIXTURE" | grep -q -E "$LOGGING_PATTERN"; then
+	echo "Privacy scan regression: instance logging fixture was not detected."
+	exit 1
+fi
 
 if grep -R -n -E "$PATTERN" "$ROOT/Sources" "$ROOT/SignalboxNative"; then
 	echo "Review privacy-sensitive references above."
