@@ -58,6 +58,28 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(keychain.readSecret(), "synthetic-saved-api-key")
     }
 
+    func testClientErrorsDoNotExposeConfiguredCredential() async throws {
+        let configuredCredential = "synthetic-credential-must-stay-private"
+        let transport = MockSignalboxHTTPTransport()
+        await transport.setJSONResponse(
+            path: "/api/v1/templates",
+            statusCode: 503,
+            json: #"{"detail":"synthetic service unavailable"}"#
+        )
+        let configuration = try SignalboxClientConfiguration(
+            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8000")),
+            apiKey: configuredCredential
+        )
+        let client = SignalboxAPIClient(configuration: configuration, transport: transport)
+
+        do {
+            _ = try await client.listTemplates()
+            XCTFail("Expected a service-unavailable error")
+        } catch let error as SignalboxClientError {
+            XCTAssertFalse(error.localizedDescription.contains(configuredCredential))
+        }
+    }
+
     func testApprovalCardsShowTheirMatchedConcurrentToolCallActions() throws {
         let callEventID = SignalboxEventID(rawValue: 1)
         let firstCallID = SignalboxToolCallID(rawValue: "call-A")
