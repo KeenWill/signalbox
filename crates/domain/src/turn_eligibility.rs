@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::context_frontier::ContextFrontierEntryValidationCache;
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
@@ -2906,6 +2907,7 @@ fn reconstitute_inner(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let mut frontier_entry_validation = ContextFrontierEntryValidationCache::default();
     for candidate in &input.snapshots {
         if candidate.owning_session() != session {
             return Err(
@@ -2914,25 +2916,26 @@ fn reconstitute_inner(
                 },
             );
         }
-        for entry in candidate.ordered_entries() {
-            if !semantic_entries.contains_key(entry) {
-                return Err(
-                    AcceptedInputSchedulingReconstitutionFailure::SnapshotEntryMissing {
-                        snapshot: candidate.snapshot(),
-                        entry: *entry,
-                    },
-                );
-            }
+        if let Some(entry) = candidate
+            .first_missing_entry(&mut frontier_entry_validation, |entry| {
+                semantic_entries.contains_key(entry)
+            })
+        {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::SnapshotEntryMissing {
+                    snapshot: candidate.snapshot(),
+                    entry,
+                },
+            );
         }
-        let (owning_session, snapshot, ordered_entries) = candidate.clone().into_parts();
-        let resolved = ResolvedContextFrontierSnapshot::try_from_candidate(
-            owning_session,
-            snapshot,
-            ordered_entries,
-        )
-        .map_err(|_| {
-            AcceptedInputSchedulingReconstitutionFailure::InvalidSnapshotMembership { snapshot }
-        })?;
+        let snapshot = candidate.snapshot();
+        let resolved =
+            ResolvedContextFrontierSnapshot::try_from_reconstitution_input(candidate.clone())
+                .map_err(|_| {
+                    AcceptedInputSchedulingReconstitutionFailure::InvalidSnapshotMembership {
+                        snapshot,
+                    }
+                })?;
         if snapshots.insert(snapshot, resolved).is_some() {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::DuplicateSnapshot { snapshot },
@@ -3968,10 +3971,8 @@ fn reconstitute_inner(
                 let failed_entry = failure_by_turn.get(&turn).copied().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::MissingFailureEntry { turn },
                 )?;
-                let mut expected = source.ordered_entries().collect::<Vec<_>>();
-                expected.push(failed_entry);
                 let ordinary_terminal_matches =
-                    terminal.ordered_entries().eq(expected.iter().copied());
+                    terminal.has_semantic_prefix_and_suffix(source, std::iter::once(failed_entry));
                 let tool_round_terminal_matches =
                     terminal_execution.as_ref().is_some_and(|execution| {
                         execution.ended_call.is_none()
@@ -4209,7 +4210,7 @@ fn reconstitute_inner(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || terminal.ordered_entries().ne(source.ordered_entries())
+                    || !terminal.same_semantic_content(source)
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -4339,9 +4340,8 @@ fn reconstitute_inner(
                 let cancellation_entry = cancellation_by_turn.get(&turn).copied().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::MissingCancellationEntry { turn },
                 )?;
-                let mut expected = source.ordered_entries().collect::<Vec<_>>();
-                expected.push(cancellation_entry);
-                let ordinary_terminal_matches = terminal.ordered_entries().eq(expected);
+                let ordinary_terminal_matches = terminal
+                    .has_semantic_prefix_and_suffix(source, std::iter::once(cancellation_entry));
                 let tool_round_terminal_matches = terminal_execution.ended_call.is_none()
                     && tool_round_terminal_matches(
                         turn,
@@ -4476,7 +4476,7 @@ fn reconstitute_inner(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || terminal.ordered_entries().ne(source.ordered_entries())
+                    || !terminal.same_semantic_content(source)
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -5183,18 +5183,14 @@ fn validate_start(
         .get(&turn)
         .copied()
         .ok_or(AcceptedInputSchedulingReconstitutionFailure::MissingOriginEntry { turn })?;
-    let mut expected = previous_terminal
-        .map(|(_, frontier)| frontier.ordered_entries().collect::<Vec<_>>())
-        .or_else(|| {
-            if index == 0 {
-                initial_seed.map(|seed| seed.ordered_entries().collect())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-    expected.push(origin);
-    if snapshot.ordered_entries().ne(expected.iter().copied()) {
+    let prefix = previous_terminal
+        .map(|(_, frontier)| frontier)
+        .or_else(|| (index == 0).then_some(initial_seed).flatten());
+    let membership_matches = prefix.map_or_else(
+        || snapshot.entry_count() == 1 && snapshot.ordered_entries().eq(std::iter::once(origin)),
+        |prefix| snapshot.has_semantic_prefix_and_suffix(prefix, std::iter::once(origin)),
+    );
+    if !membership_matches {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch { turn },
         );
@@ -5213,24 +5209,21 @@ fn completed_terminal_matches(
     completion_entry: SemanticTranscriptEntryRef,
     semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
 ) -> bool {
-    let starting_entries = starting.ordered_entries().collect::<Vec<_>>();
-    let terminal_entries = terminal.ordered_entries().collect::<Vec<_>>();
-    let Some((last, prefix_and_assistant)) = terminal_entries.split_last() else {
-        return false;
-    };
-    if *last != completion_entry
-        || !prefix_and_assistant.starts_with(&starting_entries)
-        || prefix_and_assistant.len() != starting_entries.len() + assistant_entries.len()
+    let assistant_start = starting.entry_count();
+    let assistant_end = terminal.entry_count().saturating_sub(1);
+    if terminal.ordered_entries().next_back() != Some(completion_entry)
+        || !starting.is_semantic_prefix_of(terminal)
+        || assistant_end != assistant_start + assistant_entries.len()
     {
         return false;
     }
 
-    prefix_and_assistant[starting_entries.len()..]
-        .iter()
+    terminal
+        .ordered_entries_range(assistant_start, assistant_end)
         .all(|entry| {
-            assistant_entries.contains(entry)
+            assistant_entries.contains(&entry)
                 && matches!(
-                    semantic_entries.get(entry).map(SemanticTranscriptEntry::payload),
+                    semantic_entries.get(&entry).map(SemanticTranscriptEntry::payload),
                     Some(InitialSemanticTranscriptEntryPayload::AssistantText {
                         producing_call,
                         ..
@@ -5251,11 +5244,8 @@ fn tool_round_terminal_matches(
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
 ) -> bool {
-    let terminal_entries = terminal.ordered_entries().collect::<Vec<_>>();
-    let Some((last, before_marker)) = terminal_entries.split_last() else {
-        return false;
-    };
-    if *last != terminal_marker {
+    let before_marker_end = terminal.entry_count().saturating_sub(1);
+    if terminal.ordered_entries().next_back() != Some(terminal_marker) {
         return false;
     }
 
@@ -5280,29 +5270,25 @@ fn tool_round_terminal_matches(
             let Some(source) = snapshots.get(&call.frontier().snapshot()) else {
                 return false;
             };
-            let source_entries = source.ordered_entries().collect::<Vec<_>>();
-            if !before_marker.starts_with(&source_entries) {
+            if !source.is_semantic_prefix_of(terminal) {
                 return false;
             }
             let Some(assistant_entries) = assistant_by_call.get(call_id) else {
                 return false;
             };
-            let remainder = &before_marker[source_entries.len()..];
-            if remainder.len() < assistant_entries.len() {
-                return false;
-            }
-            let (assistant_suffix, result_suffix) = remainder.split_at(assistant_entries.len());
-            if !assistant_suffix
-                .iter()
-                .all(|entry| assistant_entries.contains(entry))
-            {
+            let assistant_start = source.entry_count();
+            let assistant_end = assistant_start + assistant_entries.len();
+            if assistant_end > before_marker_end {
                 return false;
             }
 
             let mut requests = Vec::new();
-            for entry in assistant_suffix {
+            for entry in terminal.ordered_entries_range(assistant_start, assistant_end) {
+                if !assistant_entries.contains(&entry) {
+                    return false;
+                }
                 match semantic_entries
-                    .get(entry)
+                    .get(&entry)
                     .map(SemanticTranscriptEntry::payload)
                 {
                     Some(SemanticTranscriptEntryPayload::AssistantText {
@@ -5317,7 +5303,7 @@ fn tool_round_terminal_matches(
             }
             if requests.is_empty()
                 || requests.iter().copied().collect::<BTreeSet<_>>().len() != requests.len()
-                || result_suffix.len() != requests.len()
+                || before_marker_end - assistant_end != requests.len()
             {
                 return false;
             }
@@ -5333,28 +5319,31 @@ fn tool_round_terminal_matches(
             }
             let mut observed_attempts = BTreeSet::new();
             let mut observed_denials = BTreeSet::new();
-            let results_match = result_suffix.iter().zip(requests).all(|(entry, request)| {
-                match semantic_entries
-                    .get(entry)
-                    .map(SemanticTranscriptEntry::payload)
-                {
-                    Some(SemanticTranscriptEntryPayload::ToolExecutionResult { attempt }) => {
-                        observed_attempts.insert(*attempt)
-                            && attempts_by_id
-                                .get(attempt)
-                                .is_some_and(|ended| ended.request() == request)
+            let results_match = terminal
+                .ordered_entries_range(assistant_end, before_marker_end)
+                .zip(requests)
+                .all(|(entry, request)| {
+                    match semantic_entries
+                        .get(&entry)
+                        .map(SemanticTranscriptEntry::payload)
+                    {
+                        Some(SemanticTranscriptEntryPayload::ToolExecutionResult { attempt }) => {
+                            observed_attempts.insert(*attempt)
+                                && attempts_by_id
+                                    .get(attempt)
+                                    .is_some_and(|ended| ended.request() == request)
+                        }
+                        Some(SemanticTranscriptEntryPayload::ToolDenied { request: actual }) => {
+                            *actual == request
+                                && denied_requests.contains(actual)
+                                && observed_denials.insert(*actual)
+                        }
+                        Some(SemanticTranscriptEntryPayload::ToolClosed { request: actual }) => {
+                            *actual == request
+                        }
+                        _ => false,
                     }
-                    Some(SemanticTranscriptEntryPayload::ToolDenied { request: actual }) => {
-                        *actual == request
-                            && denied_requests.contains(actual)
-                            && observed_denials.insert(*actual)
-                    }
-                    Some(SemanticTranscriptEntryPayload::ToolClosed { request: actual }) => {
-                        *actual == request
-                    }
-                    _ => false,
-                }
-            });
+                });
             results_match
                 && observed_attempts.len() == attempts_by_id.len()
                 && observed_denials.len() == denied_requests.len()

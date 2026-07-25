@@ -2762,6 +2762,12 @@ impl ResolvedContextFrontierReconstitutionInput {
         snapshot: ContextFrontierId,
         ordered_entries: Vec<SemanticTranscriptEntryRef>,
     ) -> Self;
+    pub fn derive_appending(
+        &self,
+        snapshot: ContextFrontierId,
+        appended_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self;
+    pub fn entry_count(&self) -> usize;
     pub fn reconstitute(self) -> Option<ResolvedContextFrontierSnapshot>;
     // accessors: owning_session(), snapshot(), ordered_entries()
 }
@@ -2771,6 +2777,12 @@ pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // consumed by scheduling and model-call aggregate seams
 impl ResolvedContextFrontierSnapshot {
     pub fn entry_count(&self) -> usize;
+    pub fn appended_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef>
+           + DoubleEndedIterator
+           + '_;
+    pub fn immediate_semantic_prefix(&self) -> Option<ContextFrontier>;
     pub fn ordered_entries(
         &self,
     ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + DoubleEndedIterator + '_;
@@ -4999,7 +5011,7 @@ impl ReviewTarget {
 
 pub struct ReviewRunRef { /* target + run */ }
 pub struct ReviewPassRef { /* run ref + pass */ }
-pub struct ReviewFindingRef { /* run ref + finding */ }
+pub struct ReviewFindingRef { /* producing pass ref + finding */ }
 impl ReviewRunRef {
     pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
     // accessors: target(), run()
@@ -5009,8 +5021,8 @@ impl ReviewPassRef {
     // accessors: run(), pass(), target()
 }
 impl ReviewFindingRef {
-    pub const fn new(run: ReviewRunRef, finding: ReviewFindingId) -> Self;
-    // accessors: run(), finding(), target()
+    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
+    // accessors: pass(), run(), finding(), target()
 }
 
 pub enum ReviewWorkflowKind {
@@ -5269,9 +5281,10 @@ impl ReviewFindingEvent {
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
         pass: ReviewPassRef,
+        pass_kind: ReviewPassKind,
         kind: ReviewFindingEventKind,
     ) -> Self;
-    // accessors: finding(), ordinal(), pass(), kind()
+    // accessors: finding(), ordinal(), pass(), pass_kind(), kind()
 }
 pub enum ReviewFindingStatus {
     Open,
@@ -5301,6 +5314,7 @@ pub enum ReviewFindingTransitionFailure {
     ForeignProducingPass,
     ForeignEventFinding,
     ForeignEventPass,
+    IncompatibleEventPassKind,
     ForeignReferencedFinding,
     SelfReference,
     ForeignExternalLink,
@@ -5328,10 +5342,14 @@ pub enum ReviewExternalObjectKind {
     ReviewComment,
     ChangeRequestComment,
 }
-pub struct ReviewExternalLinkAttachment { /* pass + external object key */ }
+pub struct ReviewExternalLinkAttachment { /* link + pass + external object key */ }
 impl ReviewExternalLinkAttachment {
-    pub const fn new(pass: ReviewPassRef, external_object: ReviewKey) -> Self;
-    // accessors: pass(), external_object()
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassRef,
+        external_object: ReviewKey,
+    ) -> Self;
+    // accessors: link(), pass(), external_object()
 }
 pub enum ReviewExternalObjectState {
     Current,
@@ -5373,6 +5391,7 @@ impl ReviewExternalLink {
 }
 pub enum ReviewExternalLinkTransitionError {
     AlreadyAttached,
+    ForeignAttachmentLink,
     ForeignObservationLink,
     ForeignPass,
     NotAttached,

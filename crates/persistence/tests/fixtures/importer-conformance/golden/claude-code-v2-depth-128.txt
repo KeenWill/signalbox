@@ -1,0 +1,10 @@
+format: ClaudeCodeSessionJsonlV2
+raw_records: 1
+  1: raw="{\"type\":\"system\",\"deep\":[[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[0]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]]}"
+    normalized={"type": "system", "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+entries: 1
+  1: raw=1.1 speaker=not_attested
+    content=source_event(type=attested("system"))
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=not_attested
+addressable_frontiers: 1
+  1: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000200 through_position=1

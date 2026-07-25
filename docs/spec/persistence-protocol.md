@@ -93,7 +93,8 @@ Implemented table families (across the forward-only migrations):
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
-- `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- `semantic_transcript_entry`, `context_frontier`, `context_frontier_delta`,
+  plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   hub-owned session advisory pool fences;
@@ -101,6 +102,18 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
+- A `context_frontier` header records its immutable total member count and an
+  optional same-session prefix frontier. `context_frontier_delta` stores only
+  the absolute-position suffix beyond that prefix; roots store their complete
+  membership. The bounded `resolve_context_frontier_members` function follows
+  one requested prefix chain and returns the exact complete ordered membership.
+  Migration `202607260300` converts existing complete rows by selecting the
+  longest exact stored prefix (with an acyclic physical tie-break for
+  equal-content identities) without changing any frontier identity or resolved
+  sequence. Deferred completeness checks reject missing prefixes, cycles,
+  inherited duplicates, gaps, and a resolved count different from the header.
+  Why: append-derived histories store and load each immutable suffix once while
+  preserving the complete-snapshot contract.
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
@@ -331,8 +344,11 @@ or required ambiguous model call/tool attempt through the scheduling input
 described in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 The scheduling load proves its own completeness — it counts
 `queued_input_origin` against `turn_lifecycle` and fails on mismatch — rather
-than trusting whichever rows a filter returned. Active-phase, terminal-evidence,
-and acceptance-tail validation semantics are owned by
+than trusting whichever rows a filter returned. It also walks the union of the
+required frontier prefix chains once, loads each reachable header and delta
+once, and reconstitutes shared prefixes without rebuilding their complete
+membership. Active-phase, terminal-evidence, and acceptance-tail validation
+semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
@@ -525,8 +541,5 @@ by [process-protocol](process-protocol.md).
 - Command-handling error families implement no `ClassifyOperatorFailure`;
   operator classification covers only startup scan, turn activation, the
   eligibility sweep, and the model-call repository.
-- Submit-path scaling: the complete scheduling projection (content included)
-  loads under the session lock per submission; a bounded-read representation
-  remains undesigned (docs/open-questions.md).
 - Database-role separation remains a deployment choice; migration invocation
   itself is wired in `apps/hubd`.

@@ -612,3 +612,167 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
     pool.close().await;
     Ok(())
 }
+
+/// S28 / INV-009 / INV-015 / INV-039: one 300-entry imported seed remains
+/// exact when the production scheduling projection derives its first native
+/// successor, while physical storage adds only the one-entry suffix.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv009_inv015_long_frontier_projection_uses_linear_physical_deltas()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let identity = |family: u128, index: usize| {
+        Uuid::from_u128(
+            0x7f00_0000_0000_0000_0000_0000_0000_0000
+                + family * 0x1_0000
+                + u128::try_from(index).expect("the long fixture length fits u128"),
+        )
+    };
+    let conversation = ImportedConversationId::from_uuid(identity(1, 0));
+    let imported_entries = (0..300)
+        .map(|index| ImportedTranscriptEntryId::from_uuid(identity(2, index)))
+        .collect::<Vec<_>>();
+    let source = (0..300)
+        .map(|index| {
+            format!("{{\"type\":\"user\",\"message\":{{\"content\":\"entry {index}\"}}}}\n")
+        })
+        .collect::<String>();
+    let mut import_service = ImportConversationService::new(
+        FixedImportIds {
+            conversations: [conversation].into(),
+            entries: imported_entries.into(),
+        },
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    assert_eq!(
+        import_service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted { conversation }
+    );
+    let (_, _, import_repository) = import_service.into_parts();
+    let stored = import_repository
+        .load(conversation)
+        .await?
+        .expect("the long imported conversation is durable");
+    let selected_frontier = stored
+        .frontiers()
+        .last()
+        .expect("the final 300-entry boundary is addressable");
+
+    let session = SessionId::from_uuid(identity(3, 0));
+    let seed_entries = (0..300)
+        .map(|index| SemanticTranscriptEntryId::from_uuid(identity(4, index)))
+        .collect::<Vec<_>>();
+    let seed_frontier = ContextFrontierId::from_uuid(identity(5, 0));
+    let selection = DirectModelSelection::from_uuid(identity(6, 0));
+    let mut seed_service = CreateSessionFromImportedFrontierService::new(
+        FixedImportedSessionIds {
+            sessions: [session].into(),
+            semantic_entries: seed_entries.into(),
+            frontiers: [seed_frontier].into(),
+        },
+        ImportedSessionRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        seed_service
+            .execute(CreateSessionFromImportedFrontierRequest::try_new(
+                DurableCommandId::from_uuid(identity(7, 0)),
+                selected_frontier,
+                ImportedSessionRelationship::Resume,
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+            )?)
+            .await?,
+        CreateSessionFromImportedFrontierOutcome::Applied(_)
+    ));
+
+    let accepted_input = AcceptedInputId::from_uuid(identity(8, 0));
+    let turn = TurnId::from_uuid(identity(9, 0));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitIds {
+            accepted_inputs: [accepted_input].into(),
+            turns: [turn].into(),
+            semantic_entries: [SemanticTranscriptEntryId::from_uuid(identity(10, 0))].into(),
+            frontiers: [ContextFrontierId::from_uuid(identity(11, 0))].into(),
+        },
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        InProcessToolDispatchGate::default(),
+    );
+    assert!(matches!(
+        submit_service
+            .execute(SubmitInputRequest::try_new(
+                DurableCommandId::from_uuid(identity(12, 0)),
+                session,
+                UserContent::try_text("native continuation".to_owned())
+                    .expect("test content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: input_choices(),
+                },
+            )?)
+            .await?,
+        SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    let origin_entry = SemanticTranscriptEntryId::from_uuid(identity(13, 0));
+    let starting_frontier = ContextFrontierId::from_uuid(identity(14, 0));
+    let mut activation = StartEligibleTurnService::new(
+        FixedActivationIds {
+            origins: [origin_entry].into(),
+            frontiers: [starting_frontier].into(),
+            attempts: [TurnAttemptId::from_uuid(identity(15, 0))].into(),
+        },
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+
+    let storage_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM context_frontier_delta
+              WHERE owning_session_id = $1),
+            (SELECT count(*)
+               FROM context_frontier
+              WHERE owning_session_id = $1),
+            (SELECT count(*)
+               FROM context_frontier
+              WHERE owning_session_id = $1
+                AND prefix_context_frontier_id IS NOT NULL),
+            (SELECT sum(member_count)::bigint
+               FROM context_frontier
+              WHERE owning_session_id = $1),
+            (SELECT max(member_count)::bigint
+               FROM context_frontier
+              WHERE owning_session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(storage_shape, (301, 2, 1, 601, 301));
+
+    let resolved_shape: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*),
+            count(DISTINCT member_position),
+            min(member_position)::bigint,
+            max(member_position)::bigint
+           FROM resolve_context_frontier_members($1, $2)",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resolved_shape, (301, 301, 1, 301));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the long active frontier remains process-readable");
+    assert_eq!(transcript.entries().len(), 301);
+
+    pool.close().await;
+    Ok(())
+}

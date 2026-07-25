@@ -110,14 +110,23 @@ identifiers refer to [scenarios.md](scenarios.md).
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
-## Archival and retention
+## Session organization, visibility, and retention
 
-- **Archive eligibility, nonterminal work handling, and restore target.**
-  Leaning: preserve identity and history; never silently abandon work. Blocks
-  archive/restore. (S25)
-- **Archive effect on delegated children and related sessions.** Leaning:
-  explicit typed policy with visible outcomes; no implicit cascade or
-  independence rule selected. Blocks archiving related sessions. (S18, S19, S25)
+- **Creation-attributed default visibility.** The implemented visibility and
+  attribution limits are owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
+  Decide derivation, override shape and authority, and monitor inclusion
+  together with the attributed-creation implementation.
+- **Expressive metadata filters.** The implemented filter grammar is owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
+  Whether to add OR, negation, attribute predicates, case folding, or a general
+  query language remains open.
+- **Imported-conversation archive semantics.** Ordinary session archive and
+  immutable imported-source behavior are owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection)
+  and [conversation-import](spec/conversation-import.md). Whether imported
+  conversation records have a distinct non-destructive archive state, and how
+  that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
   ordinary archive; exact policy undefined. Later scope. (S17, S25)
 
@@ -275,10 +284,10 @@ questions below remain open.
   snapshot and durable-update semantics are defined by
   [process-protocol](spec/process-protocol.md), while transient model-update
   streaming remains open below. (S02, S24)
-- **Compatibility after exact process-protocol version one.** Version one has
-  its owning [specification](spec/process-protocol.md). A future compatibility
-  window, negotiation scheme, and generated-client policy remain undecided.
-  Blocks a version-two protocol. (S01, S24)
+- **Compatibility beyond the retained process-protocol versions.** Versions one
+  through four have their owning [specification](spec/process-protocol.md). A
+  future compatibility window, negotiation scheme, and generated-client policy
+  remain undecided. (S01, S24)
 - **Transient model-update relay.** Whether provider token deltas cross the
   process boundary, and the required draft identity, sequencing, replacement,
   backpressure, and redaction rules, remain undecided. The implemented durable
@@ -301,23 +310,9 @@ questions below remain open.
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) fixes
   evidence-bearing active-turn reconstitution with session-scoped acceptance
   tails. Streaming checkpoints, dispatch-generation placement, archival form,
-  and exact cancellation-delivery records remain open. The
-  [first physical frontier-layout choice](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
-  materializes complete ordered membership while preserving the accepted
-  frontier semantics' freedom for a later semantics-preserving migration. Those
-  remaining questions block only their corresponding adapter slices; the generic
-  scaffold and first typed command family are not blocked. (S03, S04, S17, S25,
-  S27)
-- **Submit-path scaling: scheduling projection and frontier storage.** The
-  [first frontier layout](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
-  materializes complete membership per snapshot and the submit path loads the
-  complete scheduling projection, content included per submission, inside the
-  session lock, degrading at hundreds of turns per session. A completeness
-  representation that bounds scheduling reads, plus a prefix-sharing or delta
-  layout the accepted frontier semantics permit, remains concretely undesigned.
-  The
-  [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
-  owns its accepted scheduling disposition. (S03, S04, S17)
+  and exact cancellation-delivery records remain open. Those remaining questions
+  block only their corresponding adapter slices; the generic scaffold and first
+  typed command family are not blocked. (S03, S04, S17, S25, S27)
 - **Update-event retention, pruning, and multiple hub processes.** Version one
   is owned by [process-protocol](spec/process-protocol.md). A pruning watermark,
   follower retention guarantees, and any later multiple-hub shared-fan-out
