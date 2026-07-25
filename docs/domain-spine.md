@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The eleven identities defined in `lib.rs`:
+The sixteen identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -68,6 +68,11 @@ pub struct ModelCallId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
+pub struct ReviewTargetId(/* private */);
+pub struct ReviewRunId(/* private */);
+pub struct ReviewPassId(/* private */);
+pub struct ReviewFindingId(/* private */);
+pub struct ReviewExternalLinkId(/* private */);
 ```
 
 Five more identities with the same shape are defined in their owning modules and
@@ -4896,11 +4901,391 @@ pub trait ToolExecutionTransaction {
 }
 ```
 
+## domain: review_workflow
+
+```rust
+pub struct ReviewKey(/* private String */);
+pub struct ReviewText(/* private String */);
+impl ReviewKey {
+    pub fn try_new(value: String) -> Result<Self, ReviewValueError>;
+    // accessors: as_str(), into_string()
+}
+impl ReviewText {
+    pub fn try_new(value: String) -> Result<Self, ReviewValueError>;
+    // accessors: as_str(), into_string()
+}
+
+pub enum ReviewValueFailure {
+    Empty,
+    ContainsNull,
+    TooLong { maximum_bytes: usize },
+}
+pub struct ReviewValueError { /* rejected value and failure */ }
+impl ReviewValueError {
+    // accessors: failure(), value(), into_parts()
+}
+
+pub struct ReviewChangeRequestNumber(/* private NonZeroU64 */);
+pub struct ReviewEventOrdinal(/* private NonZeroU32 */);
+pub struct ReviewPositiveNumberError;
+impl ReviewChangeRequestNumber {
+    pub const fn try_new(value: u64) -> Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u64;
+}
+impl ReviewEventOrdinal {
+    pub const fn one() -> Self;
+    pub const fn try_new(value: u32) -> Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u32;
+}
+
+pub struct ReviewConfidence(/* private u16 */);
+pub struct ReviewConfidenceError { /* rejected basis points */ }
+impl ReviewConfidence {
+    pub const fn try_from_basis_points(
+        basis_points: u16,
+    ) -> Result<Self, ReviewConfidenceError>;
+    pub const fn basis_points(self) -> u16;
+}
+impl ReviewConfidenceError {
+    pub const fn basis_points(self) -> u16;
+}
+
+pub struct ReviewPolicyVersion(/* private NonZeroU32 */);
+pub struct ReviewPolicy { /* version and two confidence thresholds */ }
+pub struct ReviewPolicyError { /* rejected complete policy */ }
+impl ReviewPolicyVersion {
+    pub const fn one() -> Self;
+    pub const fn try_new(value: u32) -> Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u32;
+}
+impl ReviewPolicy {
+    pub const fn try_new(
+        version: ReviewPolicyVersion,
+        minimum_judge_confidence: ReviewConfidence,
+        minimum_publication_confidence: ReviewConfidence,
+    ) -> Result<Self, ReviewPolicyError>;
+    pub const fn version_one() -> Self;
+    // accessors: version(), minimum_judge_confidence(),
+    // minimum_publication_confidence()
+}
+impl ReviewPolicyError {
+    pub const fn into_parts(
+        self,
+    ) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
+}
+
+pub enum ReviewTargetSubject {
+    ChangeRequest(ReviewChangeRequestNumber),
+    Commit,
+}
+pub struct ReviewTarget { /* immutable snapshot */ }
+pub enum ReviewTargetError {
+    SelfParent { target: ReviewTargetId },
+}
+impl ReviewTarget {
+    pub fn try_new(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<ReviewTargetId>,
+    ) -> Result<Self, ReviewTargetError>;
+    // accessors: id(), provider(), repository(), subject(), head_revision(),
+    // base_revision(), stack_parent()
+}
+
+pub struct ReviewRunRef { /* target + run */ }
+pub struct ReviewPassRef { /* run ref + pass */ }
+pub struct ReviewFindingRef { /* run ref + finding */ }
+impl ReviewRunRef {
+    pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
+    // accessors: target(), run()
+}
+impl ReviewPassRef {
+    pub const fn new(run: ReviewRunRef, pass: ReviewPassId) -> Self;
+    // accessors: run(), pass(), target()
+}
+impl ReviewFindingRef {
+    pub const fn new(run: ReviewRunRef, finding: ReviewFindingId) -> Self;
+    // accessors: run(), finding(), target()
+}
+
+pub enum ReviewWorkflowKind {
+    ImportExternalContext,
+    ReadOnlyReview,
+    JudgeFindings,
+    DedupeFindings,
+    PublishReview,
+    FixFindings,
+    PropagateStack,
+}
+pub enum ReviewRunState {
+    Queued,
+    Running { active_pass: ReviewPassRef },
+    Succeeded { concluding_pass: ReviewPassRef },
+    Failed { failed_pass: ReviewPassRef },
+    Blocked { blocking_pass: ReviewPassRef },
+    Cancelled { last_pass: Option<ReviewPassRef> },
+}
+pub struct ReviewRun { /* reference + kind + policy + state */ }
+pub enum ReviewRunTransitionFailure {
+    ForeignPass,
+    InvalidTransition,
+}
+pub struct ReviewRunTransitionError { /* current + next + failure */ }
+impl ReviewRun {
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+    ) -> Self;
+    pub fn try_reconstitute(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+        state: ReviewRunState,
+    ) -> Result<Self, ReviewRunTransitionError>;
+    pub fn transition(self, next: ReviewRunState)
+        -> Result<Self, ReviewRunTransitionError>;
+    // accessors: reference(), workflow(), policy(), state()
+}
+impl ReviewRunTransitionError {
+    // accessors: failure(), states()
+}
+
+pub enum ReviewPassKind {
+    ImportExternalContext,
+    ReadOnlyReview,
+    Judge,
+    Dedupe,
+    Publish,
+    Fix,
+    PropagateStack,
+}
+pub enum ReviewPassState {
+    Queued,
+    Running { turn: TurnId },
+    Succeeded { turn: TurnId, output_frontier: ContextFrontierId },
+    Failed { turn: TurnId },
+    Blocked { turn: TurnId },
+    Cancelled { turn: Option<TurnId> },
+}
+pub struct ReviewPass { /* reference + session input + state */ }
+pub enum ReviewPassTransitionFailure {
+    InvalidTransition,
+    TurnChanged,
+}
+pub struct ReviewPassTransitionError { /* current + next + failure */ }
+impl ReviewPass {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+    ) -> Self;
+    pub const fn reconstitute(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        state: ReviewPassState,
+    ) -> Self;
+    pub fn transition(self, next: ReviewPassState)
+        -> Result<Self, ReviewPassTransitionError>;
+    // accessors: reference(), kind(), session(), accepted_input(), state()
+}
+impl ReviewPassTransitionError {
+    // accessors: failure(), states()
+}
+
+pub enum ReviewFindingDiffSide {
+    Left,
+    Right,
+}
+pub struct ReviewLineRange { /* positive closed range */ }
+pub enum ReviewLineRangeError {
+    ZeroEndpoint,
+    EndBeforeStart,
+}
+impl ReviewLineRange {
+    pub const fn try_new(start: u32, end: u32) -> Result<Self, ReviewLineRangeError>;
+    // accessors: start(), end()
+}
+pub struct ReviewFindingLocation { /* path + optional range + side */ }
+impl ReviewFindingLocation {
+    pub const fn new(
+        file_path: ReviewKey,
+        line_range: Option<ReviewLineRange>,
+        diff_side: ReviewFindingDiffSide,
+    ) -> Self;
+    // accessors: file_path(), line_range(), diff_side()
+}
+
+pub enum ReviewFindingSeverity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+pub struct ReviewFindingContent { /* immutable checked content */ }
+impl ReviewFindingContent {
+    pub const fn new(
+        location: ReviewFindingLocation,
+        title: ReviewText,
+        body: ReviewText,
+        severity: ReviewFindingSeverity,
+        confidence: ReviewConfidence,
+        category: ReviewKey,
+        recommended_fix: Option<ReviewText>,
+    ) -> Self;
+    // accessors: location(), title(), body(), severity(), confidence(),
+    // category(), recommended_fix()
+}
+
+pub struct ReviewFindingProposal { /* reference + producing pass + content */ }
+impl ReviewFindingProposal {
+    pub fn try_new(
+        reference: ReviewFindingRef,
+        producing_pass: ReviewPassRef,
+        content: ReviewFindingContent,
+    ) -> Result<Self, ReviewFindingTransitionError>;
+    // accessors: reference(), producing_pass(), content()
+}
+pub struct ReviewFindingExternalLinkRef { /* finding + link */ }
+impl ReviewFindingExternalLinkRef {
+    pub const fn new(finding: ReviewFindingRef, link: ReviewExternalLinkId) -> Self;
+    // accessors: finding(), link()
+}
+
+pub enum ReviewFindingEventKind {
+    Accepted,
+    Rejected { reason: ReviewText },
+    Duplicate { canonical: ReviewFindingRef },
+    Superseded { successor: ReviewFindingRef },
+    Stale,
+    Posted { link: ReviewFindingExternalLinkRef },
+    Fixed,
+    BlockedWithReason { reason: ReviewText },
+}
+pub struct ReviewFindingEvent { /* ordinal + pass + kind */ }
+impl ReviewFindingEvent {
+    pub const fn new(
+        ordinal: ReviewEventOrdinal,
+        pass: ReviewPassRef,
+        kind: ReviewFindingEventKind,
+    ) -> Self;
+    // accessors: ordinal(), pass(), kind()
+}
+pub enum ReviewFindingStatus {
+    Open,
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+pub struct ReviewFinding { /* proposal + complete event history + derived status */ }
+impl ReviewFinding {
+    pub const fn new(proposal: ReviewFindingProposal) -> Self;
+    pub fn try_reconstitute(
+        proposal: ReviewFindingProposal,
+        events: Vec<ReviewFindingEvent>,
+    ) -> Result<Self, ReviewFindingTransitionError>;
+    pub fn apply(self, event: ReviewFindingEvent)
+        -> Result<Self, ReviewFindingTransitionError>;
+    // accessors: proposal(), events(), status()
+}
+pub enum ReviewFindingTransitionFailure {
+    ForeignProducingPass,
+    ForeignEventPass,
+    ForeignReferencedFinding,
+    SelfReference,
+    ForeignExternalLink,
+    NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
+    InvalidTransition { current: ReviewFindingStatus },
+}
+pub struct ReviewFindingTransitionError { /* rejected event + failure */ }
+impl ReviewFindingTransitionError {
+    // accessors: failure(), event(), into_parts()
+}
+
+pub enum ReviewExternalLinkAssociation {
+    Target(ReviewTargetId),
+    Run(ReviewRunRef),
+    Finding(ReviewFindingRef),
+}
+impl ReviewExternalLinkAssociation {
+    pub const fn target(self) -> ReviewTargetId;
+}
+pub enum ReviewExternalObjectKind {
+    ChangeRequest,
+    Commit,
+    Review,
+    ReviewThread,
+    ReviewComment,
+    ChangeRequestComment,
+}
+pub struct ReviewExternalLinkAttachment { /* pass + external object key */ }
+impl ReviewExternalLinkAttachment {
+    pub const fn new(pass: ReviewPassRef, external_object: ReviewKey) -> Self;
+    // accessors: pass(), external_object()
+}
+pub enum ReviewExternalObjectState {
+    Current,
+    Outdated,
+    Resolved,
+}
+pub struct ReviewExternalLinkObservation { /* ordinal + pass + state */ }
+impl ReviewExternalLinkObservation {
+    pub const fn new(
+        ordinal: ReviewEventOrdinal,
+        pass: ReviewPassRef,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    // accessors: ordinal(), pass(), state()
+}
+pub struct ReviewExternalLink { /* reservation + optional attachment + observations */ }
+impl ReviewExternalLink {
+    pub const fn reserve(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+    ) -> Self;
+    pub fn try_reconstitute(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        attachment: Option<ReviewExternalLinkAttachment>,
+        observations: Vec<ReviewExternalLinkObservation>,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn attach(self, attachment: ReviewExternalLinkAttachment)
+        -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn observe(self, observation: ReviewExternalLinkObservation)
+        -> Result<Self, ReviewExternalLinkTransitionError>;
+    // accessors: id(), association(), provider(), object_kind(), attachment(),
+    // observations()
+}
+pub enum ReviewExternalLinkTransitionError {
+    AlreadyAttached,
+    ForeignPass,
+    NotAttached,
+    NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
+}
+```
+
 ## Inventory
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 11                   |
+| domain: lib.rs identities                          | 16                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 29                   |
 | domain: session                                    | 21                   |
@@ -4925,7 +5310,8 @@ pub trait ToolExecutionTransaction {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| **signalbox-domain total**                         | **350 (+1 free fn)** |
+| domain: review_workflow                            | 49                   |
+| **signalbox-domain total**                         | **404 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
