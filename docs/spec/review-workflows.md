@@ -97,15 +97,15 @@ may become succeeded, failed, blocked, or cancelled while retaining its exact
 turn. No terminal state transitions again, and no other edge is permitted.
 
 Every named turn belongs to the pass's accepted input and session. A successful
-frontier belongs to that same session and includes the pass turn's terminal
-semantic evidence. A running pass names an active turn; succeeded names a
-completed turn; failed names a failed or refused turn; blocked names a turn
-requiring reconciliation; and cancellation with a turn names a cancelled turn.
-Persistence loads those canonical outcomes in addition to enforcing ownership
-with composite foreign keys; domain reconstitution rejects an invalid
-transition, mismatched outcome, or cross-wired reference. Passes never copy
-model output, tool results, or transcript content into workflow state. The
-session transcript is the evidence of record.
+frontier is exactly the pass turn's canonical terminal frontier. A running pass
+names an active turn; succeeded names a completed turn; failed names a failed or
+refused turn; blocked names a turn requiring reconciliation; and cancellation
+with a turn names a cancelled turn. Persistence loads those canonical outcomes
+in addition to enforcing ownership with composite foreign keys; domain
+reconstitution rejects an invalid transition, mismatched outcome, terminal
+frontier, or cross-wired reference. Passes never copy model output, tool
+results, or transcript content into workflow state. The session transcript is
+the evidence of record.
 
 ## Finding machine
 
@@ -138,18 +138,25 @@ superseded, or made stale. Posted findings may be fixed, blocked, superseded, or
 made stale. Blocked findings may later be fixed, superseded, or made stale.
 Rejected, duplicate, superseded, stale, and fixed are terminal. Every event
 carries its owning finding reference, a contiguous one-based ordinal, and a
-same-target pass reference. Reconstitution validates the complete history and
-fails closed on a foreign owner, gaps, illegal edges, self-reference,
-foreign-run finding references, or a publication event whose external link is
-not an attached link associated with that finding.
+same-target pass reference. Event and pass kinds are compatible only as follows:
+accepted, rejected, and stale events name a judgment pass; duplicate and
+superseded events name a deduplication pass; posted names an
+external-publication pass; fixed names a finding-repair pass; and
+blocked-with-reason names either an external-publication or finding-repair pass.
+Reconstitution validates the complete history and fails closed on a foreign
+owner, gaps, illegal edges, incompatible pass kind, self-reference, foreign-run
+finding references, or a publication event whose external link is not an
+attached link associated with that finding.
 
 ## External links and posting reservations
 
 `ReviewExternalLink` correlates a target, run, or finding with one external
-object kind at one opaque provider. Its immutable reservation row is the
-aggregate root. The caller-selected link identity is also the idempotency key:
-equal replay returns the same reservation, while reusing it for a different
-association, provider, or object kind conflicts.
+object kind at one opaque provider. The closed object kinds are change request,
+commit, review, review thread, inline review comment, and general change-request
+comment. Its immutable reservation row is the aggregate root. The
+caller-selected link identity is also the idempotency key: equal replay returns
+the same reservation, while reusing it for a different association, provider, or
+object kind conflicts.
 
 External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
