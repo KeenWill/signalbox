@@ -77,11 +77,22 @@ RAW_HTML_COMPLETE_TAG = re.compile(
     )[ \t]*(?:\r?\n)?$""",
     re.VERBOSE,
 )
+EXPLICIT_ANCHOR = re.compile(
+    r"<a\b[^>]*\b(?:name|id)[ \t]*=[ \t]*"
+    r'(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))',
+    re.IGNORECASE,
+)
 REFERENCE_LABEL = r"(?:\\[^\r\n]|[^\]\\\r\n])+"
 REFERENCE_DEFINITION = re.compile(
     rf"(?m)^[ \t]*\[(?P<label>{REFERENCE_LABEL})\]:[ \t]*"
     r"(?:\r?\n[ \t]+)?"
-    r"(?:<(?P<angled_destination>[^>\n]*)>|(?P<destination>\S+))"
+    r"(?:<(?P<angled_destination>[^>\r\n]*)>|(?P<destination>\S+))"
+    r"(?:(?:[ \t]+|\r?\n[ \t]+)(?:"
+    r'"(?:\\.|[^"\\\r\n])*"'
+    r"|'(?:\\.|[^'\\\r\n])*'"
+    r"|\((?:\\.|[^)\\\r\n])*\)"
+    r"))?"
+    r"[ \t]*(?=\r?$)"
 )
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])(?P<spacing>[ \t]+)"
@@ -117,7 +128,6 @@ TEST_GROUP = re.compile(
     r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\])?)",
     re.IGNORECASE,
 )
-TEST_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_:]*$")
 NATURAL_TEST_BINDING = re.compile(
     r"(?:"
     r"`(?P<before>[A-Za-z_][A-Za-z0-9_:]*)`[ \t]+tests?\b"
@@ -180,14 +190,17 @@ def strip_block_quote_containers(line: str) -> str:
         line = line[match.end() :]
 
 
-def mask_block_quote_prefixes(text: str) -> str:
-    """Replace repeated block-quote prefixes while preserving source offsets."""
+def mask_reference_container_prefixes(text: str) -> str:
+    """Replace quote/list prefixes while preserving reference-definition offsets."""
     buffer = list(text)
     offset = 0
     for line in text.splitlines(keepends=True):
         consumed = 0
         while True:
-            match = BLOCK_QUOTE_CONTAINER.match(line[consumed:])
+            remainder = line[consumed:]
+            match = BLOCK_QUOTE_CONTAINER.match(remainder)
+            if match is None:
+                match = FENCE_LIST_CONTAINER.match(remainder)
             if match is None:
                 break
             end = consumed + match.end()
@@ -561,7 +574,14 @@ def parse_inline_link_at(
         destination_start = position + 1
         position = destination_start
         while position < len(text):
+            if text[position] in "\r\n":
+                return None
             if text[position] == "\\":
+                if (
+                    position + 1 < len(text)
+                    and text[position + 1] in "\r\n"
+                ):
+                    return None
                 position += 2
                 continue
             if text[position] == ">":
@@ -658,7 +678,7 @@ def normalize_reference_label(label: str) -> str:
 def reference_definitions(text: str) -> dict[str, MarkdownLink]:
     """Return the first non-footnote definition for each reference label."""
     definitions: dict[str, MarkdownLink] = {}
-    reference_text = mask_block_quote_prefixes(text)
+    reference_text = mask_reference_container_prefixes(text)
     for match in REFERENCE_DEFINITION.finditer(reference_text):
         label = match.group("label")
         if label.lstrip().startswith("^"):
@@ -739,7 +759,7 @@ def extract_resolved_links(
 def extract_markdown_links(text: str) -> list[MarkdownLink]:
     """Return inline links and reference-definition destinations."""
     links = extract_inline_links(text)
-    reference_text = mask_block_quote_prefixes(text)
+    reference_text = mask_reference_container_prefixes(text)
     for match in REFERENCE_DEFINITION.finditer(reference_text):
         if match.group("label").lstrip().startswith("^"):
             continue
@@ -879,6 +899,13 @@ def strip_heading_containers(line: str) -> str:
 @lru_cache(maxsize=None)
 def heading_anchors(path: Path) -> frozenset[str]:
     text = mask_block_content(path.read_text(encoding="utf-8"))
+    anchor_text = mask_inline_code(text)
+    explicit_anchors = {
+        html.unescape(
+            next(value for value in match.groups() if value is not None)
+        )
+        for match in EXPLICIT_ANCHOR.finditer(anchor_text)
+    }
     lines = [strip_heading_containers(line) for line in text.splitlines()]
     headings: list[str] = []
     for index, line in enumerate(lines):
@@ -890,7 +917,7 @@ def heading_anchors(path: Path) -> frozenset[str]:
             headings.append(lines[index - 1].strip())
 
     used: set[str] = set()
-    anchors: set[str] = set()
+    anchors = explicit_anchors
     for heading in headings:
         base = github_slug(heading)
         candidate = base
@@ -945,18 +972,9 @@ def split_table_row(line: str) -> list[str]:
 def named_tests(
     enforcement: str, definitions: dict[str, MarkdownLink]
 ) -> list[tuple[str, MarkdownLink]]:
-    """Extract explicitly file-bound test names from an Enforcement cell."""
+    """Extract contextually identified, file-bound tests from an Enforcement cell."""
     found: set[tuple[str, str]] = set()
     bindings: list[tuple[str, MarkdownLink]] = []
-
-    for link in extract_resolved_links(enforcement, definitions):
-        raw_label = link.label.strip()
-        label = raw_label[1:-1] if re.fullmatch(r"`[^`]+`", raw_label) else ""
-        if TEST_IDENTIFIER.fullmatch(label) and "/" not in label:
-            key = (label, link.destination)
-            if key not in found:
-                found.add(key)
-                bindings.append((label, link))
 
     for match in TEST_GROUP.finditer(enforcement):
         links = extract_resolved_links(match.group("link"), definitions)
@@ -1017,7 +1035,8 @@ def check_invariant_citations(
             continue
         invariant = cells[0]
         enforcement = cells[4]
-        for link in extract_resolved_links(enforcement, definitions):
+        citation_enforcement = mask_inline_code(enforcement)
+        for link in extract_resolved_links(citation_enforcement, definitions):
             resolved = resolve_relative_target(root, source, link.destination)
             if resolved is None:
                 continue
@@ -1171,6 +1190,7 @@ def check_decision_order(root: Path) -> list[Violation]:
             number < len(lines)
             and line.strip()
             and ATX_HEADING.match(line) is None
+            and LIST_ITEM.match(line) is None
             and re.match(r"^ {0,3}-+[ \t]*$", lines[number])
         ):
             entries += 1

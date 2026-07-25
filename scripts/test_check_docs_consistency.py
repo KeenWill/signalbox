@@ -271,6 +271,30 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_code_form_link_label_requires_test_context(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[`codec`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_code_span_in_enforcement_cell_does_not_expose_link(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "`example [not a citation](../src/missing.rs)`. |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_missing_heading_anchor_is_reported(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -347,6 +371,30 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("`missing.md`", failures[0].message)
 
+    def test_list_reference_definition_target_is_checked(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "- [ref]: missing.md\n\n"
+            "[Missing][ref]\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
+
+    def test_malformed_reference_definition_title_tail_is_ignored(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[ref]: missing.md not-a-title\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_malformed_inline_link_title_tail_is_ignored(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n[literal](missing.md not-a-title)\n",
@@ -358,6 +406,16 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_forbidden_bare_destination_character_is_ignored(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n[literal](missing<file.md)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_angle_destination_may_not_contain_line_break(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[literal](<missing\nfile.md>)\n"
+            "[escaped](<missing\\\nfile.md>)\n",
             encoding="utf-8",
         )
 
@@ -558,6 +616,23 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_explicit_html_anchors_resolve(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Setup](docs/spec/example.md#setup)\n"
+            "[Details](docs/spec/example.md#details)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            '<a name="setup"></a>\n\n'
+            "<a id='details'></a>\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_heading_autolink_contributes_its_visible_text(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -635,6 +710,17 @@ class DocsConsistencyTests(unittest.TestCase):
             "Setext H2 headings are not permitted",
             failures[0].message,
         )
+
+    def test_thematic_break_after_list_item_is_not_a_decision_entry(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-25 — Entry\n\n"
+            "- first point\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_missing_and_malformed_verification_refs_are_reported(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
