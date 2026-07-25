@@ -560,6 +560,50 @@ and workspace lifecycle all need the design pass. MCP — a daemon-side client f
 centralized servers, runner-side hosting for sandboxed execution — stays
 deferred to its own pass, flagged soon by owner priority.
 
+Owner direction, 2026-07-25 (third pass — credential profiles; orientation only,
+same standing caveat): the kernel is a split between credential values and
+credential selection, and the design pass owns everything the split does not
+settle. Values are runner-resident. A runner holds named credential profiles
+locally — scoped read-only and admin variants of an infrastructure credential, a
+dedicated agent VCS identity — provisioned by the owner on that machine
+out-of-band, and no value ever transits the runner protocol. That preserves the
+credential doctrine above rather than weakening it: the daemon still hands
+nothing down the channel.
+
+Selection, audit, and policy are daemon-resident. Runners advertise profile
+names, never values, at enrollment, over the same advertised-never-trusted
+channel as the tool catalog and validated the same way against the daemon-side
+owner-editable catalog. Session creation then selects a profile as a third
+placement axis alongside machine and working directory, and the picker can only
+offer profiles the targeted runner actually advertised — credential availability
+composes with placement, so a runner that never held a profile can never be
+granted it. The daemon records every grant durably, which makes it auditable
+which sessions ran under which profile.
+
+Approval posture resolves on (tool, credential profile), not on tool alone.
+Properly scoped credentials substitute for approval judging: a session on a
+read-only profile runs the matching tools under automatic approval with no
+judging spend, while the admin-profile variant of the same tools falls back to
+confirmation or the session's blanket posture. This is a new input to the
+existing approval-resolution chain, not new machinery, and it operationalizes
+the credential-ops policy already distilled in the spec (least-privilege,
+optional-mount, channel-scope) as session-selectable mounts.
+
+Lifecycle is snapshot-then-replace. The profile grant and the tool set are
+snapshotted into session state at creation; a mid-session change is an explicit
+owner command replacing defaults forward-only — the same shape as the direction
+recorded in the mid-session model selection entry above — and each change
+extends the frontier with an injected message so the model is informed of its
+changed tools and credentials. Revoking a profile gates future tool dispatches;
+an in-flight leased call completes or crash-classifies normally, and nothing is
+yanked mid-execution.
+
+Workspace provisioning is a runner capability in the same advertisement model: a
+session declares that it needs a repo workspace, and the runner provisions
+worktree-per-session and owns cleanup. The first consumer is the goal of running
+this repo's own review workflow inside the platform (the review-workflow tier
+entry below). Details go to the design pass.
+
 ## Delegation and child sessions [blocked-on: delegation cause decision; tool loop; selectable transcript-frontier decision (fork selection)] [size: L]
 
 Owns: delegated creation cause (typed, rejected today), child-result delivery,
