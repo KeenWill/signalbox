@@ -112,6 +112,8 @@ pub enum ImportedConversationCorruption {
         /// Reconstructed member count.
         actual: u64,
     },
+    /// Non-null source-session evidence disagrees with the reconstructed entries.
+    SourceSessionLineageMismatch,
     /// One source digest resolved to a structurally different snapshot.
     ExistingSnapshotMismatch,
     /// Complete durable fields failed domain-owned correlation.
@@ -151,6 +153,8 @@ impl fmt::Display for ImportedConversationCorruption {
                 formatter,
                 "imported raw record {position:?} declares {declared} entries but reconstructs {actual}"
             ),
+            Self::SourceSessionLineageMismatch => formatter
+                .write_str("imported source-session lineage disagrees with reconstructed entries"),
             Self::ExistingSnapshotMismatch => {
                 formatter.write_str("imported source digest resolved to a different snapshot")
             }
@@ -618,8 +622,8 @@ pub(crate) async fn load_from_connection(
 ) -> Result<Option<ImportedConversation>, ImportedConversationRepositoryError> {
     let header = sqlx::query(
         "SELECT imported_conversation_id, storage_version, source_format,
-                converter_version, source_digest, declared_raw_record_count,
-                declared_entry_count
+                converter_version, source_digest, source_session_id,
+                declared_raw_record_count, declared_entry_count
            FROM imported_conversation
           WHERE imported_conversation_id = $1",
     )
@@ -649,6 +653,7 @@ async fn decode_complete(
         "source digest",
         ImportedConversationSourceDigest::from_bytes,
     )?;
+    let source_session_id: Option<Vec<u8>> = header.try_get("source_session_id")?;
     let declared_raw_record_count = positive_u64(header.try_get("declared_raw_record_count")?)
         .map_err(|reason| invalid_ordinal_with_reason("declared raw-record count", reason))?;
     let declared_entry_count = positive_u64(header.try_get("declared_entry_count")?)
@@ -757,7 +762,7 @@ async fn decode_complete(
         }
     }
 
-    ImportedConversationReconstitutionInput::new(
+    let conversation = ImportedConversationReconstitutionInput::new(
         requested,
         stored,
         format,
@@ -768,7 +773,13 @@ async fn decode_complete(
         entries,
     )
     .reconstitute()
-    .map_err(|error| ImportedConversationCorruption::Domain(error.failure()).into())
+    .map_err(|error| ImportedConversationCorruption::Domain(error.failure()))?;
+    if let Some(source_session_id) = source_session_id
+        && Some(source_session_id.as_slice()) != consistent_source_session_id(&conversation)
+    {
+        return Err(ImportedConversationCorruption::SourceSessionLineageMismatch.into());
+    }
+    Ok(conversation)
 }
 
 fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConversation) -> bool {

@@ -1265,6 +1265,96 @@ async fn s28_source_session_lineage_is_null_without_one_consistent_attestation()
     Ok(())
 }
 
+/// S28 / INV-002 / INV-038: checked loading and exact reingestion reject
+/// non-null lineage evidence that disagrees with the reconstructed entries.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv038_corrupt_source_session_lineage_fails_closed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = concat!(
+        "{\"sessionId\":\"lineage-original\",\"uuid\":\"record-1\",",
+        "\"type\":\"user\",\"message\":{\"content\":\"first\"}}"
+    );
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x3300));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut initial_import = ImportConversationService::new(
+        FixedIds::new(&[0x3300], [0x3310]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    assert_eq!(
+        initial_import.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+
+    sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation
+            SET source_session_id = $1
+          WHERE imported_conversation_id = $2",
+    )
+    .bind(b"lineage-corrupt".as_slice())
+    .bind(winner.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        repository
+            .load(winner)
+            .await
+            .expect_err("corrupt lineage evidence must not load"),
+        ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::SourceSessionLineageMismatch
+        )
+    ));
+
+    let mut exact_reingestion = ImportConversationService::new(
+        FixedIds::new(&[0x3400], [0x3410]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    assert!(matches!(
+        exact_reingestion
+            .execute(source.as_bytes())
+            .await
+            .expect_err("exact reingestion must expose corrupt lineage evidence"),
+        ImportConversationError::Store(ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::SourceSessionLineageMismatch
+        ))
+    ));
+
+    sqlx::query("ALTER TABLE imported_conversation DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation
+            SET source_session_id = NULL
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(winner.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(
+        repository.load(winner).await?.is_some(),
+        "NULL lineage must remain unknown for rows predating the column"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S28 / INV-038: Codex rollout entries use the same append-only,
 /// content-addressed persistence boundary as every imported conversation.
 #[tokio::test(flavor = "multi_thread")]
