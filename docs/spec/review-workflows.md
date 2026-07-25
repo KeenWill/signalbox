@@ -162,8 +162,8 @@ the canonical repository key before constructing it. The store uniquely admits
 one attached provider/kind/object identity and one attachment per reservation. A
 reservation without an attachment is explicitly pending; it is never interpreted
 as proof that the external effect did not occur and is not automatically retried
-(INV-025, INV-026, INV-041). Read-only import may reserve and attach in one local
-transaction because it issues no external write.
+(INV-025, INV-026, INV-041). Read-only import may reserve and attach in one
+local transaction because it issues no external write.
 
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with a same-target pass and contiguous ordinal. Observations describe
