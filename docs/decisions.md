@@ -33,6 +33,54 @@ focused capability.
 crate-specific exception in `deny.toml`; stored argument kinds, canonical
 encoding, and byte limits do not change.
 
+## 2026-07-24 — Share the lossless JSON decoder across import edges
+
+**Context.** Codex rollout JSONL needs the same ordered-member,
+duplicate-member, exact-number, Unicode, and depth guarantees as the Claude Code
+converter. The existing bounded decoder contains no Claude-specific semantics,
+but lived inside that provider adapter.
+
+**Decision.** Move the decoder unchanged into a provider-neutral import-edge
+crate used by both converters. It continues to construct the domain's
+source-neutral structured values directly, delegates only JSON string-token
+decoding to `serde_json`, and exposes content-silent syntax, UTF-8, and depth
+failures. Provider record and block semantics remain in their separate edge
+crates.
+
+**Rejected alternatives.** Duplicating the decoder would create two subtly
+different definitions of exact JSON preservation. Depending on the Claude Code
+crate from the Codex crate would couple unrelated providers. Moving parsing into
+the domain would reverse the recorded edge boundary.
+
+**Affects.** The Claude Code and Codex converter dependencies, workspace layout,
+lossless JSON parser tests, and converter implementation ownership; no
+normalized or durable representation changes.
+
+## 2026-07-24 — Run Docker-backed integration suites concurrently in CI
+
+**Context.** GitHub-hosted Ubuntu runners provide Docker, and Signalbox's
+ignored integration tests start pinned PostgreSQL containers through
+testcontainers. The workflow ran several test binaries sequentially from a
+hand-maintained list, which delayed feedback and omitted a newly added
+import-to-native end-to-end binary.
+
+**Decision.** Run three fail-fast-disabled CI matrix suites concurrently: all
+ignored persistence test targets with the `postgres-integration` feature, all
+ignored hubd test targets, and the explicitly selected offline terminal client
+end-to-end test. Retain one aggregate `postgres-integration` job so the existing
+required-check name remains stable. Package-wide selection makes new persistence
+and hubd integration-test binaries covered by default.
+
+**Rejected alternatives.** Keeping one sequential job preserves redundant
+latency and the omission-prone binary inventory. One workspace-wide ignored test
+command would mix Docker coverage with opt-in real-provider and local-file tests
+whose external inputs are deliberately unavailable in public CI. A
+workflow-managed PostgreSQL service would duplicate the pinned, isolated
+testcontainers lifecycle already owned by each test.
+
+**Affects.** GitHub Actions integration-test coverage, feedback latency,
+required-check compatibility, and Docker-backed PostgreSQL test execution.
+
 ## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
 
 **Context.** The finished-pull-request rules required push-time reviewer
@@ -412,6 +460,42 @@ deadlines would add unrelated timing semantics.
 **Affects.** Process-protocol frame ownership, submitted-input admission, and
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
+
+## 2026-07-24 — Version maximum-fidelity conversion and generic result blocks
+
+**Context.** Maximum-fidelity conversion broadens the original Claude Code
+interpretation so structurally valid source-defined message and result blocks
+are normalized instead of rejected. Reusing converter version 1 would
+reinterpret stored normalized records and violate the fixed-version converter
+contract. Maximum fidelity also adds a generic result-block variant to the
+existing [conversation-import](spec/conversation-import.md) vocabulary.
+Persistence content version 1 already includes the generic message-block tag,
+but its nested result-block tags are closed. Repository validation also needs
+source files without publishing their content.
+
+**Decision.** Preserve the original Claude Code converter-version-1
+interpretation and add converter version 2 for maximum-fidelity normalization;
+the active `ClaudeCodeJsonlConverter` emits version 2. Source digests,
+reconstitution, and persistence map the two converter versions distinctly. Also
+preserve content-encoding version 1 for every existing content shape, including
+generic message blocks. Encode content as version 2 only when it contains a
+generic result block, and reject that new nested tag beneath a version-1 header.
+Committed fixtures are synthetic. Optional local source-file validation is
+path-configured, content-silent, and excluded from ordinary test runs. A private
+repository was consulted only as non-normative provenance.
+
+**Rejected alternatives.** Reusing converter version 1 would make one version
+describe two normalization behaviors. Adding the new nested content tag beneath
+content version 1 would make one encoding version describe two vocabularies.
+Stamping every newly written content value as version 2 would needlessly reduce
+rollback readability for unchanged content. Committing source files or printing
+their transcript data would violate the public-source boundary.
+
+**Affects.** S28; INV-002/INV-038; synthetic and opt-in import tests, the Claude
+Code format enum/projector/store mapping, imported-content adapter encoding, and
+the provenance boundary of the conversation-import stack. Imported-session seed
+ownership remains recorded by
+[the separate seed decision](#2026-07-24--separate-imported-ancestry-from-its-materialized-seed-frontier).
 
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
