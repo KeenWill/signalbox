@@ -27,7 +27,8 @@ use signalbox_domain::{
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, PerInputConfigurationChoices, ProviderModelIdentity,
     ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision, ToolEffectClass,
+    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision,
+    ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_hubd::{
@@ -461,25 +462,36 @@ fn completion_script(text: &str) -> Script {
     }))
 }
 
-fn continuation_tool_results(
+fn continuation_tool_exchange(
     runtime: &ScriptedModel<ModelCallId>,
-) -> Result<Vec<ToolResultRecord>, Box<dyn Error>> {
+) -> Result<Vec<MessagePart>, Box<dyn Error>> {
     let operations = runtime.received_operations();
     let continuation = operations
-        .get(1)
+        .last()
         .ok_or_else(|| std::io::Error::other("continuation model operation was not received"))?;
     Ok(continuation
         .messages
         .iter()
         .flat_map(|message| &message.parts)
-        .filter_map(|part| match part {
-            MessagePart::ToolResult(result) => Some(result.clone()),
-            MessagePart::Text(_)
-            | MessagePart::ToolCall(_)
-            | MessagePart::Thinking { .. }
-            | MessagePart::RedactedThinking { .. } => None,
-        })
+        .filter(|part| matches!(part, MessagePart::ToolCall(_) | MessagePart::ToolResult(_)))
+        .cloned()
         .collect())
+}
+
+fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
+    MessagePart::ToolCall(RuntimeToolCallProposal {
+        id: ToolCallId::new(request.into_uuid().to_string()),
+        name: RuntimeToolName::new(name),
+        arguments_json: arguments_json.to_owned(),
+    })
+}
+
+fn expected_tool_result(request: ToolRequestId, content: String, is_error: bool) -> MessagePart {
+    MessagePart::ToolResult(ToolResultRecord {
+        tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+        content,
+        is_error,
+    })
 }
 
 #[track_caller]
@@ -506,6 +518,7 @@ struct RecordingExecutor {
     mode: ExecutorMode,
     events: Arc<Mutex<Vec<String>>>,
     arguments: Arc<Mutex<Vec<String>>>,
+    correlations: Arc<Mutex<Vec<ToolAttemptDispatchCorrelation>>>,
 }
 
 impl RecordingExecutor {
@@ -514,6 +527,7 @@ impl RecordingExecutor {
             mode: ExecutorMode::Complete,
             events: Arc::new(Mutex::new(Vec::new())),
             arguments: Arc::new(Mutex::new(Vec::new())),
+            correlations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -522,6 +536,7 @@ impl RecordingExecutor {
             mode: ExecutorMode::LoseProcess,
             events: Arc::new(Mutex::new(Vec::new())),
             arguments: Arc::new(Mutex::new(Vec::new())),
+            correlations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -538,11 +553,19 @@ impl RecordingExecutor {
             .expect("fixture argument lock is available")
             .clone()
     }
+
+    fn correlations(&self) -> Vec<ToolAttemptDispatchCorrelation> {
+        self.correlations
+            .lock()
+            .expect("fixture correlation lock is available")
+            .clone()
+    }
 }
 
 #[derive(Clone, Debug)]
 struct SerialProbeExecutor {
     events: Arc<Mutex<Vec<String>>>,
+    correlations: Arc<Mutex<Vec<ToolAttemptDispatchCorrelation>>>,
     first_entered: Arc<tokio::sync::Notify>,
     release_first: Arc<tokio::sync::Notify>,
 }
@@ -551,6 +574,7 @@ impl SerialProbeExecutor {
     fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
+            correlations: Arc::new(Mutex::new(Vec::new())),
             first_entered: Arc::new(tokio::sync::Notify::new()),
             release_first: Arc::new(tokio::sync::Notify::new()),
         }
@@ -560,6 +584,13 @@ impl SerialProbeExecutor {
         self.events
             .lock()
             .expect("fixture event lock is available")
+            .clone()
+    }
+
+    fn correlations(&self) -> Vec<ToolAttemptDispatchCorrelation> {
+        self.correlations
+            .lock()
+            .expect("fixture correlation lock is available")
             .clone()
     }
 
@@ -602,6 +633,10 @@ impl ToolExecutor for RecordingExecutor {
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        self.correlations
+            .lock()
+            .expect("fixture correlation lock is available")
+            .push(invocation.correlation());
         self.events
             .lock()
             .expect("fixture event lock is available")
@@ -627,6 +662,10 @@ impl ToolExecutor for SerialProbeExecutor {
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        self.correlations
+            .lock()
+            .expect("fixture correlation lock is available")
+            .push(invocation.correlation());
         let name = invocation.request().name().as_str().to_owned();
         let is_first = {
             let mut events = self.events.lock().expect("fixture event lock is available");
@@ -704,12 +743,11 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
         vec![String::from(r#"{"value":"one"}"#)]
     );
     assert_eq!(
-        continuation_tool_results(&runtime)?,
-        vec![ToolResultRecord {
-            tool_call_id: ToolCallId::new(requests[0].into_uuid().to_string()),
-            content: String::from("completed:confirmed"),
-            is_error: false,
-        }]
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(requests[0], "confirmed", r#"{"value":"one"}"#),
+            expected_tool_result(requests[0], String::from("completed:confirmed"), false),
+        ]
     );
     let operations = runtime.received_operations();
     let [initial, continuation] = operations.as_slice() else {
@@ -753,14 +791,19 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
             2,
         )
     );
-    let identity_shape: (Uuid, Uuid, Uuid, Uuid, Uuid, i64) = sqlx::query_as(
+    let identity_shape: (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, i64) = sqlx::query_as(
         "SELECT request.request_id,
+                producing.turn_attempt_id,
                 attempt.attempt_id,
                 attempt.request_id,
                 attempt.turn_id,
                 attempt.issuing_turn_attempt_id,
                 attempt.dispatch_generation::bigint
            FROM tool_request AS request
+           JOIN model_call AS producing
+             ON producing.model_call_id = request.producing_model_call_id
+            AND producing.turn_id = request.turn_id
+            AND producing.session_id = request.session_id
            JOIN tool_attempt AS attempt
              ON attempt.request_id = request.request_id
             AND attempt.turn_id = request.turn_id
@@ -773,12 +816,26 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(identity_shape.0, requests[0].into_uuid());
-    assert_ne!(identity_shape.0, identity_shape.1);
-    assert_eq!(identity_shape.2, identity_shape.0);
-    assert_eq!(identity_shape.3, fixture.turn.into_uuid());
-    assert_ne!(identity_shape.4, identity_shape.0);
-    assert_ne!(identity_shape.4, identity_shape.1);
-    assert_eq!(identity_shape.5, 1);
+    assert_ne!(
+        identity_shape.1, identity_shape.5,
+        "the yielded tool-round attempt must differ from the producing model call's attempt"
+    );
+    assert_ne!(identity_shape.0, identity_shape.2);
+    assert_eq!(identity_shape.3, identity_shape.0);
+    assert_eq!(identity_shape.4, fixture.turn.into_uuid());
+    assert_ne!(identity_shape.5, identity_shape.0);
+    assert_ne!(identity_shape.5, identity_shape.2);
+    assert_eq!(identity_shape.6, 1);
+    let correlations = executor.correlations();
+    let [correlation] = correlations.as_slice() else {
+        panic!("exactly one dispatch fence must cross the executor boundary")
+    };
+    assert_eq!(correlation.session(), fixture.session);
+    assert_eq!(correlation.turn(), fixture.turn);
+    assert_eq!(correlation.issuing_attempt().into_uuid(), identity_shape.5);
+    assert_eq!(correlation.request(), requests[0]);
+    assert_eq!(correlation.attempt().into_uuid(), identity_shape.2);
+    assert_eq!(correlation.generation(), ToolDispatchGeneration::first());
     Ok(())
 }
 
@@ -815,18 +872,21 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
 
     assert!(executor.events().is_empty());
     assert_eq!(
-        continuation_tool_results(&runtime)?,
-        vec![ToolResultRecord {
-            tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
-            content: serde_json::json!({
-                "error": {
-                    "kind": "denied",
-                    "detail": null,
-                }
-            })
-            .to_string(),
-            is_error: true,
-        }]
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "confirmed", "{}"),
+            expected_tool_result(
+                request,
+                serde_json::json!({
+                    "error": {
+                        "kind": "denied",
+                        "detail": null,
+                    }
+                })
+                .to_string(),
+                true,
+            ),
+        ]
     );
     assert_eq!(
         fixture.transcript_kinds().await?,
@@ -854,14 +914,14 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
     Ok(())
 }
 
-/// S10 / INV-019 / INV-020 / INV-027 / INV-029 / INV-037: deny-and-end first
+/// S10 / S11 / INV-019 / INV-020 / INV-027 / INV-029 / INV-037: deny-and-end first
 /// records the exact denial, then the ordinary proof-bearing interrupt closes
 /// the active turn; no tool attempt is created, the stop remains independently
 /// auditable, and a later submit survives reconstitution before its new turn
 /// activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_later_turn()
+async fn s10_s11_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_later_turn()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
@@ -920,7 +980,7 @@ async fn s10_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_la
     assert_eq!(applied_interrupt.proof().predecessor(), fixture.turn);
 
     assert!(executor.events().is_empty());
-    let terminal_shape: (String, i64, i64, i64) = sqlx::query_as(
+    let terminal_shape: (String, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT terminal_disposition_kind,
                 (SELECT count(*) FROM tool_attempt WHERE request_id = $3),
                 (SELECT count(*) FROM semantic_transcript_entry
@@ -930,7 +990,10 @@ async fn s10_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_la
                 (SELECT count(*) FROM semantic_transcript_entry
                   WHERE source_session_id = $1
                     AND payload_kind = 'turn_cancelled'
-                    AND cancelled_turn_id = $2)
+                    AND cancelled_turn_id = $2),
+                (SELECT count(*) FROM model_call
+                  WHERE session_id = $1
+                    AND turn_id = $2)
            FROM turn_lifecycle
           WHERE session_id = $1
             AND turn_id = $2",
@@ -940,7 +1003,7 @@ async fn s10_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_runs_la
     .bind(request.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(terminal_shape, (String::from("cancelled"), 0, 1, 1));
+    assert_eq!(terminal_shape, (String::from("cancelled"), 0, 1, 1, 1));
     assert_eq!(
         fixture.transcript_kinds().await?,
         vec![
@@ -1027,13 +1090,44 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
-    let (restarted_execution, _restarted_runtime) = fixture.execution(
+    let (restarted_execution, restarted_runtime) = fixture.execution(
         [completion_script("continued after restart")],
         tool_catalog,
         executor.clone(),
     );
     restarted_execution.resume_active(fixture.session).await?;
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
+    assert_eq!(
+        continuation_tool_exchange(&restarted_runtime)?,
+        vec![
+            expected_tool_call(request, "confirmed", "{}"),
+            expected_tool_result(request, String::from("completed:confirmed"), false),
+        ],
+        "the fresh composition must reach the correlated continuation call"
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    let terminal_shape: (String, i64) = sqlx::query_as(
+        "SELECT terminal_disposition_kind,
+                (SELECT count(*) FROM model_call
+                  WHERE session_id = $1 AND turn_id = $2)
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(terminal_shape, (String::from("completed"), 2));
     Ok(())
 }
 
@@ -1058,7 +1152,7 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         ),
     ]);
     let executor = SerialProbeExecutor::new();
-    let (execution, _runtime) = fixture.execution(
+    let (execution, runtime) = fixture.execution(
         [
             tool_use_script(&[("automatic", "{}"), ("confirmed", "{}")]),
             completion_script("batch observed"),
@@ -1097,7 +1191,11 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         .decide(requests[1], ToolApprovalDecision::Approve)
         .await?;
     let (resumed, observed_first) = tokio::join!(execution.resume_active(fixture.session), async {
-        executor.wait_for_first().await?;
+        let observed = executor.wait_for_first().await;
+        if observed.is_err() {
+            executor.release_first();
+        }
+        observed?;
         assert_eq!(
             executor.events(),
             vec![String::from("automatic")],
@@ -1113,6 +1211,30 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         executor.events(),
         vec![String::from("automatic"), String::from("confirmed")]
     );
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(requests[0], "automatic", "{}"),
+            expected_tool_call(requests[1], "confirmed", "{}"),
+            expected_tool_result(requests[0], String::from("completed:automatic"), false),
+            expected_tool_result(requests[1], String::from("completed:confirmed"), false),
+        ],
+        "continuation history retains paired calls and proposal-ordered results"
+    );
+    let correlations = executor.correlations();
+    let [automatic, confirmed] = correlations.as_slice() else {
+        panic!("each proposal must cross the executor boundary exactly once")
+    };
+    assert_eq!(automatic.request(), requests[0]);
+    assert_eq!(confirmed.request(), requests[1]);
+    assert_ne!(automatic.attempt(), confirmed.attempt());
+    assert_eq!(automatic.session(), fixture.session);
+    assert_eq!(confirmed.session(), fixture.session);
+    assert_eq!(automatic.turn(), fixture.turn);
+    assert_eq!(confirmed.turn(), fixture.turn);
+    assert_eq!(automatic.issuing_attempt(), confirmed.issuing_attempt());
+    assert_eq!(automatic.generation(), ToolDispatchGeneration::first());
+    assert_eq!(confirmed.generation(), ToolDispatchGeneration::first());
     let ordered: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT request.tool_name, approval.decision_source,
                 attempt.terminal_disposition_kind
@@ -1202,9 +1324,9 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 }
 
 /// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
-/// never retries it; startup idempotently classifies it `known_failed` with
-/// `crash_lost` evidence, closes the request, fails the turn honestly, and
-/// admits a later submit whose new turn activates and runs.
+/// never retries it; the dispatch path classifies it `known_failed` with
+/// `crash_lost` evidence before releasing its gate, startup preserves that
+/// terminal state idempotently, and a later submit activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
@@ -1236,7 +1358,11 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
     );
     let recovery = startup.execute().await?;
     assert!(recovery.is_complete());
-    assert_eq!(recovery.recovered_turn_count(), 1);
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        0,
+        "dispatch failure already classified the effect-free attempt and failed the turn"
+    );
     let repeated_recovery = startup.execute().await?;
     assert!(repeated_recovery.is_complete());
     assert_eq!(repeated_recovery.recovered_turn_count(), 0);
@@ -1304,7 +1430,7 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
     let crashing = RecordingExecutor::losing_process();
     let (first_execution, _runtime) = fixture.execution(
         [tool_use_script(&[("external_effect", "{}")])],
-        tool_catalog,
+        tool_catalog.clone(),
         crashing.clone(),
     );
     let first = first_execution
@@ -1335,6 +1461,23 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
         "repeated startup leaves the same ambiguous turn parked"
     );
     assert_eq!(crashing.events(), vec![String::from("external_effect")]);
+    let post_startup_executor = RecordingExecutor::completing();
+    let (post_startup_execution, post_startup_runtime) = fixture.execution(
+        std::iter::empty::<Script>(),
+        tool_catalog,
+        post_startup_executor.clone(),
+    );
+    post_startup_execution
+        .resume_active(fixture.session)
+        .await?;
+    assert!(
+        post_startup_executor.events().is_empty(),
+        "a progression pass must not redispatch an ambiguous external effect"
+    );
+    assert!(
+        post_startup_runtime.received_operations().is_empty(),
+        "owner recovery must remain the only way beyond the ambiguous attempt"
+    );
     let classified: (String, String, Option<Uuid>, String) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind,
                 lifecycle.active_phase_kind,
