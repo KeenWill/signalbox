@@ -9,6 +9,7 @@ pub(crate) const CREATE_SESSION_KIND: &str = "create_session";
 pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
     "create_session_from_imported_frontier";
 pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults";
+pub(crate) const REPLACE_SESSION_METADATA_KIND: &str = "replace_session_metadata";
 pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
 pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str = "decide_tool_request";
 
@@ -17,6 +18,7 @@ pub(crate) enum CommandKind {
     CreateSession,
     CreateSessionFromImportedFrontier,
     ReplaceSessionDefaults,
+    ReplaceSessionMetadata,
     SubmitInput,
     DecideToolRequest,
 }
@@ -47,6 +49,7 @@ pub(crate) async fn inspect(
             imported_create_command.command_id IS NOT NULL
                 AS has_create_session_from_imported_frontier,
             defaults_command.command_id IS NOT NULL AS has_replace_session_defaults,
+            metadata_command.command_id IS NOT NULL AS has_replace_session_metadata,
             input_command.command_id IS NOT NULL AS has_submit_input,
             tool_command.command_id IS NOT NULL AS has_decide_tool_request
          FROM durable_command AS command
@@ -57,6 +60,8 @@ pub(crate) async fn inspect(
            ON imported_create_command.command_id = command.command_id
          LEFT JOIN replace_session_defaults_command AS defaults_command
            ON defaults_command.command_id = command.command_id
+         LEFT JOIN replace_session_metadata_command AS metadata_command
+           ON metadata_command.command_id = command.command_id
          LEFT JOIN submit_input_command AS input_command
            ON input_command.command_id = command.command_id
          LEFT JOIN decide_tool_request_command AS tool_command
@@ -81,6 +86,7 @@ pub(crate) async fn inspect(
                 CommandKind::CreateSessionFromImportedFrontier
             }
             REPLACE_SESSION_DEFAULTS_KIND => CommandKind::ReplaceSessionDefaults,
+            REPLACE_SESSION_METADATA_KIND => CommandKind::ReplaceSessionMetadata,
             SUBMIT_INPUT_KIND => CommandKind::SubmitInput,
             DECIDE_TOOL_REQUEST_KIND => CommandKind::DecideToolRequest,
             _ => {
@@ -93,7 +99,9 @@ pub(crate) async fn inspect(
             CommandKind::CreateSession
             | CommandKind::CreateSessionFromImportedFrontier
             | CommandKind::ReplaceSessionDefaults => matches!(version, 1 | 2),
-            CommandKind::SubmitInput | CommandKind::DecideToolRequest => version == 1,
+            CommandKind::ReplaceSessionMetadata
+            | CommandKind::SubmitInput
+            | CommandKind::DecideToolRequest => version == 1,
         };
         if !version_supported {
             return Err(RegistryInspectionError::Corruption(
@@ -109,6 +117,9 @@ pub(crate) async fn inspect(
         let has_defaults: bool = row
             .try_get("has_replace_session_defaults")
             .map_err(RegistryInspectionError::Database)?;
+        let has_metadata: bool = row
+            .try_get("has_replace_session_metadata")
+            .map_err(RegistryInspectionError::Database)?;
         let has_input: bool = row
             .try_get("has_submit_input")
             .map_err(RegistryInspectionError::Database)?;
@@ -121,19 +132,38 @@ pub(crate) async fn inspect(
             has_create,
             has_imported_create,
             has_defaults,
+            has_metadata,
             has_input,
             has_tool,
         ) {
-            (CommandKind::CreateSession, true, false, false, false, false)
-            | (CommandKind::CreateSessionFromImportedFrontier, false, true, false, false, false)
-            | (CommandKind::ReplaceSessionDefaults, false, false, true, false, false)
-            | (CommandKind::SubmitInput, false, false, false, true, false)
-            | (CommandKind::DecideToolRequest, false, false, false, false, true) => Ok(kind),
-            (CommandKind::CreateSession, false, false, false, false, false)
-            | (CommandKind::CreateSessionFromImportedFrontier, false, false, false, false, false)
-            | (CommandKind::ReplaceSessionDefaults, false, false, false, false, false)
-            | (CommandKind::SubmitInput, false, false, false, false, false)
-            | (CommandKind::DecideToolRequest, false, false, false, false, false) => Err(
+            (CommandKind::CreateSession, true, false, false, false, false, false)
+            | (
+                CommandKind::CreateSessionFromImportedFrontier,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+            )
+            | (CommandKind::ReplaceSessionDefaults, false, false, true, false, false, false)
+            | (CommandKind::ReplaceSessionMetadata, false, false, false, true, false, false)
+            | (CommandKind::SubmitInput, false, false, false, false, true, false)
+            | (CommandKind::DecideToolRequest, false, false, false, false, false, true) => Ok(kind),
+            (CommandKind::CreateSession, false, false, false, false, false, false)
+            | (
+                CommandKind::CreateSessionFromImportedFrontier,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            | (CommandKind::ReplaceSessionDefaults, false, false, false, false, false, false)
+            | (CommandKind::ReplaceSessionMetadata, false, false, false, false, false, false)
+            | (CommandKind::SubmitInput, false, false, false, false, false, false)
+            | (CommandKind::DecideToolRequest, false, false, false, false, false, false) => Err(
                 RegistryInspectionError::Corruption(RegistryCorruption::MissingTypedRecord(kind)),
             ),
             _ => Err(RegistryInspectionError::Corruption(

@@ -197,6 +197,27 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Default session-metadata lists to fifty rows
+
+**Context.** Metadata list queries admit page sizes from one through one
+hundred, and callers may select any value in that range. The ordinary
+unfiltered, non-archived first-page constructor still needs one shared size so
+application callers and explicit version-four process frames do not choose
+different defaults.
+
+**Decision.** Use fifty rows for the canonical default page. The default query
+has no required tags or title filter, excludes archived sessions, and has no
+cursor. Fifty is a provisional interaction and resource parameter; callers that
+need another tradeoff use the validated explicit constructor.
+
+**Rejected alternatives.** Defaulting to the one-hundred-row maximum spends the
+largest admitted read and response budget for every ordinary call. A smaller
+twenty-five-row default doubles pagination for the same traversal. Omitting the
+default constructor would move this shared policy into every caller.
+
+**Affects.** `SessionMetadataListQuery::default_page`, the ordinary version-four
+metadata-list request, and their boundary tests.
+
 ## 2026-07-25 — Bound session metadata for storage and process frames
 
 **Context.** Metadata is echoed in complete read and replacement frames, while

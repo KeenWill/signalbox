@@ -4,11 +4,15 @@
 //! persistence, and client presentation values remain distinct mappings
 //! (docs/spec/process-protocol.md).
 
-use std::{collections::HashSet, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    error::Error,
+    fmt,
+};
 
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
-    de::{MapAccess, Visitor},
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
 use uuid::Uuid;
@@ -22,6 +26,9 @@ pub const IMPORTED_TRANSCRIPT_PROTOCOL_VERSION: u64 = 2;
 /// The tool-bearing projection protocol version.
 pub const TOOL_LOOP_PROTOCOL_VERSION: u64 = 3;
 
+/// The session-metadata protocol version.
+pub const SESSION_METADATA_PROTOCOL_VERSION: u64 = 4;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -31,6 +38,8 @@ pub enum ProtocolVersion {
     Two,
     /// Tool-bearing projection vocabulary.
     Three,
+    /// Session-metadata reads, pages, and replacement vocabulary.
+    Four,
 }
 
 impl ProtocolVersion {
@@ -40,6 +49,7 @@ impl ProtocolVersion {
             Self::One => PROTOCOL_VERSION,
             Self::Two => IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
             Self::Three => TOOL_LOOP_PROTOCOL_VERSION,
+            Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
         }
     }
 
@@ -48,6 +58,7 @@ impl ProtocolVersion {
             PROTOCOL_VERSION => Some(Self::One),
             IMPORTED_TRANSCRIPT_PROTOCOL_VERSION => Some(Self::Two),
             TOOL_LOOP_PROTOCOL_VERSION => Some(Self::Three),
+            SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
             _ => None,
         }
     }
@@ -84,6 +95,21 @@ pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
 /// Maximum UTF-8 bytes in one transcript content fragment.
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
+
+/// Maximum total UTF-8 bytes in one complete metadata object or filter.
+pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
+
+/// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
+pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
+
+/// Maximum exact tags in one complete metadata object.
+pub const MAX_SESSION_METADATA_TAGS: usize = 256;
+
+/// Maximum exact attributes in one complete metadata object.
+pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
+
+/// Maximum exact required tags in one metadata-list filter.
+pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -360,6 +386,8 @@ pub enum CanonicalValueError {
     RequestId,
     /// A transcript fragment exceeded its UTF-8 byte bound.
     Content,
+    /// Session metadata violated its exact string, set, map, or page bound.
+    Metadata,
 }
 
 impl fmt::Display for CanonicalValueError {
@@ -370,6 +398,7 @@ impl fmt::Display for CanonicalValueError {
             Self::Decimal => "unsigned integer is not canonical decimal text",
             Self::RequestId => "client request identity must be nonzero",
             Self::Content => "content fragment exceeds the version-one UTF-8 byte bound",
+            Self::Metadata => "session metadata value is invalid",
         })
     }
 }
@@ -408,7 +437,325 @@ pub enum ModelSelection {
     },
 }
 
-/// Closed version-one request family.
+/// One exact complete session-metadata object.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMetadata {
+    title: Option<String>,
+    tags: Vec<String>,
+    attributes: MetadataAttributes,
+    archived: bool,
+}
+
+impl SessionMetadata {
+    /// Validates and canonicalizes one complete metadata object.
+    pub fn try_new(
+        title: Option<String>,
+        tags: Vec<String>,
+        attributes: Vec<(String, String)>,
+        archived: bool,
+    ) -> Result<Self, CanonicalValueError> {
+        let mut total_utf8_bytes = 0usize;
+        if let Some(title) = title.as_deref() {
+            validate_nonempty_metadata_text(title)?;
+            add_metadata_utf8_bytes(&mut total_utf8_bytes, title)?;
+        }
+        let tags = canonical_metadata_tags(tags, MAX_SESSION_METADATA_TAGS)?;
+        for tag in &tags {
+            add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)?;
+        }
+        let attributes = MetadataAttributes::try_new(attributes)?;
+        for (key, value) in &attributes.0 {
+            add_metadata_utf8_bytes(&mut total_utf8_bytes, key)?;
+            add_metadata_utf8_bytes(&mut total_utf8_bytes, value)?;
+        }
+        Ok(Self {
+            title,
+            tags,
+            attributes,
+            archived,
+        })
+    }
+
+    /// Constructs the unwritten empty, non-archived object.
+    pub fn empty() -> Self {
+        Self {
+            title: None,
+            tags: Vec::new(),
+            attributes: MetadataAttributes(BTreeMap::new()),
+            archived: false,
+        }
+    }
+
+    /// Borrows the optional exact title.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Iterates tags in exact scalar order.
+    pub fn tags(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.tags.iter().map(String::as_str)
+    }
+
+    /// Iterates attributes in exact key scalar order.
+    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.attributes
+            .0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// Returns whether the session is archived.
+    pub const fn archived(&self) -> bool {
+        self.archived
+    }
+
+    fn is_initial(&self) -> bool {
+        self.title.is_none()
+            && self.tags.is_empty()
+            && self.attributes.0.is_empty()
+            && !self.archived
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSessionMetadata {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    title: Option<String>,
+    #[serde(deserialize_with = "deserialize_session_metadata_tags")]
+    tags: Vec<String>,
+    attributes: MetadataAttributes,
+    archived: bool,
+}
+
+impl<'de> Deserialize<'de> for SessionMetadata {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let raw = RawSessionMetadata::deserialize(deserializer)?;
+        Self::try_new(
+            raw.title,
+            raw.tags,
+            raw.attributes.0.into_iter().collect(),
+            raw.archived,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+struct MetadataAttributes(BTreeMap<String, String>);
+
+impl MetadataAttributes {
+    fn try_new(values: Vec<(String, String)>) -> Result<Self, CanonicalValueError> {
+        if values.len() > MAX_SESSION_METADATA_ATTRIBUTES {
+            return Err(CanonicalValueError::Metadata);
+        }
+        let mut attributes = BTreeMap::new();
+        for (key, value) in values {
+            validate_nonempty_metadata_text(&key)?;
+            validate_indexed_metadata_text(&key)?;
+            validate_metadata_text(&value)?;
+            if attributes.insert(key, value).is_some() {
+                return Err(CanonicalValueError::Metadata);
+            }
+        }
+        Ok(Self(attributes))
+    }
+}
+
+struct MetadataAttributesVisitor;
+
+impl<'de> Visitor<'de> for MetadataAttributesVisitor {
+    type Value = MetadataAttributes;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an exact session metadata attribute object")
+    }
+
+    fn visit_map<AccessT>(self, mut map: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: MapAccess<'de>,
+    {
+        let mut attributes = BTreeMap::new();
+        while let Some((key, value)) = map.next_entry::<String, String>()? {
+            if attributes.len() == MAX_SESSION_METADATA_ATTRIBUTES {
+                return Err(serde::de::Error::custom(
+                    "too many session metadata attributes",
+                ));
+            }
+            validate_nonempty_metadata_text(&key).map_err(serde::de::Error::custom)?;
+            validate_indexed_metadata_text(&key).map_err(serde::de::Error::custom)?;
+            validate_metadata_text(&value).map_err(serde::de::Error::custom)?;
+            if attributes.insert(key, value).is_some() {
+                return Err(serde::de::Error::custom(
+                    "duplicate session metadata attribute key",
+                ));
+            }
+        }
+        Ok(MetadataAttributes(attributes))
+    }
+}
+
+impl<'de> Deserialize<'de> for MetadataAttributes {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(MetadataAttributesVisitor)
+    }
+}
+
+fn validate_metadata_text(value: &str) -> Result<(), CanonicalValueError> {
+    if value.contains('\0') {
+        Err(CanonicalValueError::Metadata)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_nonempty_metadata_text(value: &str) -> Result<(), CanonicalValueError> {
+    if value.is_empty() {
+        Err(CanonicalValueError::Metadata)
+    } else {
+        validate_metadata_text(value)
+    }
+}
+
+fn validate_indexed_metadata_text(value: &str) -> Result<(), CanonicalValueError> {
+    if value.len() > MAX_SESSION_METADATA_INDEXED_UTF8_BYTES {
+        Err(CanonicalValueError::Metadata)
+    } else {
+        Ok(())
+    }
+}
+
+fn add_metadata_utf8_bytes(total: &mut usize, value: &str) -> Result<(), CanonicalValueError> {
+    *total = total.saturating_add(value.len());
+    if *total > MAX_SESSION_METADATA_TOTAL_UTF8_BYTES {
+        Err(CanonicalValueError::Metadata)
+    } else {
+        Ok(())
+    }
+}
+
+fn canonical_metadata_tags(
+    values: Vec<String>,
+    maximum: usize,
+) -> Result<Vec<String>, CanonicalValueError> {
+    if values.len() > maximum {
+        return Err(CanonicalValueError::Metadata);
+    }
+    let mut tags = BTreeSet::new();
+    for tag in values {
+        validate_nonempty_metadata_text(&tag)?;
+        validate_indexed_metadata_text(&tag)?;
+        if !tags.insert(tag) {
+            return Err(CanonicalValueError::Metadata);
+        }
+    }
+    Ok(tags.into_iter().collect())
+}
+
+struct MetadataTagsVisitor<const MAXIMUM: usize>;
+
+impl<'de, const MAXIMUM: usize> Visitor<'de> for MetadataTagsVisitor<MAXIMUM> {
+    type Value = Vec<String>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "at most {MAXIMUM} exact session metadata tag strings"
+        )
+    }
+
+    fn visit_seq<AccessT>(self, mut sequence: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: SeqAccess<'de>,
+    {
+        let mut tags = Vec::with_capacity(sequence.size_hint().unwrap_or_default().min(MAXIMUM));
+        while tags.len() < MAXIMUM {
+            match sequence.next_element::<String>()? {
+                Some(tag) => tags.push(tag),
+                None => return Ok(tags),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom("too many session metadata tags"));
+        }
+        Ok(tags)
+    }
+}
+
+fn deserialize_bounded_metadata_tags<'de, DeserializerT, const MAXIMUM: usize>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    deserializer.deserialize_seq(MetadataTagsVisitor::<MAXIMUM>)
+}
+
+fn deserialize_session_metadata_tags<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    deserialize_bounded_metadata_tags::<DeserializerT, MAX_SESSION_METADATA_TAGS>(deserializer)
+}
+
+fn deserialize_required_metadata_tags<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    deserialize_bounded_metadata_tags::<DeserializerT, MAX_SESSION_METADATA_REQUIRED_TAGS>(
+        deserializer,
+    )
+}
+
+/// Closed actor provenance carried by a metadata last-writer stamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MetadataActor {
+    /// The owner wrote the snapshot.
+    Owner {},
+}
+
+/// The post-lock database statement time and actor of the latest replacement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataLastWriter {
+    updated_at_unix_micros: CanonicalU64,
+    actor: MetadataActor,
+}
+
+impl MetadataLastWriter {
+    /// Constructs one exact last-writer stamp.
+    pub const fn new(updated_at_unix_micros: CanonicalU64, actor: MetadataActor) -> Self {
+        Self {
+            updated_at_unix_micros,
+            actor,
+        }
+    }
+
+    /// Returns the nonnegative Unix-microsecond transaction timestamp.
+    pub const fn updated_at_unix_micros(self) -> CanonicalU64 {
+        self.updated_at_unix_micros
+    }
+
+    /// Returns the closed actor provenance.
+    pub const fn actor(self) -> MetadataActor {
+        self.actor
+    }
+}
+
+/// Closed versioned request family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
@@ -442,6 +789,80 @@ pub enum ClientRequest {
         /// Target session.
         session_id: CanonicalUuid,
     },
+    /// Read one filtered bounded metadata-summary page.
+    ListSessionMetadata {
+        /// Exact tags every result must carry.
+        #[serde(deserialize_with = "deserialize_required_metadata_tags")]
+        required_tags: Vec<String>,
+        /// Optional exact case-sensitive title substring.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        title_contains: Option<String>,
+        /// Whether archived sessions participate.
+        include_archived: bool,
+        /// Inclusive result bound from one through one hundred.
+        page_size: CanonicalU64,
+        /// Exclusive session-identity cursor.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after_session_id: Option<CanonicalUuid>,
+    },
+    /// Read one complete current metadata snapshot.
+    ReadSessionMetadata {
+        /// Target session.
+        session_id: CanonicalUuid,
+    },
+    /// Durably replace one complete metadata snapshot.
+    ReplaceSessionMetadata {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Complete replacement object.
+        metadata: SessionMetadata,
+    },
+}
+
+impl ClientRequest {
+    const fn minimum_protocol_version(&self) -> u64 {
+        match self {
+            Self::ListSessionMetadata { .. }
+            | Self::ReadSessionMetadata { .. }
+            | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
+            Self::CreateSession { .. }
+            | Self::ListSessions {}
+            | Self::SubmitInput { .. }
+            | Self::ReadTranscript { .. }
+            | Self::FollowSession { .. } => PROTOCOL_VERSION,
+        }
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::ListSessionMetadata {
+            required_tags,
+            title_contains,
+            page_size,
+            ..
+        } = self
+        {
+            let canonical_tags =
+                canonical_metadata_tags(required_tags.clone(), MAX_SESSION_METADATA_REQUIRED_TAGS)
+                    .map_err(|_| FrameValidationError::MetadataShape)?;
+            let mut total_utf8_bytes = 0usize;
+            for tag in &canonical_tags {
+                add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)
+                    .map_err(|_| FrameValidationError::MetadataShape)?;
+            }
+            if let Some(query) = title_contains {
+                validate_nonempty_metadata_text(query)
+                    .map_err(|_| FrameValidationError::MetadataShape)?;
+                add_metadata_utf8_bytes(&mut total_utf8_bytes, query)
+                    .map_err(|_| FrameValidationError::MetadataShape)?;
+            }
+            if !(1..=100).contains(&page_size.value()) {
+                return Err(FrameValidationError::MetadataShape);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One validated client frame.
@@ -502,7 +923,10 @@ impl ClientFrame {
         if !self.request_id.is_correlated() {
             return Err(FrameValidationError::UncorrelatedClientRequest);
         }
-        Ok(())
+        if self.version.as_u64() < self.request.minimum_protocol_version() {
+            return Err(FrameValidationError::RequestRequiresNewerVersion);
+        }
+        self.request.validate()
     }
 }
 
@@ -1392,6 +1816,58 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
     },
+    /// Begins one bounded metadata-summary page.
+    SessionMetadataPageStart {},
+    /// One current session metadata summary.
+    SessionMetadataSummary {
+        /// Session identity.
+        session_id: CanonicalUuid,
+        /// Current defaults version.
+        defaults_version: CanonicalU64,
+        /// Current model-selection request.
+        model_selection: ModelSelection,
+        /// Whether the current defaults blanket-approve dangerous tools.
+        dangerous_tool_auto_approval: bool,
+        /// Optional exact title.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        title: Option<String>,
+        /// Exact sorted flat tags.
+        #[serde(deserialize_with = "deserialize_session_metadata_tags")]
+        tags: Vec<String>,
+        /// Whether the session is archived.
+        archived: bool,
+        /// Last replacement writer, absent only before the first write.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        last_writer: Option<MetadataLastWriter>,
+    },
+    /// Completes one bounded metadata-summary page.
+    SessionMetadataPageEnd {
+        /// Number of preceding summaries.
+        session_count: CanonicalU64,
+        /// Exclusive cursor for another page, or null when no later match
+        /// existed in this page snapshot.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after_session_id: Option<CanonicalUuid>,
+    },
+    /// One complete current metadata read.
+    SessionMetadata {
+        /// Selected session.
+        session_id: CanonicalUuid,
+        /// Complete current metadata object.
+        metadata: SessionMetadata,
+        /// Last replacement writer, absent only before the first write.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        last_writer: Option<MetadataLastWriter>,
+    },
+    /// One successful complete metadata replacement receipt.
+    SessionMetadataReplaced {
+        /// Updated session.
+        session_id: CanonicalUuid,
+        /// Complete committed metadata object.
+        metadata: SessionMetadata,
+        /// Non-null last replacement writer.
+        last_writer: MetadataLastWriter,
+    },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
         /// Selected session.
@@ -1482,6 +1958,11 @@ impl ServerMessage {
             Self::TranscriptEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::TranscriptTextEntry { entry, .. } => entry.minimum_protocol_version(),
             Self::SessionEvent { event, .. } => event.minimum_protocol_version(),
+            Self::SessionMetadataPageStart {}
+            | Self::SessionMetadataSummary { .. }
+            | Self::SessionMetadataPageEnd { .. }
+            | Self::SessionMetadata { .. }
+            | Self::SessionMetadataReplaced { .. } => SESSION_METADATA_PROTOCOL_VERSION,
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
             | Self::SessionsStart {}
@@ -1492,6 +1973,57 @@ impl ServerMessage {
             | Self::TranscriptSnapshotEnd { .. }
             | Self::Error { .. } => 1,
         }
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        match self {
+            Self::SessionMetadataSummary {
+                title,
+                tags,
+                archived,
+                last_writer,
+                ..
+            } => {
+                let mut total_utf8_bytes = 0usize;
+                if let Some(title) = title {
+                    validate_nonempty_metadata_text(title)
+                        .map_err(|_| FrameValidationError::MetadataShape)?;
+                    add_metadata_utf8_bytes(&mut total_utf8_bytes, title)
+                        .map_err(|_| FrameValidationError::MetadataShape)?;
+                }
+                let canonical = canonical_metadata_tags(tags.clone(), MAX_SESSION_METADATA_TAGS)
+                    .map_err(|_| FrameValidationError::MetadataShape)?;
+                if canonical != *tags {
+                    return Err(FrameValidationError::MetadataShape);
+                }
+                for tag in tags {
+                    add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)
+                        .map_err(|_| FrameValidationError::MetadataShape)?;
+                }
+                if last_writer.is_none() && (title.is_some() || !tags.is_empty() || *archived) {
+                    return Err(FrameValidationError::MetadataShape);
+                }
+            }
+            Self::SessionMetadataPageEnd {
+                session_count,
+                next_after_session_id,
+            } => {
+                if session_count.value() > 100
+                    || (next_after_session_id.is_some() && session_count.value() == 0)
+                {
+                    return Err(FrameValidationError::MetadataShape);
+                }
+            }
+            Self::SessionMetadata {
+                metadata,
+                last_writer,
+                ..
+            } if last_writer.is_none() && !metadata.is_initial() => {
+                return Err(FrameValidationError::MetadataShape);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -1560,6 +2092,7 @@ impl ServerFrame {
         if let ServerMessage::TranscriptTurn { state, .. } = &self.message {
             state.validate()?;
         }
+        self.message.validate()?;
         match &self.message {
             ServerMessage::Error { code, detail, .. } => {
                 if !self.request_id.is_correlated()
@@ -1614,6 +2147,8 @@ pub enum FrameValidationError {
     UnsupportedVersion,
     /// A retained old version cannot encode a newer closed message variant.
     MessageRequiresNewerVersion,
+    /// A retained old version cannot carry a newer closed request variant.
+    RequestRequiresNewerVersion,
     /// A client request used reserved correlation identity zero.
     UncorrelatedClientRequest,
     /// A success response used reserved correlation identity zero.
@@ -1624,6 +2159,8 @@ pub enum FrameValidationError {
     ErrorDetailShape,
     /// A transcript turn carried an impossible correlated state shape.
     TurnStateShape,
+    /// A metadata request or response carried an invalid correlated shape.
+    MetadataShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -1631,11 +2168,13 @@ impl fmt::Display for FrameValidationError {
         formatter.write_str(match self {
             Self::UnsupportedVersion => "frame version is unsupported",
             Self::MessageRequiresNewerVersion => "server message requires a newer protocol version",
+            Self::RequestRequiresNewerVersion => "client request requires a newer protocol version",
             Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
             Self::UncorrelatedSuccess => "successful server message is uncorrelated",
             Self::UncorrelatedApplicationError => "application server error is uncorrelated",
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
+            Self::MetadataShape => "session metadata frame shape is inconsistent",
         })
     }
 }
@@ -1689,7 +2228,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, and 3",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, and 4",
             ),
         }
     }
@@ -1898,7 +2437,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3") {
+    if !matches!(version_spelling, "1" | "2" | "3" | "4") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -2004,6 +2543,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "1" => Some(ProtocolVersion::One),
         "2" => Some(ProtocolVersion::Two),
         "3" => Some(ProtocolVersion::Three),
+        "4" => Some(ProtocolVersion::Four),
         _ => None,
     }
 }
@@ -2049,10 +2589,13 @@ mod tests {
         FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
         FrameEncodeError, FrameValidationError, ImportedContentKind, ImportedSourceSpeaker,
         ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor, MetadataLastWriter,
         ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION, ServerFrame, ServerMessage,
+        SessionEvent, SessionMetadata, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
+        TurnState, decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -2066,6 +2609,29 @@ mod tests {
 
     fn uuid(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn metadata(archived: bool) -> Result<SessionMetadata, Box<dyn std::error::Error>> {
+        Ok(SessionMetadata::try_new(
+            Some(String::from("Planning")),
+            vec![String::from("work"), String::from("daily")],
+            vec![
+                (String::from("run"), String::from("17")),
+                (String::from("trigger"), String::new()),
+            ],
+            archived,
+        )?)
+    }
+
+    fn numbered_metadata_strings(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("value-{index}")).collect()
+    }
+
+    fn numbered_metadata_attributes(count: usize) -> Vec<(String, String)> {
+        numbered_metadata_strings(count)
+            .into_iter()
+            .map(|key| (key, String::new()))
+            .collect()
     }
 
     fn line(json: &str) -> Vec<u8> {
@@ -2108,6 +2674,11 @@ mod tests {
         let error = decode_client_line(&line(&json)).expect_err("version must be unsupported");
         assert_eq!(error.kind(), FrameDecodeErrorKind::UnsupportedVersion);
         assert_eq!(error.request_id().value(), 9);
+        assert!(
+            error
+                .to_string()
+                .contains("supported versions are 1, 2, 3, and 4")
+        );
     }
 
     fn unsupported_version_with_nested_object_payload(payload_depth: usize) -> String {
@@ -2116,7 +2687,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":4,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":5,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -2305,7 +2876,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("4");
+        assert_unsupported_version("5");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -2844,6 +3415,454 @@ mod tests {
     }
 
     #[test]
+    fn inv033_version_four_metadata_requests_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (
+                ClientRequest::ListSessionMetadata {
+                    required_tags: vec![String::from("daily"), String::from("work")],
+                    title_contains: Some(String::from("Plan")),
+                    include_archived: true,
+                    page_size: CanonicalU64::new(25),
+                    after_session_id: Some(uuid(6)),
+                },
+                r#"{"type":"list_session_metadata","required_tags":["daily","work"],"title_contains":"Plan","include_archived":true,"page_size":"25","after_session_id":"00000000-0000-0000-0000-000000000006"}"#,
+            ),
+            (
+                ClientRequest::ReadSessionMetadata {
+                    session_id: uuid(6),
+                },
+                r#"{"type":"read_session_metadata","session_id":"00000000-0000-0000-0000-000000000006"}"#,
+            ),
+            (
+                ClientRequest::ReplaceSessionMetadata {
+                    command_id: command(5)?,
+                    session_id: uuid(6),
+                    metadata: metadata(true)?,
+                },
+                r#"{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true}}"#,
+            ),
+        ];
+
+        for (index, (request_value, request_json)) in cases.into_iter().enumerate() {
+            for retained in [
+                ProtocolVersion::One,
+                ProtocolVersion::Two,
+                ProtocolVersion::Three,
+            ] {
+                assert_eq!(
+                    ClientFrame::try_new_for_version(
+                        retained,
+                        request(u64::try_from(index + 1)?)?,
+                        request_value.clone(),
+                    ),
+                    Err(FrameValidationError::RequestRequiresNewerVersion)
+                );
+            }
+            let request_id = request(u64::try_from(index + 1)?)?;
+            let frame =
+                ClientFrame::try_new_for_version(ProtocolVersion::Four, request_id, request_value)?;
+            let encoded = encode_client_line(&frame)?;
+            let expected = format!(
+                "{{\"version\":{SESSION_METADATA_PROTOCOL_VERSION},\"request_id\":\"{}\",\"request\":{request_json}}}\n",
+                request_id.value()
+            );
+            assert_eq!(String::from_utf8(encoded.clone())?, expected);
+            assert_eq!(decode_client_line(&encoded)?, frame);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_list_requires_title_query_member() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"include_archived":false,"page_size":"50","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_requires_cursor_member() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"50"}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_duplicate_required_tags() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":["same","same"],"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_empty_title_query() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":"","include_archived":false,"page_size":"50","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_zero_page_size() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"0","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_page_size_over_bound() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"101","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_rejects_empty_title() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"","tags":[],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_requires_title_member() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"tags":[],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_rejects_duplicate_tags() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":["same","same"],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_duplicate_metadata_attribute_member_is_malformed() {
+        assert_client_malformed(
+            r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":[],"attributes":{"same":"first","\u0073ame":"second"},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_required_tag_deserializer_rejects_member_beyond_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let required_tags = serde_json::to_string(&numbered_metadata_strings(
+            MAX_SESSION_METADATA_REQUIRED_TAGS + 1,
+        ))?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
+        );
+        assert_client_malformed(&json);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_required_tag_deserializer_accepts_exact_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let required_tags = serde_json::to_string(&numbered_metadata_strings(
+            MAX_SESSION_METADATA_REQUIRED_TAGS,
+        ))?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
+        );
+        decode_client_line(&line(&json))?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_summary_tag_deserializer_rejects_member_beyond_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tags =
+            serde_json::to_string(&numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1))?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+        );
+        assert_server_malformed(&json);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_summary_tag_deserializer_accepts_exact_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut exact_tags = numbered_metadata_strings(MAX_SESSION_METADATA_TAGS);
+        exact_tags.sort();
+        let tags = serde_json::to_string(&exact_tags)?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+        );
+        decode_server_line(&line(&json))?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_writer_actor_is_owner_only() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_capacity_matches_domain_and_frame_headroom()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let exact = SessionMetadata::try_new(
+            Some("\u{1}".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
+            Vec::new(),
+            Vec::new(),
+            false,
+        )?;
+        assert!(
+            SessionMetadata::try_new(
+                Some("x".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES + 1)),
+                Vec::new(),
+                Vec::new(),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SessionMetadata::try_new(
+                None,
+                vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)],
+                Vec::new(),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SessionMetadata::try_new(
+                None,
+                numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1),
+                Vec::new(),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SessionMetadata::try_new(
+                None,
+                Vec::new(),
+                numbered_metadata_attributes(MAX_SESSION_METADATA_ATTRIBUTES + 1),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SessionMetadata::try_new(
+                None,
+                Vec::new(),
+                vec![(
+                    "x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1),
+                    String::new(),
+                )],
+                false,
+            )
+            .is_err()
+        );
+
+        let encoded = encode_server_line(&ServerFrame::try_new_for_version(
+            ProtocolVersion::Four,
+            request(1)?,
+            ServerMessage::SessionMetadataReplaced {
+                session_id: uuid(1),
+                metadata: exact,
+                last_writer: MetadataLastWriter::new(CanonicalU64::new(1), MetadataActor::Owner {}),
+            },
+        )?)?;
+        assert!(encoded.len() < super::MAX_FRAME_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_filter_capacity_is_enforced_before_mapping()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let exact = ClientRequest::ListSessionMetadata {
+            required_tags: Vec::new(),
+            title_contains: Some("x".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
+            include_archived: false,
+            page_size: CanonicalU64::new(50),
+            after_session_id: None,
+        };
+        ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, exact)?;
+
+        let over_total = ClientRequest::ListSessionMetadata {
+            required_tags: Vec::new(),
+            title_contains: Some("x".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES + 1)),
+            include_archived: false,
+            page_size: CanonicalU64::new(50),
+            after_session_id: None,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_total),
+            Err(FrameValidationError::MetadataShape)
+        );
+
+        let over_indexed = ClientRequest::ListSessionMetadata {
+            required_tags: vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)],
+            title_contains: None,
+            include_archived: false,
+            page_size: CanonicalU64::new(50),
+            after_session_id: None,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_indexed),
+            Err(FrameValidationError::MetadataShape)
+        );
+
+        let over_cardinality = ClientRequest::ListSessionMetadata {
+            required_tags: numbered_metadata_strings(MAX_SESSION_METADATA_REQUIRED_TAGS + 1),
+            title_contains: None,
+            include_archived: false,
+            page_size: CanonicalU64::new(50),
+            after_session_id: None,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, over_cardinality,),
+            Err(FrameValidationError::MetadataShape)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_summary_enforces_aggregate_utf8_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let individually_valid_but_oversized = ServerMessage::SessionMetadataSummary {
+            session_id: uuid(1),
+            defaults_version: CanonicalU64::new(1),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(2),
+            },
+            dangerous_tool_auto_approval: false,
+            title: Some("x".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES)),
+            tags: vec![String::from("tag")],
+            archived: false,
+            last_writer: Some(MetadataLastWriter::new(
+                CanonicalU64::new(1),
+                MetadataActor::Owner {},
+            )),
+        };
+
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Four,
+                request(1)?,
+                individually_valid_but_oversized,
+            ),
+            Err(FrameValidationError::MetadataShape)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_summary_requires_nullable_title_member() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"tags":[],"archived":false,"last_writer":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_summary_requires_nullable_last_writer_member() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"},"dangerous_tool_auto_approval":false,"title":null,"tags":[],"archived":false}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_page_end_requires_nullable_cursor_member() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_page_end","session_count":"0"}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_point_read_requires_nullable_last_writer_member() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_point_read_requires_nullable_title_member() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"tags":[],"attributes":{},"archived":false},"last_writer":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_response_shapes_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let summary = ServerMessage::SessionMetadataSummary {
+            session_id: uuid(1),
+            defaults_version: CanonicalU64::new(1),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(2),
+            },
+            dangerous_tool_auto_approval: false,
+            title: None,
+            tags: Vec::new(),
+            archived: false,
+            last_writer: None,
+        };
+        for retained in [
+            ProtocolVersion::One,
+            ProtocolVersion::Two,
+            ProtocolVersion::Three,
+        ] {
+            assert_eq!(
+                ServerFrame::try_new_for_version(retained, request(1)?, summary.clone()),
+                Err(FrameValidationError::MessageRequiresNewerVersion)
+            );
+        }
+        let invalid = [
+            ServerMessage::SessionMetadataSummary {
+                session_id: uuid(1),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: uuid(2),
+                },
+                dangerous_tool_auto_approval: false,
+                title: None,
+                tags: vec![String::from("z"), String::from("a")],
+                archived: false,
+                last_writer: Some(MetadataLastWriter::new(
+                    CanonicalU64::new(1),
+                    MetadataActor::Owner {},
+                )),
+            },
+            ServerMessage::SessionMetadataSummary {
+                session_id: uuid(1),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: uuid(2),
+                },
+                dangerous_tool_auto_approval: false,
+                title: Some(String::from("unwritten")),
+                tags: Vec::new(),
+                archived: false,
+                last_writer: None,
+            },
+            ServerMessage::SessionMetadata {
+                session_id: uuid(1),
+                metadata: metadata(false)?,
+                last_writer: None,
+            },
+            ServerMessage::SessionMetadataPageEnd {
+                session_count: CanonicalU64::new(0),
+                next_after_session_id: Some(uuid(1)),
+            },
+            ServerMessage::SessionMetadataPageEnd {
+                session_count: CanonicalU64::new(101),
+                next_after_session_id: None,
+            },
+        ];
+        for message in invalid {
+            assert_eq!(
+                ServerFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, message,),
+                Err(FrameValidationError::MetadataShape)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn inv033_retained_versions_keep_model_reconciliation_and_gate_tool_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let model_reconciliation = ServerMessage::TranscriptTurn {
@@ -2890,6 +3909,46 @@ mod tests {
             tool_reconciliation,
         )?;
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_version_four_inherits_imported_transcript_and_tool_event_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let imported = ServerMessage::TranscriptTextEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptTextEntry::Imported {
+                imported_conversation_id: uuid(3),
+                imported_entry_id: uuid(4),
+                source_speaker: ImportedSourceSpeaker::Attested {
+                    speaker: ImportedSpeaker::User,
+                },
+            },
+        };
+        let imported_frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, imported)?;
+        assert_eq!(
+            decode_server_line(&encode_server_line(&imported_frame)?)?,
+            imported_frame
+        );
+
+        let tool_event = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(1),
+            session_id: uuid(1),
+            event: SessionEvent::TurnToolReconciliationRequired {
+                turn_id: uuid(2),
+                tool_attempt_id: uuid(3),
+                terminal_frontier_id: uuid(4),
+            },
+        };
+        let tool_frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Four, request(2)?, tool_event)?;
+        assert_eq!(
+            decode_server_line(&encode_server_line(&tool_frame)?)?,
+            tool_frame
+        );
         Ok(())
     }
 
@@ -2952,6 +4011,54 @@ mod tests {
                 session_count: CanonicalU64::new(1),
             },
             r#"{"type":"sessions_end","session_count":"1"}"#,
+        )?;
+        let writer = MetadataLastWriter::new(CanonicalU64::new(17), MetadataActor::Owner {});
+        assert_server_message_round_trip(
+            request(32)?,
+            ServerMessage::SessionMetadataPageStart {},
+            r#"{"type":"session_metadata_page_start"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(33)?,
+            ServerMessage::SessionMetadataSummary {
+                session_id: uuid(1),
+                defaults_version: CanonicalU64::new(2),
+                model_selection: ModelSelection::Direct {
+                    selection_id: uuid(4),
+                },
+                dangerous_tool_auto_approval: false,
+                title: Some(String::from("Planning")),
+                tags: vec![String::from("daily"), String::from("work")],
+                archived: true,
+                last_writer: Some(writer),
+            },
+            r#"{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"2","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"title":"Planning","tags":["daily","work"],"archived":true,"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"owner"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(34)?,
+            ServerMessage::SessionMetadataPageEnd {
+                session_count: CanonicalU64::new(1),
+                next_after_session_id: Some(uuid(1)),
+            },
+            r#"{"type":"session_metadata_page_end","session_count":"1","next_after_session_id":"00000000-0000-0000-0000-000000000001"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(35)?,
+            ServerMessage::SessionMetadata {
+                session_id: uuid(1),
+                metadata: SessionMetadata::empty(),
+                last_writer: None,
+            },
+            r#"{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":null}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(36)?,
+            ServerMessage::SessionMetadataReplaced {
+                session_id: uuid(1),
+                metadata: metadata(true)?,
+                last_writer: writer,
+            },
+            r#"{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true},"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"owner"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(6)?,
