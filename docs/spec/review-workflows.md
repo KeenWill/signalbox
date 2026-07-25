@@ -65,7 +65,9 @@ Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`. `Running`,
 `Succeeded`, `Failed`, and `Blocked` name the exact active or concluding
 `ReviewPassRef`; cancellation records an optional last pass. A referenced pass
-must belong to the run. Terminal states do not return to running.
+must belong to the run, and its canonical pass state must match the projected
+run state. Queued cancellation names no pass; running cancellation names its
+canonically cancelled pass. Terminal states do not return to running.
 
 ## Passes use session evidence
 
@@ -88,10 +90,14 @@ Pass state is:
 
 Every named turn belongs to the pass's accepted input and session. A successful
 frontier belongs to that same session and includes the pass turn's terminal
-semantic evidence. Persistence enforces those correlations with composite
-foreign keys; domain reconstitution rejects an invalid transition or cross-wired
-reference. Passes never copy model output, tool results, or transcript content
-into workflow state. The session transcript is the evidence of record.
+semantic evidence. A running pass names an active turn; succeeded names a
+completed turn; failed names a failed or refused turn; blocked names a turn
+requiring reconciliation; and cancellation with a turn names a cancelled turn.
+Persistence loads those canonical outcomes in addition to enforcing ownership
+with composite foreign keys; domain reconstitution rejects an invalid
+transition, mismatched outcome, or cross-wired reference. Passes never copy
+model output, tool results, or transcript content into workflow state. The
+session transcript is the evidence of record.
 
 ## Finding machine
 
@@ -121,10 +127,11 @@ findings may be posted, fixed, blocked with a nonempty reason, deduplicated,
 superseded, or made stale. Posted findings may be fixed, blocked, superseded, or
 made stale. Blocked findings may later be fixed, superseded, or made stale.
 Rejected, duplicate, superseded, stale, and fixed are terminal. Every event
-carries a contiguous one-based ordinal and a same-target pass reference.
-Reconstitution validates the complete history and fails closed on gaps, illegal
-edges, self-reference, foreign-run finding references, or a publication event
-whose external link is not associated with that finding.
+carries its owning finding reference, a contiguous one-based ordinal, and a
+same-target pass reference. Reconstitution validates the complete history and
+fails closed on a foreign owner, gaps, illegal edges, self-reference,
+foreign-run finding references, or a publication event whose external link is
+not associated with that finding.
 
 ## External links and posting reservations
 
@@ -178,6 +185,6 @@ merge-based propagation remain blocked on the
 - [Review-workflow orchestration](../open-questions.md#destination-features-target-model)
   owns application commands, scheduling, adapter seams, workflow-facing
   protocol, prompt contracts, conflict escalation, and stack propagation.
-- [Artifacts](../open-questions.md#destination-features-target-model) remain a
-  separate future aggregate; review workflow rows contain references and
-  evidence, not copied general-purpose artifacts.
+- [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
+  future aggregate; review workflow rows contain references and evidence, not
+  copied general-purpose artifacts.

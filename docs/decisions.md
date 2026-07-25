@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Correlate review lifecycle projections with canonical evidence
+
+**Context.** A review run, pass, and finding-event history each project evidence
+owned by another review or session aggregate. Checking only typed ancestry would
+still permit a terminal run to name a pass with a different outcome, a pass to
+name a turn with a different lifecycle outcome, or one finding's event to be
+replayed into another same-target finding.
+
+**Decision.** Reconstitution authenticates every projected lifecycle state
+against the canonical referenced aggregate. A run's active or concluding pass
+has the corresponding pass outcome; a pass's active or concluding turn has the
+corresponding session-turn outcome; and every finding event carries and
+validates its owning finding reference. The relational adapter loads those
+canonical facts rather than inferring them from workflow projections.
+
+**Rejected alternatives.** Ancestry-only checks admit contradictory outcomes.
+Database foreign keys alone cannot compare closed lifecycle variants across
+aggregate projections. Inferring another aggregate's outcome from a workflow row
+turns copied evidence into a competing authority.
+
+**Affects.** The
+[review-workflow scenario](scenarios.md#s29--complete-a-review-workflow-pass),
+the [review-workflows specification](spec/review-workflows.md), domain
+reconstitution, and the `2026072602xx` persistence slice.
+
 ## 2026-07-25 — Canonicalize external review object identities provider-wide
 
 **Context.** Code hosts do not share one identifier scope. Some external object
