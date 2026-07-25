@@ -1,38 +1,45 @@
 format: CodexRolloutJsonlV1
 raw_records: 7
-  1: "{\"timestamp\":\"2025-02-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-record\",\"session_id\":\"rollout-session\",\"synthetic\":true}}"
-  2: "{\"timestamp\":\"2025-02-01T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Inspect synthetic.txt\"}]}}"
-  3: "{\"timestamp\":\"2025-02-01T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Need inspect.\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Use the synthetic reader.\"}],\"encrypted_content\":\"opaque-synthetic\"}}"
-  4: "{\"timestamp\":\"2025-02-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"synthetic.txt\\\"}\"}}"
-  5: "{\"timestamp\":\"2025-02-01T00:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":[{\"type\":\"input_text\",\"text\":\"fixture body\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AA==\"},{\"type\":\"future_result\",\"value\":{\"kept\":true}}]}}"
-  6: "{\"timestamp\":\"2025-02-01T00:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}}"
-  7: "{\"timestamp\":\"2025-02-01T00:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Done.\"}}"
+  1: raw="{\"timestamp\":\"2025-02-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-record\",\"session_id\":\"rollout-session\",\"synthetic\":true}}"
+    normalized={"timestamp": "2025-02-01T00:00:00Z", "type": "session_meta", "payload": {"id": "session-record", "session_id": "rollout-session", "synthetic": true}}
+  2: raw="{\"timestamp\":\"2025-02-01T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Inspect synthetic.txt\"}]}}"
+    normalized={"timestamp": "2025-02-01T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Inspect synthetic.txt"}]}}
+  3: raw="{\"timestamp\":\"2025-02-01T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Need inspect.\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Use the synthetic reader.\"}],\"encrypted_content\":\"opaque-synthetic\"}}"
+    normalized={"timestamp": "2025-02-01T00:00:02Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need inspect."}], "content": [{"type": "reasoning_text", "text": "Use the synthetic reader."}], "encrypted_content": "opaque-synthetic"}}
+  4: raw="{\"timestamp\":\"2025-02-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"synthetic.txt\\\"}\"}}"
+    normalized={"timestamp": "2025-02-01T00:00:03Z", "type": "response_item", "payload": {"type": "function_call", "call_id": "call-1", "name": "read_file", "arguments": "{\"path\":\"synthetic.txt\"}"}}
+  5: raw="{\"timestamp\":\"2025-02-01T00:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":[{\"type\":\"input_text\",\"text\":\"fixture body\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AA==\"},{\"type\":\"future_result\",\"value\":{\"kept\":true}}]}}"
+    normalized={"timestamp": "2025-02-01T00:00:04Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-1", "output": [{"type": "input_text", "text": "fixture body"}, {"type": "input_image", "image_url": "data:image/png;base64,AA=="}, {"type": "future_result", "value": {"kept": true}}]}}
+  6: raw="{\"timestamp\":\"2025-02-01T00:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done.\"}]}}"
+    normalized={"timestamp": "2025-02-01T00:00:05Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}}
+  7: raw="{\"timestamp\":\"2025-02-01T00:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Done.\"}}"
+    normalized={"timestamp": "2025-02-01T00:00:06Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "Done."}}
 entries: 9
-  1: raw=1.1 speaker=NotAttested
-    content=SourceEvent { source_type: Attested(ImportedText { utf8_len: 12, .. }) }
-    source=ImportedSourceMetadata { record_id: Attested(ImportedText { utf8_len: 14, .. }), parent_record_id: NotAttested, source_session_id: Attested(ImportedText { utf8_len: 15, .. }), timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
-  2: raw=2.1 speaker=Attested(User)
-    content=Text(Attested(ImportedText { utf8_len: 21, .. }))
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: Attested(User) }
-  3: raw=3.1 speaker=NotAttested
-    content=Thinking { thinking: Attested(ImportedText { utf8_len: 13, .. }), signature: NotAttested }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
-  4: raw=3.2 speaker=NotAttested
-    content=Thinking { thinking: Attested(ImportedText { utf8_len: 25, .. }), signature: NotAttested }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
-  5: raw=3.3 speaker=NotAttested
-    content=RedactedThinking { data: Attested(ImportedText { utf8_len: 16, .. }) }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
-  6: raw=4.1 speaker=NotAttested
-    content=ToolCall { source_call_id: Attested(ImportedText { utf8_len: 6, .. }), name: Attested(ImportedText { utf8_len: 9, .. }), input: Attested(String(ImportedText { utf8_len: 24, .. })), caller: NotAttested }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
-  7: raw=5.1 speaker=NotAttested
-    content=ToolResult { source_call_id: Attested(ImportedText { utf8_len: 6, .. }), content: Attested(Blocks([Text(Attested(ImportedText { utf8_len: 12, .. })), Image(Attested(ImportedMediaSource { kind: Attested(ImportedText { utf8_len: 11, .. }), media_type: NotAttested, data: Attested(ImportedText { utf8_len: 26, .. }) })), SourceResultBlock { source_type: Attested(ImportedText { utf8_len: 13, .. }) }])), is_error: NotAttested }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
-  8: raw=6.1 speaker=Attested(Assistant)
-    content=Text(Attested(ImportedText { utf8_len: 5, .. }))
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: Attested(Assistant) }
-  9: raw=7.1 speaker=NotAttested
-    content=SourceEvent { source_type: Attested(ImportedText { utf8_len: 9, .. }) }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: Attested(ImportedText { utf8_len: 20, .. }), sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
+  1: raw=1.1 speaker=not_attested
+    content=source_event(type=attested("session_meta"))
+    source=record_id=attested("session-record") parent_record_id=not_attested source_session_id=attested("rollout-session") timestamp=attested("2025-02-01T00:00:00Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  2: raw=2.1 speaker=attested(User)
+    content=text(attested("Inspect synthetic.txt"))
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:01Z") sidechain=not_attested metadata=not_attested message_role=attested(User)
+  3: raw=3.1 speaker=not_attested
+    content=thinking(text=attested("Need inspect.") signature=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:02Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  4: raw=3.2 speaker=not_attested
+    content=thinking(text=attested("Use the synthetic reader.") signature=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:02Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  5: raw=3.3 speaker=not_attested
+    content=redacted_thinking(data=attested("opaque-synthetic"))
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:02Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  6: raw=4.1 speaker=not_attested
+    content=tool_call(id=attested("call-1") name=attested("read_file") input=attested("{\"path\":\"synthetic.txt\"}") caller=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:03Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  7: raw=5.1 speaker=not_attested
+    content=tool_result(id=attested("call-1") content=attested(blocks([text(attested("fixture body")), image(attested(kind=attested("input_image") media_type=not_attested data=attested("data:image/png;base64,AA=="))), source_result_block(type=attested("future_result"))])) is_error=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:04Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  8: raw=6.1 speaker=attested(Assistant)
+    content=text(attested("Done."))
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:05Z") sidechain=not_attested metadata=not_attested message_role=attested(Assistant)
+  9: raw=7.1 speaker=not_attested
+    content=source_event(type=attested("event_msg"))
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:06Z") sidechain=not_attested metadata=not_attested message_role=not_attested
 addressable_frontiers: 9

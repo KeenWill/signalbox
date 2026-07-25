@@ -1,8 +1,9 @@
 format: ClaudeCodeSessionJsonlV2
 raw_records: 1
-  1: "{\"type\":\"system\",\"deep\":[[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[0]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]]}"
+  1: raw="{\"type\":\"system\",\"deep\":[[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[[ [[[[[[[0]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]] ]]]]]]]]}"
+    normalized={"type": "system", "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
 entries: 1
-  1: raw=1.1 speaker=NotAttested
-    content=SourceEvent { source_type: Attested(ImportedText { utf8_len: 6, .. }) }
-    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }
+  1: raw=1.1 speaker=not_attested
+    content=source_event(type=attested("system"))
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=not_attested
 addressable_frontiers: 1

@@ -14,6 +14,7 @@
 
 use std::{fmt::Write, str};
 
+use expect_test::expect_file;
 use signalbox_application::ImportedConversationConverter;
 use signalbox_conversation_import_claude_code::{
     ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
@@ -23,11 +24,12 @@ use signalbox_conversation_import_codex::{
 };
 use signalbox_domain::{
     ContextFrontierId, CreateSessionFromImportedFrontier, DirectModelSelection, DurableCommandId,
-    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship, ImportedSourceAttestation, ImportedText,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
-    ModelSelectionRequest, SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
-    TranscriptAncestry,
+    ImportedConversation, ImportedConversationFormat, ImportedConversationId, ImportedMediaSource,
+    ImportedSessionRelationship, ImportedSourceAttestation, ImportedSourceMetadata,
+    ImportedSpeaker, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
+    ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntryId,
+    ImportedTranscriptEntryInput, ModelSelectionRequest, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
 
@@ -147,6 +149,190 @@ fn assert_every_entry_has_one_frontier(imported: &ImportedConversation) {
     assert_eq!(imported.frontiers().count(), imported.entries().len());
 }
 
+fn render_attestation<Value>(
+    attestation: &ImportedSourceAttestation<Value>,
+    render_value: impl FnOnce(&Value) -> String,
+) -> String {
+    match attestation {
+        ImportedSourceAttestation::Attested(value) => {
+            format!("attested({})", render_value(value))
+        }
+        ImportedSourceAttestation::AttestedAbsent => String::from("attested_absent"),
+        ImportedSourceAttestation::NotAttested => String::from("not_attested"),
+    }
+}
+
+fn render_text_attestation(attestation: &ImportedSourceAttestation<ImportedText>) -> String {
+    render_attestation(attestation, |value| format!("{:?}", value.as_str()))
+}
+
+fn render_bool_attestation(attestation: &ImportedSourceAttestation<bool>) -> String {
+    render_attestation(attestation, bool::to_string)
+}
+
+fn render_speaker_attestation(attestation: &ImportedSourceAttestation<ImportedSpeaker>) -> String {
+    render_attestation(attestation, |speaker| format!("{speaker:?}"))
+}
+
+fn render_structured(value: &ImportedStructuredValue) -> String {
+    match value {
+        ImportedStructuredValue::Null => String::from("null"),
+        ImportedStructuredValue::Boolean(value) => value.to_string(),
+        ImportedStructuredValue::Number(value) => String::from(value.as_str()),
+        ImportedStructuredValue::String(value) => format!("{:?}", value.as_str()),
+        ImportedStructuredValue::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(render_structured)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ImportedStructuredValue::Object(members) => format!(
+            "{{{}}}",
+            members
+                .iter()
+                .map(|member| format!(
+                    "{:?}: {}",
+                    member.name().as_str(),
+                    render_structured(member.value())
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn render_structured_attestation(
+    attestation: &ImportedSourceAttestation<ImportedStructuredValue>,
+) -> String {
+    render_attestation(attestation, render_structured)
+}
+
+fn render_media(media: &ImportedMediaSource) -> String {
+    format!(
+        "kind={} media_type={} data={}",
+        render_text_attestation(media.kind()),
+        render_text_attestation(media.media_type()),
+        render_text_attestation(media.data())
+    )
+}
+
+fn render_media_attestation(
+    attestation: &ImportedSourceAttestation<ImportedMediaSource>,
+) -> String {
+    render_attestation(attestation, render_media)
+}
+
+fn render_result_block(block: &ImportedToolResultBlock) -> String {
+    match block {
+        ImportedToolResultBlock::Text(text) => {
+            format!("text({})", render_text_attestation(text))
+        }
+        ImportedToolResultBlock::Image(source) => {
+            format!("image({})", render_media_attestation(source))
+        }
+        ImportedToolResultBlock::ToolReference { tool_name } => {
+            format!(
+                "tool_reference(name={})",
+                render_text_attestation(tool_name)
+            )
+        }
+        ImportedToolResultBlock::SourceResultBlock { source_type } => {
+            format!(
+                "source_result_block(type={})",
+                render_text_attestation(source_type)
+            )
+        }
+    }
+}
+
+fn render_tool_result_value(value: &ImportedToolResultValue) -> String {
+    match value {
+        ImportedToolResultValue::Text(text) => format!("text({:?})", text.as_str()),
+        ImportedToolResultValue::Blocks(blocks) => format!(
+            "blocks([{}])",
+            blocks
+                .iter()
+                .map(render_result_block)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn render_content(content: &ImportedTranscriptContent) -> String {
+    match content {
+        ImportedTranscriptContent::SourceEvent { source_type } => {
+            format!(
+                "source_event(type={})",
+                render_text_attestation(source_type)
+            )
+        }
+        ImportedTranscriptContent::SourceMessageBlock { source_type } => {
+            format!(
+                "source_message_block(type={})",
+                render_text_attestation(source_type)
+            )
+        }
+        ImportedTranscriptContent::Text(text) => {
+            format!("text({})", render_text_attestation(text))
+        }
+        ImportedTranscriptContent::ToolCall {
+            source_call_id,
+            name,
+            input,
+            caller,
+        } => format!(
+            "tool_call(id={} name={} input={} caller={})",
+            render_text_attestation(source_call_id),
+            render_text_attestation(name),
+            render_structured_attestation(input),
+            render_structured_attestation(caller)
+        ),
+        ImportedTranscriptContent::ToolResult {
+            source_call_id,
+            content,
+            is_error,
+        } => format!(
+            "tool_result(id={} content={} is_error={})",
+            render_text_attestation(source_call_id),
+            render_attestation(content, render_tool_result_value),
+            render_bool_attestation(is_error)
+        ),
+        ImportedTranscriptContent::Thinking {
+            thinking,
+            signature,
+        } => format!(
+            "thinking(text={} signature={})",
+            render_text_attestation(thinking),
+            render_text_attestation(signature)
+        ),
+        ImportedTranscriptContent::RedactedThinking { data } => {
+            format!("redacted_thinking(data={})", render_text_attestation(data))
+        }
+        ImportedTranscriptContent::Document { source } => {
+            format!("document(source={})", render_media_attestation(source))
+        }
+        ImportedTranscriptContent::MessageContentAbsent(absence) => {
+            format!("message_content_absent({absence:?})")
+        }
+    }
+}
+
+fn render_source(source: &ImportedSourceMetadata) -> String {
+    format!(
+        "record_id={} parent_record_id={} source_session_id={} timestamp={} sidechain={} metadata={} message_role={}",
+        render_text_attestation(source.record_id()),
+        render_text_attestation(source.parent_record_id()),
+        render_text_attestation(source.source_session_id()),
+        render_text_attestation(source.timestamp()),
+        render_bool_attestation(source.sidechain()),
+        render_bool_attestation(source.metadata()),
+        render_speaker_attestation(source.message_role())
+    )
+}
+
 fn render_conversation(imported: &ImportedConversation) -> String {
     let mut rendered = format!(
         "format: {:?}\nraw_records: {}\n",
@@ -155,21 +341,26 @@ fn render_conversation(imported: &ImportedConversation) -> String {
     );
     for (index, record) in imported.raw_records().iter().enumerate() {
         let raw = str::from_utf8(record.bytes()).expect("successful JSON fixture is UTF-8");
-        writeln!(&mut rendered, "  {}: {raw:?}", index + 1)
-            .expect("formatting into a string cannot fail");
+        writeln!(
+            &mut rendered,
+            "  {}: raw={raw:?}\n    normalized={}",
+            index + 1,
+            render_structured(record.normalized())
+        )
+        .expect("formatting into a string cannot fail");
     }
     writeln!(&mut rendered, "entries: {}", imported.entries().len())
         .expect("formatting into a string cannot fail");
     for entry in imported.entries() {
         writeln!(
             &mut rendered,
-            "  {}: raw={}.{} speaker={:?}\n    content={:?}\n    source={:?}",
+            "  {}: raw={}.{} speaker={}\n    content={}\n    source={}",
             entry.position().as_u64(),
             entry.raw_record_position().as_u64(),
             entry.record_entry_position().as_u64(),
-            entry.source_speaker(),
-            entry.content(),
-            entry.source(),
+            render_speaker_attestation(entry.source_speaker()),
+            render_content(entry.content()),
+            render_source(entry.source()),
         )
         .expect("formatting into a string cannot fail");
     }
@@ -191,11 +382,12 @@ fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
         concat!(
             "format: ClaudeCodeSessionJsonlV2\n",
             "raw_records: 1\n",
-            "  1: \"{\\\"type\\\":\\\"system\\\"}\"\n",
+            "  1: raw=\"{\\\"type\\\":\\\"system\\\"}\"\n",
+            "    normalized={\"type\": \"system\"}\n",
             "entries: 1\n",
-            "  1: raw=1.1 speaker=NotAttested\n",
-            "    content=SourceEvent { source_type: Attested(ImportedText { utf8_len: 6, .. }) }\n",
-            "    source=ImportedSourceMetadata { record_id: NotAttested, parent_record_id: NotAttested, source_session_id: NotAttested, timestamp: NotAttested, sidechain: NotAttested, metadata: NotAttested, message_role: NotAttested }\n",
+            "  1: raw=1.1 speaker=not_attested\n",
+            "    content=source_event(type=attested(\"system\"))\n",
+            "    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=not_attested\n",
             "addressable_frontiers: 1\n",
         )
     );
@@ -224,10 +416,8 @@ fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
         ImportedTranscriptContent::SourceMessageBlock { .. }
     ));
     assert_every_entry_has_one_frontier(&imported);
-    assert_eq!(
-        render_conversation(&imported),
-        include_str!("fixtures/importer-conformance/golden/claude-code-v1-tool-round.txt")
-    );
+    expect_file!["fixtures/importer-conformance/golden/claude-code-v1-tool-round.txt"]
+        .assert_eq(&render_conversation(&imported));
 }
 
 #[test]
@@ -257,10 +447,8 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
         )
     );
     assert_every_entry_has_one_frontier(&imported);
-    assert_eq!(
-        render_conversation(&imported),
-        include_str!("fixtures/importer-conformance/golden/claude-code-v2-boundary-losses.txt")
-    );
+    expect_file!["fixtures/importer-conformance/golden/claude-code-v2-boundary-losses.txt"]
+        .assert_eq(&render_conversation(&imported));
 }
 
 #[test]
@@ -286,10 +474,8 @@ fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
         ImportedTranscriptContent::Text(_)
     ));
     assert_every_entry_has_one_frontier(&imported);
-    assert_eq!(
-        render_conversation(&imported),
-        include_str!("fixtures/importer-conformance/golden/codex-rollout-v1-tool-round.txt")
-    );
+    expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-tool-round.txt"]
+        .assert_eq(&render_conversation(&imported));
 }
 
 #[test]
@@ -303,10 +489,8 @@ fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
         ImportedTranscriptContent::SourceEvent { .. }
     ));
     assert_every_entry_has_one_frontier(&imported);
-    assert_eq!(
-        render_conversation(&imported),
-        include_str!("fixtures/importer-conformance/golden/claude-code-v2-depth-128.txt")
-    );
+    expect_file!["fixtures/importer-conformance/golden/claude-code-v2-depth-128.txt"]
+        .assert_eq(&render_conversation(&imported));
 }
 
 #[test]
@@ -328,10 +512,8 @@ fn s28_inv038_claude_code_v2_depth_129_rejection_matches_golden() {
         ClaudeCodeJsonlConversionFailure::JsonDepthExceeded { line: 1 }
     );
     assert_eq!(identity_calls, 0);
-    assert_eq!(
-        rendered,
-        include_str!("fixtures/importer-conformance/golden/claude-code-v2-depth-129-error.txt")
-    );
+    expect_file!["fixtures/importer-conformance/golden/claude-code-v2-depth-129-error.txt"]
+        .assert_eq(&rendered);
 }
 
 #[test]
@@ -357,12 +539,10 @@ fn s28_inv038_claude_code_undecodable_fragment_rejection_matches_golden() {
         ClaudeCodeJsonlConversionFailure::InvalidJson { line: 2 }
     );
     assert_eq!(identity_calls, 0);
-    assert_eq!(
-        rendered,
-        include_str!(
-            "fixtures/importer-conformance/golden/claude-code-v2-undecodable-fragment-error.txt"
-        )
-    );
+    expect_file![
+        "fixtures/importer-conformance/golden/claude-code-v2-undecodable-fragment-error.txt"
+    ]
+    .assert_eq(&rendered);
 }
 
 #[test]
@@ -384,12 +564,10 @@ fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
         CodexRolloutJsonlConversionFailure::InvalidJson { line: 2 }
     );
     assert_eq!(identity_calls, 0);
-    assert_eq!(
-        rendered,
-        include_str!(
-            "fixtures/importer-conformance/golden/codex-rollout-v1-truncated-fragment-error.txt"
-        )
-    );
+    expect_file![
+        "fixtures/importer-conformance/golden/codex-rollout-v1-truncated-fragment-error.txt"
+    ]
+    .assert_eq(&rendered);
 }
 
 #[test]
@@ -398,8 +576,8 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
     let unchanged = imported.clone();
     let selected = imported
         .frontiers()
-        .last()
-        .expect("the fixture has an addressable final boundary");
+        .nth(1)
+        .expect("the fixture has an interior addressable boundary");
     let mut next_resume_entry = 0x1100;
     let resume = CreateSessionFromImportedFrontier::new(
         command_id(0x1200),
@@ -450,11 +628,8 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
         imported == unchanged,
     );
 
-    assert_eq!(
-        resume.seed_snapshot().entry_count(),
-        imported.entries().len()
-    );
-    assert_eq!(fork.seed_snapshot().entry_count(), imported.entries().len());
+    assert_eq!(resume.seed_snapshot().entry_count(), 2);
+    assert_eq!(fork.seed_snapshot().entry_count(), 2);
     assert_eq!(
         resume.session().provenance().ancestry(),
         TranscriptAncestry::ImportedConversation {
@@ -470,8 +645,5 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
         }
     );
     assert_eq!(imported, unchanged);
-    assert_eq!(
-        rendered,
-        include_str!("fixtures/importer-conformance/golden/adoption-modes.txt")
-    );
+    expect_file!["fixtures/importer-conformance/golden/adoption-modes.txt"].assert_eq(&rendered);
 }
