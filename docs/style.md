@@ -245,7 +245,11 @@ guide introduces:
   ```
 
   The comments state each value's *role*; the reader never wonders whether `8`
-  is meaningful (it is: it must differ from `7`, and nothing more).
+  is meaningful (it is: it must differ from `7`, and nothing more). The excerpt
+  is faithful, gap included: `TARGET_IDENTITY` carries no comment, so whether
+  `7` is itself load-bearing is left to the reader — under principle 1 it would
+  say *the pinned identity under test; any value `MISMATCHING_IDENTITY` differs
+  from serves*. This guide reaches that file the next time it is modified.
 
 - **Namespaced generators** for values whose only obligation is distinctness —
   `next_test_submit_uuid()` in `postgres_integration.rs:128-131` brands its IDs

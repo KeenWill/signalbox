@@ -9,12 +9,13 @@ The normative surface is the living specification: the subsystem pages under
 `docs/domain-spine.md` (public API shapes). `docs/decisions.md` is the
 append-only record of recorded choices; `docs/open-questions.md` is the one home
 of deferred design; `docs/scenarios.md` and `docs/agents/testing-style.md`
-govern scenarios and tests; `docs/architecture.md` orients but owns nothing. The
-historical ADR corpus formerly under `docs/decisions/` is retired: its content
-was distilled into `docs/spec/` (mapping in `docs/spec/README.md`), git history
-is its archive, and it is not citable as current authority. When selecting
-milestones, consult the priority order in `docs/target-model.md` — directional,
-never overriding the sources above.
+govern scenarios and tests; `docs/style.md` governs literal provenance and label
+discipline in production and test code alike; `docs/architecture.md` orients but
+owns nothing. The historical ADR corpus formerly under `docs/decisions/` is
+retired: its content was distilled into `docs/spec/` (mapping in
+`docs/spec/README.md`), git history is its archive, and it is not citable as
+current authority. When selecting milestones, consult the priority order in
+`docs/target-model.md` — directional, never overriding the sources above.
 
 **Public-source hygiene.** Repository content — code, documentation, commit
 messages, pull-request text, branch names — cites only public sources. Never

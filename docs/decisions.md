@@ -32,8 +32,8 @@ under `docs/agents/` would classify a rule binding all code as an agent process
 document. Leaving the discipline implicit keeps review feedback uncitable and
 inconsistent between reviewers.
 
-**Affects.** `docs/style.md`, the style pointer in `AGENTS.md`, and review
-practice for new and modified code.
+**Affects.** `docs/style.md`, the normative-surface inventory and style pointer
+in `AGENTS.md`, and review practice for new and modified code.
 
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
