@@ -245,9 +245,11 @@ the sweep (INV-007).
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. Each authoritative pass first asks its
 execution composition to reconcile any active running tool round for the hinted
-session, then runs ordinary queued-turn activation. A parked approval returns
-from the pass immediately and therefore retains no scheduler worker capacity.
-Activation returns the activated turn
+session, then runs ordinary queued-turn activation. Failure of the read-only
+active-round lookup is an ordinary failed pass for later scheduler retry; only a
+failure after active-turn execution begins trips fatal recovery supervision. A
+parked approval returns from the pass immediately and therefore retains no
+scheduler worker capacity. Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
@@ -433,7 +435,11 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   attempt, plus a correlated `known_failed`/`cancelled` call when one exists —
   instead of accepting an evidence-free failure record, and the deferred
   `assert_failed_terminal_execution_final_state` assertion re-closes the shape
-  at every commit.
+  at every commit. When the failure closed a tool round, the same input names
+  the complete owner-sourced denial resolutions backing every `ToolDenied`
+  result entry in the terminal suffix; a `ToolDenied` entry whose request lacks
+  an exact `Deny` resolution — including a missing or approving decision — fails
+  reconstitution rather than fabricating an owner denial.
 - A cancelled terminal turn reconstructs only from
   `CancelledTurnExecutionReconstitutionInput`: its exact ended attempt carries
   `AfterCancellation(Cancelled)` and the same complete applied-interrupt result
@@ -444,7 +450,9 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   round, the input instead names the batch's `completed` producing call, and the
   terminal frontier extends that call's yielded frontier by exactly one
   batch-correlated result entry per request in proposal order before the
-  correlated `TurnCancelled` marker.
+  correlated `TurnCancelled` marker. Each `ToolDenied` entry in that suffix is
+  batch-correlated only against a named owner-sourced `Deny` resolution for its
+  exact request; a missing or approving decision fails reconstitution.
 - A reconciliation-required terminal turn names its exact ended turn attempt and
   exactly one required terminal `ambiguous` model call or tool attempt. The
   attempt end is either `WithoutStop(Ambiguous|Lost)` with a later

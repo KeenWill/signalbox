@@ -530,10 +530,18 @@ enum RetainedToolExecutionStateKind {
         attempt: ToolAttemptId,
         request: ToolRequest,
         definition: ToolDefinition,
+        result_entry_count: usize,
         dispatch_permit: InProcessToolDispatchPermit,
     },
     Observation {
         observation: CorrelatedToolAttemptObservation,
+        dispatch_permit: InProcessToolDispatchPermit,
+    },
+    CrashClassification {
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        result_entry_count: usize,
         dispatch_permit: InProcessToolDispatchPermit,
     },
 }
@@ -549,6 +557,9 @@ impl fmt::Debug for RetainedToolExecutionState {
                         "authorization_non_consumption"
                     }
                     RetainedToolExecutionStateKind::Observation { .. } => "observation",
+                    RetainedToolExecutionStateKind::CrashClassification { .. } => {
+                        "crash_classification"
+                    }
                 },
             )
             .field("holds_dispatch_permit", &true)
@@ -802,6 +813,7 @@ where
                     attempt,
                     request,
                     definition,
+                    result_entry_count,
                     dispatch_permit,
                 } => match self
                     .transaction
@@ -814,7 +826,13 @@ where
                     }
                     Ok(ToolAttemptAuthorizationStatus::InFlight(authorized)) => {
                         return self
-                            .execute_authorized(request, definition, authorized, dispatch_permit)
+                            .execute_authorized(
+                                request,
+                                definition,
+                                authorized,
+                                result_entry_count,
+                                dispatch_permit,
+                            )
                             .await;
                     }
                     Err(error) => {
@@ -825,6 +843,7 @@ where
                                 attempt,
                                 request,
                                 definition,
+                                result_entry_count,
                                 dispatch_permit,
                             },
                         });
@@ -861,6 +880,23 @@ where
                             ));
                         }
                     }
+                }
+                RetainedToolExecutionStateKind::CrashClassification {
+                    session,
+                    turn,
+                    attempt,
+                    result_entry_count,
+                    dispatch_permit,
+                } => {
+                    return self
+                        .classify_crash_loss(
+                            session,
+                            turn,
+                            attempt,
+                            result_entry_count,
+                            dispatch_permit,
+                        )
+                        .await;
                 }
             }
         }
@@ -928,47 +964,14 @@ where
                         {
                             return Ok(ToolExecutionServiceOutcome::NoWork);
                         }
-                        loop {
-                            let identities = ToolCrashClosureIdentities::new(
-                                (0..reloaded_batch.requests().len())
-                                    .map(|_| self.ids.next_tool_semantic_entry_id())
-                                    .collect(),
-                                self.ids.next_tool_context_frontier_id(),
-                                FailedModelCallTurnIdentities::new(
-                                    self.ids.next_tool_semantic_entry_id(),
-                                    self.ids.next_tool_context_frontier_id(),
-                                ),
-                            );
-                            let ids = &mut self.ids;
-                            match self
-                                .transaction
-                                .classify_crash_loss(
-                                    current.session(),
-                                    current.turn(),
-                                    current.attempt(),
-                                    identities,
-                                    |_| ids.next_tool_turn_id(),
-                                )
-                                .await
-                            {
-                                Err(error)
-                                    if error.operator_failure_class()
-                                        == OperatorFailureClass::IdentityCollision =>
-                                {
-                                    continue;
-                                }
-                                Ok(outcome) => {
-                                    break Ok(ToolExecutionServiceOutcome::CrashClassified(
-                                        Box::new(outcome),
-                                    ));
-                                }
-                                Err(error) => {
-                                    break Err(ToolExecutionServiceError::CrashClassification(
-                                        error,
-                                    ));
-                                }
-                            }
-                        }
+                        self.classify_crash_loss(
+                            current.session(),
+                            current.turn(),
+                            current.attempt(),
+                            reloaded_batch.requests().len(),
+                            _dispatch_permit,
+                        )
+                        .await
                     }
                 };
             }
@@ -1043,6 +1046,7 @@ where
         if !exact_prepared_attempt {
             return Ok(ToolExecutionServiceOutcome::NoWork);
         }
+        let result_entry_count = reloaded_batch.requests().len();
 
         let definition = self.catalog.definition(request.name());
         let preflight = match definition.as_ref() {
@@ -1122,6 +1126,7 @@ where
                                 attempt: prepared.attempt(),
                                 request,
                                 definition,
+                                result_entry_count,
                                 dispatch_permit,
                             },
                         });
@@ -1136,8 +1141,14 @@ where
                 return Err(ToolExecutionServiceError::Authorize(error));
             }
         };
-        self.execute_authorized(request, definition, authorized, dispatch_permit)
-            .await
+        self.execute_authorized(
+            request,
+            definition,
+            authorized,
+            result_entry_count,
+            dispatch_permit,
+        )
+        .await
     }
 
     async fn execute_authorized(
@@ -1145,6 +1156,7 @@ where
         request: ToolRequest,
         definition: ToolDefinition,
         authorized: AuthorizedToolAttempt,
+        result_entry_count: usize,
         dispatch_permit: InProcessToolDispatchPermit,
     ) -> Result<
         ToolExecutionServiceOutcome,
@@ -1154,11 +1166,27 @@ where
         let expected_correlation = authorized.correlation();
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
-        let evidence = self
-            .executor
-            .execute(invocation)
-            .await
-            .map_err(ToolExecutionServiceError::Executor)?;
+        let evidence = match self.executor.execute(invocation).await {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                match self
+                    .classify_crash_loss(
+                        expected_correlation.session(),
+                        expected_correlation.turn(),
+                        authorized.attempt().attempt(),
+                        result_entry_count,
+                        dispatch_permit,
+                    )
+                    .await
+                {
+                    Ok(ToolExecutionServiceOutcome::CrashClassified(_)) => {
+                        return Err(ToolExecutionServiceError::Executor(error));
+                    }
+                    Ok(_) => unreachable!("crash classification has one successful outcome"),
+                    Err(classification_error) => return Err(classification_error),
+                }
+            }
+        };
         if evidence.correlation() != expected_correlation {
             return Err(ToolExecutionServiceError::ExecutorCorrelationMismatch);
         }
@@ -1195,6 +1223,63 @@ where
         }
     }
 
+    async fn classify_crash_loss(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        result_entry_count: usize,
+        dispatch_permit: InProcessToolDispatchPermit,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    > {
+        loop {
+            let identities = ToolCrashClosureIdentities::new(
+                (0..result_entry_count)
+                    .map(|_| self.ids.next_tool_semantic_entry_id())
+                    .collect(),
+                self.ids.next_tool_context_frontier_id(),
+                FailedModelCallTurnIdentities::new(
+                    self.ids.next_tool_semantic_entry_id(),
+                    self.ids.next_tool_context_frontier_id(),
+                ),
+            );
+            let ids = &mut self.ids;
+            match self
+                .transaction
+                .classify_crash_loss(session, turn, attempt, identities, |_| {
+                    ids.next_tool_turn_id()
+                })
+                .await
+            {
+                Err(error)
+                    if error.operator_failure_class()
+                        == OperatorFailureClass::IdentityCollision =>
+                {
+                    continue;
+                }
+                Ok(outcome) => {
+                    return Ok(ToolExecutionServiceOutcome::CrashClassified(Box::new(
+                        outcome,
+                    )));
+                }
+                Err(error) => {
+                    self.retained_state = Some(RetainedToolExecutionState {
+                        state: RetainedToolExecutionStateKind::CrashClassification {
+                            session,
+                            turn,
+                            attempt,
+                            result_entry_count,
+                            dispatch_permit,
+                        },
+                    });
+                    return Err(ToolExecutionServiceError::CrashClassification(error));
+                }
+            }
+        }
+    }
+
     async fn prepare_continuation(
         &mut self,
         batch: &ToolBatch,
@@ -1202,6 +1287,15 @@ where
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
+        let _dispatch_permit = self.gate.acquire(batch.turn()).await;
+        let Some(batch) = self
+            .transaction
+            .load_active_batch(batch.session(), batch.turn())
+            .await
+            .map_err(ToolExecutionServiceError::Load)?
+        else {
+            return Ok(ToolExecutionServiceOutcome::NoWork);
+        };
         loop {
             let result_entries = (0..batch.requests().len())
                 .map(|_| self.ids.next_tool_semantic_entry_id())
@@ -1577,6 +1671,10 @@ mod tests {
                 panic!("prepared fixture is not a restart loss");
             }
             self.events.lock().expect("event lock").push("classify");
+            if self.commit_failures > 0 {
+                self.commit_failures -= 1;
+                return Err(FakeError::Ordinary);
+            }
             Ok(self.prepared.clone().classify_crash_loss())
         }
 
@@ -1658,6 +1756,22 @@ mod tests {
 
     struct FixedEvidenceExecutor {
         evidence: Option<CorrelatedToolExecutorEvidence>,
+    }
+
+    struct FailingExecutor {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ToolExecutor for FailingExecutor {
+        type Error = FakeError;
+
+        async fn execute(
+            &mut self,
+            _invocation: ToolExecutionInvocation,
+        ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+            self.events.lock().expect("event lock").push("execute");
+            Err(FakeError::Ordinary)
+        }
     }
 
     impl ToolExecutor for FixedEvidenceExecutor {
@@ -1900,6 +2014,140 @@ mod tests {
         );
     }
 
+    /// INV-011 / INV-024 / INV-037: an executor operator failure cannot release
+    /// the interrupt gate while its durable attempt remains in flight.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_executor_failure_classifies_before_gate_release() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: true,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let gate = InProcessToolDispatchGate::default();
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            FailingExecutor {
+                events: Arc::clone(&events),
+            },
+            gate.clone(),
+        );
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Err(ToolExecutionServiceError::Executor(FakeError::Ordinary))
+        ));
+        assert!(service.retained_state().is_none());
+        let _released = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await
+        .expect("durable crash classification releases the interrupt gate");
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "classify"]
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-037: failed executor crash classification
+    /// retains the exact gate permit until a later pass commits closure.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_failed_executor_classification_retains_gate() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 1,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: true,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let gate = InProcessToolDispatchGate::default();
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            FailingExecutor {
+                events: Arc::clone(&events),
+            },
+            gate.clone(),
+        );
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Err(ToolExecutionServiceError::CrashClassification(
+                FakeError::Ordinary
+            ))
+        ));
+        assert!(service.retained_state().is_some());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                gate.acquire(batch.turn())
+            )
+            .await
+            .is_err(),
+            "failed classification keeps interrupts behind the exact permit"
+        );
+        assert!(matches!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("retained classification commits"),
+            ToolExecutionServiceOutcome::CrashClassified(_)
+        ));
+        let _released = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await
+        .expect("durable closure releases the interrupt gate");
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "classify", "classify"]
+        );
+    }
+
     /// INV-011: executor evidence from another valid dispatch fence is rejected
     /// before persistence sees it.
     #[tokio::test]
@@ -2007,6 +2255,57 @@ mod tests {
         drop(blocking_permit);
         assert_eq!(
             execution.await.expect("stale hint is not an error"),
+            ToolExecutionServiceOutcome::NoWork
+        );
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-037: an all-resolved continuation hint is revalidated
+    /// under the dispatch gate, so a winning interrupt is ordinary no-work.
+    #[tokio::test]
+    async fn inv011_inv037_vanished_continuation_batch_is_no_work() {
+        let (batch, _) = batch_with_attempt_state(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Ended(signalbox_domain::ToolAttemptEnd::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+            }),
+            0,
+        );
+        let (prepared_batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let prepared = match prepared_batch.attempt(prepared_batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: [Some(batch.clone()), None].into(),
+            allow_crash_classification: false,
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            NoToolCatalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("a winning interrupt makes continuation stale"),
             ToolExecutionServiceOutcome::NoWork
         );
         assert!(events.lock().expect("event lock").is_empty());

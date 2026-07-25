@@ -57,7 +57,7 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
         load_active_batch_from_connection, load_recovery_batch_by_attempt,
-        load_terminal_result_attempts, persist_ended_attempt,
+        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -1819,18 +1819,30 @@ pub(crate) async fn load_scheduling_projection(
                                     required_model_calls.insert(call);
                                     ModelCallId::from_uuid(call)
                                 });
-                                let terminal_tool_attempts = if terminal_call.is_none() {
-                                    load_terminal_result_attempts(
-                                        connection,
-                                        lifecycle_session,
-                                        lifecycle_turn,
-                                        ContextFrontierId::from_uuid(terminal_frontier),
-                                    )
-                                    .await
-                                    .map_err(map_tool_loop_error)?
-                                } else {
-                                    Vec::new()
-                                };
+                                let (terminal_tool_attempts, terminal_tool_denials) =
+                                    if terminal_call.is_none() {
+                                        let terminal_frontier =
+                                            ContextFrontierId::from_uuid(terminal_frontier);
+                                        let attempts = load_terminal_result_attempts(
+                                            connection,
+                                            lifecycle_session,
+                                            lifecycle_turn,
+                                            terminal_frontier,
+                                        )
+                                        .await
+                                        .map_err(map_tool_loop_error)?;
+                                        let denials = load_terminal_result_denials(
+                                            connection,
+                                            lifecycle_session,
+                                            lifecycle_turn,
+                                            terminal_frontier,
+                                        )
+                                        .await
+                                        .map_err(map_tool_loop_error)?;
+                                        (attempts, denials)
+                                    } else {
+                                        (Vec::new(), Vec::new())
+                                    };
                                 let execution = match (
                                     end_variant.as_deref(),
                                     end_disposition.as_deref(),
@@ -1921,7 +1933,11 @@ pub(crate) async fn load_scheduling_projection(
                                         .into());
                                     }
                                 };
-                                Some(execution.with_terminal_tool_attempts(terminal_tool_attempts))
+                                Some(
+                                    execution
+                                        .with_terminal_tool_attempts(terminal_tool_attempts)
+                                        .with_terminal_tool_denials(terminal_tool_denials),
+                                )
                             }
                             (None, Some(_)) => {
                                 return Err(SubmitInputCorruption::Inconsistent(
@@ -1969,17 +1985,29 @@ pub(crate) async fn load_scheduling_projection(
                         if let Some(call) = terminal_model_call {
                             required_model_calls.insert(call);
                         }
-                        let terminal_tool_attempts = if terminal_model_call.is_none() {
-                            load_terminal_result_attempts(
+                        let (terminal_tool_attempts, terminal_tool_denials) = if terminal_model_call
+                            .is_none()
+                        {
+                            let terminal_frontier = ContextFrontierId::from_uuid(terminal_frontier);
+                            let attempts = load_terminal_result_attempts(
                                 connection,
                                 lifecycle_session,
                                 lifecycle_turn,
-                                ContextFrontierId::from_uuid(terminal_frontier),
+                                terminal_frontier,
                             )
                             .await
-                            .map_err(map_tool_loop_error)?
+                            .map_err(map_tool_loop_error)?;
+                            let denials = load_terminal_result_denials(
+                                connection,
+                                lifecycle_session,
+                                lifecycle_turn,
+                                terminal_frontier,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
+                            (attempts, denials)
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
                         AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
                             starting_lineage,
@@ -1994,7 +2022,8 @@ pub(crate) async fn load_scheduling_projection(
                                 ended_call,
                                 interrupt,
                             )
-                            .with_terminal_tool_attempts(terminal_tool_attempts),
+                            .with_terminal_tool_attempts(terminal_tool_attempts)
+                            .with_terminal_tool_denials(terminal_tool_denials),
                             terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                         }
                     }

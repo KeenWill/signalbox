@@ -65,6 +65,16 @@ pub trait ActivatedTurnExecution {
         std::future::ready(Ok(()))
     }
 
+    /// Reports whether a failed active-turn resume may require startup
+    /// recovery rather than ordinary scheduler retry.
+    ///
+    /// The fail-safe default treats every failure as potentially
+    /// post-mutation. Implementations may return `false` only for a stage
+    /// proven not to have entered durable execution.
+    fn active_resume_failure_requires_recovery(_error: &Self::Error) -> bool {
+        true
+    }
+
     /// Reports that durable activation may require startup recovery.
     fn report_post_activation_failure(&self) {}
 }
@@ -118,7 +128,7 @@ impl<Execution> FatalExecutionSupervisor<Execution> {
 
 impl<Execution> ActivatedTurnExecution for FatalExecutionSupervisor<Execution>
 where
-    Execution: ActivatedTurnExecution,
+    Execution: ActivatedTurnExecution + 'static,
     Execution::Error: 'static,
 {
     type Error = Execution::Error;
@@ -136,7 +146,11 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.resume_active(session);
-        supervise_execution(self.fatal_signal.clone(), execution)
+        supervise_active_resume::<Execution, _>(self.fatal_signal.clone(), execution)
+    }
+
+    fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
+        Execution::active_resume_failure_requires_recovery(error)
     }
 
     fn report_post_activation_failure(&self) {
@@ -154,6 +168,26 @@ where
     let fatal_on_drop = FatalOnIncompleteExecution(Some(fatal_signal));
     let result = execution.await;
     if result.is_ok() {
+        fatal_on_drop.disarm();
+    }
+    result
+}
+
+async fn supervise_active_resume<Execution, Resume>(
+    fatal_signal: watch::Sender<bool>,
+    resume: Resume,
+) -> Result<(), Execution::Error>
+where
+    Execution: ActivatedTurnExecution,
+    Resume: Future<Output = Result<(), Execution::Error>>,
+{
+    let fatal_on_drop = FatalOnIncompleteExecution(Some(fatal_signal));
+    let result = resume.await;
+    let requires_recovery = match &result {
+        Ok(()) => false,
+        Err(error) => Execution::active_resume_failure_requires_recovery(error),
+    };
+    if !requires_recovery {
         fatal_on_drop.disarm();
     }
     result
@@ -465,6 +499,8 @@ pub type PostgresProviderToolExecutionError<ExecutorError> =
 /// stages within one turn.
 #[derive(Debug)]
 pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
+    /// Read-only active-turn lookup failed before durable execution began.
+    ResumeLookup(ToolLoopRepositoryError),
     /// Model-call execution or same-incarnation reconciliation failed.
     Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
     /// Tool preparation, execution, evidence commit, or continuation failed.
@@ -479,6 +515,7 @@ where
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ResumeLookup(error) => error.fmt(formatter),
             Self::Model(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
         }
@@ -493,6 +530,7 @@ where
 {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::ResumeLookup(error) => Some(error),
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
         }
@@ -507,6 +545,7 @@ where
 {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
+            Self::ResumeLookup(error) => error.operator_failure_class(),
             Self::Model(error) => error.operator_failure_class(),
             Self::Tool(error) => error.operator_failure_class(),
         }
@@ -781,16 +820,19 @@ where
             let turn = tool_repository
                 .find_resumable_turn(session)
                 .await
-                .map_err(|error| {
-                    PostgresProviderToolLoopExecutionError::Tool(Box::new(
-                        RetainedExecutionError::Primary(ToolExecutionServiceError::Load(error)),
-                    ))
-                })?;
+                .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
             match turn {
                 Some(turn) => execution.execute_scope(session, turn).await,
                 None => Ok(()),
             }
         }
+    }
+
+    fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
+        !matches!(
+            error,
+            PostgresProviderToolLoopExecutionError::ResumeLookup(_)
+        )
     }
 }
 
@@ -1045,6 +1087,52 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct ReadOnlyResumeFailureExecution;
+
+    impl ActivatedTurnExecution for ReadOnlyResumeFailureExecution {
+        type Error = ExecutionFailure;
+
+        fn execute(
+            &self,
+            _activated: Box<ActivatedAcceptedInputTurn>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Ok(()))
+        }
+
+        fn resume_active(
+            &self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Err(ExecutionFailure))
+        }
+
+        fn active_resume_failure_requires_recovery(_error: &Self::Error) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PostMutationResumeFailureExecution;
+
+    impl ActivatedTurnExecution for PostMutationResumeFailureExecution {
+        type Error = ExecutionFailure;
+
+        fn execute(
+            &self,
+            _activated: Box<ActivatedAcceptedInputTurn>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Ok(()))
+        }
+
+        fn resume_active(
+            &self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Err(ExecutionFailure))
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct OrderedResumeTransaction {
         events: Arc<Mutex<Vec<&'static str>>>,
@@ -1174,6 +1262,33 @@ mod tests {
         let signal = FatalExecutionSignal { triggered };
         assert_eq!(
             supervise_execution(fatal_signal, ready(Err(ExecutionFailure))).await,
+            Err(ExecutionFailure)
+        );
+        signal.wait().await;
+        assert!(signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn read_only_active_resume_failure_remains_an_ordinary_pass_error() {
+        let (execution, signal) = FatalExecutionSupervisor::new(ReadOnlyResumeFailureExecution);
+
+        assert_eq!(
+            execution
+                .resume_active(SessionId::from_uuid(Uuid::from_u128(9)))
+                .await,
+            Err(ExecutionFailure)
+        );
+        assert!(!signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn post_mutation_active_resume_failure_raises_the_fatal_signal() {
+        let (execution, signal) = FatalExecutionSupervisor::new(PostMutationResumeFailureExecution);
+
+        assert_eq!(
+            execution
+                .resume_active(SessionId::from_uuid(Uuid::from_u128(9)))
+                .await,
             Err(ExecutionFailure)
         );
         signal.wait().await;

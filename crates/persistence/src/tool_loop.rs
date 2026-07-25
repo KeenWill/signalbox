@@ -1134,12 +1134,18 @@ pub(crate) async fn load_recovery_batch_by_attempt(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
-pub(crate) async fn load_terminal_result_attempts(
+/// Identifies the single continuing tool round whose request suffix exactly
+/// fills the terminal frontier, returning the boundary member position and
+/// request count that bound its result window.
+///
+/// A `None` result names a terminal frontier with no continuing tool round, so
+/// no terminal tool results or denials back its ending marker.
+async fn load_terminal_tool_round_window(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     terminal_frontier: signalbox_domain::ContextFrontierId,
-) -> Result<Vec<EndedToolAttempt>, ToolLoopRepositoryError> {
+) -> Result<Option<(Decimal, Decimal)>, ToolLoopRepositoryError> {
     let candidate_rounds = sqlx::query(
         "SELECT round.producing_model_call_id,
                 boundary.member_count AS boundary_member_count,
@@ -1182,7 +1188,7 @@ pub(crate) async fn load_terminal_result_attempts(
     .fetch_all(&mut *connection)
     .await?;
     let candidate = match candidate_rounds.as_slice() {
-        [] => return Ok(Vec::new()),
+        [] => return Ok(None),
         [candidate] => candidate,
         [_, ..] => {
             return Err(ToolLoopCorruption::Inconsistent("terminal tool round identity").into());
@@ -1190,6 +1196,20 @@ pub(crate) async fn load_terminal_result_attempts(
     };
     let boundary_member_count: Decimal = required(candidate, "boundary_member_count")?;
     let request_count: Decimal = required(candidate, "request_count")?;
+    Ok(Some((boundary_member_count, request_count)))
+}
+
+pub(crate) async fn load_terminal_result_attempts(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    terminal_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<Vec<EndedToolAttempt>, ToolLoopRepositoryError> {
+    let Some((boundary_member_count, request_count)) =
+        load_terminal_tool_round_window(connection, session, turn, terminal_frontier).await?
+    else {
+        return Ok(Vec::new());
+    };
     let rows = sqlx::query(
         "SELECT attempt.*
            FROM context_frontier_member AS member
@@ -1220,6 +1240,50 @@ pub(crate) async fn load_terminal_result_attempts(
             }
         })
         .collect()
+}
+
+/// Loads the owner-sourced denial resolution backing every `tool_denied` entry
+/// in a terminal tool round's result suffix.
+///
+/// The reconstitution guard tightened by the terminal tool-round evidence work
+/// requires each terminal `ToolDenied` result to name its exact durable
+/// resolution, so a cancelled or failed turn whose terminal round denied a
+/// request cannot reconstitute from the empty default.
+pub(crate) async fn load_terminal_result_denials(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    terminal_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
+    let Some((boundary_member_count, request_count)) =
+        load_terminal_tool_round_window(connection, session, turn, terminal_frontier).await?
+    else {
+        return Ok(Vec::new());
+    };
+    let rows = sqlx::query(
+        "SELECT approval.request_id, approval.decision_kind,
+                approval.decision_source, approval.denial_reason,
+                approval.owner_command_id
+           FROM context_frontier_member AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+           JOIN tool_approval_decision AS approval
+             ON approval.request_id = entry.tool_result_request_id
+          WHERE member.owning_session_id = $1
+            AND member.context_frontier_id = $2
+            AND member.member_position > $3
+            AND member.member_position <= $3 + $4
+            AND entry.payload_kind = 'tool_denied'
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(terminal_frontier.into_uuid())
+    .bind(boundary_member_count)
+    .bind(request_count)
+    .fetch_all(&mut *connection)
+    .await?;
+    decode_approvals(connection, rows).await
 }
 
 async fn load_snapshot(
