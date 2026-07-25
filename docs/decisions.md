@@ -10,6 +10,32 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Index imported snapshots by attested source session
+
+**Context.** Exact source-content identity correctly makes an appended source a
+new immutable imported conversation, but the header had no queryable evidence
+for grouping snapshots that attest the same external session. Source-session
+text is already extracted independently on every normalized record and may be
+absent, explicit null, conflicting, empty, or contain U+0000.
+
+**Decision.** Add nullable `imported_conversation.source_session_id` evidence.
+On new insertion, store the exact UTF-8 bytes when at least one record attests
+an identifier and all attested identifiers agree; otherwise store `NULL`. Index
+non-null values with a non-unique PostgreSQL hash index for exact-equality
+lineage queries without imposing B-tree entry-size limits. Keep the
+format/converter/source-digest unique constraint and every identity rule
+unchanged. Never derive lineage evidence from filenames or import context.
+
+**Rejected alternatives.** Using the source session as identity would collapse
+distinct grown snapshots. A unique lineage index would permit only one snapshot
+per external session. PostgreSQL `text` cannot preserve U+0000, and a direct
+B-tree over unbounded evidence can reject otherwise valid identifiers. Inferring
+missing evidence from a path would turn caller context into false provenance.
+
+**Affects.** Migration `202607270001`, imported-conversation insertion,
+synthetic Postgres snapshot-lineage tests, and
+[conversation-import](spec/conversation-import.md).
+
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
 **Context.** Metadata list queries admit page sizes from one through one

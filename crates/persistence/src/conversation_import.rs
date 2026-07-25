@@ -264,9 +264,9 @@ impl ImportedConversationRepository {
         let inserted = sqlx::query(
             "INSERT INTO imported_conversation
                 (imported_conversation_id, storage_version, source_format,
-                 converter_version, source_digest, declared_raw_record_count,
-                 declared_entry_count)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 converter_version, source_digest, source_session_id,
+                 declared_raw_record_count, declared_entry_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT DO NOTHING",
         )
         .bind(candidate_id.into_uuid())
@@ -274,6 +274,7 @@ impl ImportedConversationRepository {
         .bind(encoded.format)
         .bind(encoded.converter_version)
         .bind(source_digest.as_bytes().as_slice())
+        .bind(encoded.source_session_id.as_deref())
         .bind(Decimal::from(declared_raw_record_count))
         .bind(Decimal::from(declared_entry_count))
         .execute(&mut *transaction)
@@ -339,6 +340,7 @@ impl ImportedConversationStore for ImportedConversationRepository {
 struct EncodedConversation {
     format: &'static str,
     converter_version: i16,
+    source_session_id: Option<Vec<u8>>,
     raws: Vec<EncodedRawRecord>,
     entries: Vec<EncodedEntry>,
 }
@@ -348,6 +350,7 @@ impl EncodedConversation {
         conversation: &ImportedConversation,
     ) -> Result<Self, ImportedConversationRepositoryError> {
         let (format, converter_version) = encode_format(conversation.format());
+        let source_session_id = consistent_source_session_id(conversation).map(<[u8]>::to_vec);
         let mut entry_counts = vec![0_u64; conversation.raw_records().len()];
         for entry in conversation.entries() {
             let raw_index = usize::try_from(entry.raw_record_position().as_u64())
@@ -396,10 +399,28 @@ impl EncodedConversation {
         Ok(Self {
             format,
             converter_version,
+            source_session_id,
             raws,
             entries,
         })
     }
+}
+
+fn consistent_source_session_id(conversation: &ImportedConversation) -> Option<&[u8]> {
+    let mut consistent = None;
+    for entry in conversation.entries() {
+        if let ImportedSourceAttestation::Attested(source_session_id) =
+            entry.source().source_session_id()
+        {
+            let source_session_id = source_session_id.as_str().as_bytes();
+            match consistent {
+                None => consistent = Some(source_session_id),
+                Some(existing) if existing == source_session_id => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    consistent
 }
 
 struct EncodedRawRecord {

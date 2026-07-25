@@ -62,6 +62,18 @@ wall-clock import time, adoption choice, target session, or future-use policy
 participates in it. The imported aggregate is separate from `Session`, and an
 import neither creates nor mutates a session.
 
+A newly inserted `imported_conversation` header also carries nullable
+`source_session_id` lineage evidence. The value is the exact UTF-8 bytes of the
+converter-extracted source-session identifier when at least one record attests
+one and every attested source-session identifier in the snapshot is equal.
+Omitted and explicit-null fields do not supply evidence; conflicting attested
+identifiers make the header value `NULL`. The nullable byte value has a
+non-unique equality index so callers can group every exact snapshot carrying the
+same evidence. It never participates in the source digest, the
+`imported_conversation` identity, or the unique source-identity constraint. The
+importer never derives this evidence or any identity from a filename, source
+path, neighboring record, or import-time context.
+
 Why: retrying or copying the same source must not duplicate history, while an
 append or edit cannot mutate the snapshot that an existing session already
 names.
