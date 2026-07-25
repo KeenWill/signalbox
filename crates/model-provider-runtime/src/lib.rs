@@ -29,27 +29,6 @@ use signalbox_model_runtime::{
     ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
 };
 
-fn render_conversation_message(message: &ModelConversationMessage) -> ConversationMessage {
-    match message {
-        ModelConversationMessage::User { content, .. } => {
-            ConversationMessage::user_text(content.text().as_str())
-        }
-        ModelConversationMessage::Assistant { content, .. } => {
-            ConversationMessage::assistant_text(content.as_str())
-        }
-        ModelConversationMessage::ImportedUser { content, .. } => {
-            ConversationMessage::user_text(content.as_str())
-        }
-        ModelConversationMessage::ImportedAssistant { content, .. } => {
-            ConversationMessage::assistant_text(content.as_str())
-        }
-        ModelConversationMessage::AssistantToolUse { .. }
-        | ModelConversationMessage::ToolResult { .. } => {
-            unreachable!("tool messages require batch-aware rendering")
-        }
-    }
-}
-
 /// One exact provider-model spelling and baseline request limit for a durable
 /// domain target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -539,9 +518,13 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 assistant_call = None;
                 collecting_tool_results = true;
             }
-            message @ (ModelConversationMessage::ImportedUser { .. }
-            | ModelConversationMessage::ImportedAssistant { .. }) => {
-                rendered.push(render_conversation_message(message));
+            ModelConversationMessage::ImportedUser { content, .. } => {
+                rendered.push(ConversationMessage::user_text(content.as_str()));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ImportedAssistant { content, .. } => {
+                rendered.push(ConversationMessage::assistant_text(content.as_str()));
                 assistant_call = None;
                 collecting_tool_results = false;
             }
@@ -666,15 +649,16 @@ fn classify_terminal(
         TerminalEvidence::Completed(completion) => {
             let finish = completion.finish;
             let mut response_parts = Vec::new();
+            let mut text_parts = Vec::new();
             let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
                     AssistantPart::Text(text) if text.is_empty() => {}
                     AssistantPart::Text(text) => {
-                        response_parts.push(AssistantResponsePart::Text(
-                            AssistantText::try_new(text)
-                                .map_err(|_| RuntimeModelCallProviderError::InvalidAssistantText)?,
-                        ));
+                        let text = AssistantText::try_new(text)
+                            .map_err(|_| RuntimeModelCallProviderError::InvalidAssistantText)?;
+                        text_parts.push(text.clone());
+                        response_parts.push(AssistantResponsePart::Text(text));
                     }
                     AssistantPart::ToolCall(proposal) => {
                         tool_count += 1;
@@ -701,15 +685,7 @@ fn classify_terminal(
                     return Ok(ModelCallTerminalObservation::KnownFailed);
                 }
                 Ok(ModelCallTerminalObservation::Completed {
-                    assistant_text: response_parts
-                        .into_iter()
-                        .map(|part| match part {
-                            AssistantResponsePart::Text(text) => text,
-                            AssistantResponsePart::ToolCall(_) => {
-                                unreachable!("zero tool count excludes tool parts")
-                            }
-                        })
-                        .collect(),
+                    assistant_text: text_parts,
                 })
             } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
@@ -773,7 +749,7 @@ mod tests {
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
         RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
-        render_conversation_message, render_runtime_messages,
+        render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -821,20 +797,22 @@ mod tests {
         let assistant_text = ImportedText::new(String::new());
 
         assert_eq!(
-            render_conversation_message(&ModelConversationMessage::ImportedUser {
-                source,
-                imported_entry,
-                content: user_text.clone(),
-            }),
-            ConversationMessage::user_text(user_text.as_str())
-        );
-        assert_eq!(
-            render_conversation_message(&ModelConversationMessage::ImportedAssistant {
-                source,
-                imported_entry,
-                content: assistant_text.clone(),
-            }),
-            ConversationMessage::assistant_text(assistant_text.as_str())
+            render_runtime_messages(&[
+                ModelConversationMessage::ImportedUser {
+                    source,
+                    imported_entry,
+                    content: user_text.clone(),
+                },
+                ModelConversationMessage::ImportedAssistant {
+                    source,
+                    imported_entry,
+                    content: assistant_text.clone(),
+                },
+            ]),
+            vec![
+                ConversationMessage::user_text(user_text.as_str()),
+                ConversationMessage::assistant_text(assistant_text.as_str()),
+            ]
         );
     }
 
