@@ -10,6 +10,44 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Bind reconstitution evidence for terminal tool rounds
+
+**Context.** Two seam-completeness holes surfaced in the durable tool-round
+foundation (PR #194). Scheduling reconstitution accepted a failed or cancelled
+terminal tool round whose result suffix carried a `ToolDenied` entry with no
+owner-sourced `Deny` resolution: `tool_round_terminal_matches` only checked that
+the denial payload repeated a batch request id, so a missing or approving
+decision could be admitted as durable denial history. Separately, the
+executing-batch cancellation seam `apply_interrupt_to_tool_batch` correlated the
+supplied result projection by session and source-frontier identity but never
+required `projection.turn() == self.turn`, so a projection prepared for a
+foreign turn — reusing this turn's current frontier identity as its yielded
+source — could terminalize this turn with foreign request/attempt results. The
+sibling recovery-wait seam already bound the projection turn, and the live
+model-call reconstitution already required denial correlations, so both holes
+were asymmetries rather than intended latitude.
+
+**Decision.** Require the owner denial evidence and the turn binding. The failed
+and cancelled terminal reconstitution inputs now name the exact
+`ToolApprovalResolution` (`Deny`) backing every `ToolDenied` result entry, and
+`tool_round_terminal_matches` admits a denial only against a named owner denial
+for its exact request, rejecting missing or approving decisions. The
+executing-batch cancellation guard additionally requires the projection to name
+the interrupted turn.
+
+**Rejected alternatives.** Trusting the stored `ToolDenied` discriminator
+violates the fail-closed reconstitution law: an unbacked denial is
+indistinguishable from a fabricated one. Deferring the denial check to the next
+model call's reconstitution leaves a terminal round with no successor
+unvalidated. Binding the cancellation projection only by frontier identity is
+insufficient because a foreign turn's batch can reuse the same yielded frontier.
+
+**Affects.** `FailedTurnExecutionReconstitutionInput` and
+`CancelledTurnExecutionReconstitutionInput` gain a `terminal_tool_denials`
+input; `docs/spec/turn-lifecycle-and-scheduling.md` and `docs/spec/tool-loop.md`
+record the tightened reconstitution laws (INV-005, INV-006, INV-027, INV-029,
+INV-037). No schema or migration changes; the domain crate stays pure.
+
 ## 2026-07-24 — Make the model-call credential reference total
 
 **Context.** A schema audit found that the nullability of
