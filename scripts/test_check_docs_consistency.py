@@ -127,6 +127,46 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("`missing_test`", failures[0].message)
 
+    def test_natural_named_tests_bind_to_their_own_cited_files(self) -> None:
+        (self.root / "src/other_tests.rs").write_text(
+            "#[test]\nfn existing_test() {}\n", encoding="utf-8"
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "the `missing_one` test in "
+            "[`src/tests.rs`](../src/tests.rs) and the `missing_two` test in "
+            "[`src/other_tests.rs`](../src/other_tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["invariant-test", "invariant-test"],
+        )
+        self.assertIn("`missing_one`", failures[0].message)
+        self.assertIn("`missing_two`", failures[1].message)
+
+    def test_natural_test_is_not_bound_to_unrelated_context_link(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "// Context only.\n", encoding="utf-8"
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "the `missing_test` test and context in "
+            "[`src/context.rs`](../src/context.rs). |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_missing_heading_anchor_is_reported(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -238,6 +278,22 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification", "spec-verification"],
         )
 
+    def test_verification_ref_rejects_internal_branch_whitespace(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/bad branch`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["spec-verification", "spec-verification"],
+        )
+
     def test_verification_ref_requires_literal_closing_parenthesis(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
@@ -270,6 +326,36 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
+
+    def test_unrelated_verified_fact_does_not_satisfy_reference(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "The certificate is verified locally. Historical discussion: "
+            "PR #42 (`agent/history`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_unrelated_pr_after_verification_clause_is_ignored(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`). Historical discussion: "
+            "PR #42.\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_github_slug_preserves_expected_house_shapes(self) -> None:
         self.assertEqual(

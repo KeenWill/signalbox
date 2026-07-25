@@ -46,8 +46,15 @@ REFERENCE_DEFINITION = re.compile(
 DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
 PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
-    r"`([^\s`\r\n](?:[^`\r\n]*[^\s`\r\n])?)`"
+    r"`([^\s`]+)`"
     r"\)"
+)
+VERIFICATION_LEAD = re.compile(
+    r"\bverified\b"
+    r"(?:(?![.!?](?:[ \t\r\n]|$)).)*?"
+    r"\b(?:through|rooted[ \t]+at)[ \t\r\n]+"
+    r"(?P<pr>\bPR[ \t]*#)",
+    re.IGNORECASE | re.DOTALL,
 )
 TEST_GROUP = re.compile(
     r"\btests?[ \t]+"
@@ -61,13 +68,15 @@ TEST_GROUP = re.compile(
     re.IGNORECASE,
 )
 TEST_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_:]*$")
-NATURAL_TEST_NAME = re.compile(
+NATURAL_TEST_BINDING = re.compile(
     r"(?:"
     r"`(?P<before>[A-Za-z_][A-Za-z0-9_:]*)`[ \t]+tests?\b"
     r"|"
     r"\btests?(?:[ \t]+named)?[ \t]+"
     r"`(?P<after>[A-Za-z_][A-Za-z0-9_:]*)`"
-    r")",
+    r")"
+    r"[ \t]+in[ \t]+"
+    r"(?P<link>\[[^\]\n]+\]\([^)]+\))",
     re.IGNORECASE,
 )
 
@@ -454,27 +463,21 @@ def named_tests(enforcement: str) -> list[tuple[str, MarkdownLink]]:
                 found.add(key)
                 bindings.append((name, adjusted))
 
-    clause_start = 0
-    for clause in enforcement.split(";"):
-        links = [
-            link
-            for link in extract_inline_links(clause)
-            if split_destination(link.destination) is not None
-        ]
-        if len(links) == 1:
-            linked = links[0]
-            adjusted = MarkdownLink(
-                label=linked.label,
-                destination=linked.destination,
-                offset=clause_start + linked.offset,
-            )
-            for match in NATURAL_TEST_NAME.finditer(clause):
-                name = match.group("before") or match.group("after")
-                key = (name, adjusted.destination)
-                if key not in found:
-                    found.add(key)
-                    bindings.append((name, adjusted))
-        clause_start += len(clause) + 1
+    for match in NATURAL_TEST_BINDING.finditer(enforcement):
+        links = extract_inline_links(match.group("link"))
+        if len(links) != 1:
+            continue
+        linked = links[0]
+        adjusted = MarkdownLink(
+            label=linked.label,
+            destination=linked.destination,
+            offset=match.start("link") + linked.offset,
+        )
+        name = match.group("before") or match.group("after")
+        key = (name, adjusted.destination)
+        if key not in found:
+            found.add(key)
+            bindings.append((name, adjusted))
     return bindings
 
 
@@ -700,53 +703,26 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
         code_ranges = inline_code_ranges(text)
         valid_reference = False
 
-        paragraphs = list(re.finditer(r"\r?\n[ \t]*\r?\n", text))
-        paragraph_ends = [match.start() for match in paragraphs] + [len(text)]
-        paragraph_starts = [0] + [match.end() for match in paragraphs]
-        for paragraph_start, paragraph_end in zip(
-            paragraph_starts, paragraph_ends, strict=True
-        ):
-            verified = [
-                match
-                for match in re.finditer(
-                    r"\bverified\b",
-                    text[paragraph_start:paragraph_end],
-                    re.IGNORECASE,
-                )
-                if not offset_in_ranges(
-                    paragraph_start + match.start(), code_ranges
-                )
-            ]
-            if not verified:
-                continue
-            verified_end = paragraph_start + verified[0].end()
-            valid_token_starts = {
-                match.start()
-                for match in PR_TOKEN.finditer(text, verified_end, paragraph_end)
-                if not offset_in_ranges(match.start(), code_ranges)
-            }
-            if valid_token_starts:
-                valid_reference = True
-
-            for candidate in re.finditer(
-                r"\bPR[ \t]*#", text[verified_end:paragraph_end]
+        for reference in VERIFICATION_LEAD.finditer(text):
+            candidate_start = reference.start("pr")
+            if offset_in_ranges(reference.start(), code_ranges) or offset_in_ranges(
+                candidate_start, code_ranges
             ):
-                candidate_start = verified_end + candidate.start()
-                if (
-                    offset_in_ranges(candidate_start, code_ranges)
-                    or candidate_start in valid_token_starts
-                ):
-                    continue
-                violations.append(
-                    Violation(
-                        source_label,
-                        line_number(text, candidate_start),
-                        "spec-verification",
-                        "verification reference must use "
-                        "`PR #N (`branch-ref`)` with a positive decimal PR "
-                        "number and a nonempty branch ref",
-                    )
+                continue
+            token = PR_TOKEN.match(text, candidate_start)
+            if token is not None:
+                valid_reference = True
+                continue
+            violations.append(
+                Violation(
+                    source_label,
+                    line_number(text, candidate_start),
+                    "spec-verification",
+                    "verification reference must use "
+                    "`PR #N (`branch-ref`)` with a positive decimal PR "
+                    "number and a non-whitespace branch ref",
                 )
+            )
 
         if not valid_reference:
             violations.append(
