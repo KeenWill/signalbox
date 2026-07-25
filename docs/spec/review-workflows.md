@@ -1,9 +1,9 @@
 # Review workflows
 
 This page specifies the implemented review-workflow bounded context as verified
-against the implementing stack rooted at `agent/review-workflow-spec`. It owns
-review targets, workflow runs, session-backed passes, findings, external links,
-and their relational store. Session execution remains owned by
+against the implementing stack rooted at PR #221 (`agent/review-workflow-spec`).
+It owns review targets, workflow runs, session-backed passes, findings, external
+links, and their relational store. Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
