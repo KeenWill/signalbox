@@ -110,14 +110,23 @@ identifiers refer to [scenarios.md](scenarios.md).
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
-## Archival and retention
+## Session organization, visibility, and retention
 
-- **Archive eligibility, nonterminal work handling, and restore target.**
-  Leaning: preserve identity and history; never silently abandon work. Blocks
-  archive/restore. (S25)
-- **Archive effect on delegated children and related sessions.** Leaning:
-  explicit typed policy with visible outcomes; no implicit cascade or
-  independence rule selected. Blocks archiving related sessions. (S18, S19, S25)
+- **Creation-attributed default visibility.** The implemented visibility and
+  attribution limits are owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
+  Decide derivation, override shape and authority, and monitor inclusion
+  together with the attributed-creation implementation.
+- **Expressive metadata filters.** The implemented filter grammar is owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
+  Whether to add OR, negation, attribute predicates, case folding, or a general
+  query language remains open.
+- **Imported-conversation archive semantics.** Ordinary session archive and
+  immutable imported-source behavior are owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection)
+  and [conversation-import](spec/conversation-import.md). Whether imported
+  conversation records have a distinct non-destructive archive state, and how
+  that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
   ordinary archive; exact policy undefined. Later scope. (S17, S25)
 
@@ -275,10 +284,10 @@ questions below remain open.
   snapshot and durable-update semantics are defined by
   [process-protocol](spec/process-protocol.md), while transient model-update
   streaming remains open below. (S02, S24)
-- **Compatibility after exact process-protocol version one.** Version one has
-  its owning [specification](spec/process-protocol.md). A future compatibility
-  window, negotiation scheme, and generated-client policy remain undecided.
-  Blocks a version-two protocol. (S01, S24)
+- **Compatibility beyond the retained process-protocol versions.** Versions one
+  through four have their owning [specification](spec/process-protocol.md). A
+  future compatibility window, negotiation scheme, and generated-client policy
+  remain undecided. (S01, S24)
 - **Transient model-update relay.** Whether provider token deltas cross the
   process boundary, and the required draft identity, sequencing, replacement,
   backpressure, and redaction rules, remain undecided. The implemented durable
