@@ -264,6 +264,29 @@ final class SignalboxNativeTests: XCTestCase {
         withExtendedLifetime(streamStopped.cancellable) {}
     }
 
+    func testLoadAndConnectFallsBackWhenStreamHelloTimesOut() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let viewModel = SessionDetailViewModel(
+            session: fixture.session,
+            streamHelloTimeout: StreamHelloHistoryReuseFixture.timeout
+        ) { service }
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await loadTask.value
+
+        XCTAssertEqual(viewModel.events, fixture.historyEvents)
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedListEventsCallCount
+        )
+        viewModel.disconnectStream()
+    }
+
     func testWebSocketStreamAcknowledgesHeartbeatBeforeYieldingNextFrame() async throws {
         let heartbeatSentAt = "2026-05-10T12:00:00Z"
         let expectedSentAt = try SignalboxJSONCoding.decoder().decode(
@@ -700,6 +723,13 @@ final class SignalboxNativeTests: XCTestCase {
         let helloEvents = Array(
             expectedMergedEvents.suffix(StreamHelloHistoryReuseFixture.helloWindowEventCount)
         )
+        XCTAssertEqual(
+            helloEvents.count,
+            StreamHelloHistoryReuseFixture.helloWindowEventCount
+        )
+        XCTAssertFalse(
+            helloEvents.contains { $0.eventID == deletedEventID }
+        )
         return StreamHelloHistoryReuseFixture(
             session: session,
             historyEvents: historyEvents,
@@ -864,6 +894,9 @@ private struct StreamHelloHistoryReuseFixture {
 
     /// A local actor handoff should comfortably complete within this bound.
     static let observationTimeout: TimeInterval = 1
+
+    /// The timeout regression advances immediately without using wall-clock time.
+    static let timeout: Duration = .zero
 
     static let streamHelloKind = "stream_hello"
 
@@ -1151,6 +1184,10 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         await withCheckedContinuation { continuation in
             lock.lock()
             lockedListEventsCallCount += 1
+            precondition(
+                listEventsContinuation == nil,
+                "History load is already pending"
+            )
             listEventsContinuation = continuation
             let waiters = listEventsInvocationWaiters
             listEventsInvocationWaiters = []

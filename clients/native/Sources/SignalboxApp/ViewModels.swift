@@ -350,9 +350,16 @@ final class SessionDetailViewModel: ObservableObject {
     private var activeStreamID: UUID?
     private var eventNormalizer = SignalboxIncrementalEventNormalizer()
     private var streamHistorySynchronization: StreamHistorySynchronization?
+    private var streamHelloTimeoutTask: Task<Void, Never>?
+    private let streamHelloTimeout: Duration
 
-    init(session: SignalboxSessionMetadata, serviceProvider: @escaping () -> (any SignalboxClientProtocol)?) {
+    init(
+        session: SignalboxSessionMetadata,
+        streamHelloTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout,
+        serviceProvider: @escaping () -> (any SignalboxClientProtocol)?
+    ) {
         self.session = session
+        self.streamHelloTimeout = streamHelloTimeout
         self.serviceProvider = serviceProvider
     }
 
@@ -412,6 +419,7 @@ final class SessionDetailViewModel: ObservableObject {
         }
         if !synchronized, !Task.isCancelled {
             await load()
+            connectStream()
         }
     }
 
@@ -482,6 +490,20 @@ final class SessionDetailViewModel: ObservableObject {
                 await MainActor.run {
                     self?.finishStream(streamID: streamID, error: error)
                 }
+            }
+        }
+        if completion != nil {
+            let helloTimeout = streamHelloTimeout
+            streamHelloTimeoutTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: helloTimeout)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else {
+                    return
+                }
+                self?.expireHistorySynchronization(streamID: streamID)
             }
         }
         return true
@@ -607,6 +629,8 @@ final class SessionDetailViewModel: ObservableObject {
         sessionID: SignalboxSessionID,
         streamID: UUID
     ) async {
+        streamHelloTimeoutTask?.cancel()
+        streamHelloTimeoutTask = nil
         do {
             async let events = service.listEvents(sessionID: sessionID)
             async let artifacts = service.listArtifacts(sessionID: sessionID)
@@ -626,7 +650,8 @@ final class SessionDetailViewModel: ObservableObject {
             }
             synchronization.bufferedMessages.forEach(apply)
             errorMessage = error.localizedDescription
-            synchronization.completion?.resume(returning: true)
+            disconnectStream()
+            synchronization.completion?.resume(returning: false)
         }
     }
 
@@ -638,8 +663,17 @@ final class SessionDetailViewModel: ObservableObject {
         else {
             return nil
         }
+        streamHelloTimeoutTask?.cancel()
+        streamHelloTimeoutTask = nil
         streamHistorySynchronization = nil
         return synchronization
+    }
+
+    private func expireHistorySynchronization(streamID: UUID) {
+        guard streamHistorySynchronization?.streamID == streamID else {
+            return
+        }
+        disconnectStream()
     }
 
     private func cancelHistorySynchronization(streamID: UUID?) {
