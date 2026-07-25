@@ -124,27 +124,35 @@ impl SubmitInput {
             });
         }
 
-        let DeliveryRequest::StartWhenNoActiveTurn { configuration } = self.delivery else {
-            if matches!(self.delivery, DeliveryRequest::NextSafePoint { .. }) != turn.is_none() {
-                return Err(SubmitInputPreparationError {
-                    command: Box::new(self),
-                    failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+        let configuration = match self.delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { configuration } => configuration,
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                ..
+            }
+            | DeliveryRequest::NextSafePoint {
+                expected_active_turn,
+            }
+            | DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn,
+                ..
+            } => {
+                if matches!(self.delivery, DeliveryRequest::NextSafePoint { .. }) != turn.is_none()
+                {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                    });
+                }
+                let target_session = self.session;
+                return Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
+                        session: target_session,
+                        expected_active_turn,
+                    }),
                 });
             }
-            #[expect(
-                clippy::expect_used,
-                reason = "temporary ledger site: non-start delivery exhaustiveness is validated above; typed conversion is commissioned by the 2026-07-20 audit"
-            )]
-            let expected_active_turn =
-                expected_active_turn(self.delivery).expect("non-start delivery names a turn");
-            let target_session = self.session;
-            return Ok(PreparedSubmitInput {
-                command: self,
-                result: SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
-                    session: target_session,
-                    expected_active_turn,
-                }),
-            });
         };
         let Some(turn) = turn else {
             return Err(SubmitInputPreparationError {
@@ -255,16 +263,13 @@ impl SubmitInput {
                 failure: SubmitInputPreparationFailure::ActiveTurnProjectionMissing,
             });
         };
-        #[expect(
-            clippy::expect_used,
-            reason = "temporary ledger site: scheduling reconstitution validates every active acceptance tail; typed conversion is commissioned by the 2026-07-20 audit"
-        )]
-        let previous_position = Some(
-            scheduling
-                .active_acceptance_tail()
-                .expect("an active scheduling projection has a validated acceptance tail")
-                .observed_last_position(),
-        );
+        let Some(active_acceptance_tail) = scheduling.active_acceptance_tail() else {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::ActiveTurnProjectionMissing,
+            });
+        };
+        let previous_position = Some(active_acceptance_tail.observed_last_position());
         if delivery_creates_turn(self.delivery) != turn.is_some() {
             return Err(SubmitInputPreparationError {
                 command: Box::new(self),
@@ -276,17 +281,7 @@ impl SubmitInput {
         let target_session = self.session;
         let delivery = self.delivery;
         let expected_active_turn = match delivery {
-            DeliveryRequest::StartWhenNoActiveTurn { .. } => {
-                return Ok(PreparedSubmitInput {
-                    command: self,
-                    result: SubmitInputResult::Rejected(
-                        SubmitInputRejectedResult::ActiveTurnPresent {
-                            session: target_session,
-                            active_turn: actual_active_turn,
-                        },
-                    ),
-                });
-            }
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => None,
             DeliveryRequest::Interrupt {
                 expected_active_turn,
                 ..
@@ -297,9 +292,11 @@ impl SubmitInput {
             | DeliveryRequest::AfterCurrentTurn {
                 expected_active_turn,
                 ..
-            } => expected_active_turn,
+            } => Some(expected_active_turn),
         };
-        if expected_active_turn != actual_active_turn {
+        if let Some(expected_active_turn) = expected_active_turn
+            && expected_active_turn != actual_active_turn
+        {
             return Ok(PreparedSubmitInput {
                 command: self,
                 result: SubmitInputResult::Rejected(
@@ -517,12 +514,11 @@ impl SubmitInput {
                 })
             }
             DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
-                #[expect(
-                    clippy::unreachable,
-                    reason = "temporary ledger site: delivery-to-candidate correlation is validated above; typed conversion is commissioned by the 2026-07-20 audit"
-                )]
                 let Some(turn) = turn else {
-                    unreachable!("turn-candidate correlation was validated above");
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                    });
                 };
                 if turn == actual_active_turn {
                     return Err(SubmitInputPreparationError {
@@ -602,13 +598,13 @@ impl SubmitInput {
                     )),
                 })
             }
-            #[expect(
-                clippy::unreachable,
-                reason = "temporary ledger site: the start variant returns before this active-turn match; typed conversion is commissioned by the 2026-07-20 audit"
-            )]
-            DeliveryRequest::StartWhenNoActiveTurn { .. } => {
-                unreachable!("start returned the active-turn rejection above")
-            }
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => Ok(PreparedSubmitInput {
+                command: self,
+                result: SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+                    session: target_session,
+                    active_turn: actual_active_turn,
+                }),
+            }),
         }
     }
 }
@@ -1561,9 +1557,12 @@ impl SubmitInputReconstitutionInput {
                     stored_requested_model,
                     stored_frozen_model,
                 } = *facts;
-                let (expected_predecessor, expected_priority) = match self.command.delivery {
+                let (expected_predecessor, expected_priority, interrupt_predecessor) = match self
+                    .command
+                    .delivery
+                {
                     DeliveryRequest::StartWhenNoActiveTurn { .. } => {
-                        (None, AcceptedInputQueuePriority::Ordinary)
+                        (None, AcceptedInputQueuePriority::Ordinary, None)
                     }
                     DeliveryRequest::AfterCurrentTurn {
                         expected_active_turn,
@@ -1575,6 +1574,7 @@ impl SubmitInputReconstitutionInput {
                         (
                             Some(expected_active_turn),
                             AcceptedInputQueuePriority::Ordinary,
+                            None,
                         )
                     }
                     DeliveryRequest::Interrupt {
@@ -1589,6 +1589,7 @@ impl SubmitInputReconstitutionInput {
                             AcceptedInputQueuePriority::InterruptImmediatelyAfter {
                                 predecessor: expected_active_turn,
                             },
+                            Some(expected_active_turn),
                         )
                     }
                     DeliveryRequest::NextSafePoint { .. } => {
@@ -1700,24 +1701,23 @@ impl SubmitInputReconstitutionInput {
                     stored_frozen_model,
                 )
                 .map_err(&fail)?;
-                let applied_interrupt = match self.command.delivery {
-                    DeliveryRequest::Interrupt {
-                        expected_active_turn,
-                        ..
-                    } => AppliedInterruptCommandResult::from_correlated_submit(
-                        self.command.command_id,
-                        result_session,
-                        expected_active_turn,
-                        result_accepted_input,
-                        result_turn,
-                        queue_order,
-                    )
-                    .map(Box::new)
-                    .ok_or_else(|| fail(SubmitInputReconstitutionFailure::QueuePriorityMismatch))?
-                    .into(),
-                    DeliveryRequest::StartWhenNoActiveTurn { .. }
-                    | DeliveryRequest::AfterCurrentTurn { .. } => None,
-                    DeliveryRequest::NextSafePoint { .. } => unreachable!(),
+                let applied_interrupt = match interrupt_predecessor {
+                    Some(expected_active_turn) => {
+                        AppliedInterruptCommandResult::from_correlated_submit(
+                            self.command.command_id,
+                            result_session,
+                            expected_active_turn,
+                            result_accepted_input,
+                            result_turn,
+                            queue_order,
+                        )
+                        .map(Box::new)
+                        .ok_or_else(|| {
+                            fail(SubmitInputReconstitutionFailure::QueuePriorityMismatch)
+                        })?
+                        .into()
+                    }
+                    None => None,
                 };
 
                 SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(

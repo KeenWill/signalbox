@@ -39,9 +39,13 @@ impl PartialEq for StructuredOutputContract {
 impl StructuredOutputContract {
     /// A contract whose schema is generated from `T`.
     pub fn of_type<T: JsonSchema>(name: impl Into<String>, description: impl Into<String>) -> Self {
+        // Invariant: schemars produces a `serde_json::Value`, whose `Serialize`
+        // implementation admits every value. The
+        // `generated_contract_schema_serializes_as_raw_json` test exercises
+        // this exact conversion boundary.
         #[expect(
             clippy::expect_used,
-            reason = "serde_json::Value has no fallible serialization shape"
+            reason = "serde_json::Value serialization is total; generated_contract_schema_serializes_as_raw_json enforces the boundary"
         )]
         let schema = to_raw_value(&schemars::schema_for!(T).to_value())
             .expect("generated JSON Schema always serializes");
@@ -217,6 +221,15 @@ mod tests {
             name: ToolName::new("verdict"),
             arguments_json: arguments_json.to_string(),
         })
+    }
+
+    #[test]
+    fn generated_contract_schema_serializes_as_raw_json() {
+        let contract = contract();
+        let schema = serde_json::from_str::<serde_json::Value>(contract.schema.get())
+            .expect("the generated raw schema remains valid JSON");
+
+        assert_eq!(schema["title"], "Verdict");
     }
 
     #[test]

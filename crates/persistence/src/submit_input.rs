@@ -2889,12 +2889,9 @@ pub(crate) async fn load_scheduling_projection(
             .ok_or(SubmitInputCorruption::Inconsistent(
                 "context frontier declared membership",
             ))?;
-        #[expect(
-            clippy::expect_used,
-            reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
-        )]
-        let actual_count = u64::try_from(actual_count)
-            .expect("PostgreSQL result cardinality fits the u64 schema bound");
+        let actual_count = u64::try_from(actual_count).map_err(|_| {
+            SubmitInputCorruption::Inconsistent("context frontier declared membership")
+        })?;
         if stored.declared_count != Decimal::from(actual_count) {
             return Err(SubmitInputCorruption::Inconsistent(
                 "context frontier declared membership",
@@ -2904,12 +2901,10 @@ pub(crate) async fn load_scheduling_projection(
         let mut members = Vec::with_capacity(stored.members.len());
         for (index, (position, source_session, semantic_entry)) in stored.members.iter().enumerate()
         {
-            #[expect(
-                clippy::expect_used,
-                reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
-            )]
-            let expected_position = u64::try_from(prefix_member_count + index + 1)
-                .expect("PostgreSQL result cardinality fits the u64 schema bound");
+            let expected_position =
+                u64::try_from(prefix_member_count + index + 1).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("context frontier contiguous membership")
+                })?;
             if *position != Decimal::from(expected_position) {
                 return Err(SubmitInputCorruption::Inconsistent(
                     "context frontier contiguous membership",
@@ -4445,13 +4440,9 @@ pub(crate) async fn load_turn_origin_graph(
     ))?;
     let mut decoded = BTreeMap::new();
     for ready in decode_order {
-        #[expect(
-            clippy::expect_used,
-            reason = "temporary ledger site: the dependency-order output is derived from these exact remaining links; typed conversion is commissioned by the 2026-07-20 audit"
-        )]
         let link = links
             .remove(&ready)
-            .expect("the selected turn origin link remains present");
+            .ok_or(SubmitInputCorruption::Missing("related turn origin"))?;
         let command_uuid = durable_command_id_to_uuid(link.command_id);
         let row = rows_by_command
             .remove(&command_uuid)

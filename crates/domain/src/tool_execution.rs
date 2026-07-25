@@ -666,9 +666,11 @@ impl ToolBatch {
                                 failure: ToolResultProjectionFailure::TurnLevelFailure,
                             });
                         }
-                        Some(ReconstitutedToolAttempt::Current(_)) => unreachable!(
-                            "the live-attempt guard rejects current cancellation evidence"
-                        ),
+                        Some(ReconstitutedToolAttempt::Current(_)) => {
+                            return Err(ToolResultProjectionError {
+                                failure: ToolResultProjectionFailure::BatchNotResolved,
+                            });
+                        }
                         None => SemanticTranscriptEntryPayload::ToolClosed {
                             request: request.id(),
                         },
@@ -762,9 +764,11 @@ impl ToolBatch {
                                 request: request.id(),
                             }
                         }
-                        Some(ReconstitutedToolAttempt::Current(_)) => unreachable!(
-                            "the live-attempt guard rejects current reconciliation evidence"
-                        ),
+                        Some(ReconstitutedToolAttempt::Current(_)) => {
+                            return Err(ToolResultProjectionError {
+                                failure: ToolResultProjectionFailure::BatchNotResolved,
+                            });
+                        }
                     }
                 }
                 Some(_) | None => SemanticTranscriptEntryPayload::ToolClosed {
