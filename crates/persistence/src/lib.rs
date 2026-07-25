@@ -16,6 +16,7 @@ pub mod model_execution;
 pub mod outbox;
 pub mod process_read;
 pub mod replace_session_defaults;
+pub mod review_workflow;
 pub mod scheduler;
 pub mod session;
 pub mod start_eligible_turn;
