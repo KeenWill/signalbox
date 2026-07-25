@@ -255,6 +255,36 @@ subscription accounts, the cost texture of multi-account spreading — an owner
 call, the same bucket as the owner-revisit parking on the reimplementation
 track.
 
+Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
+carries the real design and its decision-log entries): the owner set the
+reaction doctrine per evidence kind, answering open tensions (1) and (2) above.
+RateLimited and Overloaded get platform-owned deferred retry — a durable
+cooldown window, bounded re-attempts, and each re-attempt is a new prepared
+call, so the one-dispatch-per-prepared-call evidence law holds unmodified.
+QuotaExhausted never auto-retries on the same credential — billing state, not
+weather — and instead marks the credential failover-eligible. CredentialRejected
+and PermissionDenied fail closed with no failover: silently rotating past a
+misconfigured credential would hide the problem from the owner. All other kinds
+keep today's behavior.
+
+On failover granularity, refining the per-session affinity direction above: the
+session pins a credential at creation to preserve provider-side prompt-cache
+prefixes — the stated point of pinning — and automatic failover is permitted
+only at attempt boundaries, and only when the pinned credential is cooling down
+or quota-exhausted, the case where the cache is going cold anyway. Every call
+still pins the credential it actually used, keeping history truthful. Automatic
+pools are same-provider only.
+
+On limit-state durability: per-credential cooldown/limit state lives in durable
+rows fed by the rate-limit evidence already captured, consulted at dispatch time
+— restart-safe, and displayable by future monitor surfaces.
+
+One boundary clarification the owner recorded alongside: user-driven
+model/provider switching mid-session — selecting a different model between
+turns, or ending a turn, switching, and continuing — is a wanted first-class
+capability and deliberately separate from automatic failover. This entry does
+not own it; see the mid-session model selection entry below.
+
 ## Native client rewire, macOS first [blocked-on: client stack + snapshot import merges] [size: L]
 
 Owns: `clients/native`, possibly additive process-protocol frames.
@@ -323,6 +353,19 @@ owns the metadata and listing contract,
 and
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention)
 owns deferred visibility and filter design.
+
+## Mid-session model selection [blocked-on: owner commission call] [size: S-M]
+
+Owns: an additive protocol affordance and client UI surface. Collides-with:
+little. Owner-wanted capability: change the session's model target between turns
+from the client — pick a different model for the next turn, or end a turn,
+switch, and continue in place. The server-side mechanism already exists: session
+defaults carry the model-selection request, and the existing
+`ReplaceSessionDefaults` command installs a new defaults version affecting only
+origin input accepted afterward — this entry exposes that machinery to clients
+rather than inventing a new one. Distinct from automatic failover by owner call:
+this is the user choosing, not the platform routing around a limit; the
+account-pools entry above records that boundary and does not own this.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 
