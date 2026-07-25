@@ -4310,7 +4310,12 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     AuthorizationReconciliation(TransactionError),
     PreflightCommit(TransactionError),
     Executor(ExecutorError),
+    ExecutorCrashClassification {
+        executor_error: ExecutorError,
+        classification_error: TransactionError,
+    },
     ExecutorCorrelationMismatch,
+    ExecutorCorrelationMismatchCrashClassification(TransactionError),
     ObservationCommit(TransactionError),
     ObservationReconciliation(TransactionError),
     CrashClassification(TransactionError),

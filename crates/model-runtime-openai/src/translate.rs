@@ -308,8 +308,9 @@ fn tools_and_choice<C>(
 /// Chat Completions carries tool results as separate `tool`-role messages
 /// rather than content parts, so one conversation message can produce
 /// several wire messages: consecutive text parts group into one message,
-/// assistant tool calls attach to the preceding assistant text (or form
-/// their own message), and each tool result becomes its own message.
+/// assistant tool calls attach to preceding assistant text (or form their own
+/// message), and each tool result becomes its own message. Assistant text after
+/// a tool call is rejected because this wire cannot preserve that part order.
 fn wire_messages(
     message: &ConversationMessage,
     out: &mut Vec<WireChatMessage>,
@@ -331,6 +332,13 @@ fn wire_messages(
     for part in &message.parts {
         match part {
             MessagePart::Text(text) => {
+                if role == "assistant" && !pending_tool_calls.is_empty() {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the Chat Completions wire contract cannot preserve assistant \
+                                 text after a replayed tool call"
+                            .to_string(),
+                    });
+                }
                 match &mut pending_text {
                     Some(pending) => pending.push_str(text),
                     None => pending_text = Some(text.clone()),
@@ -969,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn text_after_a_tool_call_stays_in_the_same_assistant_message() {
+    fn text_after_a_tool_call_is_rejected_before_any_send() {
         let mut operation = operation("call-9");
         operation.messages = vec![
             ConversationMessage {
@@ -993,24 +1001,14 @@ mod tests {
             },
         ];
 
-        let request =
-            build_request(&operation).expect("one grouped assistant message remains replayable");
-        assert_eq!(
-            request.messages[0].content.as_deref(),
-            Some("after the call")
-        );
-        assert_eq!(
-            request.messages[0]
-                .tool_calls
-                .as_ref()
-                .expect("tool call remains attached")
-                .len(),
-            1
-        );
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]
-    fn text_segments_separated_by_a_tool_call_preserve_exact_content() {
+    fn text_segments_separated_by_a_tool_call_are_rejected_before_any_send() {
         let mut operation = operation("call-separated-text");
         operation.messages = vec![
             ConversationMessage {
@@ -1035,11 +1033,10 @@ mod tests {
             },
         ];
 
-        let request = build_request(&operation).expect("grouped tool history remains replayable");
-        assert_eq!(
-            request.messages[0].content.as_deref(),
-            Some("before the callafter the call")
-        );
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]
