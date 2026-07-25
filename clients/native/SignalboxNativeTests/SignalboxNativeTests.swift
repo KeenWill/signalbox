@@ -150,7 +150,7 @@ final class SignalboxNativeTests: XCTestCase {
         let yieldedMessage = try await iterator.next()
         let message = try XCTUnwrap(yieldedMessage)
 
-        guard case .unknown(let kind, _) = message else {
+        guard case .unknown(let kind, _, _) = message else {
             return XCTFail("Expected the frame after the heartbeat")
         }
         XCTAssertEqual(kind, "turn_started")
@@ -167,6 +167,118 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(
             decoded.sentAt,
             try SignalboxJSONCoding.decoder().decode(Date.self, from: Data(#""2026-05-10T12:00:00Z""#.utf8))
+        )
+    }
+
+    func testWebSocketStreamContinuesAfterUndecodableFrame() async throws {
+        let transport = StubSignalboxWebSocketTransport(
+            incoming: [
+                .string(#"{"kind":"event_appended","event_id":"not-an-integer","event":{}}"#),
+                .string(#"{"kind":"turn_started","turn_id":"turn-1"}"#),
+            ]
+        )
+        let stream = SignalboxWebSocketStream(transport: transport)
+
+        var iterator = stream.messages().makeAsyncIterator()
+        let firstYield = try await iterator.next()
+        let firstMessage = try XCTUnwrap(firstYield)
+        let secondYield = try await iterator.next()
+        let secondMessage = try XCTUnwrap(secondYield)
+
+        guard case .unknown(let firstKind, _, let diagnostic) = firstMessage else {
+            return XCTFail("Expected the evolved known frame to use the unknown-frame path")
+        }
+        XCTAssertEqual(firstKind, "event_appended")
+        XCTAssertEqual(diagnostic?.message, "Unexpected field type at event_id.")
+        guard case .unknown(let secondKind, _, let secondDiagnostic) = secondMessage else {
+            return XCTFail("Expected the frame after the decode failure")
+        }
+        XCTAssertEqual(secondKind, "turn_started")
+        XCTAssertNil(secondDiagnostic)
+    }
+
+    func testWebSocketStreamSurfacesMalformedPayloadAndContinues() async throws {
+        let transport = StubSignalboxWebSocketTransport(
+            incoming: [
+                .string("not-json"),
+                .string(#"{"kind":"turn_started","turn_id":"turn-1"}"#),
+            ]
+        )
+        let stream = SignalboxWebSocketStream(transport: transport)
+
+        var iterator = stream.messages().makeAsyncIterator()
+        let firstYield = try await iterator.next()
+        let firstMessage = try XCTUnwrap(firstYield)
+        let secondYield = try await iterator.next()
+        let secondMessage = try XCTUnwrap(secondYield)
+
+        guard case .diagnostic(let diagnostic) = firstMessage else {
+            return XCTFail("Expected a surfaced payload diagnostic")
+        }
+        XCTAssertEqual(diagnostic.message, "Invalid field value at the payload.")
+        guard case .unknown(let kind, _, let secondDiagnostic) = secondMessage else {
+            return XCTFail("Expected the frame after the malformed payload")
+        }
+        XCTAssertEqual(kind, "turn_started")
+        XCTAssertNil(secondDiagnostic)
+    }
+
+    func testListEventsPreservesPageWhenKnownEventFieldsEvolve() async throws {
+        let transport = MockSignalboxHTTPTransport()
+        await transport.setJSONResponse(
+            path: "/api/v1/sessions/session-1/events",
+            json: """
+            {
+              "events": [
+                {
+                  "event_id": 1,
+                  "event": {"kind": "future_event", "field": "preserved"}
+                },
+                {
+                  "event_id": 2,
+                  "event": {
+                    "kind": "message",
+                    "message": {
+                      "role": "assistant",
+                      "parts": [{"kind": "text", "text": "still loading"}]
+                    },
+                    "visible_to_llm": true,
+                    "visible_to_user": true,
+                    "is_streaming": false,
+                    "parent_tool_invocation": null,
+                    "created_at": "2026-05-10T12:00:00Z",
+                    "last_modified_at": "2026-05-10T12:00:00Z"
+                  }
+                }
+              ],
+              "limit": 500,
+              "next_after": null
+            }
+            """
+        )
+        let configuration = try SignalboxClientConfiguration(
+            baseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8000")),
+            apiKey: "synthetic-api-key"
+        )
+        let client = SignalboxAPIClient(configuration: configuration, transport: transport)
+
+        let events = try await client.listEvents(sessionID: SignalboxSessionID(rawValue: "session-1"))
+
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events[0].eventID, SignalboxEventID(rawValue: 1))
+        guard case .unknown(let preservedUnknown) = events[0].event else {
+            return XCTFail("Expected the unknown event to remain available")
+        }
+        XCTAssertEqual(preservedUnknown.kind, "future_event")
+        XCTAssertNil(preservedUnknown.decodingDiagnostic)
+        XCTAssertEqual(events[1].eventID, SignalboxEventID(rawValue: 2))
+        guard case .unknown(let evolvedKnownEvent) = events[1].event else {
+            return XCTFail("Expected the evolved event to degrade to an unknown event")
+        }
+        XCTAssertEqual(evolvedKnownEvent.kind, "message")
+        XCTAssertEqual(
+            evolvedKnownEvent.decodingDiagnostic?.message,
+            "Missing required field at events[1].event.created_from."
         )
     }
 }

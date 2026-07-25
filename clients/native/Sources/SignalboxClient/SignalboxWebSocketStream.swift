@@ -82,7 +82,13 @@ public final class SignalboxWebSocketStream: Sendable {
                         case .string(let string):
                             data = Data(string.utf8)
                         }
-                        let decoded = try SignalboxJSONCoding.decoder().decode(SignalboxServerMessage.self, from: data)
+                        let decoded: SignalboxServerMessage
+                        do {
+                            decoded = try SignalboxJSONCoding.decoder().decode(SignalboxServerMessage.self, from: data)
+                        } catch {
+                            continuation.yield(.diagnostic(SignalboxDecodingDiagnostic(error: error)))
+                            continue
+                        }
                         if case .heartbeat(let sentAt) = decoded {
                             try await sendHeartbeatAck(sentAt: sentAt)
                             continue

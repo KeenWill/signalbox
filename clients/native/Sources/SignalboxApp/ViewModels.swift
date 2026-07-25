@@ -487,11 +487,19 @@ final class SessionDetailViewModel: ObservableObject {
             upsert(artifact: artifact)
         case .heartbeat:
             break
-        case .unknown(let kind, let payload):
+        case .diagnostic(let diagnostic):
+            errorMessage = diagnostic.message
+        case .unknown(let kind, let payload, let decodingDiagnostic):
             events.append(
                 SignalboxStoredEvent(
                     eventID: SignalboxEventID(rawValue: (events.last?.eventID.rawValue ?? 0) + 1),
-                    event: .unknown(SignalboxUnknownEvent(kind: kind, payload: payload))
+                    event: .unknown(
+                        SignalboxUnknownEvent(
+                            kind: kind,
+                            payload: payload,
+                            decodingDiagnostic: decodingDiagnostic
+                        )
+                    )
                 )
             )
         }

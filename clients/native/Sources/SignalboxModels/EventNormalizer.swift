@@ -148,7 +148,8 @@ public enum SignalboxEventNormalizer {
                     SignalboxUnknownEventCard(
                         eventID: record.eventID,
                         kind: event.kind,
-                        diagnostic: event.payload.keys.sorted().joined(separator: ", ")
+                        diagnostic: event.decodingDiagnostic?.message
+                            ?? event.payload.keys.sorted().joined(separator: ", ")
                     )
                 )
             }

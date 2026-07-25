@@ -81,6 +81,48 @@ public enum SignalboxJSONCoding {
     }
 }
 
+public struct SignalboxDecodingDiagnostic: Equatable, Sendable {
+    public let message: String
+
+    public init(message: String) {
+        self.message = message
+    }
+
+    public init(error: Error) {
+        switch error {
+        case DecodingError.keyNotFound(let key, let context):
+            self.message = "Missing required field at \(Self.path(context.codingPath + [key]))."
+        case DecodingError.typeMismatch(_, let context):
+            self.message = "Unexpected field type at \(Self.path(context.codingPath))."
+        case DecodingError.valueNotFound(_, let context):
+            self.message = "Missing required value at \(Self.path(context.codingPath))."
+        case DecodingError.dataCorrupted(let context):
+            self.message = "Invalid field value at \(Self.path(context.codingPath))."
+        default:
+            self.message = "Could not decode the server payload."
+        }
+    }
+
+    private static func path(_ codingPath: [any CodingKey]) -> String {
+        let components = codingPath.map { key in
+            if let index = key.intValue {
+                return "[\(index)]"
+            }
+            return key.stringValue
+        }
+        guard !components.isEmpty else {
+            return "the payload"
+        }
+        return components.reduce(into: "") { path, component in
+            if component.hasPrefix("[") {
+                path += component
+            } else {
+                path += path.isEmpty ? component : ".\(component)"
+            }
+        }
+    }
+}
+
 public enum SignalboxDateParser {
     private static func fractionalFormatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
