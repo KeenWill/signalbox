@@ -22,10 +22,11 @@ aggregate.
 `ReviewTargetId`, `ReviewRunId`, `ReviewPassId`, `ReviewFindingId`, and
 `ReviewExternalLinkId` are distinct UUID-backed domain identities. A
 `ReviewRunRef` binds a run to its target; a `ReviewPassRef` binds a pass to that
-run and target; and a `ReviewFindingRef` binds a finding to all three ancestors.
-Child records carry those complete references. Why: complete typed ownership
-facts make a cross-wired target/run/pass/finding combination unconstructible in
-normal domain use and rejectable during reconstitution (INV-002).
+run and target; and a `ReviewFindingRef` binds a finding to its exact producing
+pass and therefore its run and target. Child records carry those complete
+references. Why: complete typed ownership facts make a cross-wired
+target/run/pass/finding combination unconstructible in normal domain use and
+rejectable during reconstitution (INV-002).
 
 Key-like values preserve their exact UTF-8 content without trimming or
 normalization. Construction rejects empty values, U+0000, and values longer than
@@ -160,20 +161,24 @@ object kind conflicts.
 
 External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
-attachment containing the exact external object identifier and the producing
-pass. The producing pass must belong to the target carried by the reservation's
-target, run, or finding association. The identifier is an opaque canonical
-provider-wide key. An adapter qualifies a repository-scoped host identifier with
-the canonical repository key before constructing it. The store uniquely admits
-one attached provider/kind/object identity and one attachment per reservation. A
-reservation without an attachment is explicitly pending; it is never interpreted
-as proof that the external effect did not occur and is not automatically retried
-(INV-025, INV-026). Read-only import may reserve and attach in one local
-transaction because it issues no external write.
+attachment containing the owning reservation identity, the exact external object
+identifier, and the producing pass. The attachment's reservation must equal the
+aggregate root, and the producing pass must belong to the target carried by the
+reservation's target, run, or finding association. Construction and
+reconstitution reject another same-target reservation. The identifier is an
+opaque canonical provider-wide key. An adapter qualifies a repository-scoped
+host identifier with the canonical repository key before constructing it. The
+store uniquely admits one attached provider/kind/object identity and one
+attachment per reservation. A reservation without an attachment is explicitly
+pending; it is never interpreted as proof that the external effect did not occur
+and is not automatically retried (INV-025, INV-026). Read-only import may
+reserve and attach in one local transaction because it issues no external write.
 
 After attachment, append-only observations record `Current`, `Outdated`, or
-`Resolved` with a same-target pass and contiguous ordinal. Observations describe
-the external object's reported state; they do not rewrite finding status.
+`Resolved` with the owning reservation identity, a same-target pass, and a
+contiguous ordinal. Reconstitution rejects another reservation even when both
+share a target. Observations describe the external object's reported state; they
+do not rewrite finding status.
 
 ## Store and reconstitution
 
