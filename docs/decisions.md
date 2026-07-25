@@ -33,6 +33,56 @@ without a recorded server heartbeat cadence that justifies it.
 and its unit-test seam; the wire protocol and heartbeat acknowledgment remain
 unchanged.
 
+## 2026-07-25 — Route review requests for every path to the owner
+
+**Context.** The repository carries no `CODEOWNERS` file, so GitHub attaches no
+reviewer to a new pull request and nothing outside the prose rules resolves who
+owns a path. The 2026-07-17 entry "Merging an ADR pull request is its
+acceptance" lists `CODEOWNERS` among its rejected alternatives, but in the
+narrower sense there declined: mechanical enforcement of record acceptance
+through *required* review.
+
+**Decision.** Add `.github/CODEOWNERS` with the single rule `* @KeenWill`, so
+every path routes to the repository owner. The file is routing and notification
+only: it is not paired with a branch-protection rule that makes owner review a
+merge condition, so it changes who is requested, not what may merge. Merge
+authority is unchanged and stays owned by `AGENTS.md`.
+
+**Rejected alternatives.** Per-directory owner rules restate one owner across a
+path table that can only drift. Pairing the file with required-review branch
+protection is the enforcement the 2026-07-17 entry declined as ceremony for a
+single-owner repository. Leaving the file absent keeps every review request
+manual and leaves tooling with no owner to resolve.
+
+**Affects.** `.github/CODEOWNERS` (new) and pull-request reviewer assignment.
+
+## 2026-07-25 — Deny untracked production panic primitives
+
+**Context.** The workspace already denied direct `panic!`, `expect()`, and
+`unwrap()` use, while the 2026-07-20 panic ledger commissioned typed conversions
+and an `unreachable!` gate. Rechecking every production target found twelve
+`unreachable!` sites and seven temporary ledger `expect()` sites. Two additional
+`expect()` calls serialize `serde_json::Value`, a representation whose
+serialization is total.
+
+**Decision.** Convert the nineteen temporary or branch-derived sites to
+exhaustive matches, structurally correlated values, or existing typed errors.
+Retain only the two total `serde_json::Value` conversions, each with a local
+invariant comment, a narrow lint expectation, and a named unit check. Deny
+Clippy's `unreachable`, `todo`, and `unimplemented` lints workspace-wide
+alongside the existing panic, expect, and unwrap gates; test targets retain the
+workspace's test-only panic allowance.
+
+**Rejected alternatives.** A source grep cannot distinguish production code from
+inline test modules as reliably as target-aware Clippy. A permanent allow-list
+would let stale line-oriented exceptions survive refactors. Returning `Result`
+from otherwise infallible public schema constructors would export a failure
+state their input type cannot produce.
+
+**Affects.** The workspace Clippy policy, the closed 2026-07-20 panic ledger,
+and the locally rewritten domain, application, persistence, runtime-bridge, and
+client branches. Public API shapes and accepted runtime semantics do not change.
+
 ## 2026-07-25 — Phase-one review-process amendments
 
 **Context.** The first heavy-throughput week under the living-specification
