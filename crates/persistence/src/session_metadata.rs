@@ -27,7 +27,7 @@ use crate::{
         self, CommandKind, REPLACE_SESSION_METADATA_KIND, RegistryCorruption,
         RegistryInspectionError,
     },
-    commit_failure_is_ambiguous,
+    commit_failure_is_ambiguous, lock_inventory,
     mapping::{
         PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
         defaults_version_from_numeric, durable_command_id_to_uuid, session_id_from_uuid,
@@ -225,16 +225,12 @@ impl SessionMetadataRepository {
             return Ok(outcome);
         }
 
-        let session_exists = sqlx::query_scalar::<_, Uuid>(
-            "SELECT session_id
-               FROM session
-              WHERE session_id = $1
-              FOR UPDATE",
-        )
-        .bind(session_id_to_uuid(command.session()))
-        .fetch_optional(&mut *transaction)
-        .await?
-        .is_some();
+        let session_exists =
+            sqlx::query_scalar::<_, Uuid>(lock_inventory::REPLACE_SESSION_METADATA)
+                .bind(session_id_to_uuid(command.session()))
+                .fetch_optional(&mut *transaction)
+                .await?
+                .is_some();
 
         let prepared = if session_exists {
             let updated_at = transaction_timestamp(&mut transaction).await?;

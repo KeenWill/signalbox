@@ -281,6 +281,10 @@ Locks per transaction, in acquisition order:
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
+- **ReplaceSessionMetadata**: the target session row is locked
+  `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
+  serializes metadata writers without conflicting with the `KEY SHARE` lock
+  taken by foreign-key checks.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
