@@ -44,10 +44,10 @@ gates. Binary-local floating-point defaults would neither reconstruct the policy
 used by an old run nor provide one exact relational representation.
 
 **Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
-integer basis-point thresholds from zero through 10,000. Version one requires at
-least 7,000 basis points for judgment and 8,000 for unattended publication; the
-publication threshold may not be lower than the judgment threshold. Dedupe and
-judge passes consume the same frozen run policy.
+integer basis-point thresholds from zero through 10,000. Version one fixes
+exactly 7,000 basis points for judgment and exactly 8,000 for unattended
+publication; the publication threshold may not be lower than the judgment
+threshold. Dedupe and judge passes consume the same frozen run policy.
 
 **Rejected alternatives.** Process-wide defaults make old decisions depend on
 current configuration. Binary floating point admits storage/JSON comparison
