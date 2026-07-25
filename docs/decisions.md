@@ -10,6 +10,40 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Run Swift client CI on the wired unit-test bundle
+
+**Context.** The native-client snapshot import deferred Swift CI wholesale,
+parking the Tart VM scripts inert "with the rest of Swift CI" because
+GitHub-hosted macOS runners lack nested virtualization. Meanwhile nothing
+mechanical checks `clients/native` at all: a change can break the Xcode build,
+the privacy boundary, the Tart script contracts, or the screenshot manifest with
+no signal until someone builds locally. The imported `Tests/SignalboxAppTests`,
+`Tests/SignalboxClientTests`, and `Tests/SignalboxModelsTests` are still not
+wired as Xcode targets, so `SignalboxNativeTests` is the only unit-test bundle
+that can run today.
+
+**Decision.** Land a macOS workflow now for what a hosted runner can actually do
+— the Debug simulator build, the wired `SignalboxNativeTests` bundle, and the
+privacy, Tart dry-run, and screenshot-golden-hash script checks — pinned to the
+image's Xcode 26.6 rather than its rolling default. The UI and
+screenshot-capture bundles are excluded through a new
+`SIGNALBOX_NATIVE_SKIP_TESTING` option on `test-xcode.sh`, and the real-server
+smoke test stays out; both need an interactive session or a live server and
+credential. This supersedes the blanket Swift-CI deferral for the build and
+script surface only. Restoring the unreachable test targets remains the rewire's
+first task, and the Tart device matrix stays deferred pending self-hosted Apple
+Silicon or a managed Tart service.
+
+**Rejected alternatives.** Waiting for the rewire leaves `clients/native`
+unchecked through the milestone that changes it most. Running the UI and
+screenshot-capture suites in CI trades a real signal for a flaky one, and the
+golden hashes already catch manifest drift without a simulator. Following the
+image's default Xcode would let a runner-image bump change the toolchain under a
+project created against a pinned one.
+
+**Affects.** `.github/workflows/swift.yml` (new),
+`clients/native/scripts/test-xcode.sh`.
+
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
 **Context.** Metadata list queries admit page sizes from one through one
