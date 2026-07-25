@@ -2755,19 +2755,22 @@ mod tests {
         };
         assert_eq!(continuing.response_parts().len(), 3);
         assert_eq!(continuing.continuation_attempt(), None);
-        let requests = continuing
-            .response_parts()
-            .iter()
-            .filter_map(|part| match part {
-                ToolResponsePartIdentity::Text { .. } => None,
-                ToolResponsePartIdentity::ToolCall {
-                    request, approval, ..
-                } => Some((*request, *approval)),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].1, InitialToolApproval::PolicyAuto);
-        assert_eq!(requests[1].1, InitialToolApproval::Confirm);
+        let [
+            ToolResponsePartIdentity::Text { .. },
+            ToolResponsePartIdentity::ToolCall {
+                approval: first_approval,
+                ..
+            },
+            ToolResponsePartIdentity::ToolCall {
+                approval: second_approval,
+                ..
+            },
+        ] = continuing.response_parts()
+        else {
+            panic!("fixture response preserves one text part then two tool calls");
+        };
+        assert_eq!(*first_approval, InitialToolApproval::PolicyAuto);
+        assert_eq!(*second_approval, InitialToolApproval::Confirm);
         assert_eq!(
             stopped,
             StoppedToolRoundModelCallIdentities::new(
