@@ -866,7 +866,7 @@ private enum LongSequenceFixture {
 
     /// One naive normalization after each append evaluates the triangular
     /// record total through `eventCount`.
-    static let naiveRecordEvaluationCount = 80_200
+    static let naiveRecordEvaluationCount = eventCount * (eventCount + 1) / 2
 
     /// Arbitrary shared timestamp for every generated message.
     static let timestampJSON = #""2026-05-10T12:00:00Z""#
