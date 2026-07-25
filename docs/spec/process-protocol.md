@@ -188,7 +188,8 @@ the domain capacity contract: at most 262,144 total UTF-8 bytes across the
 object, and at most 1,024 UTF-8 bytes in each tag or attribute key. That bound
 leaves response-envelope and worst-case JSON-escaping headroom below the 8 MiB
 frame limit when a complete accepted object is echoed by a read or replacement
-receipt.
+receipt. The exact capacity choice is recorded in the
+[metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
 
 `list_session_metadata` admits one through 100 results. `required_tags` is an
 exact AND-filter, a present `title_contains` is nonempty and applies an exact
@@ -244,9 +245,14 @@ that variant. Every accepted `create_session`, `submit_input`, or
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`;
-- `session_metadata_replaced` with `session_id`, the complete current `metadata`
-  object, and its non-null `last_writer`; or
+- `session_metadata_replaced` with `session_id`, the complete `metadata`
+  snapshot installed by that recorded handling, and its non-null `last_writer`;
+  or
 - `error` with a stable `code` and a non-sensitive `message`.
+
+A replayed metadata receipt remains the exact snapshot installed by its original
+handling even if a later command has replaced the current metadata. A caller
+that needs current state issues `read_session_metadata`.
 
 In the server shapes below, notation such as `queued` or
 `terminal { disposition }` means a closed JSON object with `"type":"queued"` or
@@ -274,11 +280,13 @@ Version four's metadata list is a bounded sequence:
 
 Each summary carries `session_id`, current `defaults_version`,
 `model_selection`, `dangerous_tool_auto_approval`, `title`, sorted `tags`,
-`archived`, and `last_writer`. Attributes are intentionally absent from the list
-projection. The end cursor is null when no later match existed in the page
-snapshot; otherwise it equals the last emitted session identity. The page
-sequence is spooled before output and becomes authoritative only after its
-count, ordering, and cursor validate.
+`archived`, and `last_writer`. `dangerous_tool_auto_approval` is a JSON boolean:
+`false` encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags
+are strictly increasing by lexicographic UTF-8 byte sequence. Attributes are
+intentionally absent from the list projection. The end cursor is null when no
+later match existed in the page snapshot; otherwise it equals the last emitted
+session identity. The page sequence is spooled before output and becomes
+authoritative only after its count, ordering, and cursor validate.
 
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry

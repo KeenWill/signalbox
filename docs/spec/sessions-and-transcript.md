@@ -570,14 +570,13 @@ storage convention are owned by
 only — not authentication, authorization, or approval — and model agency can
 never compare equal to owner agency (INV-020).
 
-The session-command consequences: `SubmitInput` is the only command payload
-carrying an actor inside the conversational command surface, and its constructor
-fixes `Actor::Owner`, so no non-owner agency can claim a command through this
-boundary; domain reconstitution compares the stored actor against the canonical
-command and fails closed on mismatch (`StoredActorMismatch`).
-`ReplaceSessionMetadata` independently carries the actor for its organizational
-last-writer stamp and likewise fixes `Actor::Owner` at its implemented
-application boundary.
+The session-command consequences: `SubmitInput` and `ReplaceSessionMetadata` are
+the command payloads carrying an actor inside the conversational command
+surface. Both implemented application constructors fix `Actor::Owner`, so no
+non-owner agency can claim either command through this boundary; domain
+reconstitution compares the stored actor against the canonical command and fails
+closed on mismatch (`StoredActorMismatch`). The metadata actor also becomes its
+organizational last-writer stamp.
 
 Why (seeded while constant): `Owner` is currently the only truthful issuer, so
 seeding the field now preserves a truthful backfill; retrofitting after several

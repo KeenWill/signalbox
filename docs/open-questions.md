@@ -121,6 +121,11 @@ identifiers refer to [scenarios.md](scenarios.md).
 - **Expressive metadata filters.** The implemented query is exact tag AND-match
   plus exact case-sensitive title substring. OR, negation, attribute predicates,
   case folding, and a general query language remain later scope.
+- **Imported-conversation archive semantics.** Ordinary session archive changes
+  only the native session's organizational discoverability and does not mutate
+  its immutable imported source. Whether imported-conversation records have a
+  distinct non-destructive archive state, and how that state affects discovery,
+  remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
   ordinary archive; exact policy undefined. Later scope. (S17, S25)
 
