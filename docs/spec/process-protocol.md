@@ -181,16 +181,17 @@ recovery.
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).
 Present titles, tags, and attribute keys are nonempty; every metadata string
-rejects U+0000. Attribute values may be empty. Duplicate tags are invalid
-requests. Repeating a decoded attribute member name is a `malformed_frame` under
-the frame-wide duplicate-object-member rule above. Tag order and attribute
-member order do not affect durable command equality. Wire validation enforces
-the domain capacity contract: at most 262,144 total UTF-8 bytes across the
-object, at most 256 tags, at most 256 attributes, and at most 1,024 UTF-8 bytes
-in each tag or attribute key. Those bounds leave response-envelope and
-worst-case JSON-escaping headroom below the 8 MiB frame limit while bounding
-normalized satellite work when a complete accepted object is echoed by a read or
-replacement receipt. The exact capacity choice is recorded in the
+rejects U+0000. Attribute values may be empty. Duplicate tags produce
+`malformed_frame`. Repeating a decoded attribute member name also produces
+`malformed_frame` under the frame-wide duplicate-object-member rule above. Tag
+order and attribute member order do not affect durable command equality. Wire
+validation enforces the domain capacity contract: at most 262,144 total UTF-8
+bytes across the object, at most 256 tags, at most 256 attributes, and at most
+1,024 UTF-8 bytes in each tag or attribute key. Those bounds leave
+response-envelope and worst-case JSON-escaping headroom below the 8 MiB frame
+limit while bounding normalized satellite work when a complete accepted object
+is echoed by a read or replacement receipt. The exact capacity choice is
+recorded in the
 [metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
 
 `list_session_metadata` admits one through 100 results. `required_tags` is an
@@ -202,6 +203,12 @@ cursor form the ordinary default request; the wire carries every field
 explicitly. At most 256 required tags are admitted. They are nonempty, reject
 U+0000, and carry at most 1,024 UTF-8 bytes each; a title query rejects U+0000;
 and all required tags plus the title query carry at most 262,144 UTF-8 bytes.
+Every metadata-object and metadata-filter string, shape, cardinality, and byte
+rule in these two paragraphs is client-frame field or size validation. A
+violation returns `malformed_frame` before application construction.
+`invalid_request` is reserved for the fail-closed case where an admitted wire
+value cannot construct the corresponding application input; no currently valid
+metadata frame is intended to reach that mapping error.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
 treatment in all four versions. If a turn is already active, the normal typed
@@ -216,6 +223,13 @@ not admit that request variant; it never reaches application construction. A
 version-one `submit_input`, `read_transcript`, or `follow_session` request that
 selects imported ancestry returns a version-one `unsupported_version` error
 naming version two before mutation or snapshot construction.
+
+Version four also inherits every transcript, turn-state, entry, and event shape
+admitted by version three, including the imported representations introduced by
+version two and the tool-bearing representations introduced by version three. A
+version-four `read_transcript`, `follow_session`, or `submit_input` therefore
+never requires a downgrade or a version newer than four for a representation
+already admitted by version three.
 
 Tool-free native sessions remain readable and mutable through every version. A
 version-one or version-two `read_transcript` or `follow_session` request whose
@@ -296,9 +310,10 @@ authoritative only after its count, ordering, and cursor validate.
 unwritten snapshot has the empty non-archived metadata object and a null
 `last_writer`; an applied replacement always has a non-null last writer. A
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
-microseconds since the Unix epoch) and one closed actor object: `owner`,
-`recovery`, `model { turn_id }`, or `tool { tool_request_id }`. Actor is
-provenance, not wire authentication or authorization.
+microseconds since the Unix epoch) and the closed actor object `owner`. No
+non-owner metadata writer is constructible through this boundary; additional
+actor variants require the later slice that introduces their constructing
+authority. Actor is provenance, not wire authentication or authorization.
 
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. The version-one input treatment

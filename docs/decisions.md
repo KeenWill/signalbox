@@ -52,9 +52,15 @@ through version-three request and message shape unchanged. Version four adds
 distinct `list_session_metadata`, `read_session_metadata`, and
 `replace_session_metadata` requests plus their response families. Client-frame
 validation rejects those requests under older typed versions, and server-frame
-validation rejects their messages likewise. The current terminal client remains
-on version three; this slice supplies the core wire and hub adapter, not new
-terminal UX.
+validation rejects their messages likewise. Version four inherits every
+version-three transcript and event representation, including the imported and
+tool-bearing shapes introduced by versions two and three. Metadata and
+metadata-filter shape, string, cardinality, and byte rules are client-frame
+validation, whose failures are `malformed_frame`; `invalid_request` remains the
+fail-closed application-mapping error. The version-four last-writer actor object
+admits only `owner`, the sole actor this boundary constructs. The current
+terminal client remains on version three; this slice supplies the core wire and
+hub adapter, not new terminal UX.
 
 **Rejected alternatives.** Adding fields to `list_sessions` changes a closed
 shape in place. Reinterpreting version three weakens captured-frame meaning.
@@ -84,8 +90,11 @@ means the empty, non-archived snapshot with no last writer. A durable
 `ReplaceSessionMetadata` command atomically replaces the whole snapshot and
 records PostgreSQL statement time (microsecond precision), sampled in a separate
 statement after acquiring the target session lock, plus its actor. Equal replay
-returns that recorded stamp. Archive is view-only: it neither cancels work nor
-cascades, and restore only clears the flag.
+returns that recorded stamp. Append-only internal installation evidence records
+each applied receipt when it becomes current and rejects installing the same
+receipt again; this enforces one physical application without exposing aggregate
+versioning or a metadata-history API. Archive is view-only: it neither cancels
+work nor cascades, and restore only clears the flag.
 
 **Rejected alternatives.** Adding fields to `Session` makes organizational state
 part of the conversational aggregate. Per-field patch commands complicate replay

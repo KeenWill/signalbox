@@ -112,20 +112,21 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Session organization, visibility, and retention
 
-- **Creation-attributed default visibility.** The current default is every
-  non-archived session. Creation commands carry no actor and only
-  `OwnerInitiated` is constructible, so later creation causes cannot yet support
-  a truthful narrower derivation. Decide derivation, override shape and
-  authority, and monitor inclusion together with the attributed-creation
-  implementation; none is fixed by the current metadata slice.
-- **Expressive metadata filters.** The implemented query is exact tag AND-match
-  plus exact case-sensitive title substring. OR, negation, attribute predicates,
-  case folding, and a general query language remain later scope.
-- **Imported-conversation archive semantics.** Ordinary session archive changes
-  only the native session's organizational discoverability and does not mutate
-  its immutable imported source. Whether imported-conversation records have a
-  distinct non-destructive archive state, and how that state affects discovery,
-  remains undecided.
+- **Creation-attributed default visibility.** The implemented visibility and
+  attribution limits are owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
+  Decide derivation, override shape and authority, and monitor inclusion
+  together with the attributed-creation implementation.
+- **Expressive metadata filters.** The implemented filter grammar is owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection).
+  Whether to add OR, negation, attribute predicates, case folding, or a general
+  query language remains open.
+- **Imported-conversation archive semantics.** Ordinary session archive and
+  immutable imported-source behavior are owned by
+  [sessions-and-transcript](spec/sessions-and-transcript.md#session-metadata-and-list-projection)
+  and [conversation-import](spec/conversation-import.md). Whether imported
+  conversation records have a distinct non-destructive archive state, and how
+  that state affects discovery, remains undecided.
 - **Destructive retention or purge beyond ordinary archive.** Kept separate from
   ordinary archive; exact policy undefined. Later scope. (S17, S25)
 

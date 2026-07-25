@@ -301,8 +301,11 @@ serialization on the session row; a full replacement can overwrite an earlier
 writer's unrelated field. Callers that need to preserve fields read the current
 snapshot before forming the replacement. The owner-global durable-command
 contract retains each command's payload and typed result for replay, so those
-records preserve prior replacement values; they are not an optimistic-
-concurrency mechanism or a metadata-history projection.
+records preserve prior replacement values. Persistence also retains append-only
+internal evidence that each applied receipt became current exactly once; it
+rejects reinstalling an earlier receipt after a later replacement. Neither form
+of evidence is an optimistic-concurrency mechanism, aggregate version, or
+metadata-history projection.
 
 Archive is organizational visibility state only. Archiving never cancels,
 pauses, rejects, or rewrites accepted, queued, active, or terminal work and
