@@ -325,8 +325,6 @@ final class SessionListViewModel: ObservableObject {
 final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var session: SignalboxSessionMetadata
     @Published private(set) var status: SignalboxSessionStatus = SignalboxSessionStatus(state: .idle)
-    @Published private(set) var events: [SignalboxStoredEvent] = []
-    @Published private(set) var timelineItems: [SignalboxTimelineItem] = []
     @Published private(set) var artifacts: [SignalboxArtifact] = []
     @Published private(set) var unhandledFrameKinds: [String: Int] = [:]
     @Published private(set) var latestStreamDiagnostic: String?
@@ -347,6 +345,14 @@ final class SessionDetailViewModel: ObservableObject {
 
     func setServiceProvider(_ provider: @escaping () -> (any SignalboxClientProtocol)?) {
         self.serviceProvider = provider
+    }
+
+    var events: [SignalboxStoredEvent] {
+        eventNormalizer.records
+    }
+
+    var timelineItems: [SignalboxTimelineItem] {
+        eventNormalizer.timelineItems
     }
 
     var latestPromptContextArtifact: SignalboxArtifact? {
@@ -538,28 +544,23 @@ final class SessionDetailViewModel: ObservableObject {
     }
 
     private func upsert(event: SignalboxStoredEvent) {
+        objectWillChange.send()
         eventNormalizer.upsert(event)
-        publishNormalizedEvents()
     }
 
     private func removeEvent(withID eventID: SignalboxEventID) {
+        objectWillChange.send()
         eventNormalizer.remove(eventID: eventID)
-        publishNormalizedEvents()
     }
 
     private func replaceEvents(with events: [SignalboxStoredEvent]) {
+        objectWillChange.send()
         eventNormalizer.replaceAll(with: events)
-        publishNormalizedEvents()
     }
 
     private func mergeEvents(with events: [SignalboxStoredEvent]) {
+        objectWillChange.send()
         eventNormalizer.upsert(contentsOf: events)
-        publishNormalizedEvents()
-    }
-
-    private func publishNormalizedEvents() {
-        events = eventNormalizer.records
-        timelineItems = eventNormalizer.timelineItems
     }
 }
 
