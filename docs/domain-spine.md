@@ -5461,7 +5461,7 @@ pub enum ReviewRunTransitionFailure {
     Evidence(ReviewRunEvidenceFailure),
     InvalidTransition,
 }
-pub struct ReviewRunTransitionError { /* states + canonical pass + failure */ }
+pub struct ReviewRunTransitionError { /* unchanged run + requested state + evidence + failure */ }
 impl ReviewRun {
     pub const fn new(
         reference: ReviewRunRef,
@@ -5480,7 +5480,7 @@ impl ReviewRun {
     // evidence()
 }
 impl ReviewRunTransitionError {
-    // accessors: failure(), states(), pass_evidence()
+    // accessors: failure(), states(), pass_evidence(), current(), into_current()
 }
 
 pub enum ReviewPassKind {
@@ -5596,7 +5596,7 @@ pub enum ReviewPassTransitionFailure {
     IncompatibleResult,
     ResultAlreadyBound,
 }
-pub struct ReviewPassTransitionError { /* states + canonical turn + failure */ }
+pub struct ReviewPassTransitionError { /* unchanged pass + requested state + evidence + failure */ }
 impl ReviewPass {
     pub fn try_new(
         reference: ReviewPassRef,
@@ -5621,7 +5621,7 @@ impl ReviewPass {
     // state()
 }
 impl ReviewPassTransitionError {
-    // accessors: failure(), states(), turn_evidence()
+    // accessors: failure(), states(), turn_evidence(), current(), into_current()
 }
 
 pub enum ReviewFindingDiffSide {
@@ -5746,6 +5746,7 @@ pub enum ReviewFindingTransitionFailure {
     IncompatibleEventRunEvidence,
     EventPolicyMismatch,
     ConflictingPassEvidence,
+    ConflictingRunEvidence,
     IncompatibleEventPassEvidence,
     BelowJudgmentThreshold,
     BelowPublicationThreshold,
@@ -5758,9 +5759,9 @@ pub enum ReviewFindingTransitionFailure {
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
     InvalidTransition { current: ReviewFindingStatus },
 }
-pub struct ReviewFindingTransitionError { /* rejected event + failure */ }
+pub struct ReviewFindingTransitionError { /* optional unchanged finding + rejected event + failure */ }
 impl ReviewFindingTransitionError {
-    // accessors: failure(), event(), into_parts()
+    // accessors: failure(), current(), event(), into_parts()
 }
 
 pub enum ReviewExternalLinkAssociation {
@@ -5815,7 +5816,7 @@ impl ReviewExternalLink {
         provider: ReviewKey,
         object_kind: ReviewExternalObjectKind,
         target: &ReviewTarget,
-    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    ) -> Result<Self, ReviewExternalLinkTransitionFailure>;
     pub fn try_reconstitute(
         id: ReviewExternalLinkId,
         association: ReviewExternalLinkAssociation,
@@ -5824,7 +5825,7 @@ impl ReviewExternalLink {
         attachment: Option<ReviewExternalLinkAttachment>,
         observations: Vec<ReviewExternalLinkObservation>,
         target: &ReviewTarget,
-    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    ) -> Result<Self, ReviewExternalLinkTransitionFailure>;
     pub fn attach(self, attachment: ReviewExternalLinkAttachment)
         -> Result<Self, ReviewExternalLinkTransitionError>;
     pub fn observe(self, observation: ReviewExternalLinkObservation)
@@ -5853,7 +5854,11 @@ pub enum ReviewExternalObjectClaimError {
     SameTarget,
     UnrelatedTarget,
 }
-pub enum ReviewExternalLinkTransitionError {
+pub struct ReviewExternalLinkTransitionError { /* unchanged link + failure */ }
+impl ReviewExternalLinkTransitionError {
+    // accessors: current(), failure(), into_parts()
+}
+pub enum ReviewExternalLinkTransitionFailure {
     ForeignAssociationTarget,
     ProviderMismatch,
     AlreadyAttached,
@@ -5865,6 +5870,7 @@ pub enum ReviewExternalLinkTransitionError {
     IncompatibleObservationPass,
     IncompatibleObservationRunEvidence,
     ConflictingPassEvidence,
+    ConflictingRunEvidence,
     NotAttached,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
 }
@@ -5899,9 +5905,9 @@ pub enum ReviewExternalLinkTransitionError {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 76                   |
+| domain: review_workflow                            | 77                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **446 (+1 free fn)** |
+| **signalbox-domain total**                         | **447 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
