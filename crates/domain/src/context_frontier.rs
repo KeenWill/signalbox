@@ -195,6 +195,23 @@ impl ResolvedContextFrontierReconstitutionInput {
         &self.ordered_entries
     }
 
+    /// Validates this complete stored membership for an aggregate that owns
+    /// its database existence and eligibility checks.
+    ///
+    /// Persistence adapters use this after loading the declared member count,
+    /// every contiguous member, and every referenced semantic entry. The
+    /// returned value proves only snapshot shape; the consuming aggregate
+    /// remains responsible for ownership and boundary correlation.
+    pub fn reconstitute(self) -> Option<ResolvedContextFrontierSnapshot> {
+        let (owning_session, snapshot, ordered_entries) = self.into_parts();
+        ResolvedContextFrontierSnapshot::try_from_candidate(
+            owning_session,
+            snapshot,
+            ordered_entries,
+        )
+        .ok()
+    }
+
     #[allow(
         dead_code,
         reason = "checked scheduling reconstitution consumes this inert input"
@@ -549,6 +566,37 @@ mod tests {
         assert_ne!(first, same_entry_other_source);
         assert_eq!(first.source_session(), first_source);
         assert_eq!(first.entry(), semantic_transcript_entry_id(1));
+    }
+
+    /// INV-015: the persistence-facing seam admits complete distinct
+    /// membership and rejects an exact duplicate without exposing unchecked
+    /// snapshot construction.
+    #[test]
+    fn inv015_reconstitution_input_checks_complete_snapshot_shape() {
+        let owner = session_id(1);
+        let first = entry(1);
+        let second = entry(2);
+        let resolved = ResolvedContextFrontierReconstitutionInput::new(
+            owner,
+            context_frontier_id(1),
+            vec![first, second],
+        )
+        .reconstitute()
+        .expect("distinct complete membership reconstitutes");
+        assert_eq!(resolved.frontier().owning_session(), owner);
+        assert_eq!(
+            resolved.ordered_entries().collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert!(
+            ResolvedContextFrontierReconstitutionInput::new(
+                owner,
+                context_frontier_id(2),
+                vec![first, first],
+            )
+            .reconstitute()
+            .is_none()
+        );
     }
 
     /// S09 / INV-015: later candidate derivation retains the complete earlier

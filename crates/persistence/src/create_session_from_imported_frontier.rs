@@ -11,17 +11,18 @@ use signalbox_domain::{
     ContextFrontierId, CreateSessionFromImportedFrontier,
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionFailure,
-    CreateSessionFromImportedFrontierReconstitutionInput, DirectModelSelection, DurableCommandId,
-    ImportedConversation, ImportedConversationId, ImportedSessionReconstitutionFailure,
-    ImportedSessionReconstitutionInput, ImportedSessionRelationship,
-    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionInput,
-    ImportedTranscriptEntryId, ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest,
-    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
-    ReconstitutedSessionCreationFromImportedFrontier, ResolvedContextFrontierReconstitutionInput,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, TranscriptAncestry,
+    CreateSessionFromImportedFrontierReconstitutionInput, DangerousToolAutoApproval,
+    DirectModelSelection, DurableCommandId, ImportedConversation, ImportedConversationId,
+    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
+    ImportedSessionRelationship, ImportedSessionSeedHeaderReconstitutionInput,
+    ImportedSessionSeedReconstitutionInput, ImportedTranscriptEntryId, ImportedTranscriptPosition,
+    ModelAlias, ModelSelectionRequest, PreparedCreateSessionFromImportedFrontier,
+    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
+    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
+    SemanticTranscriptEntryRef, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -42,7 +43,9 @@ use crate::{
     outbox,
 };
 
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
+const TOOL_APPROVAL_DISABLED: &str = "disabled";
+const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 const OWNER_INITIATED: &str = "owner_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
 const APPLIED: &str = "applied";
@@ -453,14 +456,18 @@ async fn insert_prepared(
     sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
-             direct_model_selection_id, model_alias_id)
-         VALUES ($1, $2, $3, $4, $5)",
+             direct_model_selection_id, model_alias_id,
+             dangerous_tool_auto_approval)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(stored_selection.kind)
     .bind(stored_selection.direct)
     .bind(stored_selection.alias)
+    .bind(encode_tool_approval(
+        defaults.defaults().dangerous_tool_auto_approval(),
+    ))
     .execute(&mut *connection)
     .await?;
 
@@ -480,10 +487,10 @@ async fn insert_prepared(
              imported_frontier_position, imported_relationship_kind,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             result_kind, created_session_id)
+             dangerous_tool_auto_approval, result_kind, created_session_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-             $14, $15)",
+             $14, $15, $16)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND)
@@ -498,6 +505,11 @@ async fn insert_prepared(
     .bind(command_selection.kind)
     .bind(command_selection.direct)
     .bind(command_selection.alias)
+    .bind(encode_tool_approval(
+        command
+            .initial_configuration_defaults()
+            .dangerous_tool_auto_approval(),
+    ))
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
@@ -605,6 +617,7 @@ async fn load_creation_from_connection(
             c.model_selection_kind AS command_model_kind,
             c.direct_model_selection_id AS command_direct_id,
             c.model_alias_id AS command_alias_id,
+            c.dangerous_tool_auto_approval AS command_tool_approval,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -618,7 +631,8 @@ async fn load_creation_from_connection(
             v.version AS stored_defaults_version,
             v.model_selection_kind AS stored_model_kind,
             v.direct_model_selection_id AS stored_direct_id,
-            v.model_alias_id AS stored_alias_id
+            v.model_alias_id AS stored_alias_id,
+            v.dangerous_tool_auto_approval AS stored_tool_approval
          FROM durable_command AS d
          LEFT JOIN create_session_from_imported_frontier_command AS c
            ON c.command_id = d.command_id
@@ -641,7 +655,7 @@ async fn load_creation_from_connection(
         "registry_kind",
         CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
     )?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let stored_command = durable_command_id_from_uuid(required(&row, "typed_command_id")?)
         .map_err(|reason| ImportedSessionCorruption::InvalidCommandIdentity {
             field: "typed command identity",
@@ -655,7 +669,10 @@ async fn load_creation_from_connection(
         "typed_kind",
         CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
     )?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(ImportedSessionCorruption::Inconsistent("command storage version").into());
+    }
     require_spelling(&row, "command_cause", OWNER_INITIATED)?;
     require_spelling(&row, "command_ancestry", IMPORTED_ANCESTRY)?;
     require_spelling(&row, "result_kind", APPLIED)?;
@@ -678,10 +695,12 @@ async fn load_creation_from_connection(
             ImportedSessionCorruption::Inconsistent("command initial defaults version").into(),
         );
     }
-    let command_defaults = decode_selection(
+    let command_defaults = decode_versioned_selection(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
+        required(&row, "command_tool_approval")?,
+        typed_version,
         "command model selection",
     )?;
     let command = CreateSessionFromImportedFrontier::new(
@@ -700,6 +719,7 @@ async fn load_creation_from_connection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
+        required(&row, "stored_tool_approval")?,
         "stored model selection",
     )?;
     let projection = load_seed_projection(connection, stored_session, &conversation).await?;
@@ -766,6 +786,7 @@ pub(crate) fn reconstitute_bounded_current(
         required(&row, "model_selection_kind")?,
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
+        required(&row, "dangerous_tool_auto_approval")?,
         "model selection",
     )?;
 
@@ -1103,6 +1124,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    tool_approval: String,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -1117,7 +1139,50 @@ fn decode_selection(
             return Err(ImportedSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
-    Ok(SessionConfigurationDefaults::new(model))
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            decode_tool_approval(tool_approval, field)?,
+        ),
+    )
+}
+
+const fn encode_tool_approval(value: DangerousToolAutoApproval) -> &'static str {
+    match value {
+        DangerousToolAutoApproval::Disabled => TOOL_APPROVAL_DISABLED,
+        DangerousToolAutoApproval::ApproveAll => TOOL_APPROVAL_APPROVE_ALL,
+    }
+}
+
+fn decode_tool_approval(
+    value: String,
+    field: &'static str,
+) -> Result<DangerousToolAutoApproval, ImportedSessionRepositoryError> {
+    match value.as_str() {
+        TOOL_APPROVAL_DISABLED => Ok(DangerousToolAutoApproval::Disabled),
+        TOOL_APPROVAL_APPROVE_ALL => Ok(DangerousToolAutoApproval::ApproveAll),
+        _ => Err(ImportedSessionCorruption::Unsupported { field, value }.into()),
+    }
+}
+
+fn decode_versioned_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    tool_approval: String,
+    storage_version: i16,
+    field: &'static str,
+) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
+    let defaults = decode_selection(kind, direct, alias, tool_approval, field)?;
+    if storage_version == 1
+        && defaults.dangerous_tool_auto_approval() != DangerousToolAutoApproval::Disabled
+    {
+        return Err(ImportedSessionCorruption::Inconsistent(
+            "version-one dangerous tool auto approval",
+        )
+        .into());
+    }
+    Ok(defaults)
 }
 
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, ImportedSessionRepositoryError>
@@ -1145,14 +1210,13 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), ImportedSessionRepositoryError> {
+) -> Result<i16, ImportedSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1 | 2) {
+        Ok(actual)
     } else {
         Err(ImportedSessionCorruption::Unsupported {
             field,

@@ -5,9 +5,10 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::SessionReader;
 use signalbox_domain::{
-    DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
+    DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -21,6 +22,8 @@ use crate::mapping::{
 
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
+const TOOL_APPROVAL_DISABLED: &str = "disabled";
+const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 
 /// A durable shape that cannot reconstruct one complete current session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,6 +179,7 @@ pub(crate) async fn load_session_from_connection(
             v.model_selection_kind,
             v.direct_model_selection_id,
             v.model_alias_id,
+            v.dangerous_tool_auto_approval,
             seed.session_id AS seed_session_id,
             seed.seed_context_frontier_id,
             seed_frontier.owning_session_id AS seed_frontier_session_id,
@@ -240,6 +244,7 @@ fn decode_complete(
         required(&row, "model_selection_kind")?,
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
+        required(&row, "dangerous_tool_auto_approval")?,
     )?;
 
     SessionReconstitutionInput::new(
@@ -334,6 +339,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    tool_approval: String,
 ) -> Result<SessionConfigurationDefaults, SessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
@@ -351,5 +357,16 @@ fn decode_selection(
             .into());
         }
     };
-    Ok(SessionConfigurationDefaults::new(model))
+    let tool_approval = match tool_approval.as_str() {
+        TOOL_APPROVAL_DISABLED => DangerousToolAutoApproval::Disabled,
+        TOOL_APPROVAL_APPROVE_ALL => DangerousToolAutoApproval::ApproveAll,
+        _ => {
+            return Err(SessionCorruption::Unsupported {
+                field: "dangerous tool auto approval",
+                value: tool_approval,
+            }
+            .into());
+        }
+    };
+    Ok(SessionConfigurationDefaults::with_dangerous_tool_auto_approval(model, tool_approval))
 }

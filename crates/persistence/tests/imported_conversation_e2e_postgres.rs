@@ -25,7 +25,8 @@ use signalbox_domain::{
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
     ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnId, UserContent,
+    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TurnAttemptId, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -204,6 +205,14 @@ impl ModelCallExecutionIdGenerator for FixedModelExecutionIds {
         self.frontiers
             .pop_front()
             .expect("the execution stage has every required frontier identity")
+    }
+
+    fn next_tool_request_id(&mut self) -> ToolRequestId {
+        panic!("the fixture has no tool response")
+    }
+
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
+        panic!("the fixture has no tool continuation")
     }
 
     fn next_turn_id(&mut self) -> TurnId {

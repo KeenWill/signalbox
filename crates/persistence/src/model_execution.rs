@@ -1063,6 +1063,7 @@ async fn terminal_observation_closure_matches(
             completed_terminal_closure_matches(connection, session, observation, assistant_text)
                 .await
         }
+        ModelCallTerminalObservation::CompletedWithTools { .. } => Ok(false),
         ModelCallTerminalObservation::KnownFailed => {
             failed_terminal_closure_matches(connection, session, observation).await
         }
@@ -1868,6 +1869,14 @@ fn attach_pending_reclassification_candidates(
                 identities.with_pending_steering_reclassifications(reclassifications),
             )
         }
+        ModelCallTerminalIdentities::ToolRound(identities) => {
+            ModelCallTerminalIdentities::ToolRound(identities)
+        }
+        ModelCallTerminalIdentities::StoppedToolRound(identities) => {
+            ModelCallTerminalIdentities::StoppedToolRound(
+                identities.with_pending_steering_reclassifications(reclassifications),
+            )
+        }
         ModelCallTerminalIdentities::Failed(identities) => ModelCallTerminalIdentities::Failed(
             identities.with_pending_steering_reclassifications(reclassifications),
         ),
@@ -2141,6 +2150,9 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::Imported { .. } => None,
         })
@@ -2616,6 +2628,10 @@ pub(crate) async fn persist_terminal_outcome(
         ModelCallTerminalOutcome::Completed(completed) => {
             persist_completed(connection, completed).await
         }
+        ModelCallTerminalOutcome::ToolRound(_)
+        | ModelCallTerminalOutcome::CancelledWithToolResponse(_) => Err(
+            ModelCallRepositoryError::InvalidTransition("tool-loop persistence is unavailable"),
+        ),
         ModelCallTerminalOutcome::Failed(failed) => persist_failed(connection, failed).await,
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
             persist_cancelled(connection, cancelled).await

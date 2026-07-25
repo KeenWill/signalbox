@@ -13,9 +13,10 @@ use signalbox_domain::{
     AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
     AppliedInterruptCommandResult, AssistantText, CancellationStopDisposition,
     CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
-    ConsumedSteeringReconstitutionInput, ContextFrontierId, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ConsumedSteeringReconstitutionInput, ContextFrontierId, DangerousToolAutoApproval,
+    DeliveryRequest, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
     ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
     PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
@@ -52,6 +53,9 @@ use crate::{
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
+
+const TOOL_APPROVAL_DISABLED: &str = "disabled";
+const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 
 const STORAGE_VERSION: i16 = 1;
 const APPLIED: &str = "applied";
@@ -678,6 +682,12 @@ where
                 &ModelCallTerminalOutcome::ReconciliationRequired(reconciliation),
             )
             .await?;
+        }
+        Some(ModelCallInterruptOutcome::ToolReconciliationRequired(_)) => {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "tool reconciliation outcome requires tool storage",
+            )
+            .into());
         }
         None => {}
     }
@@ -3222,6 +3232,7 @@ async fn load_complete_rows(
             defaults.model_selection_kind AS defaults_model_kind,
             defaults.direct_model_selection_id AS defaults_direct_id,
             defaults.model_alias_id AS defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS defaults_tool_approval,
             (
                 SELECT count(*)
                   FROM accepted_input AS effect
@@ -4133,6 +4144,7 @@ fn decode_applied_turn_origin(
         required(row, "defaults_model_kind")?,
         row.try_get("defaults_direct_id")?,
         row.try_get("defaults_alias_id")?,
+        required(row, "defaults_tool_approval")?,
         "selected defaults",
     )?;
     let stored_requested_model = decode_model_selection(
@@ -4398,6 +4410,7 @@ fn decode_rejected(
                 required(row, "defaults_model_kind")?,
                 row.try_get("defaults_direct_id")?,
                 row.try_get("defaults_alias_id")?,
+                required(row, "defaults_tool_approval")?,
                 "selected defaults",
             )?;
             if selected != defaults_version {
@@ -4800,11 +4813,26 @@ fn decode_defaults(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    tool_approval: String,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, SubmitInputRepositoryError> {
-    Ok(SessionConfigurationDefaults::new(decode_model_selection(
-        kind, direct, alias, field,
-    )?))
+    let tool_approval = match tool_approval.as_str() {
+        TOOL_APPROVAL_DISABLED => DangerousToolAutoApproval::Disabled,
+        TOOL_APPROVAL_APPROVE_ALL => DangerousToolAutoApproval::ApproveAll,
+        _ => {
+            return Err(SubmitInputCorruption::Unsupported {
+                field,
+                value: tool_approval,
+            }
+            .into());
+        }
+    };
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            decode_model_selection(kind, direct, alias, field)?,
+            tool_approval,
+        ),
+    )
 }
 
 fn decode_model_selection(

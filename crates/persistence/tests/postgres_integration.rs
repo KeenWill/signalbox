@@ -36,8 +36,8 @@ use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
     AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
     CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
-    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, ModelAlias, ModelCallId,
+    CreateSession, CurrentTurnAttemptState, DangerousToolAutoApproval, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
@@ -47,8 +47,8 @@ use signalbox_domain::{
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId,
-    UserContent,
+    SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -395,6 +395,24 @@ fn prepared(
     .expect("owner-initiated creation without ancestry is preparable")
 }
 
+fn prepared_with_tool_approval(
+    command: u128,
+    session: u128,
+    selection: ModelSelectionRequest,
+    tool_approval: DangerousToolAutoApproval,
+) -> PreparedCreateSession {
+    CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(selection, tool_approval),
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
+    .expect("owner-initiated creation without ancestry is preparable")
+}
+
 async fn append_session_created_test_event(
     connection: &mut PgConnection,
     session: Uuid,
@@ -614,6 +632,22 @@ fn replacement(
         SessionConfigurationDefaultsVersion::try_from_u64(expected)
             .expect("test versions are positive"),
         SessionConfigurationDefaults::new(selection),
+    )
+}
+
+fn replacement_with_tool_approval(
+    command: u128,
+    session: u128,
+    expected: u64,
+    selection: ModelSelectionRequest,
+    tool_approval: DangerousToolAutoApproval,
+) -> ReplaceSessionDefaults {
+    ReplaceSessionDefaults::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionId::from_uuid(Uuid::from_u128(session)),
+        SessionConfigurationDefaultsVersion::try_from_u64(expected)
+            .expect("test versions are positive"),
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(selection, tool_approval),
     )
 }
 
@@ -934,6 +968,14 @@ impl ModelCallExecutionIdGenerator for FixedModelCallExecutionIds {
         self.frontiers
             .pop_front()
             .expect("context-frontier identity fixture")
+    }
+
+    fn next_tool_request_id(&mut self) -> ToolRequestId {
+        panic!("this fixture has no tool response")
+    }
+
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
+        panic!("this fixture has no tool continuation")
     }
 
     fn next_turn_id(&mut self) -> TurnId {
@@ -6192,6 +6234,110 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
         create_repository.handle(replay_candidate).await?,
         CreateSessionHandlingOutcome::Applied(direct_creation.applied_result())
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / S10 / INV-003 / INV-012: version-two creation and replacement
+/// commands preserve the explicit dangerous blanket posture in both immutable
+/// command replay and the selected current defaults.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s10_inv003_inv012_tool_approval_posture_round_trips() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let replace_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let session_repository = SessionRepository::new(pool.clone());
+    let creation = prepared_with_tool_approval(
+        0x507,
+        0x907,
+        direct(0x807),
+        DangerousToolAutoApproval::ApproveAll,
+    );
+
+    assert_eq!(
+        create_repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+    assert_eq!(
+        create_repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+    let loaded = session_repository
+        .load_session(creation.session().id())
+        .await?
+        .expect("the created session remains loadable");
+    assert_eq!(
+        loaded
+            .current_configuration_defaults()
+            .defaults()
+            .dangerous_tool_auto_approval(),
+        DangerousToolAutoApproval::ApproveAll
+    );
+
+    let replacement = replacement_with_tool_approval(
+        0x508,
+        0x907,
+        1,
+        alias(0x808),
+        DangerousToolAutoApproval::ApproveAll,
+    );
+    assert!(matches!(
+        replace_repository.handle(replacement).await?,
+        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+    ));
+    assert!(matches!(
+        replace_repository.handle(replacement).await?,
+        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+    ));
+    assert_eq!(
+        replace_repository
+            .handle(replacement_with_tool_approval(
+                0x508,
+                0x907,
+                1,
+                alias(0x808),
+                DangerousToolAutoApproval::Disabled,
+            ))
+            .await?,
+        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse {
+            command_id: replacement.command_id(),
+        }
+    );
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT dangerous_tool_auto_approval
+           FROM session_defaults_version
+          WHERE session_id = $1
+          ORDER BY version",
+    )
+    .bind(Uuid::from_u128(0x907))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(stored, vec!["approve_all", "approve_all"]);
+    let create_versions: (i16, i16) = sqlx::query_as(
+        "SELECT registry.storage_version, typed.storage_version
+           FROM durable_command AS registry
+           JOIN create_session_command AS typed
+             ON typed.command_id = registry.command_id
+          WHERE registry.command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x507))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(create_versions, (2, 2));
+    let replace_versions: (i16, i16) = sqlx::query_as(
+        "SELECT registry.storage_version, typed.storage_version
+           FROM durable_command AS registry
+           JOIN replace_session_defaults_command AS typed
+             ON typed.command_id = registry.command_id
+          WHERE registry.command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x508))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(replace_versions, (2, 2));
 
     pool.close().await;
     drop(container);
