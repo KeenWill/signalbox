@@ -9,9 +9,7 @@
 
 use std::{
     env,
-    error::Error,
     ffi::OsString,
-    fmt,
     future::Future,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -19,19 +17,19 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnService, StartupScanService, ToolExecutionInvocation, ToolExecutor,
+    ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
+    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
+    SchedulerLoopExit, StartEligibleTurnService, StartupScanService,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor, FencedHubDatabase,
-    FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    SystemCurrentTimeClock,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
@@ -52,37 +50,6 @@ const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-
-#[derive(Clone, Copy, Debug)]
-struct EmptyCatalogToolExecutor;
-
-#[derive(Clone, Copy, Debug)]
-struct EmptyCatalogToolExecution;
-
-impl fmt::Display for EmptyCatalogToolExecution {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("empty production tool catalog dispatched an executor call")
-    }
-}
-
-impl Error for EmptyCatalogToolExecution {}
-
-impl ClassifyOperatorFailure for EmptyCatalogToolExecution {
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        OperatorFailureClass::CallerOrHubBug
-    }
-}
-
-impl ToolExecutor for EmptyCatalogToolExecutor {
-    type Error = EmptyCatalogToolExecution;
-
-    async fn execute(
-        &mut self,
-        _invocation: ToolExecutionInvocation,
-    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
-        Err(EmptyCatalogToolExecution)
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimePhase {
@@ -412,6 +379,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
+    let (tool_catalog, tool_executor) = CurrentTimeTool::try_new(SystemCurrentTimeClock)
+        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
+        .into_parts();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
         .map_err(|error| {
@@ -508,7 +478,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             InProcessAttemptDispatchGate::default(),
             provider,
         )
-        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, EmptyCatalogToolExecutor),
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor),
     );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
