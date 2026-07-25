@@ -18,6 +18,7 @@ pub mod process_read;
 pub mod replace_session_defaults;
 pub mod scheduler;
 pub mod session;
+pub mod session_metadata;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
