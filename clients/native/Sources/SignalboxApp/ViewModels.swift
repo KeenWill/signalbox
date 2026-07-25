@@ -492,7 +492,7 @@ final class SessionDetailViewModel: ObservableObject {
                 }
             }
         }
-        if completion != nil {
+        if synchronizeHistory {
             let helloTimeout = streamHelloTimeout
             streamHelloTimeoutTask = Task { [weak self] in
                 do {
@@ -670,10 +670,15 @@ final class SessionDetailViewModel: ObservableObject {
     }
 
     private func expireHistorySynchronization(streamID: UUID) {
-        guard streamHistorySynchronization?.streamID == streamID else {
+        guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
+            return
+        }
+        guard let completion = synchronization.completion else {
+            synchronization.bufferedMessages.forEach(apply)
             return
         }
         disconnectStream()
+        completion.resume(returning: false)
     }
 
     private func cancelHistorySynchronization(streamID: UUID?) {
