@@ -33,6 +33,32 @@ focused capability.
 crate-specific exception in `deny.toml`; stored argument kinds, canonical
 encoding, and byte limits do not change.
 
+## 2026-07-24 — Pre-production schema discipline
+
+**Context.** The schema has never had a durable deployment; every database is a
+disposable dev instance. Agent-built migrations risk inheriting production-brain
+caution — nullable columns and tolerant types chosen for backwards compatibility
+with a production that does not exist — a failure mode the owner watched consume
+his prior system.
+
+**Decision.** Until the first durable deployment, schema changes make the
+correct design choice, not the backwards-compatible one: new columns are NOT
+NULL when the domain field is total, types are as tight as the domain (CHECK,
+UNIQUE, and FK constraints where the domain implies them), and a wrong earlier
+choice is fixed rather than papered over. The migration set may additionally be
+squashed to a clean baseline at owner-chosen checkpoints, with dev databases
+recreated. Applied-migration immutability (sqlx checksums) governs any single
+live dev database but does not sanctify history. A superseding entry ends this
+discipline when the first durable deployment freezes migration history and
+append-only discipline begins. A schema audit is underway to decide whether a
+first baseline squash is warranted.
+
+**Rejected alternatives.** Append-only-forever from day one imports production
+constraints without a production. Silent per-agent judgment produced the prior
+system's rot.
+
+**Affects.** `crates/persistence/migrations`, migration-writing goal runs.
+
 ## 2026-07-24 — Share the lossless JSON decoder across import edges
 
 **Context.** Codex rollout JSONL needs the same ordered-member,
