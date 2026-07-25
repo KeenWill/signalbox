@@ -1,6 +1,41 @@
 -- Preserve the dangerous blanket-auto posture in session defaults and the
 -- immutable commands that install them.
 
+ALTER TABLE durable_command
+    DROP CONSTRAINT durable_command_storage_version_supported,
+    ADD CONSTRAINT durable_command_storage_version_supported
+        CHECK (
+            (
+                command_kind IN (
+                    'create_session',
+                    'create_session_from_imported_frontier',
+                    'replace_session_defaults'
+                )
+                AND storage_version IN (1, 2)
+            )
+            OR (
+                command_kind = 'submit_input'
+                AND storage_version = 1
+            )
+        );
+
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_storage_version_supported,
+    ADD CONSTRAINT create_session_command_storage_version_supported
+        CHECK (storage_version IN (1, 2));
+
+ALTER TABLE replace_session_defaults_command
+    DROP CONSTRAINT replace_session_defaults_command_storage_version_supported,
+    ADD CONSTRAINT replace_session_defaults_command_storage_version_supported
+        CHECK (storage_version IN (1, 2));
+
+ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT
+        create_session_from_imported_frontier_command_version_supported,
+    ADD CONSTRAINT
+        create_session_from_imported_frontier_command_version_supported
+        CHECK (storage_version IN (1, 2));
+
 ALTER TABLE session_defaults_version
     ADD COLUMN dangerous_tool_auto_approval text NOT NULL DEFAULT 'disabled',
     ADD CONSTRAINT session_defaults_version_tool_approval_closed

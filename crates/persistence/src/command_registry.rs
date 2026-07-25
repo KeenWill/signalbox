@@ -10,7 +10,6 @@ pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
     "create_session_from_imported_frontier";
 pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults";
 pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
-const STORAGE_VERSION: i16 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
@@ -68,12 +67,6 @@ pub(crate) async fn inspect(
         let version: i16 = row
             .try_get("storage_version")
             .map_err(RegistryInspectionError::Database)?;
-        if version != STORAGE_VERSION {
-            return Err(RegistryInspectionError::Corruption(
-                RegistryCorruption::UnsupportedVersion(version),
-            ));
-        }
-
         let spelling: String = row
             .try_get("command_kind")
             .map_err(RegistryInspectionError::Database)?;
@@ -90,6 +83,17 @@ pub(crate) async fn inspect(
                 ));
             }
         };
+        let version_supported = match kind {
+            CommandKind::CreateSession
+            | CommandKind::CreateSessionFromImportedFrontier
+            | CommandKind::ReplaceSessionDefaults => matches!(version, 1 | 2),
+            CommandKind::SubmitInput => version == 1,
+        };
+        if !version_supported {
+            return Err(RegistryInspectionError::Corruption(
+                RegistryCorruption::UnsupportedVersion(version),
+            ));
+        }
         let has_create: bool = row
             .try_get("has_create_session")
             .map_err(RegistryInspectionError::Database)?;

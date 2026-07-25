@@ -26,7 +26,7 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -584,10 +584,15 @@ fn decode_complete(
     command_id: DurableCommandId,
 ) -> Result<ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaultsRepositoryError> {
     require_spelling(&row, "registry_kind", REPLACE_SESSION_DEFAULTS_KIND)?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let _: Uuid = required(&row, "typed_command_id")?;
     require_spelling(&row, "typed_kind", REPLACE_SESSION_DEFAULTS_KIND)?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(
+            ReplaceSessionDefaultsCorruption::Inconsistent("command storage version").into(),
+        );
+    }
 
     let command = ReplaceSessionDefaults::new(
         command_id,
@@ -598,6 +603,7 @@ fn decode_complete(
             row.try_get("command_direct_id")?,
             row.try_get("command_alias_id")?,
             required(&row, "command_tool_approval")?,
+            typed_version,
             "command model selection",
         )?,
     );
@@ -627,6 +633,7 @@ fn decode_complete(
                 row.try_get("installed_direct_id")?,
                 row.try_get("installed_alias_id")?,
                 required(&row, "installed_tool_approval")?,
+                typed_version,
                 "installed model selection",
             )?;
             ReplaceSessionDefaultsReconstitutionInput::applied(
@@ -750,14 +757,13 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
+) -> Result<i16, ReplaceSessionDefaultsRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1 | 2) {
+        Ok(actual)
     } else {
         Err(ReplaceSessionDefaultsCorruption::Unsupported {
             field,
@@ -794,6 +800,7 @@ fn decode_selection(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     tool_approval: String,
+    storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ReplaceSessionDefaultsRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -810,12 +817,14 @@ fn decode_selection(
             );
         }
     };
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            decode_tool_approval(tool_approval, field)?,
-        ),
-    )
+    let tool_approval = decode_tool_approval(tool_approval, field)?;
+    if storage_version == 1 && tool_approval != DangerousToolAutoApproval::Disabled {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "version-one dangerous tool auto approval",
+        )
+        .into());
+    }
+    Ok(SessionConfigurationDefaults::with_dangerous_tool_auto_approval(model, tool_approval))
 }
 
 const fn encode_tool_approval(value: DangerousToolAutoApproval) -> &'static str {

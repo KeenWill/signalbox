@@ -6240,9 +6240,9 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
     Ok(())
 }
 
-/// S01 / S10 / INV-003 / INV-012: creation and replacement preserve the
-/// explicit dangerous blanket posture in both immutable command replay and the
-/// selected current defaults.
+/// S01 / S10 / INV-003 / INV-012: version-two creation and replacement
+/// commands preserve the explicit dangerous blanket posture in both immutable
+/// command replay and the selected current defaults.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_s10_inv003_inv012_tool_approval_posture_round_trips() -> Result<(), Box<dyn Error>> {
@@ -6316,6 +6316,28 @@ async fn s01_s10_inv003_inv012_tool_approval_posture_round_trips() -> Result<(),
     .fetch_all(&pool)
     .await?;
     assert_eq!(stored, vec!["approve_all", "approve_all"]);
+    let create_versions: (i16, i16) = sqlx::query_as(
+        "SELECT registry.storage_version, typed.storage_version
+           FROM durable_command AS registry
+           JOIN create_session_command AS typed
+             ON typed.command_id = registry.command_id
+          WHERE registry.command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x507))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(create_versions, (2, 2));
+    let replace_versions: (i16, i16) = sqlx::query_as(
+        "SELECT registry.storage_version, typed.storage_version
+           FROM durable_command AS registry
+           JOIN replace_session_defaults_command AS typed
+             ON typed.command_id = registry.command_id
+          WHERE registry.command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x508))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(replace_versions, (2, 2));
 
     pool.close().await;
     drop(container);

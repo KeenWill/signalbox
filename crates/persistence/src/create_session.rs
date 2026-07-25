@@ -22,7 +22,7 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
@@ -481,10 +481,13 @@ fn decode_complete(
     command_id: DurableCommandId,
 ) -> Result<ReconstitutedSessionCreation, CreateSessionRepositoryError> {
     require_spelling(&row, "registry_kind", COMMAND_KIND)?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let _: Uuid = required(&row, "typed_command_id")?;
     require_spelling(&row, "typed_kind", COMMAND_KIND)?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(CreateSessionCorruption::Inconsistent("command storage version").into());
+    }
     let command_provenance = decode_provenance(
         required(&row, "command_cause")?,
         required(&row, "command_ancestry")?,
@@ -500,6 +503,7 @@ fn decode_complete(
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
         required(&row, "command_tool_approval")?,
+        typed_version,
         "command model selection",
     )?;
     require_spelling(&row, "result_kind", APPLIED)?;
@@ -521,6 +525,7 @@ fn decode_complete(
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
         required(&row, "stored_tool_approval")?,
+        typed_version,
         "stored model selection",
     )?;
 
@@ -562,14 +567,13 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), CreateSessionRepositoryError> {
+) -> Result<i16, CreateSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1 | 2) {
+        Ok(actual)
     } else {
         Err(CreateSessionCorruption::Unsupported {
             field,
@@ -617,6 +621,7 @@ fn decode_selection(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     tool_approval: String,
+    storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, CreateSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -631,12 +636,14 @@ fn decode_selection(
             return Err(CreateSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            decode_tool_approval(tool_approval, field)?,
-        ),
-    )
+    let tool_approval = decode_tool_approval(tool_approval, field)?;
+    if storage_version == 1 && tool_approval != DangerousToolAutoApproval::Disabled {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "version-one dangerous tool auto approval",
+        )
+        .into());
+    }
+    Ok(SessionConfigurationDefaults::with_dangerous_tool_auto_approval(model, tool_approval))
 }
 
 const fn encode_tool_approval(value: DangerousToolAutoApproval) -> &'static str {

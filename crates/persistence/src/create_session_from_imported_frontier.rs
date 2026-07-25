@@ -43,7 +43,7 @@ use crate::{
     outbox,
 };
 
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
 const TOOL_APPROVAL_DISABLED: &str = "disabled";
 const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 const OWNER_INITIATED: &str = "owner_initiated";
@@ -655,7 +655,7 @@ async fn load_creation_from_connection(
         "registry_kind",
         CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
     )?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let stored_command = durable_command_id_from_uuid(required(&row, "typed_command_id")?)
         .map_err(|reason| ImportedSessionCorruption::InvalidCommandIdentity {
             field: "typed command identity",
@@ -669,7 +669,10 @@ async fn load_creation_from_connection(
         "typed_kind",
         CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
     )?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(ImportedSessionCorruption::Inconsistent("command storage version").into());
+    }
     require_spelling(&row, "command_cause", OWNER_INITIATED)?;
     require_spelling(&row, "command_ancestry", IMPORTED_ANCESTRY)?;
     require_spelling(&row, "result_kind", APPLIED)?;
@@ -692,11 +695,12 @@ async fn load_creation_from_connection(
             ImportedSessionCorruption::Inconsistent("command initial defaults version").into(),
         );
     }
-    let command_defaults = decode_selection(
+    let command_defaults = decode_versioned_selection(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
         required(&row, "command_tool_approval")?,
+        typed_version,
         "command model selection",
     )?;
     let command = CreateSessionFromImportedFrontier::new(
@@ -1161,6 +1165,26 @@ fn decode_tool_approval(
     }
 }
 
+fn decode_versioned_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    tool_approval: String,
+    storage_version: i16,
+    field: &'static str,
+) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
+    let defaults = decode_selection(kind, direct, alias, tool_approval, field)?;
+    if storage_version == 1
+        && defaults.dangerous_tool_auto_approval() != DangerousToolAutoApproval::Disabled
+    {
+        return Err(ImportedSessionCorruption::Inconsistent(
+            "version-one dangerous tool auto approval",
+        )
+        .into());
+    }
+    Ok(defaults)
+}
+
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, ImportedSessionRepositoryError>
 where
     for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
@@ -1186,14 +1210,13 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), ImportedSessionRepositoryError> {
+) -> Result<i16, ImportedSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1 | 2) {
+        Ok(actual)
     } else {
         Err(ImportedSessionCorruption::Unsupported {
             field,
