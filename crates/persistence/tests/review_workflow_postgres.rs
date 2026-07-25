@@ -20,15 +20,16 @@ use signalbox_domain::{
     ReviewExternalLinkAttachment, ReviewExternalLinkId, ReviewExternalLinkObservation,
     ReviewExternalLinkTransitionError, ReviewExternalObjectKind, ReviewExternalObjectState,
     ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
-    ReviewFindingEventKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
-    ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionFailure,
-    ReviewKey, ReviewLineRange, ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-    ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewPolicyVersion, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef, ReviewRunState,
-    ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry,
-    TurnAttemptId, TurnId, UserContent,
+    ReviewFindingEventKind, ReviewFindingEventResult, ReviewFindingEventType, ReviewFindingId,
+    ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity,
+    ReviewFindingStatus, ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewPass,
+    ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyVersion,
+    ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -107,8 +108,70 @@ fn succeeded_pass(reference: ReviewPassRef, kind: ReviewPassKind) -> ReviewPassE
         ReviewPassState::Succeeded {
             turn: TurnId::from_uuid(uuid(0x203)),
             output_frontier: ContextFrontierId::from_uuid(uuid(0x131)),
+            finding_event: None,
         },
     )
+}
+
+fn run_evidence_for_pass(pass: ReviewPassEvidence) -> ReviewRunEvidence {
+    ReviewRunEvidence::new(
+        pass.reference().run(),
+        workflow_for_pass(pass.kind()),
+        pass.policy(),
+    )
+}
+
+fn pass_with_finding_event(
+    finding: ReviewFindingRef,
+    ordinal: ReviewEventOrdinal,
+    pass: ReviewPassEvidence,
+    event_type: ReviewFindingEventType,
+) -> ReviewPassEvidence {
+    let result = ReviewFindingEventResult::new(finding, ordinal, event_type);
+    let state = match pass.state() {
+        ReviewPassState::Succeeded {
+            turn,
+            output_frontier,
+            ..
+        } => ReviewPassState::Succeeded {
+            turn,
+            output_frontier,
+            finding_event: Some(result),
+        },
+        ReviewPassState::Blocked { turn, .. } => ReviewPassState::Blocked {
+            turn,
+            finding_event: Some(result),
+        },
+        other => other,
+    };
+    ReviewPassEvidence::new(pass.reference(), pass.kind(), pass.policy(), state)
+}
+
+fn finding_event(
+    finding: ReviewFindingRef,
+    ordinal: ReviewEventOrdinal,
+    pass: ReviewPassEvidence,
+    kind: ReviewFindingEventKind,
+) -> ReviewFindingEvent {
+    let pass = pass_with_finding_event(finding, ordinal, pass, kind.event_type());
+    ReviewFindingEvent::new(finding, ordinal, pass, run_evidence_for_pass(pass), kind)
+}
+
+fn attachment(
+    link: ReviewExternalLinkId,
+    pass: ReviewPassEvidence,
+    external_object: ReviewKey,
+) -> ReviewExternalLinkAttachment {
+    ReviewExternalLinkAttachment::new(link, pass, run_evidence_for_pass(pass), external_object)
+}
+
+fn observation(
+    link: ReviewExternalLinkId,
+    ordinal: ReviewEventOrdinal,
+    pass: ReviewPassEvidence,
+    state: ReviewExternalObjectState,
+) -> ReviewExternalLinkObservation {
+    ReviewExternalLinkObservation::new(link, ordinal, pass, run_evidence_for_pass(pass), state)
 }
 
 #[derive(Debug)]
@@ -525,6 +588,7 @@ async fn succeed_fixture_passes(
                 ReviewPassState::Succeeded {
                     turn,
                     output_frontier,
+                    finding_event: None,
                 },
             )
             .await,
@@ -634,6 +698,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewPassState::Succeeded {
             turn,
             output_frontier,
+            finding_event: None,
         },
     )
     .await;
@@ -643,6 +708,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewPassState::Succeeded {
             turn,
             output_frontier,
+            finding_event: None,
         },
     )
     .await;
@@ -652,6 +718,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewPassState::Succeeded {
             turn,
             output_frontier,
+            finding_event: None,
         },
     )
     .await;
@@ -661,6 +728,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewPassState::Succeeded {
             turn,
             output_frontier,
+            finding_event: None,
         },
     )
     .await;
@@ -671,7 +739,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         .insert_finding(&open_finding)
         .await
         .expect("open finding persists");
-    let accepted_event = ReviewFindingEvent::new(
+    let accepted_event = finding_event(
         finding_ref,
         ReviewEventOrdinal::one(),
         judge_evidence,
@@ -721,8 +789,14 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         Err(ReviewWorkflowStoreError::ReservationConflict(_))
     ));
 
-    let attachment =
-        ReviewExternalLinkAttachment::new(link_id, publish_evidence, key("comment-84"));
+    let posted_ordinal = ReviewEventOrdinal::try_new(2).expect("positive ordinal");
+    let publish_evidence = pass_with_finding_event(
+        finding_ref,
+        posted_ordinal,
+        publish_evidence,
+        ReviewFindingEventType::Posted,
+    );
+    let attachment = attachment(link_id, publish_evidence, key("comment-84"));
     let attached = reservation
         .clone()
         .attach(attachment.clone())
@@ -734,9 +808,9 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .expect("attachment persists"),
         Some(attached.clone())
     );
-    let posted_event = ReviewFindingEvent::new(
+    let posted_event = finding_event(
         finding_ref,
-        ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+        posted_ordinal,
         publish_evidence,
         ReviewFindingEventKind::Posted {
             link: signalbox_domain::ReviewFindingExternalLinkRef::try_new(finding_ref, &attached)
@@ -753,7 +827,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .expect("posted event persists after attachment"),
         Some(posted_finding)
     );
-    let observation = ReviewExternalLinkObservation::new(
+    let observation = observation(
         link_id,
         ReviewEventOrdinal::one(),
         import_evidence,
@@ -1059,7 +1133,7 @@ async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Erro
         .store
         .append_finding_event(
             first.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 second,
                 ReviewEventOrdinal::one(),
                 succeeded_pass(fixture.pass, ReviewPassKind::Judge),
@@ -1105,12 +1179,15 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
             &fixture.target_snapshot,
         ))
         .await?;
-    let event = ReviewFindingEvent::new(
+    let event = finding_event(
         finding_ref,
         ReviewEventOrdinal::one(),
         dedupe_evidence,
         ReviewFindingEventKind::Duplicate {
-            canonical: canonical_ref,
+            canonical: ReviewReferencedFindingEvidence::new(
+                canonical_ref,
+                ReviewFindingStatus::Open,
+            ),
         },
     );
     let expected = open
@@ -1124,6 +1201,157 @@ async fn inv040_referenced_finding_retains_producing_pass() -> Result<(), Box<dy
     assert_eq!(
         fixture.store.load_finding(finding_ref.finding()).await?,
         Some(expected)
+    );
+    Ok(())
+}
+
+/// INV-040: duplicate/superseded references cannot close a cycle by
+/// referencing a finding whose current status is already terminal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_references_reject_cycles() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let first_dedupe = insert_fixture_pass(&fixture, 0x336, ReviewPassKind::Dedupe).await;
+    let second_dedupe = insert_fixture_pass(&fixture, 0x337, ReviewPassKind::Dedupe).await;
+    let evidence = succeed_fixture_passes(
+        &pool,
+        &fixture.store,
+        &[fixture.pass, first_dedupe, second_dedupe],
+    )
+    .await;
+    let first = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x338)));
+    let second = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x339)));
+    fixture
+        .store
+        .insert_finding(&finding(first, evidence[0], &fixture.target_snapshot))
+        .await?;
+    fixture
+        .store
+        .insert_finding(&finding(second, evidence[0], &fixture.target_snapshot))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            first.finding(),
+            finding_event(
+                first,
+                ReviewEventOrdinal::one(),
+                evidence[1],
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::new(
+                        second,
+                        ReviewFindingStatus::Open,
+                    ),
+                },
+            ),
+        )
+        .await?
+        .expect("first reference persists");
+
+    let cycle = fixture
+        .store
+        .append_finding_event(
+            second.finding(),
+            finding_event(
+                second,
+                ReviewEventOrdinal::one(),
+                evidence[2],
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::new(
+                        first,
+                        ReviewFindingStatus::Open,
+                    ),
+                },
+            ),
+        )
+        .await
+        .expect_err("terminal reference targets cannot close a cycle");
+    let ReviewWorkflowStoreError::Database(cycle) = cycle else {
+        panic!("cycle prevention must be a database rejection");
+    };
+    assert_sqlstate(&cycle, "23514");
+    Ok(())
+}
+
+/// INV-040: a referenced finding's missing canonical producer is corruption,
+/// even when the aggregate finding's own producer remains intact.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_load_rejects_missing_referenced_producer() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let dedupe_pass = insert_fixture_pass(&fixture, 0x33a, ReviewPassKind::Dedupe).await;
+    let evidence =
+        succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, dedupe_pass]).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x33b)));
+    let canonical_ref =
+        ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x33c)));
+    fixture
+        .store
+        .insert_finding(&finding(finding_ref, evidence[0], &fixture.target_snapshot))
+        .await?;
+    fixture
+        .store
+        .insert_finding(&finding(
+            canonical_ref,
+            evidence[0],
+            &fixture.target_snapshot,
+        ))
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            finding_event(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                evidence[1],
+                ReviewFindingEventKind::Duplicate {
+                    canonical: ReviewReferencedFindingEvidence::new(
+                        canonical_ref,
+                        ReviewFindingStatus::Open,
+                    ),
+                },
+            ),
+        )
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE review_finding
+         DROP CONSTRAINT review_finding_producing_pass_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_finding
+         DISABLE TRIGGER review_finding_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_finding
+            SET producing_pass_id = $2
+          WHERE finding_id = $1",
+    )
+    .bind(canonical_ref.finding().into_uuid())
+    .bind(uuid(0x33d))
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .store
+        .load_finding(finding_ref.finding())
+        .await
+        .expect_err("missing referenced producer must fail closed");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed review-finding-event corruption");
+    };
+    assert_eq!(error.aggregate(), "review_finding_event");
+    assert!(
+        error
+            .detail()
+            .contains("referenced finding producing pass row is missing")
     );
     Ok(())
 }
@@ -1148,7 +1376,7 @@ async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), 
         .store
         .append_finding_event(
             finding_ref.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 ReviewPassEvidence::new(
@@ -1166,6 +1394,59 @@ async fn inv040_canonical_pass_kind_rejects_misclassified_event() -> Result<(), 
         panic!("canonical pass-kind mismatch must be a database rejection");
     };
     assert_sqlstate(&error, "23514");
+    Ok(())
+}
+
+/// INV-040: the event row must exactly match the finding result committed by
+/// its terminal pass, including ordinal and event type.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_event_requires_exact_pass_result() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let judge_pass = insert_fixture_pass(&fixture, 0x33e, ReviewPassKind::Judge).await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, judge_pass]).await;
+    let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x33f)));
+    fixture
+        .store
+        .insert_finding(&finding(finding_ref, evidence[0], &fixture.target_snapshot))
+        .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET finding_event_finding_id = $1,
+                finding_event_finding_run_id = $2,
+                finding_event_finding_pass_id = $3,
+                finding_event_ordinal = 1,
+                finding_event_kind = 'accepted'
+          WHERE pass_id = $4",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(finding_ref.run().run().into_uuid())
+    .bind(finding_ref.pass().pass().into_uuid())
+    .bind(judge_pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let mismatched = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, referenced_finding_status,
+             external_link_id, external_link_association_kind)
+         VALUES (
+             $1, 1, $2, $3, $4, $5, 'rejected', 'not accepted',
+             NULL, NULL, NULL, NULL
+         )",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(finding_ref.run().run().into_uuid())
+    .bind(finding_ref.target().into_uuid())
+    .bind(judge_pass.pass().into_uuid())
+    .bind(judge_pass.run().run().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("event kind must equal the terminal pass result");
+    assert_sqlstate(&mismatched, "23514");
     Ok(())
 }
 
@@ -1242,7 +1523,7 @@ async fn inv041_external_attachment_rejects_foreign_owner() -> Result<(), Box<dy
         .store
         .attach_external_link(
             first,
-            ReviewExternalLinkAttachment::new(
+            attachment(
                 second,
                 succeeded_pass(fixture.pass, ReviewPassKind::Publish),
                 key("comment-337"),
@@ -1288,7 +1569,7 @@ async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<d
         .store
         .attach_external_link(
             first,
-            ReviewExternalLinkAttachment::new(first, publish_evidence, key("comment-335")),
+            attachment(first, publish_evidence, key("comment-335")),
         )
         .await?;
     fixture
@@ -1304,7 +1585,7 @@ async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<d
         .store
         .attach_external_link(
             second,
-            ReviewExternalLinkAttachment::new(second, publish_evidence, key("comment-336")),
+            attachment(second, publish_evidence, key("comment-336")),
         )
         .await?;
 
@@ -1312,7 +1593,7 @@ async fn inv040_external_observation_rejects_foreign_owner() -> Result<(), Box<d
         .store
         .append_external_observation(
             first,
-            ReviewExternalLinkObservation::new(
+            observation(
                 second,
                 ReviewEventOrdinal::one(),
                 import_evidence,
@@ -1478,7 +1759,7 @@ async fn inv040_finding_insert_requires_open_state() -> Result<(), Box<dyn Error
     let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, judge_pass]).await;
     let finding_ref = ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(0x306)));
     let accepted = finding(finding_ref, evidence[0], &fixture.target_snapshot)
-        .apply(ReviewFindingEvent::new(
+        .apply(finding_event(
             finding_ref,
             ReviewEventOrdinal::one(),
             evidence[1],
@@ -1507,7 +1788,7 @@ async fn inv041_reservation_insert_requires_pending_state() -> Result<(), Box<dy
         key("example-code-host"),
         ReviewExternalObjectKind::ReviewComment,
     )
-    .attach(ReviewExternalLinkAttachment::new(
+    .attach(attachment(
         link,
         succeeded_pass(fixture.pass, ReviewPassKind::Publish),
         key("comment-85"),
@@ -1717,7 +1998,7 @@ async fn inv041_schema_authenticates_posted_external_review_content() -> Result<
         .store
         .append_finding_event(
             posted_finding.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 posted_finding,
                 ReviewEventOrdinal::one(),
                 evidence[1],
@@ -1771,7 +2052,7 @@ async fn inv041_schema_authenticates_posted_external_review_content() -> Result<
         .store
         .attach_external_link(
             commit_link,
-            ReviewExternalLinkAttachment::new(commit_link, evidence[2], key("external-commit-609")),
+            attachment(commit_link, evidence[2], key("external-commit-609")),
         )
         .await
         .expect("repository correlation attachment persists");
@@ -1978,6 +2259,21 @@ async fn inv040_finding_event_serialization_is_fk_compatible() -> Result<(), Box
         .execute(&mut *appender)
         .await?;
     sqlx::query(
+        "UPDATE review_pass
+            SET finding_event_finding_id = $1,
+                finding_event_finding_run_id = $2,
+                finding_event_finding_pass_id = $3,
+                finding_event_ordinal = 1,
+                finding_event_kind = 'accepted'
+          WHERE pass_id = $4",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(finding_ref.pass().run().run().into_uuid())
+    .bind(finding_ref.pass().pass().into_uuid())
+    .bind(judge_pass.pass().into_uuid())
+    .execute(&mut *appender)
+    .await?;
+    sqlx::query(
         "INSERT INTO review_finding_event
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
@@ -2024,10 +2320,7 @@ async fn inv041_external_observation_serialization_is_fk_compatible() -> Result<
         .await?;
     fixture
         .store
-        .attach_external_link(
-            link,
-            ReviewExternalLinkAttachment::new(link, evidence[0], key("comment-30e")),
-        )
+        .attach_external_link(link, attachment(link, evidence[0], key("comment-30e")))
         .await?;
 
     let mut foreign_key_reader = pool.begin().await?;
@@ -2301,7 +2594,7 @@ async fn inv040_finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn 
         .store
         .append_finding_event(
             finding_ref.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 evidence[1],
@@ -2346,7 +2639,8 @@ async fn inv040_finding_load_rejects_missing_event_pass() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-041: one provider/kind/object identity has at most one attachment.
+/// INV-041: one provider/kind/object identity has at most one attachment per
+/// frozen target, while a refreshed target may reattach the canonical object.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Error>> {
@@ -2382,7 +2676,7 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
         .store
         .attach_external_link(
             first_link,
-            ReviewExternalLinkAttachment::new(first_link, publish_evidence, key("comment-84")),
+            attachment(first_link, publish_evidence, key("comment-84")),
         )
         .await
         .expect("first attachment persists");
@@ -2391,7 +2685,7 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
         .store
         .attach_external_link(
             second_link,
-            ReviewExternalLinkAttachment::new(second_link, publish_evidence, key("comment-84")),
+            attachment(second_link, publish_evidence, key("comment-84")),
         )
         .await
         .expect_err("one external object identity cannot attach twice");
@@ -2399,6 +2693,72 @@ async fn inv041_external_object_attachment_is_unique() -> Result<(), Box<dyn Err
         panic!("external-object uniqueness must be a database rejection")
     };
     assert_sqlstate(&duplicate, "23505");
+
+    let refreshed_target_id = ReviewTargetId::from_uuid(uuid(0x813));
+    let refreshed_target = ReviewTarget::try_new(
+        refreshed_target_id,
+        key("example-code-host"),
+        key("example/repository"),
+        ReviewTargetSubject::ChangeRequest(
+            ReviewChangeRequestNumber::try_new(42).expect("positive change request"),
+        ),
+        key("1122334455667788"),
+        Some(key("0123456789abcdef")),
+        None,
+    )
+    .expect("refreshed target snapshot is valid");
+    fixture.store.insert_target(&refreshed_target).await?;
+    let refreshed_session = SessionId::from_uuid(uuid(0x810));
+    let refreshed_input = AcceptedInputId::from_uuid(uuid(0x811));
+    let refreshed_turn = TurnId::from_uuid(uuid(0x812));
+    insert_active_turn_with_offset(
+        &pool,
+        refreshed_session,
+        refreshed_input,
+        refreshed_turn,
+        0x7_000,
+    )
+    .await;
+    let refreshed_publish = insert_pass_for_target(
+        &fixture.store,
+        refreshed_target_id,
+        0x814,
+        ReviewPassKind::Publish,
+        refreshed_session,
+        refreshed_input,
+    )
+    .await;
+    start_review_pass(&fixture.store, refreshed_publish, refreshed_turn).await;
+    let refreshed_frontier =
+        synthetically_terminalize_turn(&pool, refreshed_turn, "completed").await;
+    let refreshed_evidence = conclude_review_pass(
+        &fixture.store,
+        refreshed_publish,
+        ReviewPassState::Succeeded {
+            turn: refreshed_turn,
+            output_frontier: refreshed_frontier,
+            finding_event: None,
+        },
+    )
+    .await;
+    let refreshed_link = ReviewExternalLinkId::from_uuid(uuid(0x815));
+    fixture
+        .store
+        .reserve_external_link(ReviewExternalLink::reserve(
+            refreshed_link,
+            ReviewExternalLinkAssociation::Target(refreshed_target_id),
+            key("example-code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        ))
+        .await?;
+    fixture
+        .store
+        .attach_external_link(
+            refreshed_link,
+            attachment(refreshed_link, refreshed_evidence, key("comment-84")),
+        )
+        .await?
+        .expect("a refreshed target may reattach the canonical external object");
 
     Ok(())
 }
@@ -2675,6 +3035,7 @@ async fn inv040_finding_event_rejects_failed_pass() -> Result<(), Box<dyn Error>
         ReviewPassState::Succeeded {
             turn,
             output_frontier,
+            finding_event: None,
         },
     )
     .await;
@@ -2770,10 +3131,7 @@ async fn inv041_observation_rejects_queued_import_pass() -> Result<(), Box<dyn E
         .await?;
     fixture
         .store
-        .attach_external_link(
-            link,
-            ReviewExternalLinkAttachment::new(link, publish_evidence, key("comment-70b")),
-        )
+        .attach_external_link(link, attachment(link, publish_evidence, key("comment-70b")))
         .await?;
     let unauthorized = sqlx::query(
         "INSERT INTO review_external_link_observation
@@ -2832,6 +3190,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     let succeeded = ReviewPassState::Succeeded {
         turn,
         output_frontier,
+        finding_event: None,
     };
     let review_evidence = conclude_review_pass(&fixture.store, fixture.pass, succeeded).await;
     let judge_evidence = conclude_review_pass(&fixture.store, judge_pass, succeeded).await;
@@ -2840,7 +3199,10 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
     let blocked_evidence = conclude_review_pass(
         &fixture.store,
         blocked_publish_pass,
-        ReviewPassState::Blocked { turn: blocked_turn },
+        ReviewPassState::Blocked {
+            turn: blocked_turn,
+            finding_event: None,
+        },
     )
     .await;
 
@@ -2857,7 +3219,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .append_finding_event(
             finding_ref.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 finding_ref,
                 ReviewEventOrdinal::one(),
                 judge_evidence,
@@ -2869,7 +3231,7 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .append_finding_event(
             finding_ref.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 finding_ref,
                 ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
                 blocked_evidence,
@@ -2891,11 +3253,18 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .reserve_external_link(reservation.clone())
         .await?;
+    let posted_ordinal = ReviewEventOrdinal::try_new(3).expect("positive ordinal");
+    let attaching_evidence = pass_with_finding_event(
+        finding_ref,
+        posted_ordinal,
+        attaching_evidence,
+        ReviewFindingEventType::Posted,
+    );
     let attached = fixture
         .store
         .attach_external_link(
             link,
-            ReviewExternalLinkAttachment::new(link, attaching_evidence, key("comment-711")),
+            attachment(link, attaching_evidence, key("comment-711")),
         )
         .await?
         .expect("publication attachment persists");
@@ -2923,9 +3292,9 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .append_finding_event(
             finding_ref.finding(),
-            ReviewFindingEvent::new(
+            finding_event(
                 finding_ref,
-                ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
+                posted_ordinal,
                 attaching_evidence,
                 ReviewFindingEventKind::Posted {
                     link: signalbox_domain::ReviewFindingExternalLinkRef::try_new(
@@ -2940,28 +3309,13 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .expect("publication reconciliation persists");
     assert_eq!(posted.status(), ReviewFindingStatus::Posted);
 
-    fixture
-        .store
-        .append_finding_event(
-            finding_ref.finding(),
-            ReviewFindingEvent::new(
-                finding_ref,
-                ReviewEventOrdinal::try_new(4).expect("positive ordinal"),
-                blocked_evidence,
-                ReviewFindingEventKind::BlockedWithReason {
-                    reason: text("publication state requires another reconciliation"),
-                },
-            ),
-        )
-        .await?
-        .expect("posted finding may become publication-blocked again");
     let replayed_attachment = sqlx::query(
         "INSERT INTO review_finding_event
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
              referenced_finding_id, external_link_id,
              external_link_association_kind)
-         VALUES ($1, 5, $2, $3, $4, $5, 'posted', NULL, NULL, $6, 'finding')",
+         VALUES ($1, 4, $2, $3, $4, $5, 'posted', NULL, NULL, $6, 'finding')",
     )
     .bind(finding_ref.finding().into_uuid())
     .bind(fixture.run.run().into_uuid())

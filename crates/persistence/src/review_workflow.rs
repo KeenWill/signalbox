@@ -11,13 +11,14 @@ use signalbox_domain::{
     ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
     ReviewExternalLinkAttachment, ReviewExternalLinkId, ReviewExternalLinkObservation,
     ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind,
-    ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
-    ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
-    ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput,
-    ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewPolicyVersion, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunReconstitutionInput,
-    ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReviewFindingEventType, ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation,
+    ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey,
+    ReviewLineRange, ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+    ReviewPassReconstitutionInput, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
+    ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyVersion, ReviewReferencedFindingEvidence,
+    ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
     ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
@@ -151,7 +152,17 @@ impl ReviewWorkflowStore {
                     canonical_pass.state_kind AS evidence_pass_state_kind,
                     canonical_pass.turn_id AS evidence_pass_turn_id,
                     canonical_pass.output_frontier_id
-                        AS evidence_pass_output_frontier_id
+                        AS evidence_pass_output_frontier_id,
+                    canonical_pass.finding_event_finding_id
+                        AS evidence_pass_finding_event_finding_id,
+                    canonical_pass.finding_event_finding_run_id
+                        AS evidence_pass_finding_event_finding_run_id,
+                    canonical_pass.finding_event_finding_pass_id
+                        AS evidence_pass_finding_event_finding_pass_id,
+                    canonical_pass.finding_event_ordinal
+                        AS evidence_pass_finding_event_ordinal,
+                    canonical_pass.finding_event_kind
+                        AS evidence_pass_finding_event_kind
                FROM review_run AS workflow_run
                LEFT JOIN review_target AS canonical_target
                  ON canonical_target.target_id = workflow_run.target_id
@@ -224,8 +235,14 @@ impl ReviewWorkflowStore {
         sqlx::query(
             "INSERT INTO review_pass
                 (pass_id, run_id, target_id, pass_kind, session_id,
-                 accepted_input_id, state_kind, turn_id, output_frontier_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 accepted_input_id, state_kind, turn_id, output_frontier_id,
+                 finding_event_finding_id, finding_event_finding_run_id,
+                 finding_event_finding_pass_id, finding_event_ordinal,
+                 finding_event_kind)
+             VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 $14
+             )",
         )
         .bind(pass.reference().pass().into_uuid())
         .bind(pass.reference().run().run().into_uuid())
@@ -236,6 +253,31 @@ impl ReviewWorkflowStore {
         .bind(state.kind)
         .bind(state.turn.map(TurnId::into_uuid))
         .bind(state.frontier.map(ContextFrontierId::into_uuid))
+        .bind(
+            state
+                .finding_event
+                .map(|result| result.finding().finding().into_uuid()),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| result.finding().run().run().into_uuid()),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| result.finding().pass().pass().into_uuid()),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| i64::from(result.ordinal().get())),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| encode_finding_event_type(result.event_type())),
+        )
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
@@ -254,6 +296,11 @@ impl ReviewWorkflowStore {
                     workflow_pass.session_id AS pass_session_id,
                     workflow_pass.accepted_input_id, workflow_pass.state_kind,
                     workflow_pass.turn_id, workflow_pass.output_frontier_id,
+                    workflow_pass.finding_event_finding_id,
+                    workflow_pass.finding_event_finding_run_id,
+                    workflow_pass.finding_event_finding_pass_id,
+                    workflow_pass.finding_event_ordinal,
+                    workflow_pass.finding_event_kind,
                     canonical_input.session_id AS accepted_input_session_id,
                     canonical_turn.turn_id AS evidence_turn_id,
                     canonical_turn.session_id AS turn_session_id,
@@ -317,13 +364,43 @@ impl ReviewWorkflowStore {
             "UPDATE review_pass
                 SET state_kind = $2,
                     turn_id = $3,
-                    output_frontier_id = $4
+                    output_frontier_id = $4,
+                    finding_event_finding_id = $5,
+                    finding_event_finding_run_id = $6,
+                    finding_event_finding_pass_id = $7,
+                    finding_event_ordinal = $8,
+                    finding_event_kind = $9
               WHERE pass_id = $1",
         )
         .bind(pass.into_uuid())
         .bind(state.kind)
         .bind(state.turn.map(TurnId::into_uuid))
         .bind(state.frontier.map(ContextFrontierId::into_uuid))
+        .bind(
+            state
+                .finding_event
+                .map(|result| result.finding().finding().into_uuid()),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| result.finding().run().run().into_uuid()),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| result.finding().pass().pass().into_uuid()),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| i64::from(result.ordinal().get())),
+        )
+        .bind(
+            state
+                .finding_event
+                .map(|result| encode_finding_event_type(result.event_type())),
+        )
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
@@ -389,13 +466,43 @@ impl ReviewWorkflowStore {
             "UPDATE review_pass
                 SET state_kind = $2,
                     turn_id = $3,
-                    output_frontier_id = $4
+                    output_frontier_id = $4,
+                    finding_event_finding_id = $5,
+                    finding_event_finding_run_id = $6,
+                    finding_event_finding_pass_id = $7,
+                    finding_event_ordinal = $8,
+                    finding_event_kind = $9
               WHERE pass_id = $1",
         )
         .bind(pass.into_uuid())
         .bind(encoded_pass.kind)
         .bind(encoded_pass.turn.map(TurnId::into_uuid))
         .bind(encoded_pass.frontier.map(ContextFrontierId::into_uuid))
+        .bind(
+            encoded_pass
+                .finding_event
+                .map(|result| result.finding().finding().into_uuid()),
+        )
+        .bind(
+            encoded_pass
+                .finding_event
+                .map(|result| result.finding().run().run().into_uuid()),
+        )
+        .bind(
+            encoded_pass
+                .finding_event
+                .map(|result| result.finding().pass().pass().into_uuid()),
+        )
+        .bind(
+            encoded_pass
+                .finding_event
+                .map(|result| i64::from(result.ordinal().get())),
+        )
+        .bind(
+            encoded_pass
+                .finding_event
+                .map(|result| encode_finding_event_type(result.event_type())),
+        )
         .execute(&mut *transaction)
         .await?;
         let (run_state_kind, run_state_pass) = encode_run_state(transitioned_run.state());
@@ -517,6 +624,16 @@ impl ReviewWorkflowStore {
                     producing_pass.turn_id AS producing_pass_turn_id,
                     producing_pass.output_frontier_id
                         AS producing_pass_output_frontier_id,
+                    producing_pass.finding_event_finding_id
+                        AS producing_pass_finding_event_finding_id,
+                    producing_pass.finding_event_finding_run_id
+                        AS producing_pass_finding_event_finding_run_id,
+                    producing_pass.finding_event_finding_pass_id
+                        AS producing_pass_finding_event_finding_pass_id,
+                    producing_pass.finding_event_ordinal
+                        AS producing_pass_finding_event_ordinal,
+                    producing_pass.finding_event_kind
+                        AS producing_pass_finding_event_kind,
                     producing_run.policy_version
                         AS producing_policy_version,
                     producing_run.run_id AS canonical_producing_run_id,
@@ -575,15 +692,31 @@ impl ReviewWorkflowStore {
                     event_pass.turn_id AS event_pass_turn_id,
                     event_pass.output_frontier_id
                         AS event_pass_output_frontier_id,
+                    event_pass.finding_event_finding_id
+                        AS event_pass_finding_event_finding_id,
+                    event_pass.finding_event_finding_run_id
+                        AS event_pass_finding_event_finding_run_id,
+                    event_pass.finding_event_finding_pass_id
+                        AS event_pass_finding_event_finding_pass_id,
+                    event_pass.finding_event_ordinal
+                        AS event_pass_finding_event_ordinal,
+                    event_pass.finding_event_kind
+                        AS event_pass_finding_event_kind,
+                    event_run.run_id AS canonical_event_run_id,
+                    event_run.workflow_kind AS event_workflow_kind,
                     event_run.policy_version AS event_policy_version,
                     event_run.minimum_judge_confidence
                         AS event_minimum_judge_confidence,
                     event_run.minimum_publication_confidence
                         AS event_minimum_publication_confidence,
                     event.event_kind, event.reason,
-                    event.referenced_finding_id, event.external_link_id,
+                    event.referenced_finding_id,
+                    event.referenced_finding_status,
+                    event.external_link_id,
                     referenced_finding.producing_pass_id
                         AS referenced_finding_pass_id,
+                    referenced_finding_pass.pass_id
+                        AS canonical_referenced_finding_pass_id,
                     canonical_link.external_link_id AS canonical_link_id,
                     canonical_link.target_id AS link_target_id,
                     canonical_link.association_kind AS link_association_kind,
@@ -598,11 +731,27 @@ impl ReviewWorkflowStore {
                     attachment.target_id AS attachment_target_id,
                     attachment.pass_run_id AS attachment_pass_run_id,
                     attachment.pass_id AS attachment_pass_id,
+                    attachment_pass.pass_id
+                        AS canonical_attachment_pass_id,
                     attachment_pass.pass_kind AS attachment_pass_kind,
                     attachment_pass.state_kind AS attachment_pass_state_kind,
                     attachment_pass.turn_id AS attachment_pass_turn_id,
                     attachment_pass.output_frontier_id
                         AS attachment_pass_output_frontier_id,
+                    attachment_pass.finding_event_finding_id
+                        AS attachment_pass_finding_event_finding_id,
+                    attachment_pass.finding_event_finding_run_id
+                        AS attachment_pass_finding_event_finding_run_id,
+                    attachment_pass.finding_event_finding_pass_id
+                        AS attachment_pass_finding_event_finding_pass_id,
+                    attachment_pass.finding_event_ordinal
+                        AS attachment_pass_finding_event_ordinal,
+                    attachment_pass.finding_event_kind
+                        AS attachment_pass_finding_event_kind,
+                    attachment_run.run_id
+                        AS canonical_attachment_run_id,
+                    attachment_run.workflow_kind
+                        AS attachment_workflow_kind,
                     attachment_run.policy_version
                         AS attachment_policy_version,
                     attachment_run.minimum_judge_confidence
@@ -624,6 +773,13 @@ impl ReviewWorkflowStore {
                     event.referenced_finding_id
                 AND referenced_finding.run_id = event.finding_run_id
                 AND referenced_finding.target_id = event.target_id
+               LEFT JOIN review_pass AS referenced_finding_pass
+                 ON referenced_finding_pass.pass_id =
+                    referenced_finding.producing_pass_id
+                AND referenced_finding_pass.run_id =
+                    referenced_finding.run_id
+                AND referenced_finding_pass.target_id =
+                    referenced_finding.target_id
                LEFT JOIN review_external_link AS canonical_link
                  ON canonical_link.external_link_id = event.external_link_id
                LEFT JOIN review_finding AS link_finding
@@ -655,6 +811,40 @@ impl ReviewWorkflowStore {
                     "review_finding_event",
                     "event pass row is missing",
                 )?;
+                require_joined_reference(
+                    &row,
+                    "canonical_event_run_id",
+                    "review_finding_event",
+                    "event run row is missing",
+                )?;
+                if row
+                    .try_get::<Option<Uuid>, _>("referenced_finding_id")?
+                    .is_some()
+                {
+                    require_joined_reference(
+                        &row,
+                        "canonical_referenced_finding_pass_id",
+                        "review_finding_event",
+                        "referenced finding producing pass row is missing",
+                    )?;
+                }
+                if row
+                    .try_get::<Option<Uuid>, _>("attachment_external_link_id")?
+                    .is_some()
+                {
+                    require_joined_reference(
+                        &row,
+                        "canonical_attachment_pass_id",
+                        "review_finding_event",
+                        "attachment pass row is missing",
+                    )?;
+                    require_joined_reference(
+                        &row,
+                        "canonical_attachment_run_id",
+                        "review_finding_event",
+                        "attachment run row is missing",
+                    )?;
+                }
                 decode_finding_event(&row, proposal.reference())
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -858,6 +1048,17 @@ impl ReviewWorkflowStore {
                     pass.pass_kind, pass.state_kind AS pass_state_kind,
                     pass.turn_id AS pass_turn_id,
                     pass.output_frontier_id AS pass_output_frontier_id,
+                    pass.finding_event_finding_id
+                        AS pass_finding_event_finding_id,
+                    pass.finding_event_finding_run_id
+                        AS pass_finding_event_finding_run_id,
+                    pass.finding_event_finding_pass_id
+                        AS pass_finding_event_finding_pass_id,
+                    pass.finding_event_ordinal
+                        AS pass_finding_event_ordinal,
+                    pass.finding_event_kind AS pass_finding_event_kind,
+                    pass_run.run_id AS canonical_attachment_run_id,
+                    pass_run.workflow_kind AS pass_workflow_kind,
                     pass_run.policy_version AS pass_policy_version,
                     pass_run.minimum_judge_confidence
                         AS pass_minimum_judge_confidence,
@@ -884,6 +1085,12 @@ impl ReviewWorkflowStore {
                 "review_external_link_attachment",
                 "attaching pass row is missing",
             )?;
+            require_joined_reference(
+                &row,
+                "canonical_attachment_run_id",
+                "review_external_link_attachment",
+                "attaching run row is missing",
+            )?;
             decode_external_link_attachment(&row)
         })
         .transpose()?;
@@ -896,6 +1103,17 @@ impl ReviewWorkflowStore {
                     pass.pass_kind, pass.state_kind AS pass_state_kind,
                     pass.turn_id AS pass_turn_id,
                     pass.output_frontier_id AS pass_output_frontier_id,
+                    pass.finding_event_finding_id
+                        AS pass_finding_event_finding_id,
+                    pass.finding_event_finding_run_id
+                        AS pass_finding_event_finding_run_id,
+                    pass.finding_event_finding_pass_id
+                        AS pass_finding_event_finding_pass_id,
+                    pass.finding_event_ordinal
+                        AS pass_finding_event_ordinal,
+                    pass.finding_event_kind AS pass_finding_event_kind,
+                    pass_run.run_id AS canonical_observation_run_id,
+                    pass_run.workflow_kind AS pass_workflow_kind,
                     pass_run.policy_version AS pass_policy_version,
                     pass_run.minimum_judge_confidence
                         AS pass_minimum_judge_confidence,
@@ -922,6 +1140,12 @@ impl ReviewWorkflowStore {
                 "canonical_observation_pass_id",
                 "review_external_link_observation",
                 "observing pass row is missing",
+            )?;
+            require_joined_reference(
+                &row,
+                "canonical_observation_run_id",
+                "review_external_link_observation",
+                "observing run row is missing",
             )?;
             decode_external_link_observation(&row)
         })
@@ -985,13 +1209,65 @@ async fn insert_finding_event(
 ) -> Result<(), ReviewWorkflowStoreError> {
     let finding = event.finding();
     let encoded = encode_finding_event(event.kind());
+    let pass = event.pass_evidence();
+    let pass_state = encode_pass_state(pass.state());
+    let Some(result) = pass_state.finding_event else {
+        return Err(corruption(
+            "review_finding_event",
+            String::from("event pass omitted its exact finding-event result"),
+        ));
+    };
+    let bound = sqlx::query(
+        "UPDATE review_pass
+            SET finding_event_finding_id = $6,
+                finding_event_finding_run_id = $7,
+                finding_event_finding_pass_id = $8,
+                finding_event_ordinal = $9,
+                finding_event_kind = $10
+          WHERE pass_id = $1
+            AND run_id = $2
+            AND target_id = $3
+            AND state_kind = $4
+            AND turn_id IS NOT DISTINCT FROM $5
+            AND output_frontier_id IS NOT DISTINCT FROM $11
+            AND (
+                finding_event_finding_id IS NULL
+                OR (
+                    finding_event_finding_id = $6
+                    AND finding_event_finding_run_id = $7
+                    AND finding_event_finding_pass_id = $8
+                    AND finding_event_ordinal = $9
+                    AND finding_event_kind = $10
+                )
+            )
+        RETURNING pass_id",
+    )
+    .bind(pass.reference().pass().into_uuid())
+    .bind(pass.reference().run().run().into_uuid())
+    .bind(pass.reference().target().into_uuid())
+    .bind(pass_state.kind)
+    .bind(pass_state.turn.map(TurnId::into_uuid))
+    .bind(result.finding().finding().into_uuid())
+    .bind(result.finding().run().run().into_uuid())
+    .bind(result.finding().pass().pass().into_uuid())
+    .bind(i64::from(result.ordinal().get()))
+    .bind(encode_finding_event_type(result.event_type()))
+    .bind(pass_state.frontier.map(ContextFrontierId::into_uuid))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if bound.is_none() {
+        return Err(corruption(
+            "review_finding_event",
+            String::from("event pass row or compatible canonical outcome is missing"),
+        ));
+    }
     sqlx::query(
         "INSERT INTO review_finding_event
             (finding_id, event_ordinal, finding_run_id, target_id,
              event_pass_id, event_pass_run_id, event_kind, reason,
-             referenced_finding_id, external_link_id,
-             external_link_association_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             referenced_finding_id, referenced_finding_status,
+             external_link_id, external_link_association_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(finding.finding().into_uuid())
     .bind(i64::from(event.ordinal().get()))
@@ -1002,6 +1278,7 @@ async fn insert_finding_event(
     .bind(encoded.kind)
     .bind(encoded.reason)
     .bind(encoded.referenced_finding.map(ReviewFindingId::into_uuid))
+    .bind(encoded.referenced_status.map(encode_finding_status))
     .bind(encoded.external_link.map(ReviewExternalLinkId::into_uuid))
     .bind(encoded.external_link.map(|_| "finding"))
     .execute(&mut **transaction)
@@ -1189,7 +1466,12 @@ fn decode_run_pass_evidence(
                     "minimum_publication_confidence",
                     "review_run",
                 )?,
-                decode_pass_state(&state_kind, turn, frontier)?,
+                decode_pass_state(
+                    &state_kind,
+                    turn,
+                    frontier,
+                    stored_finding_event_result(row, "evidence_pass_target_id", "evidence_pass_")?,
+                )?,
             )))
         }
         _ => Err(corruption(
@@ -1285,7 +1567,12 @@ fn reconstitute_pass(
         session_id(row.try_get("pass_session_id")?),
         accepted_input_id(row.try_get("accepted_input_id")?),
         session_id(accepted_input_session),
-        decode_pass_state(&state_kind, turn, frontier)?,
+        decode_pass_state(
+            &state_kind,
+            turn,
+            frontier,
+            stored_finding_event_result(row, "target_id", "")?,
+        )?,
         turn_evidence,
     ))
     .map_err(|error| {
@@ -1301,6 +1588,7 @@ fn decode_pass_row_state(row: &PgRow) -> Result<ReviewPassState, ReviewWorkflowS
         &row.try_get::<String, _>("state_kind")?,
         row.try_get("turn_id")?,
         row.try_get("output_frontier_id")?,
+        stored_finding_event_result(row, "target_id", "")?,
     )
 }
 
@@ -1404,6 +1692,7 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
             &row.try_get::<String, _>("producing_pass_state_kind")?,
             row.try_get("producing_pass_turn_id")?,
             row.try_get("producing_pass_output_frontier_id")?,
+            stored_finding_event_result(row, "target_id", "producing_pass_")?,
         )?,
     );
     let producing_run = ReviewRunEvidence::new(
@@ -1489,46 +1778,70 @@ fn decode_finding_event(
             &row.try_get::<String, _>("event_pass_state_kind")?,
             row.try_get("event_pass_turn_id")?,
             row.try_get("event_pass_output_frontier_id")?,
+            stored_finding_event_result(row, "target_id", "event_pass_")?,
         )?,
+    );
+    let run = ReviewRunEvidence::new(
+        pass_reference.run(),
+        decode_workflow_kind(&row.try_get::<String, _>("event_workflow_kind")?)?,
+        pass.policy(),
     );
     let kind: String = row.try_get("event_kind")?;
     let reason: Option<String> = row.try_get("reason")?;
     let referenced: Option<Uuid> = row.try_get("referenced_finding_id")?;
     let referenced_pass: Option<Uuid> = row.try_get("referenced_finding_pass_id")?;
+    let referenced_status: Option<String> = row.try_get("referenced_finding_status")?;
     let external_link: Option<Uuid> = row.try_get("external_link_id")?;
     let kind = match (
         kind.as_str(),
         reason,
         referenced,
         referenced_pass,
+        referenced_status,
         external_link,
     ) {
-        ("accepted", None, None, None, None) => ReviewFindingEventKind::Accepted,
-        ("rejected", Some(reason), None, None, None) => ReviewFindingEventKind::Rejected {
+        ("accepted", None, None, None, None, None) => ReviewFindingEventKind::Accepted,
+        ("rejected", Some(reason), None, None, None, None) => ReviewFindingEventKind::Rejected {
             reason: review_text(reason, "review_finding_event")?,
         },
-        ("duplicate", None, Some(referenced), Some(referenced_pass), None) => {
-            ReviewFindingEventKind::Duplicate {
-                canonical: ReviewFindingRef::new(
+        (
+            "duplicate",
+            None,
+            Some(referenced),
+            Some(referenced_pass),
+            Some(referenced_status),
+            None,
+        ) => ReviewFindingEventKind::Duplicate {
+            canonical: ReviewReferencedFindingEvidence::new(
+                ReviewFindingRef::new(
                     ReviewPassRef::new(finding.run(), pass_id(referenced_pass)),
                     finding_id(referenced),
                 ),
-            }
-        }
-        ("superseded", None, Some(referenced), Some(referenced_pass), None) => {
-            ReviewFindingEventKind::Superseded {
-                successor: ReviewFindingRef::new(
+                decode_finding_status(&referenced_status)?,
+            ),
+        },
+        (
+            "superseded",
+            None,
+            Some(referenced),
+            Some(referenced_pass),
+            Some(referenced_status),
+            None,
+        ) => ReviewFindingEventKind::Superseded {
+            successor: ReviewReferencedFindingEvidence::new(
+                ReviewFindingRef::new(
                     ReviewPassRef::new(finding.run(), pass_id(referenced_pass)),
                     finding_id(referenced),
                 ),
-            }
-        }
-        ("stale", None, None, None, None) => ReviewFindingEventKind::Stale,
-        ("posted", None, None, None, Some(link)) => ReviewFindingEventKind::Posted {
+                decode_finding_status(&referenced_status)?,
+            ),
+        },
+        ("stale", None, None, None, None, None) => ReviewFindingEventKind::Stale,
+        ("posted", None, None, None, None, Some(link)) => ReviewFindingEventKind::Posted {
             link: decode_finding_external_link(row, finding, external_link_id(link))?,
         },
-        ("fixed", None, None, None, None) => ReviewFindingEventKind::Fixed,
-        ("blocked_with_reason", Some(reason), None, None, None) => {
+        ("fixed", None, None, None, None, None) => ReviewFindingEventKind::Fixed,
+        ("blocked_with_reason", Some(reason), None, None, None, None) => {
             ReviewFindingEventKind::BlockedWithReason {
                 reason: review_text(reason, "review_finding_event")?,
             }
@@ -1548,6 +1861,7 @@ fn decode_finding_event(
         )?)
         .map_err(|_| corruption("review_finding_event", String::from("zero ordinal")))?,
         pass,
+        run,
         kind,
     ))
 }
@@ -1667,25 +1981,40 @@ fn decode_finding_external_link(
             Some(kind),
             Some(state),
             Some(object),
-        ) => Some(ReviewExternalLinkAttachment::new(
-            external_link_id(link),
-            ReviewPassEvidence::new(
-                ReviewPassRef::new(
-                    ReviewRunRef::new(target_id(target), run_id(run)),
-                    pass_id(pass),
-                ),
+        ) => {
+            let reference = ReviewPassRef::new(
+                ReviewRunRef::new(target_id(target), run_id(run)),
+                pass_id(pass),
+            );
+            let policy = decode_review_policy(
+                row,
+                "attachment_policy_version",
+                "attachment_minimum_judge_confidence",
+                "attachment_minimum_publication_confidence",
+                "review_finding_event",
+            )?;
+            let pass = ReviewPassEvidence::new(
+                reference,
                 decode_pass_kind(&kind)?,
-                decode_review_policy(
-                    row,
-                    "attachment_policy_version",
-                    "attachment_minimum_judge_confidence",
-                    "attachment_minimum_publication_confidence",
-                    "review_finding_event",
+                policy,
+                decode_pass_state(
+                    &state,
+                    attachment_pass_turn,
+                    attachment_pass_frontier,
+                    stored_finding_event_result(row, "attachment_target_id", "attachment_pass_")?,
                 )?,
-                decode_pass_state(&state, attachment_pass_turn, attachment_pass_frontier)?,
-            ),
-            review_key(object, "review_external_link_attachment")?,
-        )),
+            );
+            Some(ReviewExternalLinkAttachment::new(
+                external_link_id(link),
+                pass,
+                ReviewRunEvidence::new(
+                    reference.run(),
+                    decode_workflow_kind(&row.try_get::<String, _>("attachment_workflow_kind")?)?,
+                    policy,
+                ),
+                review_key(object, "review_external_link_attachment")?,
+            ))
+        }
         _ => {
             return Err(corruption(
                 "review_finding_event",
@@ -1759,29 +2088,37 @@ fn decode_external_link_root(
 fn decode_external_link_attachment(
     row: &PgRow,
 ) -> Result<ReviewExternalLinkAttachment, ReviewWorkflowStoreError> {
+    let reference = ReviewPassRef::new(
+        ReviewRunRef::new(
+            target_id(row.try_get("target_id")?),
+            run_id(row.try_get("pass_run_id")?),
+        ),
+        pass_id(row.try_get("pass_id")?),
+    );
+    let policy = decode_review_policy(
+        row,
+        "pass_policy_version",
+        "pass_minimum_judge_confidence",
+        "pass_minimum_publication_confidence",
+        "review_external_link_attachment",
+    )?;
     Ok(ReviewExternalLinkAttachment::new(
         external_link_id(row.try_get("external_link_id")?),
         ReviewPassEvidence::new(
-            ReviewPassRef::new(
-                ReviewRunRef::new(
-                    target_id(row.try_get("target_id")?),
-                    run_id(row.try_get("pass_run_id")?),
-                ),
-                pass_id(row.try_get("pass_id")?),
-            ),
+            reference,
             decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
-            decode_review_policy(
-                row,
-                "pass_policy_version",
-                "pass_minimum_judge_confidence",
-                "pass_minimum_publication_confidence",
-                "review_external_link_attachment",
-            )?,
+            policy,
             decode_pass_state(
                 &row.try_get::<String, _>("pass_state_kind")?,
                 row.try_get("pass_turn_id")?,
                 row.try_get("pass_output_frontier_id")?,
+                stored_finding_event_result(row, "target_id", "pass_")?,
             )?,
+        ),
+        ReviewRunEvidence::new(
+            reference.run(),
+            decode_workflow_kind(&row.try_get::<String, _>("pass_workflow_kind")?)?,
+            policy,
         ),
         review_key(
             row.try_get("external_object_key")?,
@@ -1793,6 +2130,20 @@ fn decode_external_link_attachment(
 fn decode_external_link_observation(
     row: &PgRow,
 ) -> Result<ReviewExternalLinkObservation, ReviewWorkflowStoreError> {
+    let reference = ReviewPassRef::new(
+        ReviewRunRef::new(
+            target_id(row.try_get("target_id")?),
+            run_id(row.try_get("pass_run_id")?),
+        ),
+        pass_id(row.try_get("pass_id")?),
+    );
+    let policy = decode_review_policy(
+        row,
+        "pass_policy_version",
+        "pass_minimum_judge_confidence",
+        "pass_minimum_publication_confidence",
+        "review_external_link_observation",
+    )?;
     Ok(ReviewExternalLinkObservation::new(
         external_link_id(row.try_get("external_link_id")?),
         ReviewEventOrdinal::try_new(positive_u32(
@@ -1806,26 +2157,20 @@ fn decode_external_link_observation(
             )
         })?,
         ReviewPassEvidence::new(
-            ReviewPassRef::new(
-                ReviewRunRef::new(
-                    target_id(row.try_get("target_id")?),
-                    run_id(row.try_get("pass_run_id")?),
-                ),
-                pass_id(row.try_get("pass_id")?),
-            ),
+            reference,
             decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
-            decode_review_policy(
-                row,
-                "pass_policy_version",
-                "pass_minimum_judge_confidence",
-                "pass_minimum_publication_confidence",
-                "review_external_link_observation",
-            )?,
+            policy,
             decode_pass_state(
                 &row.try_get::<String, _>("pass_state_kind")?,
                 row.try_get("pass_turn_id")?,
                 row.try_get("pass_output_frontier_id")?,
+                stored_finding_event_result(row, "target_id", "pass_")?,
             )?,
+        ),
+        ReviewRunEvidence::new(
+            reference.run(),
+            decode_workflow_kind(&row.try_get::<String, _>("pass_workflow_kind")?)?,
+            policy,
         ),
         decode_external_object_state(&row.try_get::<String, _>("object_state")?)?,
     ))
@@ -1842,6 +2187,7 @@ struct EncodedPassState {
     kind: &'static str,
     turn: Option<TurnId>,
     frontier: Option<ContextFrontierId>,
+    finding_event: Option<ReviewFindingEventResult>,
 }
 
 fn pass_state_turn(state: ReviewPassState) -> Option<TurnId> {
@@ -1850,7 +2196,7 @@ fn pass_state_turn(state: ReviewPassState) -> Option<TurnId> {
         ReviewPassState::Running { turn }
         | ReviewPassState::Succeeded { turn, .. }
         | ReviewPassState::Failed { turn }
-        | ReviewPassState::Blocked { turn }
+        | ReviewPassState::Blocked { turn, .. }
         | ReviewPassState::Cancelled { turn: Some(turn) } => Some(turn),
     }
 }
@@ -1861,59 +2207,128 @@ fn encode_pass_state(state: ReviewPassState) -> EncodedPassState {
             kind: "queued",
             turn: None,
             frontier: None,
+            finding_event: None,
         },
         ReviewPassState::Running { turn } => EncodedPassState {
             kind: "running",
             turn: Some(turn),
             frontier: None,
+            finding_event: None,
         },
         ReviewPassState::Succeeded {
             turn,
             output_frontier,
+            finding_event,
         } => EncodedPassState {
             kind: "succeeded",
             turn: Some(turn),
             frontier: Some(output_frontier),
+            finding_event,
         },
         ReviewPassState::Failed { turn } => EncodedPassState {
             kind: "failed",
             turn: Some(turn),
             frontier: None,
+            finding_event: None,
         },
-        ReviewPassState::Blocked { turn } => EncodedPassState {
+        ReviewPassState::Blocked {
+            turn,
+            finding_event,
+        } => EncodedPassState {
             kind: "blocked",
             turn: Some(turn),
             frontier: None,
+            finding_event,
         },
         ReviewPassState::Cancelled { turn } => EncodedPassState {
             kind: "cancelled",
             turn,
             frontier: None,
+            finding_event: None,
         },
     }
+}
+
+struct StoredFindingEventResult {
+    target: Uuid,
+    finding: Option<Uuid>,
+    finding_run: Option<Uuid>,
+    finding_pass: Option<Uuid>,
+    ordinal: Option<i64>,
+    event_kind: Option<String>,
+}
+
+fn stored_finding_event_result(
+    row: &PgRow,
+    target_column: &str,
+    prefix: &str,
+) -> Result<StoredFindingEventResult, ReviewWorkflowStoreError> {
+    let column = |suffix: &str| format!("{prefix}{suffix}");
+    Ok(StoredFindingEventResult {
+        target: row.try_get(target_column)?,
+        finding: row.try_get(column("finding_event_finding_id").as_str())?,
+        finding_run: row.try_get(column("finding_event_finding_run_id").as_str())?,
+        finding_pass: row.try_get(column("finding_event_finding_pass_id").as_str())?,
+        ordinal: row.try_get(column("finding_event_ordinal").as_str())?,
+        event_kind: row.try_get(column("finding_event_kind").as_str())?,
+    })
 }
 
 fn decode_pass_state(
     kind: &str,
     turn: Option<Uuid>,
     frontier: Option<Uuid>,
+    result: StoredFindingEventResult,
 ) -> Result<ReviewPassState, ReviewWorkflowStoreError> {
-    match (kind, turn, frontier) {
-        ("queued", None, None) => Ok(ReviewPassState::Queued),
-        ("running", Some(turn), None) => Ok(ReviewPassState::Running {
+    let finding_event = match (
+        result.finding,
+        result.finding_run,
+        result.finding_pass,
+        result.ordinal,
+        result.event_kind,
+    ) {
+        (None, None, None, None, None) => None,
+        (Some(finding), Some(run), Some(pass), Some(ordinal), Some(event_kind)) => {
+            Some(ReviewFindingEventResult::new(
+                ReviewFindingRef::new(
+                    ReviewPassRef::new(
+                        ReviewRunRef::new(target_id(result.target), run_id(run)),
+                        pass_id(pass),
+                    ),
+                    finding_id(finding),
+                ),
+                ReviewEventOrdinal::try_new(positive_u32(ordinal, "review_pass")?)
+                    .map_err(|_| corruption("review_pass", String::from("zero event ordinal")))?,
+                decode_finding_event_type(&event_kind)?,
+            ))
+        }
+        _ => {
+            return Err(corruption(
+                "review_pass",
+                String::from("torn finding-event result"),
+            ));
+        }
+    };
+    match (kind, turn, frontier, finding_event) {
+        ("queued", None, None, None) => Ok(ReviewPassState::Queued),
+        ("running", Some(turn), None, None) => Ok(ReviewPassState::Running {
             turn: turn_id(turn),
         }),
-        ("succeeded", Some(turn), Some(frontier)) => Ok(ReviewPassState::Succeeded {
+        ("succeeded", Some(turn), Some(frontier), finding_event) => {
+            Ok(ReviewPassState::Succeeded {
+                turn: turn_id(turn),
+                output_frontier: context_frontier_id(frontier),
+                finding_event,
+            })
+        }
+        ("failed", Some(turn), None, None) => Ok(ReviewPassState::Failed {
             turn: turn_id(turn),
-            output_frontier: context_frontier_id(frontier),
         }),
-        ("failed", Some(turn), None) => Ok(ReviewPassState::Failed {
+        ("blocked", Some(turn), None, finding_event) => Ok(ReviewPassState::Blocked {
             turn: turn_id(turn),
+            finding_event,
         }),
-        ("blocked", Some(turn), None) => Ok(ReviewPassState::Blocked {
-            turn: turn_id(turn),
-        }),
-        ("cancelled", turn, None) => Ok(ReviewPassState::Cancelled {
+        ("cancelled", turn, None, None) => Ok(ReviewPassState::Cancelled {
             turn: turn.map(turn_id),
         }),
         _ => Err(corruption(
@@ -1988,6 +2403,7 @@ struct EncodedFindingEvent<'a> {
     kind: &'static str,
     reason: Option<&'a str>,
     referenced_finding: Option<ReviewFindingId>,
+    referenced_status: Option<ReviewFindingStatus>,
     external_link: Option<ReviewExternalLinkId>,
 }
 
@@ -1996,6 +2412,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
         kind,
         reason: None,
         referenced_finding: None,
+        referenced_status: None,
         external_link: None,
     };
     match event {
@@ -2004,18 +2421,21 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
             kind: "rejected",
             reason: Some(reason.as_str()),
             referenced_finding: None,
+            referenced_status: None,
             external_link: None,
         },
         ReviewFindingEventKind::Duplicate { canonical } => EncodedFindingEvent {
             kind: "duplicate",
             reason: None,
-            referenced_finding: Some(canonical.finding()),
+            referenced_finding: Some(canonical.reference().finding()),
+            referenced_status: Some(canonical.status()),
             external_link: None,
         },
         ReviewFindingEventKind::Superseded { successor } => EncodedFindingEvent {
             kind: "superseded",
             reason: None,
-            referenced_finding: Some(successor.finding()),
+            referenced_finding: Some(successor.reference().finding()),
+            referenced_status: Some(successor.status()),
             external_link: None,
         },
         ReviewFindingEventKind::Stale => empty("stale"),
@@ -2023,6 +2443,7 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
             kind: "posted",
             reason: None,
             referenced_finding: None,
+            referenced_status: None,
             external_link: Some(link.link()),
         },
         ReviewFindingEventKind::Fixed => empty("fixed"),
@@ -2030,8 +2451,73 @@ fn encode_finding_event(event: &ReviewFindingEventKind) -> EncodedFindingEvent<'
             kind: "blocked_with_reason",
             reason: Some(reason.as_str()),
             referenced_finding: None,
+            referenced_status: None,
             external_link: None,
         },
+    }
+}
+
+fn encode_finding_event_type(event_type: ReviewFindingEventType) -> &'static str {
+    match event_type {
+        ReviewFindingEventType::Accepted => "accepted",
+        ReviewFindingEventType::Rejected => "rejected",
+        ReviewFindingEventType::Duplicate => "duplicate",
+        ReviewFindingEventType::Superseded => "superseded",
+        ReviewFindingEventType::Stale => "stale",
+        ReviewFindingEventType::Posted => "posted",
+        ReviewFindingEventType::Fixed => "fixed",
+        ReviewFindingEventType::BlockedWithReason => "blocked_with_reason",
+    }
+}
+
+fn decode_finding_event_type(
+    event_type: &str,
+) -> Result<ReviewFindingEventType, ReviewWorkflowStoreError> {
+    match event_type {
+        "accepted" => Ok(ReviewFindingEventType::Accepted),
+        "rejected" => Ok(ReviewFindingEventType::Rejected),
+        "duplicate" => Ok(ReviewFindingEventType::Duplicate),
+        "superseded" => Ok(ReviewFindingEventType::Superseded),
+        "stale" => Ok(ReviewFindingEventType::Stale),
+        "posted" => Ok(ReviewFindingEventType::Posted),
+        "fixed" => Ok(ReviewFindingEventType::Fixed),
+        "blocked_with_reason" => Ok(ReviewFindingEventType::BlockedWithReason),
+        other => Err(corruption(
+            "review_pass",
+            format!("unknown finding-event result {other}"),
+        )),
+    }
+}
+
+fn encode_finding_status(status: ReviewFindingStatus) -> &'static str {
+    match status {
+        ReviewFindingStatus::Open => "open",
+        ReviewFindingStatus::Accepted => "accepted",
+        ReviewFindingStatus::Rejected => "rejected",
+        ReviewFindingStatus::Duplicate => "duplicate",
+        ReviewFindingStatus::Superseded => "superseded",
+        ReviewFindingStatus::Stale => "stale",
+        ReviewFindingStatus::Posted => "posted",
+        ReviewFindingStatus::Fixed => "fixed",
+        ReviewFindingStatus::BlockedWithReason => "blocked_with_reason",
+    }
+}
+
+fn decode_finding_status(status: &str) -> Result<ReviewFindingStatus, ReviewWorkflowStoreError> {
+    match status {
+        "open" => Ok(ReviewFindingStatus::Open),
+        "accepted" => Ok(ReviewFindingStatus::Accepted),
+        "rejected" => Ok(ReviewFindingStatus::Rejected),
+        "duplicate" => Ok(ReviewFindingStatus::Duplicate),
+        "superseded" => Ok(ReviewFindingStatus::Superseded),
+        "stale" => Ok(ReviewFindingStatus::Stale),
+        "posted" => Ok(ReviewFindingStatus::Posted),
+        "fixed" => Ok(ReviewFindingStatus::Fixed),
+        "blocked_with_reason" => Ok(ReviewFindingStatus::BlockedWithReason),
+        other => Err(corruption(
+            "review_finding_event",
+            format!("unknown referenced-finding status {other}"),
+        )),
     }
 }
 

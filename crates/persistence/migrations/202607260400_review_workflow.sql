@@ -201,6 +201,11 @@ CREATE TABLE review_pass (
     state_kind text NOT NULL,
     turn_id uuid,
     output_frontier_id uuid,
+    finding_event_finding_id uuid,
+    finding_event_finding_run_id uuid,
+    finding_event_finding_pass_id uuid,
+    finding_event_ordinal bigint,
+    finding_event_kind text,
 
     CONSTRAINT review_pass_ancestry_key
         UNIQUE (pass_id, run_id, target_id),
@@ -235,20 +240,82 @@ CREATE TABLE review_pass (
                 state_kind = 'queued'
                 AND turn_id IS NULL
                 AND output_frontier_id IS NULL
+                AND finding_event_finding_id IS NULL
+                AND finding_event_finding_run_id IS NULL
+                AND finding_event_finding_pass_id IS NULL
+                AND finding_event_ordinal IS NULL
+                AND finding_event_kind IS NULL
             )
             OR (
                 state_kind IN ('running', 'failed', 'blocked')
                 AND turn_id IS NOT NULL
                 AND output_frontier_id IS NULL
+                AND (
+                    (
+                        state_kind = 'blocked'
+                        AND finding_event_finding_id IS NOT NULL
+                        AND finding_event_finding_run_id IS NOT NULL
+                        AND finding_event_finding_pass_id IS NOT NULL
+                        AND finding_event_ordinal IS NOT NULL
+                        AND finding_event_kind IS NOT NULL
+                    )
+                    OR (
+                        finding_event_finding_id IS NULL
+                        AND finding_event_finding_run_id IS NULL
+                        AND finding_event_finding_pass_id IS NULL
+                        AND finding_event_ordinal IS NULL
+                        AND finding_event_kind IS NULL
+                    )
+                )
             )
             OR (
                 state_kind = 'succeeded'
                 AND turn_id IS NOT NULL
                 AND output_frontier_id IS NOT NULL
+                AND (
+                    (
+                        finding_event_finding_id IS NOT NULL
+                        AND finding_event_finding_run_id IS NOT NULL
+                        AND finding_event_finding_pass_id IS NOT NULL
+                        AND finding_event_ordinal IS NOT NULL
+                        AND finding_event_kind IS NOT NULL
+                    )
+                    OR (
+                        finding_event_finding_id IS NULL
+                        AND finding_event_finding_run_id IS NULL
+                        AND finding_event_finding_pass_id IS NULL
+                        AND finding_event_ordinal IS NULL
+                        AND finding_event_kind IS NULL
+                    )
+                )
             )
             OR (
                 state_kind = 'cancelled'
                 AND output_frontier_id IS NULL
+                AND finding_event_finding_id IS NULL
+                AND finding_event_finding_run_id IS NULL
+                AND finding_event_finding_pass_id IS NULL
+                AND finding_event_ordinal IS NULL
+                AND finding_event_kind IS NULL
+            )
+        ),
+    CONSTRAINT review_pass_finding_event_ordinal_positive_u32
+        CHECK (
+            finding_event_ordinal IS NULL
+            OR finding_event_ordinal BETWEEN 1 AND 4294967295
+        ),
+    CONSTRAINT review_pass_finding_event_kind_closed
+        CHECK (
+            finding_event_kind IS NULL
+            OR finding_event_kind IN (
+                'accepted',
+                'rejected',
+                'duplicate',
+                'superseded',
+                'stale',
+                'posted',
+                'fixed',
+                'blocked_with_reason'
             )
         ),
     CONSTRAINT review_pass_run_fk
@@ -709,6 +776,27 @@ CREATE TABLE review_finding (
 CREATE INDEX review_finding_run_index
     ON review_finding (run_id, target_id, finding_id);
 
+ALTER TABLE review_finding
+    ADD CONSTRAINT review_finding_complete_ancestry_key
+    UNIQUE (finding_id, run_id, target_id, producing_pass_id);
+
+ALTER TABLE review_pass
+    ADD CONSTRAINT review_pass_finding_event_finding_fk
+    FOREIGN KEY (
+        finding_event_finding_id,
+        finding_event_finding_run_id,
+        target_id,
+        finding_event_finding_pass_id
+    )
+    REFERENCES review_finding (
+        finding_id,
+        run_id,
+        target_id,
+        producing_pass_id
+    )
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT;
+
 CREATE FUNCTION guard_review_finding_insert()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -855,8 +943,8 @@ CREATE TABLE review_external_link_attachment (
 
     CONSTRAINT review_external_link_attachment_target_key
         UNIQUE (external_link_id, target_id),
-    CONSTRAINT review_external_object_identity_unique
-        UNIQUE (provider_key, object_kind, external_object_key),
+    CONSTRAINT review_external_object_identity_per_target_unique
+        UNIQUE (target_id, provider_key, object_kind, external_object_key),
     CONSTRAINT review_external_link_attachment_object_bound
         CHECK (octet_length(external_object_key) BETWEEN 1 AND 1024),
     CONSTRAINT review_external_link_attachment_reservation_fk
@@ -926,6 +1014,7 @@ CREATE TABLE review_finding_event (
     event_kind text NOT NULL,
     reason text,
     referenced_finding_id uuid,
+    referenced_finding_status text,
     external_link_id uuid,
     external_link_association_kind text,
 
@@ -954,6 +1043,7 @@ CREATE TABLE review_finding_event (
                 event_kind IN ('accepted', 'stale', 'fixed')
                 AND reason IS NULL
                 AND referenced_finding_id IS NULL
+                AND referenced_finding_status IS NULL
                 AND external_link_id IS NULL
                 AND external_link_association_kind IS NULL
             )
@@ -962,6 +1052,7 @@ CREATE TABLE review_finding_event (
                 AND reason IS NOT NULL
                 AND octet_length(reason) BETWEEN 1 AND 65536
                 AND referenced_finding_id IS NULL
+                AND referenced_finding_status IS NULL
                 AND external_link_id IS NULL
                 AND external_link_association_kind IS NULL
             )
@@ -969,6 +1060,7 @@ CREATE TABLE review_finding_event (
                 event_kind IN ('duplicate', 'superseded')
                 AND reason IS NULL
                 AND referenced_finding_id IS NOT NULL
+                AND referenced_finding_status IN ('open', 'accepted')
                 AND referenced_finding_id <> finding_id
                 AND external_link_id IS NULL
                 AND external_link_association_kind IS NULL
@@ -977,6 +1069,7 @@ CREATE TABLE review_finding_event (
                 event_kind = 'posted'
                 AND reason IS NULL
                 AND referenced_finding_id IS NULL
+                AND referenced_finding_status IS NULL
                 AND external_link_id IS NOT NULL
                 AND external_link_association_kind = 'finding'
             )
@@ -1043,6 +1136,9 @@ AS $$
 DECLARE
     event_pass_kind text;
     event_pass_state text;
+    event_pass_result_finding uuid;
+    event_pass_result_ordinal bigint;
+    event_pass_result_kind text;
     event_policy_version bigint;
     event_judge_confidence integer;
     event_publication_confidence integer;
@@ -1052,6 +1148,7 @@ DECLARE
     previous_kind text;
     previous_pass_kind text;
     previous_status text;
+    referenced_status text;
     expected_ordinal bigint;
 BEGIN
     SELECT producing_run.policy_version,
@@ -1068,10 +1165,16 @@ BEGIN
      FOR NO KEY UPDATE OF finding;
 
     SELECT pass.pass_kind, pass.state_kind,
+           pass.finding_event_finding_id,
+           pass.finding_event_ordinal,
+           pass.finding_event_kind,
            event_run.policy_version,
            event_run.minimum_judge_confidence,
            event_run.minimum_publication_confidence
       INTO event_pass_kind, event_pass_state,
+           event_pass_result_finding,
+           event_pass_result_ordinal,
+           event_pass_result_kind,
            event_policy_version,
            event_judge_confidence,
            event_publication_confidence
@@ -1142,6 +1245,15 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF event_pass_result_finding IS DISTINCT FROM NEW.finding_id
+       OR event_pass_result_ordinal IS DISTINCT FROM NEW.event_ordinal
+       OR event_pass_result_kind IS DISTINCT FROM NEW.event_kind
+    THEN
+        RAISE EXCEPTION
+            'finding event is not the exact result committed by its pass'
+            USING ERRCODE = '23514';
+    END IF;
+
     SELECT event.event_kind, pass.pass_kind
       INTO previous_kind, previous_pass_kind
       FROM review_finding_event AS event
@@ -1164,6 +1276,43 @@ BEGIN
             NEW.event_ordinal,
             expected_ordinal
             USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.referenced_finding_id IS NOT NULL THEN
+        SELECT CASE latest.event_kind
+                   WHEN 'accepted' THEN 'accepted'
+                   WHEN 'rejected' THEN 'rejected'
+                   WHEN 'duplicate' THEN 'duplicate'
+                   WHEN 'superseded' THEN 'superseded'
+                   WHEN 'stale' THEN 'stale'
+                   WHEN 'posted' THEN 'posted'
+                   WHEN 'fixed' THEN 'fixed'
+                   WHEN 'blocked_with_reason' THEN 'blocked_with_reason'
+                   ELSE 'open'
+               END
+          INTO referenced_status
+          FROM review_finding AS referenced
+          LEFT JOIN LATERAL (
+              SELECT event_kind
+                FROM review_finding_event
+               WHERE finding_id = referenced.finding_id
+               ORDER BY event_ordinal DESC
+               LIMIT 1
+          ) AS latest ON true
+         WHERE referenced.finding_id = NEW.referenced_finding_id
+           AND referenced.run_id = NEW.finding_run_id
+           AND referenced.target_id = NEW.target_id
+         FOR NO KEY UPDATE OF referenced;
+
+        IF referenced_status NOT IN ('open', 'accepted')
+           OR NEW.referenced_finding_status
+                IS DISTINCT FROM referenced_status
+        THEN
+            RAISE EXCEPTION
+                'referenced finding status % is not eligible or authenticated',
+                referenced_status
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     previous_status := CASE previous_kind
