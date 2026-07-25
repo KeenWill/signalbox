@@ -10,6 +10,99 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Stage creation-derived visibility behind attributed creation
+
+**Status.** Proposed foundation decision; owner acceptance is the merge of this
+specification diff together with its implementing stack. This stack implements
+only the current all-non-archived default view.
+
+**Context.** Session visibility must eventually keep automation-created work out
+of the interactive default view without introducing a parallel session-kind
+taxonomy. Only `OwnerInitiated` creation is constructible today, and
+`CreateSession` carries no actor, so neither future automation cause nor its
+authority can be truthfully derived yet.
+
+**Decision.** Before another creation cause becomes constructible, add actor
+attribution to every creation command and make the cause derive from its
+authorized creation boundary. The eventual default interactive view derives from
+owner-initiated cause plus not-archived state. Admit one nullable creation-time
+override, settable only by `Actor::Owner`, for explicit inclusion or exclusion;
+monitor projections ignore that interactive-view selection. Until that
+dependency lands, store no visibility taxonomy or override and define the
+default view as every non-archived session.
+
+**Rejected alternatives.** A mutable visibility enum duplicates derivable
+provenance and can drift from it. Inferring owner agency from the only current
+cause launders a missing command fact. Letting model, tool, or recovery actors
+set the exception grants organizational authority that actor attribution alone
+does not carry.
+
+**Affects.** The current metadata list contract in
+[sessions-and-transcript](spec/sessions-and-transcript.md); future creation
+commands, creation causes, automation entry points, and the default-view
+override remain blocked on this proposal's owner acceptance and later
+implementation.
+
+## 2026-07-25 — Add session-metadata protocol version four
+
+**Status.** Proposed foundation decision; owner acceptance is the merge of this
+specification diff together with its implementing stack.
+
+**Context.** Process-protocol versions one through three are closed, and their
+`list_sessions` summaries have no metadata, filtering, or pagination. The
+metadata slice needs list, read, and durable replacement frames without changing
+the wire language an existing client already admitted.
+
+**Decision.** Add typed `ProtocolVersion::Four`. Retain every version-one
+through version-three request and message shape unchanged. Version four adds
+distinct `list_session_metadata`, `read_session_metadata`, and
+`replace_session_metadata` requests plus their response families. Client-frame
+validation rejects those requests under older typed versions, and server-frame
+validation rejects their messages likewise. The current terminal client remains
+on version three; this slice supplies the core wire and hub adapter, not new
+terminal UX.
+
+**Rejected alternatives.** Adding fields to `list_sessions` changes a closed
+shape in place. Reinterpreting version three weakens captured-frame meaning.
+Moving metadata into untyped JSON extensions defeats the protocol's exhaustive
+validation. Advancing the terminal client without a commissioned interaction
+design expands this core slice.
+
+**Affects.** [process-protocol](spec/process-protocol.md),
+`crates/process-protocol`, `apps/hubd`, and process-protocol integration tests.
+
+## 2026-07-25 — Store replaceable session metadata as satellites
+
+**Status.** Proposed foundation decision; owner acceptance is the merge of this
+specification diff together with its implementing stack.
+
+**Context.** Titles, tags, attributes, and archive state organize sessions but
+do not change conversational identity, provenance, defaults, transcript, or
+lifecycle. A single-owner deployment needs truthful retry behavior and
+last-writer attribution, but the commissioned scope explicitly rejects aggregate
+versioning and full edit history.
+
+**Decision.** Represent metadata as one complete replaceable snapshot outside
+the `Session` aggregate: optional exact title, exact flat tag set, exact
+string-to-string attribute map, and archive boolean. Persist a mutable root plus
+normalized tag and attribute satellites only after the first write; absence
+means the empty, non-archived snapshot with no last writer. A durable
+`ReplaceSessionMetadata` command atomically replaces the whole snapshot and
+records PostgreSQL transaction time (microsecond precision) plus its actor.
+Equal replay returns that recorded stamp. Archive is view-only: it neither
+cancels work nor cascades, and restore only clears the flag.
+
+**Rejected alternatives.** Adding fields to `Session` makes organizational state
+part of the conversational aggregate. Per-field patch commands complicate replay
+and attribution without a commissioned merge policy. Compare-and-set versioning
+contradicts the accepted last-writer posture. Treating archive as a lifecycle
+transition silently abandons or moves work.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[identity-and-commands](spec/identity-and-commands.md), migration
+`202607260101`, the domain/application metadata boundary, persistence adapters,
+and version-four process frames.
+
 ## 2026-07-25 — Share immutable context-frontier prefixes
 
 **Context.** Complete membership rows and independently materialized domain

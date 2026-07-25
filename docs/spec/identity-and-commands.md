@@ -65,9 +65,9 @@ records (INV-001, INV-004).
 The nil and max UUIDs are rejected as `DurableCommandId` values at two
 boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
-`ReplaceSessionDefaultsRequest`, and `SubmitInputRequest` in
-`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
-persistence decoding (`durable_command_id_from_uuid` in
+`ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`, and
+`SubmitInputRequest` in `crates/application`, plus `DecideToolRequest` in
+`crates/domain`) and persistence decoding (`durable_command_id_from_uuid` in
 `crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
 command can reach a transaction and claims no identifier. Why: sentinel-like
 values are common accidental defaults and would otherwise become permanent
@@ -162,25 +162,25 @@ All claimed command identifiers live in one owner-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`submit_input`, `decide_tool_request`), a kind-scoped `storage_version`, and
-`claimed_at` (`transaction_timestamp()`), which is non-semantic operational
-metadata. No command kind, session, or client has a separate command-ID
-namespace.
+`replace_session_metadata`, `submit_input`, `decide_tool_request`), a
+kind-scoped `storage_version`, and `claimed_at` (`transaction_timestamp()`),
+which is non-semantic operational metadata. No command kind, session, or client
+has a separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
-`replace_session_defaults_command`, `submit_input_command`,
-`decide_tool_request_command`) keyed one-to-one by `command_id`, storing every
-caller-supplied semantic field, the terminal `applied`/`rejected` result
-discriminator, and the typed result fields, all under `CHECK` constraints and
-foreign keys. Kind and version agreement between the registry row and its typed
-record is enforced by a composite foreign key, and a deferred constraint trigger
-(`durable_command_requires_typed_record`, executing function
-`require_durable_command_typed_record`) requires exactly one typed record per
-claim at every transaction boundary. Why: typed relational records keep each
-command's comparison payload and result reviewable and constraint-checked
-instead of delegating meaning to a serializer; there is no universal JSONB or
-byte-blob payload anywhere.
+`replace_session_defaults_command`, `replace_session_metadata_command`,
+`submit_input_command`, `decide_tool_request_command`) keyed one-to-one by
+`command_id`, storing every caller-supplied semantic field, the terminal
+`applied`/`rejected` result discriminator, and the typed result fields, all
+under `CHECK` constraints and foreign keys. Kind and version agreement between
+the registry row and its typed record is enforced by a composite foreign key,
+and a deferred constraint trigger (`durable_command_requires_typed_record`,
+executing function `require_durable_command_typed_record`) requires exactly one
+typed record per claim at every transaction boundary. Why: typed relational
+records keep each command's comparison payload and result reviewable and
+constraint-checked instead of delegating meaning to a serializer; there is no
+universal JSONB or byte-blob payload anywhere.
 
 For `SubmitInput`, a second deferred constraint trigger
 (`submit_input_command_requires_correlated_effect`, migration `202607180003`,
@@ -215,15 +215,16 @@ from recorded domain rejection.
 
 New `CreateSession`, `CreateSessionFromImportedFrontier`, and
 `ReplaceSessionDefaults` records use version 2 for the complete defaults value;
-version 1 reconstitutes with dangerous blanket approval disabled. `SubmitInput`
-and `DecideToolRequest` use version 1. `CreateSession` records applied results
-only (its one preparation failure is an error, not a recorded rejection);
-`CreateSessionFromImportedFrontier` also records applied results only, because a
-missing conversation named by the frontier or a boundary absent from that
-conversation is a pre-claim admission error rather than an authoritative
-rejection; `ReplaceSessionDefaults` and `SubmitInput` and `DecideToolRequest`
-record both applied results and closed, typed rejection discriminators.
-Authoritative rejections claim the identifier exactly as applied results do.
+version 1 reconstitutes with dangerous blanket approval disabled.
+`ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` use version 1.
+`CreateSession` records applied results only (its one preparation failure is an
+error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
+records applied results only, because a missing conversation named by the
+frontier or a boundary absent from that conversation is a pre-claim admission
+error rather than an authoritative rejection; `ReplaceSessionDefaults`,
+`ReplaceSessionMetadata`, `SubmitInput`, and `DecideToolRequest` record both
+applied results and closed, typed rejection discriminators. Authoritative
+rejections claim the identifier exactly as applied results do.
 
 ## Replay and equality
 
@@ -231,15 +232,16 @@ The canonical command payload is the typed domain value constructed at the
 boundary before registry lookup — not a serialization. Structural equality
 (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
-and `DecideToolRequest` in `crates/domain`) covers every caller-supplied
-semantic field and excludes `DurableCommandId`. Why: the identifier is the
-lookup key that names the payload, not part of the meaning it names.
+`ReplaceSessionMetadata`, and `DecideToolRequest` in `crates/domain`) covers
+every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
+identifier is the lookup key that names the payload, not part of the meaning it
+names.
 
 Every command repository (`crates/persistence/src/create_session.rs`,
 `create_session_from_imported_frontier.rs`, `replace_session_defaults.rs`,
-`submit_input.rs`, and the decision path in `tool_loop.rs`) follows one claim
-protocol, with registry lookup as the first durable operation, before any
-current-state validation (INV-012):
+`session_metadata.rs`, `submit_input.rs`, and the decision path in
+`tool_loop.rs`) follows one claim protocol, with registry lookup as the first
+durable operation, before any current-state validation (INV-012):
 
 1. Inspect the registry. If the identifier is claimed by the same kind, load and
    reconstruct the recorded typed payload and result through domain-owned
@@ -274,7 +276,7 @@ surfaces infrastructure failure to its caller without retry or receipt
 reconstruction (the `CreateSessionTransaction` contract in
 `crates/application/src/create_session.rs`, the
 `CreateSessionFromImportedFrontierTransaction` contract, and the corresponding
-transaction-failure tests in all five services, including
+transaction-failure tests in all six services, including
 `decide_service_returns_transaction_failure_without_retry`). Because a failed
 transaction claims no identifier, retransmitting under the same
 `DurableCommandId` is the caller's retry path and replays or claims cleanly.

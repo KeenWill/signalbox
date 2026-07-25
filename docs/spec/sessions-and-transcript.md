@@ -2,11 +2,11 @@
 
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
-their replacement, the long-lived session aggregate, semantic transcript
-entries, accepted-input user content, and actor attribution. The
-imported-conversation record and converter are owned by
-[conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+their replacement, replaceable organizational metadata and listing, the
+long-lived session aggregate, semantic transcript entries, accepted-input user
+content, and actor attribution. The imported-conversation record and converter
+are owned by [conversation-import](conversation-import.md). Where a law is cited
+as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
 mechanics owned by another decision are summarized, the owning sibling page is
 linked inline.
 
@@ -241,6 +241,83 @@ A supplied session that does not match the command target is a nonterminal
 preparation error, not a recorded rejection. Application orchestration
 constructs the canonical command once and calls its atomic port exactly once,
 with no preload and no retry.
+
+## Session metadata and list projection
+
+Session metadata is a purpose-specific satellite snapshot, not part of the
+long-lived `Session` aggregate (INV-005). It contains exactly:
+
+- an optional title. A present title is nonempty exact Unicode text;
+- a flat set of nonempty exact Unicode tags;
+- a map from nonempty exact Unicode keys to exact Unicode values, including the
+  empty value; and
+- one archive boolean.
+
+Every string rejects U+0000, which PostgreSQL text cannot store. No string is
+trimmed, normalized, or case-folded. Set and map equality is independent of
+caller order; duplicate tags or attribute keys fail construction rather than
+silently selecting a winner. Tags are human-facing organization and attributes
+are machine-facing provenance; neither shape substitutes for the other.
+
+The root `session_metadata` row and normalized
+`session_metadata_tag`/`session_metadata_attribute` rows (migration
+`202607260101_session_metadata.sql`) exist only after the first metadata write.
+Their absence is the canonical initial projection: no title, no tags or
+attributes, not archived, and no last-writer stamp. Creation therefore does not
+fabricate an actor that its command does not carry.
+
+`ReplaceSessionMetadata` carries durable command identity, target session,
+actor, and one complete replacement snapshot. Its replay equality covers every
+field except command identity (INV-012). The implemented application request
+fixes `Actor::Owner`; non-owner metadata writers are not constructible through
+the process boundary. First handling locks the target session, then either
+records `SessionNotFound` without an effect or atomically replaces the complete
+root, tag, and attribute snapshot. The applied result records the transaction's
+PostgreSQL timestamp at microsecond precision together with the command actor as
+the one last-writer stamp. An equal replay returns that exact recorded result
+and timestamp. The database timestamp is result evidence, not caller intent, so
+it does not participate in command equality.
+
+There is deliberately no expected or installed metadata version and no edit
+history. Two distinct writes are last-writer-wins after serialization on the
+session row; a full replacement can overwrite an earlier writer's unrelated
+field. Callers that need to preserve fields read the current snapshot before
+forming the replacement. Durable command replay prevents an ambiguous retry from
+becoming a second logical write, but it does not provide optimistic concurrency.
+
+Archive is organizational visibility state only. Archiving never cancels,
+pauses, rejects, or rewrites accepted, queued, active, or terminal work and
+never cascades to descendants or otherwise related sessions. Restore is the same
+replacement operation with `archived = false`; it has no lifecycle target to
+reconstruct. Destructive retention remains a separate open question.
+
+The paginated list projection joins current defaults with metadata but does not
+reconstitute the `Session` aggregate. Each result carries session identity,
+current defaults, title, tags, archive state, and optional last-writer stamp;
+attributes remain available through the single-session metadata read. A query
+has an exact tag set, optional exact case-sensitive title substring,
+`include_archived`, a page size from 1 through 100, and an exclusive
+`after_session_id` cursor:
+
+- every requested tag must exist (AND-match); an empty set matches all;
+- a title query matches only a present title containing that exact scalar
+  sequence;
+- archived sessions are excluded when `include_archived` is false, which is the
+  default view, and included when it is true; and
+- matching rows are ordered by `SessionId` UUID value.
+
+One read-only repeatable-read transaction selects each page and fetches at most
+one extra identity to determine whether another page exists. When it does, the
+next cursor is the last emitted session identity. A later page is a new
+snapshot: pagination guarantees deterministic keyset traversal, not a cross-page
+snapshot under concurrent creation or replacement.
+
+Because `OwnerInitiated` is the only constructible creation cause and every
+current session-creation boundary lacks actor attribution, the implemented
+default view is exactly all non-archived sessions. No visibility taxonomy,
+creation-time override, or inference from missing attribution is stored. The
+dependency for future creation-derived visibility is recorded in
+[open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 ## The session aggregate
 
@@ -480,10 +557,13 @@ only — not authentication, authorization, or approval — and model agency can
 never compare equal to owner agency (INV-020).
 
 The session-command consequences: `SubmitInput` is the only command payload
-carrying an actor, and its constructor fixes `Actor::Owner`, so no non-owner
-agency can claim a command through this boundary; domain reconstitution compares
-the stored actor against the canonical command and fails closed on mismatch
-(`StoredActorMismatch`).
+carrying an actor inside the conversational command surface, and its constructor
+fixes `Actor::Owner`, so no non-owner agency can claim a command through this
+boundary; domain reconstitution compares the stored actor against the canonical
+command and fails closed on mismatch (`StoredActorMismatch`).
+`ReplaceSessionMetadata` independently carries the actor for its organizational
+last-writer stamp and likewise fixes `Actor::Owner` at its implemented
+application boundary.
 
 Why (seeded while constant): `Owner` is currently the only truthful issuer, so
 seeding the field now preserves a truthful backfill; retrofitting after several
@@ -516,6 +596,9 @@ open edges of [model-call-execution](model-call-execution.md).
 - Multi-source ancestry and transcript merge remain future decision scope, and
   retention when an ancestry source is destructively deleted is undecided; both
   are recorded in [open-questions.md](../open-questions.md).
+- Creation-attributed default visibility, richer metadata filters, and
+  destructive retention remain cataloged under
+  [Session organization, visibility, and retention](../open-questions.md#session-organization-visibility-and-retention).
 - The static eligible-failure path (terminalize at eligibility without an
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
