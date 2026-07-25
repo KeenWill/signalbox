@@ -287,6 +287,32 @@ final class SignalboxNativeTests: XCTestCase {
         viewModel.disconnectStream()
     }
 
+    func testLoadAndConnectRecoversFromInitialHistoryFailure() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(
+            fixture: fixture,
+            historyFailureCount: StreamHelloHistoryReuseFixture.initialHistoryFailureCount
+        )
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await loadTask.value
+
+        XCTAssertEqual(viewModel.events, fixture.historyEvents)
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedRecoveryListEventsCallCount
+        )
+        XCTAssertNil(viewModel.errorMessage)
+        viewModel.disconnectStream()
+    }
+
     func testWebSocketStreamAcknowledgesHeartbeatBeforeYieldingNextFrame() async throws {
         let heartbeatSentAt = "2026-05-10T12:00:00Z"
         let expectedSentAt = try SignalboxJSONCoding.decoder().decode(
@@ -892,6 +918,12 @@ private struct StreamHelloHistoryReuseFixture {
     /// Loading history once and then applying hello must not fetch it again.
     static let expectedListEventsCallCount = 1
 
+    /// One failed synchronized load plus one fallback load.
+    static let expectedRecoveryListEventsCallCount = 2
+
+    /// The recovery fixture fails only its first history request.
+    static let initialHistoryFailureCount = 1
+
     /// A local actor handoff should comfortably complete within this bound.
     static let observationTimeout: TimeInterval = 1
 
@@ -1072,17 +1104,25 @@ private enum StubSignalboxWebSocketTransportError: Error {
 private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol, @unchecked Sendable {
     /// This service intentionally models no artifacts on either load.
     private static let noArtifacts: [SignalboxArtifact] = []
+    private static let historySynchronizationFailure = SignalboxClientError.requestFailed(
+        "Controlled initial history failure"
+    )
 
     private let fixture: StreamHelloHistoryReuseFixture
     private let lock = NSLock()
     private var lockedListEventsCallCount = 0
+    private var lockedHistoryFailuresRemaining: Int
     private var listEventsContinuation: CheckedContinuation<[SignalboxStoredEvent], Never>?
     private var listEventsInvocationWaiters: [CheckedContinuation<Void, Never>] = []
     private var streamContinuation: AsyncThrowingStream<SignalboxServerMessage, Error>.Continuation?
     private var streamInvocationWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(fixture: StreamHelloHistoryReuseFixture) {
+    init(
+        fixture: StreamHelloHistoryReuseFixture,
+        historyFailureCount: Int = 0
+    ) {
         self.fixture = fixture
+        self.lockedHistoryFailuresRemaining = historyFailureCount
     }
 
     var listEventsCallCount: Int {
@@ -1181,9 +1221,19 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         throw unexpectedCall()
     }
     func listEvents(sessionID: SignalboxSessionID) async throws -> [SignalboxStoredEvent] {
-        await withCheckedContinuation { continuation in
-            lock.lock()
+        let shouldFail = lock.withLock {
             lockedListEventsCallCount += 1
+            if lockedHistoryFailuresRemaining > 0 {
+                lockedHistoryFailuresRemaining -= 1
+                return true
+            }
+            return false
+        }
+        if shouldFail {
+            throw Self.historySynchronizationFailure
+        }
+        return await withCheckedContinuation { continuation in
+            lock.lock()
             precondition(
                 listEventsContinuation == nil,
                 "History load is already pending"
