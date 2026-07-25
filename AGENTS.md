@@ -69,16 +69,20 @@ one finished and awaiting owner merge:
   review land, push the fixes for its accepted findings, then complete its
   disposition (replies naming the pushed fixing commits) before requesting the
   next wave against the new head. A pull request whose diff touches only files
-  that open with the non-authoritative-planning banner (for example
-  [`docs/agents/backlog.md`](docs/agents/backlog.md)) gets no review request at
-  all: those files decide nothing and are reviewed for nothing.
+  that already opened with the non-authoritative-planning banner on its base
+  branch (for example [`docs/agents/backlog.md`](docs/agents/backlog.md)), or
+  that it adds as new files opening with that banner, gets no review request at
+  all: those files decide nothing and are reviewed for nothing. Stamping the
+  banner onto a file that already existed without one is a reclassification, not
+  an exemption — that pull request is requested and reviewed like any other.
 - Before the first review request, run the pre-push self-review checklist over
   the pull request's own diff — the first-wave findings agents can catch
   themselves:
-  - grep the diff's own test bodies — under `#[test]`, `#[tokio::test]`, or any
-    other test attribute — for `for`/`while` loops and `if`/`match`
-    conditionals, and unroll or split them per `docs/agents/testing-style.md`
-    rule 2 before pushing;
+  - grep the whole body of every test the diff adds or modifies — under
+    `#[test]`, `#[tokio::test]`, or any other test attribute, including the
+    lines the diff itself leaves untouched — for `for`/`while` loops and
+    `if`/`match` conditionals, and unroll or split them per
+    `docs/agents/testing-style.md` rule 2 before pushing;
   - confirm each added assertion compares against a fixture accessor, not a
     literal re-encoding a value the fixture already states (rule 6);
   - confirm every new INV-tagged test is bound from the enforcement column of
@@ -86,7 +90,11 @@ one finished and awaiting owner merge:
     tag (rule 17), so add a citation in the same diff only when the test's file
     is not already cited for that tag;
   - re-verify any count or inventory the diff states against the current head;
-  - bump the touched `docs/spec/` page's verified-against-ref line.
+  - when the diff changes what a `docs/spec/` page states as implemented
+    behavior, re-verify that behavior against the head and advance the page's
+    verified-against-ref line; a wording, link, or formatting edit that changes
+    no stated behavior leaves the reference alone, since the reference records
+    verification against code and not the fact of an edit.
 - External reviews are re-requested after a change that could alter what a
   reviewer already approved — code, tests, normative documentation or
   specifications, contract-bearing comments, or claims in the description — not
