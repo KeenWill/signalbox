@@ -330,6 +330,123 @@ CREATE TABLE replace_session_metadata_command_attribute (
         CHECK (octet_length(convert_to(attribute_key, 'UTF8')) <= 1024)
 );
 
+CREATE TABLE session_metadata_installation (
+    session_id uuid NOT NULL,
+    source_command_id uuid NOT NULL,
+
+    CONSTRAINT session_metadata_installation_pk
+        PRIMARY KEY (session_id, source_command_id),
+    CONSTRAINT session_metadata_installation_receipt_fk
+        FOREIGN KEY (source_command_id, session_id)
+        REFERENCES replace_session_metadata_command (
+            command_id,
+            result_applied_session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+ALTER TABLE session_metadata
+    ADD CONSTRAINT session_metadata_current_installation_fk
+        FOREIGN KEY (session_id, source_command_id)
+        REFERENCES session_metadata_installation (
+            session_id,
+            source_command_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE replace_session_metadata_command
+    ADD CONSTRAINT replace_session_metadata_command_installation_fk
+        FOREIGN KEY (result_applied_session_id, command_id)
+        REFERENCES session_metadata_installation (
+            session_id,
+            source_command_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION require_session_metadata_installation_is_current()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM session_metadata
+         WHERE session_id = NEW.session_id
+           AND source_command_id = NEW.source_command_id
+    ) THEN
+        RAISE EXCEPTION
+            'session metadata installation is not current for session %',
+            NEW.session_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_metadata_installation_requires_current
+BEFORE INSERT ON session_metadata_installation
+FOR EACH ROW
+EXECUTE FUNCTION require_session_metadata_installation_is_current();
+
+CREATE FUNCTION record_session_metadata_installation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'UPDATE'
+       AND NEW.source_command_id IS NOT DISTINCT FROM OLD.source_command_id
+    THEN
+        RETURN NEW;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM session_metadata_installation
+         WHERE session_id = NEW.session_id
+           AND source_command_id = NEW.source_command_id
+    ) THEN
+        RAISE EXCEPTION
+            'session metadata receipt % was already installed for session %',
+            NEW.source_command_id,
+            NEW.session_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    INSERT INTO session_metadata_installation (
+        session_id,
+        source_command_id
+    )
+    VALUES (
+        NEW.session_id,
+        NEW.source_command_id
+    );
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_metadata_insert_records_installation
+AFTER INSERT ON session_metadata
+FOR EACH ROW
+EXECUTE FUNCTION record_session_metadata_installation();
+
+CREATE TRIGGER session_metadata_update_records_installation
+AFTER UPDATE OF source_command_id ON session_metadata
+FOR EACH ROW
+EXECUTE FUNCTION record_session_metadata_installation();
+
+CREATE TRIGGER session_metadata_installation_is_append_only
+BEFORE UPDATE OR DELETE ON session_metadata_installation
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER session_metadata_tag_update_is_rejected
 BEFORE UPDATE ON session_metadata_tag
 FOR EACH ROW
@@ -527,6 +644,11 @@ EXECUTE FUNCTION reject_session_metadata_table_truncate();
 
 CREATE TRIGGER session_metadata_attribute_truncate_is_rejected
 BEFORE TRUNCATE ON session_metadata_attribute
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_session_metadata_table_truncate();
+
+CREATE TRIGGER session_metadata_installation_truncate_is_rejected
+BEFORE TRUNCATE ON session_metadata_installation
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_session_metadata_table_truncate();
 

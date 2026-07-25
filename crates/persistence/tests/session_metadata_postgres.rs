@@ -265,6 +265,54 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
     Ok(())
 }
 
+/// INV-012: the maximum admitted tag and attribute sets are retained exactly in
+/// both the current snapshot and its immutable receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_maximum_metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let tags = (0..SessionMetadataContent::MAX_TAGS)
+        .map(|index| format!("tag-{index:03}"))
+        .collect::<Vec<_>>();
+    let attributes = (0..SessionMetadataContent::MAX_ATTRIBUTES)
+        .map(|index| (format!("key-{index:03}"), format!("value-{index:03}")))
+        .collect::<Vec<_>>();
+    let content =
+        SessionMetadataContent::try_new(Some(String::from("maximum")), tags, attributes, false)
+            .expect("the exact metadata member bounds are valid");
+    let command = replacement(0x902, 0x701, content.clone());
+
+    assert!(matches!(
+        repository.handle(command.clone()).await?,
+        ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(_))
+    ));
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x701))
+            .await?
+            .expect("the written session exists")
+            .content(),
+        &content
+    );
+    assert_eq!(
+        repository
+            .load_command(command.command_id())
+            .await?
+            .expect("the replacement receipt exists")
+            .command()
+            .replacement(),
+        &content
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-012: a blocked writer samples one post-lock statement timestamp and
 /// records that exact value in both current state and its durable receipt.
 #[tokio::test(flavor = "multi_thread")]
@@ -531,6 +579,95 @@ async fn inv012_concurrent_replacements_serialize_and_replay() -> Result<(), Box
         repository.handle(right).await?,
         ReplaceSessionMetadataHandlingOutcome::Recorded(_)
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: append-only installation evidence prevents an earlier applied
+/// receipt from becoming current for the same session a second time.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0x905,
+            0x701,
+            metadata(Some("first"), &[], &[], false),
+        ))
+        .await?;
+    let current = metadata(Some("second"), &[], &[], false);
+    repository
+        .handle(replacement(0x906, 0x701, current.clone()))
+        .await?;
+
+    let reinstallation = sqlx::query(
+        "UPDATE session_metadata AS current
+            SET source_command_id = receipt.command_id,
+                title = receipt.replacement_title,
+                archived = receipt.replacement_archived,
+                updated_at = receipt.result_updated_at,
+                actor_kind = receipt.result_actor_kind,
+                actor_turn_id = receipt.result_actor_turn_id,
+                actor_tool_request_id = receipt.result_actor_tool_request_id
+           FROM replace_session_metadata_command AS receipt
+          WHERE current.session_id = $1
+            AND receipt.command_id = $2",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .bind(Uuid::from_u128(0x905))
+    .execute(&pool)
+    .await
+    .expect_err("an earlier applied receipt cannot become current again");
+    assert_check_violation(&reinstallation);
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x701))
+            .await?
+            .expect("the session remains readable")
+            .content(),
+        &current
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: deleting installation evidence cannot reopen an applied receipt for
+/// a second physical installation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_metadata_installation_evidence_rejects_delete() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    SessionMetadataRepository::new(pool.clone())
+        .handle(replacement(
+            0x905,
+            0x701,
+            metadata(Some("retained"), &[], &[], false),
+        ))
+        .await?;
+
+    let deletion = sqlx::query(
+        "DELETE FROM session_metadata_installation
+          WHERE session_id = $1
+            AND source_command_id = $2",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .bind(Uuid::from_u128(0x905))
+    .execute(&pool)
+    .await
+    .expect_err("metadata installation evidence is append-only");
+    assert_check_violation(&deletion);
 
     pool.close().await;
     drop(container);
@@ -1034,6 +1171,12 @@ async fn inv005_metadata_tables_reject_truncate() -> Result<(), Box<dyn Error>> 
         .await
         .expect_err("current metadata attributes are not truncatable");
     assert_check_violation(&current_attributes);
+
+    let installations = sqlx::query("TRUNCATE session_metadata_installation CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("metadata installation evidence is not truncatable");
+    assert_check_violation(&installations);
 
     let receipt_parent = sqlx::query("TRUNCATE replace_session_metadata_command CASCADE")
         .execute(&pool)

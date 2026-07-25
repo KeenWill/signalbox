@@ -676,30 +676,38 @@ async fn replace_current_snapshot(
         .bind(session_id_to_uuid(command.session()))
         .execute(&mut *connection)
         .await?;
-    for tag in command.replacement().tags() {
-        sqlx::query("INSERT INTO session_metadata_tag (session_id, tag) VALUES ($1, $2)")
-            .bind(session_id_to_uuid(command.session()))
-            .bind(tag)
-            .execute(&mut *connection)
-            .await?;
-    }
+    let tags: Vec<String> = command.replacement().tags().map(str::to_owned).collect();
+    sqlx::query(
+        "INSERT INTO session_metadata_tag (session_id, tag)
+         SELECT $1, supplied.tag
+           FROM UNNEST($2::text[]) AS supplied(tag)",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .bind(tags)
+    .execute(&mut *connection)
+    .await?;
 
     sqlx::query("DELETE FROM session_metadata_attribute WHERE session_id = $1")
         .bind(session_id_to_uuid(command.session()))
         .execute(&mut *connection)
         .await?;
-    for (key, value) in command.replacement().attributes() {
-        sqlx::query(
-            "INSERT INTO session_metadata_attribute
-                (session_id, attribute_key, attribute_value)
-             VALUES ($1, $2, $3)",
-        )
-        .bind(session_id_to_uuid(command.session()))
-        .bind(key)
-        .bind(value)
-        .execute(&mut *connection)
-        .await?;
-    }
+    let (attribute_keys, attribute_values): (Vec<String>, Vec<String>) = command
+        .replacement()
+        .attributes()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .unzip();
+    sqlx::query(
+        "INSERT INTO session_metadata_attribute
+            (session_id, attribute_key, attribute_value)
+         SELECT $1, supplied.attribute_key, supplied.attribute_value
+           FROM UNNEST($2::text[], $3::text[])
+             AS supplied(attribute_key, attribute_value)",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .bind(attribute_keys)
+    .bind(attribute_values)
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -718,28 +726,33 @@ async fn insert_typed_record(
     };
     // Deferred child foreign keys allow the satellites to precede the parent;
     // inserting the immutable parent last seals the complete receipt.
-    for tag in command.replacement().tags() {
-        sqlx::query(
-            "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
-             VALUES ($1, $2)",
-        )
-        .bind(durable_command_id_to_uuid(command.command_id()))
-        .bind(tag)
-        .execute(&mut *connection)
-        .await?;
-    }
-    for (key, value) in command.replacement().attributes() {
-        sqlx::query(
-            "INSERT INTO replace_session_metadata_command_attribute
-                (command_id, attribute_key, attribute_value)
-             VALUES ($1, $2, $3)",
-        )
-        .bind(durable_command_id_to_uuid(command.command_id()))
-        .bind(key)
-        .bind(value)
-        .execute(&mut *connection)
-        .await?;
-    }
+    let tags: Vec<String> = command.replacement().tags().map(str::to_owned).collect();
+    sqlx::query(
+        "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
+         SELECT $1, supplied.tag
+           FROM UNNEST($2::text[]) AS supplied(tag)",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .bind(tags)
+    .execute(&mut *connection)
+    .await?;
+    let (attribute_keys, attribute_values): (Vec<String>, Vec<String>) = command
+        .replacement()
+        .attributes()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .unzip();
+    sqlx::query(
+        "INSERT INTO replace_session_metadata_command_attribute
+            (command_id, attribute_key, attribute_value)
+         SELECT $1, supplied.attribute_key, supplied.attribute_value
+           FROM UNNEST($2::text[], $3::text[])
+             AS supplied(attribute_key, attribute_value)",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .bind(attribute_keys)
+    .bind(attribute_values)
+    .execute(&mut *connection)
+    .await?;
 
     sqlx::query(
         "INSERT INTO replace_session_metadata_command

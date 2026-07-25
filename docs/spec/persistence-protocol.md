@@ -84,8 +84,9 @@ Implemented table families (across the forward-only migrations):
   `submit_input_command`, `decide_tool_request_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
-- `session_metadata` plus its current tag and attribute satellites, and the
-  complete tag and attribute satellites of `replace_session_metadata_command`;
+- `session_metadata` plus its current tag and attribute satellites,
+  `session_metadata_installation`, and the complete tag and attribute satellites
+  of `replace_session_metadata_command`;
 - `imported_raw_source_record`, `imported_conversation`,
   `imported_conversation_raw_record`, and `imported_transcript_entry`, whose
   exact append-only representation, idempotency, and completeness rules are
@@ -153,7 +154,14 @@ Representation rules, all enforced in the schema:
   complete satellite sets to that receipt, so a partial direct insert, update,
   or delete cannot commit. Current satellite updates are rejected outright. The
   current root, tag, and attribute tables also reject `TRUNCATE`; complete
-  replacement through the adapter is their only admitted mutation.
+  replacement through the adapter is their only admitted mutation. An
+  append-only `session_metadata_installation` row records each source receipt
+  when it first becomes current. Deferred foreign keys bind both the current
+  root and every applied receipt to that evidence, while its insert trigger
+  requires the source to be current and rejects a source already recorded for
+  the session. Reinstalling an older receipt after a later replacement therefore
+  cannot commit, and installation evidence cannot be updated, deleted, or
+  truncated.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
