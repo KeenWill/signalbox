@@ -6,6 +6,12 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
 
+use crate::{
+    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
+    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
@@ -17,13 +23,6 @@ use signalbox_domain::{
     ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
     ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
-};
-
-use crate::{
-    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
