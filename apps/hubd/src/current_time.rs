@@ -345,6 +345,24 @@ mod tests {
             .expect("static fixture detail is valid")
     }
 
+    #[track_caller]
+    fn assert_auxiliary_zoneinfo_path_rejected(
+        catalog: &CompiledToolCatalog,
+        definition: &ToolDefinition,
+        timezone: &str,
+    ) {
+        assert!(
+            matches!(
+                catalog.validate_arguments(
+                    definition.name(),
+                    &arguments(&format!(r#"{{"timezone":"{timezone}"}}"#))
+                ),
+                Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+            ),
+            "auxiliary zoneinfo path {timezone} must not enter the IANA contract"
+        );
+    }
+
     fn prepared_current_time_batch(arguments: &str) -> signalbox_domain::ToolBatch {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
         let turn = TurnId::from_uuid(Uuid::from_u128(2));
@@ -693,18 +711,10 @@ mod tests {
             .into_parts();
         let definition = &catalog.definitions()[0];
 
-        for timezone in ["localtime", "posixrules", "posix/UTC", "right/UTC"] {
-            assert!(
-                matches!(
-                    catalog.validate_arguments(
-                        definition.name(),
-                        &arguments(&format!(r#"{{"timezone":"{timezone}"}}"#))
-                    ),
-                    Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
-                ),
-                "auxiliary zoneinfo path {timezone} must not enter the IANA contract"
-            );
-        }
+        assert_auxiliary_zoneinfo_path_rejected(&catalog, definition, "localtime");
+        assert_auxiliary_zoneinfo_path_rejected(&catalog, definition, "posixrules");
+        assert_auxiliary_zoneinfo_path_rejected(&catalog, definition, "posix/UTC");
+        assert_auxiliary_zoneinfo_path_rejected(&catalog, definition, "right/UTC");
     }
 
     /// S15: a present timezone must be a string.
