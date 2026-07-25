@@ -920,6 +920,39 @@ those tests.
   are outside this scenario. Real-content validation remains opt-in, local, and
   content-silent.
 
+## S29 — Complete a review-workflow pass
+
+- **User intent:** Review one exact repository revision and trust that the
+  workflow result is backed by the session execution that produced it.
+- **Durable commands:** Freeze a target snapshot and complete policy; create a
+  queued run and pass only after the pass input is accepted in its exact
+  session; project the pass from that input's canonical turn; append each
+  proposed finding's own contiguous event history. Publication, when requested
+  by later orchestration, reserves its link before the external call and
+  attaches the canonical provider-wide object identity afterward.
+- **State transitions:** Queued run/pass → running run/pass only while the
+  canonical pass/turn are running. A succeeded pass names a completed turn, a
+  failed pass names a failed or refused turn, a blocked pass names a turn
+  requiring reconciliation, and a cancelled pass with a turn names a cancelled
+  turn. The run concludes with the same canonical pass outcome. Findings follow
+  their closed event machine; every event names that exact finding.
+- **Transient updates:** Prompt progress, model drafts, and code-host request
+  progress are not workflow evidence.
+- **Owning component:** The review-workflow domain validates its projections;
+  sessions and turns own execution evidence; Postgres loads and correlates both;
+  future orchestration coordinates adapters.
+- **Failure behavior:** A foreign accepted input, turn, pass, finding event,
+  frontier, or lifecycle outcome fails reconstitution as corruption. A pending
+  external reservation does not prove absence of an external effect and is not
+  retried automatically. No transcript content or general-purpose artifact is
+  copied into workflow rows.
+- **Required invariants:** INV-002, INV-025, INV-026.
+- **Remaining questions:** Application commands, scheduling, prompts,
+  automation, repair, and stack propagation remain in
+  [review-workflow orchestration](open-questions.md#destination-features-target-model);
+  a general artifact aggregate remains
+  [open](open-questions.md#general-purpose-artifacts).
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input
