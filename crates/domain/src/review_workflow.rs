@@ -2153,7 +2153,7 @@ fn validate_finding_reference(
                 failure: ReviewFindingTransitionFailure::ForeignReferencedFinding,
             });
         }
-        if referenced == proposal.reference {
+        if referenced.finding() == proposal.reference.finding() {
             return Err(ReviewFindingTransitionError {
                 event: Some(Box::new(event.clone())),
                 failure: ReviewFindingTransitionFailure::SelfReference,
@@ -3371,21 +3371,14 @@ mod tests {
         assert_eq!(missing_error.input(), &missing);
     }
 
-    /// INV-040: reconstitution checks accepted-input, turn, and frontier
-    /// evidence loaded independently from the pass row.
+    /// INV-040: exact canonical accepted-input, turn, and frontier evidence
+    /// reconstitutes the stored pass state.
     #[test]
-    fn inv040_pass_reconstitution_rejects_cross_wired_canonical_evidence() {
+    fn inv040_pass_reconstitution_accepts_exact_canonical_evidence() {
         let state = ReviewPassState::Succeeded {
             turn: turn_id(6),
             output_frontier: frontier_id(8),
         };
-        let exact_turn = ReviewPassTurnEvidence::new(
-            turn_id(6),
-            session_id(4),
-            accepted_input_id(5),
-            ReviewPassTurnOutcome::Completed,
-            Some(frontier_id(8)),
-        );
         let exact = ReviewPassReconstitutionInput::new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
@@ -3394,7 +3387,13 @@ mod tests {
             accepted_input_id(5),
             session_id(4),
             state,
-            Some(exact_turn),
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::Completed,
+                Some(frontier_id(8)),
+            )),
         );
         assert_eq!(
             ReviewPass::try_reconstitute(exact)
@@ -3402,7 +3401,11 @@ mod tests {
                 .state(),
             state
         );
+    }
 
+    /// INV-040: the accepted input must belong to the pass session.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_foreign_accepted_input_session() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3411,11 +3414,25 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(9),
-                state,
-                Some(exact_turn),
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::Completed,
+                    Some(frontier_id(8)),
+                )),
             ),
             ReviewPassReconstitutionFailure::AcceptedInputSessionMismatch,
         );
+    }
+
+    /// INV-040: a turn-naming pass state requires its canonical turn row.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_missing_turn_evidence() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3424,11 +3441,19 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(4),
-                state,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
                 None,
             ),
             ReviewPassReconstitutionFailure::MissingTurnEvidence,
         );
+    }
+
+    /// INV-040: a queued pass admits no turn evidence.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_unexpected_turn_evidence() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3437,7 +3462,34 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(4),
-                state,
+                ReviewPassState::Queued,
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::Completed,
+                    Some(frontier_id(8)),
+                )),
+            ),
+            ReviewPassReconstitutionFailure::UnexpectedTurnEvidence,
+        );
+    }
+
+    /// INV-040: the canonical turn row must name the pass state's exact turn.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_foreign_turn() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(5),
+                session_id(4),
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(7),
                     session_id(4),
@@ -3448,6 +3500,11 @@ mod tests {
             ),
             ReviewPassReconstitutionFailure::TurnMismatch,
         );
+    }
+
+    /// INV-040: the canonical turn must belong to the pass session.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_foreign_turn_session() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3456,7 +3513,10 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(4),
-                state,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(6),
                     session_id(9),
@@ -3467,6 +3527,11 @@ mod tests {
             ),
             ReviewPassReconstitutionFailure::TurnSessionMismatch,
         );
+    }
+
+    /// INV-040: the canonical turn must originate from the pass input.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_foreign_turn_origin_input() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3475,7 +3540,10 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(4),
-                state,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(6),
                     session_id(4),
@@ -3486,6 +3554,11 @@ mod tests {
             ),
             ReviewPassReconstitutionFailure::TurnAcceptedInputMismatch,
         );
+    }
+
+    /// INV-040: a succeeded pass rejects a contradictory canonical outcome.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_mismatched_turn_outcome() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3494,7 +3567,10 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(4),
-                state,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(6),
                     session_id(4),
@@ -3505,6 +3581,11 @@ mod tests {
             ),
             ReviewPassReconstitutionFailure::TurnOutcomeMismatch,
         );
+    }
+
+    /// INV-040: the successful output must be the canonical terminal frontier.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_mismatched_output_frontier() {
         assert_pass_reconstitution_rejects(
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
@@ -3513,7 +3594,10 @@ mod tests {
                 session_id(4),
                 accepted_input_id(5),
                 session_id(4),
-                state,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
                 Some(ReviewPassTurnEvidence::new(
                     turn_id(6),
                     session_id(4),
@@ -3523,19 +3607,6 @@ mod tests {
                 )),
             ),
             ReviewPassReconstitutionFailure::OutputFrontierMismatch,
-        );
-        assert_pass_reconstitution_rejects(
-            ReviewPassReconstitutionInput::new(
-                pass_ref(3),
-                ReviewPassKind::ReadOnlyReview,
-                ReviewWorkflowKind::ReadOnlyReview,
-                session_id(4),
-                accepted_input_id(5),
-                session_id(4),
-                ReviewPassState::Queued,
-                Some(exact_turn),
-            ),
-            ReviewPassReconstitutionFailure::UnexpectedTurnEvidence,
         );
     }
 
@@ -3755,6 +3826,28 @@ mod tests {
         assert_eq!(
             error.failure(),
             ReviewFindingTransitionFailure::ForeignEventFinding
+        );
+        assert_eq!(error.event(), Some(&event));
+    }
+
+    /// INV-040: a referenced finding naming the aggregate's own identity is a
+    /// self-reference even when its producing-pass ancestry is cross-wired.
+    #[test]
+    fn inv040_finding_history_rejects_identity_self_reference() {
+        let event = ReviewFindingEvent::new(
+            finding_ref(10),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(20, ReviewPassKind::Dedupe),
+            ReviewFindingEventKind::Duplicate {
+                canonical: ReviewFindingRef::new(pass_ref(4), finding_id(10)),
+            },
+        );
+        let error = ReviewFinding::new(proposal())
+            .apply(event.clone())
+            .expect_err("a finding cannot be its own canonical duplicate");
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::SelfReference
         );
         assert_eq!(error.event(), Some(&event));
     }

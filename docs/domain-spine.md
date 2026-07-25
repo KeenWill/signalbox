@@ -5457,6 +5457,7 @@ pub enum ReviewPassReconstitutionFailure {
     TurnSessionMismatch,
     TurnAcceptedInputMismatch,
     TurnOutcomeMismatch,
+    TurnFrontierShapeMismatch,
     OutputFrontierMismatch,
 }
 pub struct ReviewPassReconstitutionError { /* input + failure */ }
@@ -5467,6 +5468,7 @@ pub enum ReviewPassTransitionFailure {
     Evidence(ReviewPassReconstitutionFailure),
     InvalidTransition,
     TurnChanged,
+    TurnNotActive,
 }
 pub struct ReviewPassTransitionError { /* states + canonical turn + failure */ }
 impl ReviewPass {
