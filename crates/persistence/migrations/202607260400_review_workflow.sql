@@ -55,8 +55,20 @@ CREATE TABLE review_target (
             stack_parent_target_id IS NULL
             OR stack_parent_target_id <> target_id
         ),
+    CONSTRAINT review_target_parent_has_base
+        CHECK (
+            stack_parent_target_id IS NULL
+            OR base_revision IS NOT NULL
+        ),
     CONSTRAINT review_target_repository_identity_key
         UNIQUE (target_id, provider_key, repository_key),
+    CONSTRAINT review_target_revision_identity_key
+        UNIQUE (
+            target_id,
+            provider_key,
+            repository_key,
+            head_revision
+        ),
     CONSTRAINT review_target_parent_fk
         FOREIGN KEY (
             stack_parent_target_id,
@@ -67,6 +79,22 @@ CREATE TABLE review_target (
             target_id,
             provider_key,
             repository_key
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT review_target_parent_revision_fk
+        FOREIGN KEY (
+            stack_parent_target_id,
+            provider_key,
+            repository_key,
+            base_revision
+        )
+        REFERENCES review_target (
+            target_id,
+            provider_key,
+            repository_key,
+            head_revision
         )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
@@ -480,7 +508,11 @@ BEGIN
             OR (
                 NEW.state_kind = 'failed'
                 AND canonical_turn_state = 'terminal'
-                AND canonical_turn_disposition IN ('failed', 'refused')
+                AND canonical_turn_disposition IN (
+                    'completed',
+                    'failed',
+                    'refused'
+                )
             )
             OR (
                 NEW.state_kind = 'blocked'
@@ -1196,11 +1228,20 @@ BEGIN
     IF NEW.event_kind = 'posted'
        AND NOT EXISTS (
            SELECT 1
-             FROM review_external_link_attachment
-            WHERE external_link_id = NEW.external_link_id
-              AND target_id = NEW.target_id
-              AND pass_run_id = NEW.event_pass_run_id
-              AND pass_id = NEW.event_pass_id
+             FROM review_external_link_attachment AS attachment
+             JOIN review_external_link AS link
+               ON link.external_link_id = attachment.external_link_id
+              AND link.target_id = attachment.target_id
+            WHERE attachment.external_link_id = NEW.external_link_id
+              AND attachment.target_id = NEW.target_id
+              AND attachment.pass_run_id = NEW.event_pass_run_id
+              AND attachment.pass_id = NEW.event_pass_id
+              AND link.object_kind IN (
+                  'review',
+                  'review_thread',
+                  'review_comment',
+                  'change_request_comment'
+              )
        )
     THEN
         RAISE EXCEPTION

@@ -17,8 +17,8 @@ use signalbox_domain::{
     ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput,
     ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef,
-    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetParentRef, ReviewTargetSubject,
-    ReviewText, ReviewWorkflowKind, SessionId, TurnId,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -82,7 +82,12 @@ impl ReviewWorkflowStore {
                     target.change_request_number, target.head_revision,
                     target.base_revision, target.stack_parent_target_id,
                     parent.provider_key AS stack_parent_provider_key,
-                    parent.repository_key AS stack_parent_repository_key
+                    parent.repository_key AS stack_parent_repository_key,
+                    parent.subject_kind AS stack_parent_subject_kind,
+                    parent.change_request_number
+                        AS stack_parent_change_request_number,
+                    parent.head_revision AS stack_parent_head_revision,
+                    parent.base_revision AS stack_parent_base_revision
                FROM review_target AS target
                LEFT JOIN review_target AS parent
                  ON parent.target_id = target.stack_parent_target_id
@@ -500,6 +505,11 @@ impl ReviewWorkflowStore {
                     target.target_id AS canonical_target_id,
                     parent.provider_key AS stack_parent_provider_key,
                     parent.repository_key AS stack_parent_repository_key,
+                    parent.subject_kind AS stack_parent_subject_kind,
+                    parent.change_request_number
+                        AS stack_parent_change_request_number,
+                    parent.head_revision AS stack_parent_head_revision,
+                    parent.base_revision AS stack_parent_base_revision,
                     producing_pass.pass_id
                         AS canonical_producing_pass_id,
                     producing_pass.pass_kind AS producing_pass_kind,
@@ -980,32 +990,48 @@ fn decode_target(row: &PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> 
     let repository = review_key(row.try_get("repository_key")?, "review_target")?;
     let subject_kind: String = row.try_get("subject_kind")?;
     let change_request_number: Option<Decimal> = row.try_get("change_request_number")?;
-    let subject = match (subject_kind.as_str(), change_request_number) {
-        ("change_request", Some(number)) => ReviewTargetSubject::ChangeRequest(
-            ReviewChangeRequestNumber::try_new(decimal_u64(number, "review_target")?)
-                .map_err(|_| corruption("review_target", String::from("zero change request")))?,
-        ),
-        ("commit", None) => ReviewTargetSubject::Commit,
-        _ => {
-            return Err(corruption(
-                "review_target",
-                format!("invalid subject shape {subject_kind}"),
-            ));
-        }
-    };
+    let subject = decode_target_subject(&subject_kind, change_request_number)?;
+    let stack_parent_target = row.try_get::<Option<Uuid>, _>("stack_parent_target_id")?;
+    let stack_parent_provider = row.try_get::<Option<String>, _>("stack_parent_provider_key")?;
+    let stack_parent_repository =
+        row.try_get::<Option<String>, _>("stack_parent_repository_key")?;
+    let stack_parent_subject = row.try_get::<Option<String>, _>("stack_parent_subject_kind")?;
+    let stack_parent_change_request =
+        row.try_get::<Option<Decimal>, _>("stack_parent_change_request_number")?;
+    let stack_parent_head = row.try_get::<Option<String>, _>("stack_parent_head_revision")?;
+    let stack_parent_base = row.try_get::<Option<String>, _>("stack_parent_base_revision")?;
     let stack_parent = match (
-        row.try_get::<Option<Uuid>, _>("stack_parent_target_id")?,
-        row.try_get::<Option<String>, _>("stack_parent_provider_key")?,
-        row.try_get::<Option<String>, _>("stack_parent_repository_key")?,
+        stack_parent_target,
+        stack_parent_provider,
+        stack_parent_repository,
+        stack_parent_subject,
+        stack_parent_head,
     ) {
-        (None, None, None) => None,
-        (Some(target), Some(parent_provider), Some(parent_repository)) => {
-            Some(ReviewTargetParentRef::new(
+        (None, None, None, None, None)
+            if stack_parent_change_request.is_none() && stack_parent_base.is_none() =>
+        {
+            None
+        }
+        (
+            Some(target),
+            Some(parent_provider),
+            Some(parent_repository),
+            Some(parent_subject),
+            Some(parent_head),
+        ) => Some(
+            ReviewTarget::try_new(
                 target_id(target),
                 review_key(parent_provider, "review_target")?,
                 review_key(parent_repository, "review_target")?,
-            ))
-        }
+                decode_target_subject(&parent_subject, stack_parent_change_request)?,
+                review_key(parent_head, "review_target")?,
+                stack_parent_base
+                    .map(|value| review_key(value, "review_target"))
+                    .transpose()?,
+                None,
+            )
+            .map_err(|error| corruption("review_target", format!("{error:?}")))?,
+        ),
         _ => {
             return Err(corruption(
                 "review_target",
@@ -1022,9 +1048,28 @@ fn decode_target(row: &PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> 
         row.try_get::<Option<String>, _>("base_revision")?
             .map(|value| review_key(value, "review_target"))
             .transpose()?,
-        stack_parent,
+        stack_parent.as_ref(),
     )
     .map_err(|error| corruption("review_target", format!("{error:?}")))
+}
+
+fn decode_target_subject(
+    subject_kind: &str,
+    change_request_number: Option<Decimal>,
+) -> Result<ReviewTargetSubject, ReviewWorkflowStoreError> {
+    Ok(match (subject_kind, change_request_number) {
+        ("change_request", Some(number)) => ReviewTargetSubject::ChangeRequest(
+            ReviewChangeRequestNumber::try_new(decimal_u64(number, "review_target")?)
+                .map_err(|_| corruption("review_target", String::from("zero change request")))?,
+        ),
+        ("commit", None) => ReviewTargetSubject::Commit,
+        _ => {
+            return Err(corruption(
+                "review_target",
+                format!("invalid subject shape {subject_kind}"),
+            ));
+        }
+    })
 }
 
 fn decode_run(row: PgRow) -> Result<ReviewRun, ReviewWorkflowStoreError> {

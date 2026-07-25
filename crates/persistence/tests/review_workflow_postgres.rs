@@ -969,7 +969,7 @@ async fn inv040_pass_projection_rejects_noncanonical_turn_outcome() -> Result<()
     .bind(fixture.pass.pass().into_uuid())
     .execute(&pool)
     .await
-    .expect_err("pass failure requires a canonically failed or refused turn");
+    .expect_err("pass failure requires a canonical terminal turn");
     assert_sqlstate(&guarded, "23514");
 
     sqlx::query(
@@ -1003,6 +1003,37 @@ async fn inv040_pass_projection_rejects_noncanonical_turn_outcome() -> Result<()
     assert_eq!(error.aggregate(), "review_pass");
     assert!(error.detail().contains("TurnOutcomeMismatch"));
 
+    Ok(())
+}
+
+/// INV-040: pass failure is the workflow-operation outcome and may follow a
+/// canonically completed turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_failed_pass_accepts_completed_turn_evidence() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let turn = TurnId::from_uuid(uuid(0x203));
+    start_review_pass(&fixture.store, fixture.pass, turn).await;
+    synthetically_terminalize_turn(&pool, turn, "completed").await;
+
+    let evidence = conclude_review_pass(
+        &fixture.store,
+        fixture.pass,
+        ReviewPassState::Failed { turn },
+    )
+    .await;
+
+    assert_eq!(evidence.state(), ReviewPassState::Failed { turn });
+    assert_eq!(
+        fixture
+            .store
+            .load_pass(fixture.pass.pass())
+            .await?
+            .expect("failed pass remains loadable")
+            .state(),
+        ReviewPassState::Failed { turn }
+    );
     Ok(())
 }
 
@@ -1665,10 +1696,11 @@ async fn inv040_schema_requires_rejection_reason() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-041: a posted event requires an attached canonical external link.
+/// INV-041: a posted event requires attached external review content.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), Box<dyn Error>> {
+async fn inv041_schema_authenticates_posted_external_review_content() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     let fixture = insert_review_pass_fixture(&pool).await;
     let judge_pass = insert_fixture_pass(&fixture, 0x607, ReviewPassKind::Judge).await;
@@ -1732,6 +1764,44 @@ async fn inv041_schema_requires_attachment_before_posted_event() -> Result<(), B
     .await
     .expect_err("posted status requires attachment evidence from the event pass");
     assert_sqlstate(&posted_without_attachment, "23514");
+
+    let commit_link = ReviewExternalLinkId::from_uuid(uuid(0x609));
+    fixture
+        .store
+        .reserve_external_link(ReviewExternalLink::reserve(
+            commit_link,
+            ReviewExternalLinkAssociation::Finding(posted_finding),
+            key("example-code-host"),
+            ReviewExternalObjectKind::Commit,
+        ))
+        .await
+        .expect("repository correlation reservation persists");
+    fixture
+        .store
+        .attach_external_link(
+            commit_link,
+            ReviewExternalLinkAttachment::new(commit_link, evidence[2], key("external-commit-609")),
+        )
+        .await
+        .expect("repository correlation attachment persists");
+    let posted_through_commit = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, external_link_id,
+             external_link_association_kind)
+         VALUES ($1, 2, $2, $3, $4, $5, 'posted', NULL, NULL, $6, 'finding')",
+    )
+    .bind(posted_finding.finding().into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(publish_pass.pass().into_uuid())
+    .bind(publish_pass.run().run().into_uuid())
+    .bind(commit_link.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an attached commit does not prove that finding content was posted");
+    assert_sqlstate(&posted_through_commit, "23514");
     Ok(())
 }
 
@@ -2198,7 +2268,8 @@ async fn inv040_stack_parent_requires_same_repository() -> Result<(), Box<dyn Er
              stack_parent_target_id)
          VALUES (
              $1, 'example-code-host', 'example/other-repository',
-             'commit', NULL, '1122334455667788', NULL, $2
+             'commit', NULL, '1122334455667788',
+             '0123456789abcdef', $2
          )",
     )
     .bind(uuid(0x701))
@@ -2207,6 +2278,64 @@ async fn inv040_stack_parent_requires_same_repository() -> Result<(), Box<dyn Er
     .await
     .expect_err("stack parent must be in the target repository");
     assert_sqlstate(&foreign_repository_parent, "23503");
+    Ok(())
+}
+
+/// INV-040: a stack edge joins the child base to the canonical parent head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_stack_parent_requires_canonical_revision() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let child = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(0x801)),
+        key("example-code-host"),
+        key("example/repository"),
+        ReviewTargetSubject::Commit,
+        key("child-head"),
+        Some(key("0123456789abcdef")),
+        Some(&fixture.target_snapshot),
+    )
+    .expect("child base equals its canonical parent head");
+    fixture.store.insert_target(&child).await?;
+    assert_eq!(
+        fixture.store.load_target(child.id()).await?,
+        Some(child.clone())
+    );
+
+    let base_less = sqlx::query(
+        "INSERT INTO review_target
+            (target_id, provider_key, repository_key, subject_kind,
+             change_request_number, head_revision, base_revision,
+             stack_parent_target_id)
+         VALUES (
+             $1, 'example-code-host', 'example/repository',
+             'commit', NULL, 'base-less-child', NULL, $2
+         )",
+    )
+    .bind(uuid(0x802))
+    .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a parented target must freeze an exact base revision");
+    assert_sqlstate(&base_less, "23514");
+
+    let disconnected = sqlx::query(
+        "INSERT INTO review_target
+            (target_id, provider_key, repository_key, subject_kind,
+             change_request_number, head_revision, base_revision,
+             stack_parent_target_id)
+         VALUES (
+             $1, 'example-code-host', 'example/repository',
+             'commit', NULL, 'disconnected-child', 'unrelated-base', $2
+         )",
+    )
+    .bind(uuid(0x803))
+    .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a child base must equal its canonical parent head");
+    assert_sqlstate(&disconnected, "23503");
     Ok(())
 }
 
