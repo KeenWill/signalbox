@@ -30,9 +30,13 @@ snapshot; the upstream tree moves daily, so treat line numbers as hints.
 - **License: Apache-2.0** (`LICENSE`, copyright line "Copyright 2025 OpenAI"),
   with a `NOTICE` file; standard Apache-2.0 boilerplate, no MIT dual-license.
   This is permissive: specific crates may legally be read, adapted, or vendored
-  provided attribution/NOTICE is preserved — which materially changes the
-  build-vs-borrow economics for the OAuth/refresh logic and the Responses SSE
-  parser (see §9).
+  provided the license's Section 4 redistribution conditions are met — a copy of
+  the license accompanies the distribution, modified files carry prominent
+  change notices, and existing copyright/attribution notices plus the `NOTICE`
+  content are preserved (see the
+  [license text](https://www.apache.org/licenses/LICENSE-2.0) for the exact
+  terms) — which materially changes the build-vs-borrow economics for the
+  OAuth/refresh logic and the Responses SSE parser (see §9).
 - **Language: overwhelmingly Rust.** The real client is a large Cargo workspace
   at `codex-rs/` (~100+ member crates). The `codex-cli/` (npm) and `sdk/`
   (TypeScript) trees are thin wrappers/distribution; the protocol logic is all

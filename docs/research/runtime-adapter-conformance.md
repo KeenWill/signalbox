@@ -23,7 +23,13 @@
   its owning spec section or invariant row instead of restating the requirement,
   so reuse of this page cannot age into a divergent second contract
 - Intended use: reusable body for the subscription-runtime tracks in the
-  [backlog](../agents/backlog.md); pairs with the
+  [backlog](../agents/backlog.md), with one scoping caveat: the stability
+  verdict (§1), the PR split (§3), and the test-matrix obligations apply to any
+  `ModelRuntime` adapter, but the §2 dependency/build recipe and the §4 TCP
+  loopback harness are specific to **direct-HTTP** adapters. The wrapped-CLI
+  tracks are subprocess transports, so those tracks substitute their own
+  transport layer and process-level test harness (their track spec-diff owns
+  that shape). Pairs with the
   [Codex CLI subscription protocol notes](codex-cli-subscription-protocol.md)
 
 File references below are repo-relative `crate/path:line` as verified on the
@@ -31,14 +37,15 @@ study date; line numbers drift with the tree.
 
 ## 1. Stability verdict
 
-**Verdict: STABLE for the method signatures; the evidence vocabulary grows
-additively. A pure adapter written today against the current trait is very
-unlikely to need structural reshaping. Rate: LOW reshape risk on the trait
-surface, LOW–MODERATE on the evidence enums — new variants may appear, but they
-are additive, and the two enums differ in blast radius: `ProviderErrorKind`
-growth leaves existing adapters untouched, while `TerminalEvidence` growth is a
-compiler-guided arm addition in every adapter (detail in the residual-risk list
-below).**
+**Verdict: STABLE for the method signatures; the evidence vocabulary has grown
+additively since the prepare/execute split (which itself removed evidence
+variants once — see the evidence list). A pure adapter written today against the
+current trait is very unlikely to need structural reshaping. Rate: LOW reshape
+risk on the trait surface, LOW–MODERATE on the evidence enums — new variants may
+appear, but they are additive, and the two enums differ in blast radius:
+`ProviderErrorKind` growth leaves existing adapters untouched, while
+`TerminalEvidence` growth is a compiler-guided arm addition in every adapter
+(detail in the residual-risk list below).**
 
 ### Evidence
 
@@ -60,10 +67,14 @@ At the study date the runtime layer was about three days old (first
   lines in its `runtime.rs`) as a one-time event, and the OpenAI adapter
   (created 2026-07-20) was likewise brought into conformance. Both now sit on
   the two-stage surface. There is no pending redesign visible in the log.
-- **Evidence growth is additive, not churn.** `evidence.rs` totals **522
-  insertions / 80 deletions** over its whole life; the deletions are
-  concentrated in doc-comment rewrites, not variant removal or rename. New
-  vocabulary arrives as new closed-enum arms:
+- **Evidence growth has been additive since the two-stage split — with that
+  split itself as the one breaking counterexample.** `evidence.rs` totals **522
+  insertions / 80 deletions** over its whole life, and the deletions are not all
+  comments: the same `e953834` split removed `UnsentCause::PreparationFailed`
+  and the public `PreparationFailure` enum from `evidence.rs` (the enum moved to
+  the new `preparation.rs` surface, but for evidence-matching code this was a
+  breaking removal, absorbed by both adapters in the same change). Outside that
+  one restructuring, new vocabulary arrives as new closed-enum arms:
   `ProviderErrorKind::QuotaExhausted` was *added* in `6ab75af` ("add
   credential-unavailable and quota-exhausted vocabulary"); `CredentialRejected`
   has existed since the first commit. The design explicitly anticipates this
@@ -237,7 +248,9 @@ sections do not.
   on `signalbox-model-runtime` plus transport/serde.
 - Its own loopback tests (§4).
 - One line in the workspace `members` list in the root `Cargo.toml` (so it
-  builds in-workspace).
+  builds in-workspace), plus the resulting `Cargo.lock` update — the lockfile is
+  tracked, and adding the member records the new package and its dependency
+  graph there (the OpenAI-adapter precedent commit did exactly this).
 - The owning-spec update: [runtime-substrate](../spec/runtime-substrate.md)
   describes the implemented adapters, so the same PR updates its adapter
   coverage — or the bottom specification diff of the PR's stack supplies it —
@@ -291,9 +304,16 @@ and needs no change. What the wiring PR must touch:
 first real wiring PR must *introduce* the dispatch mechanism (enum plus
 boxing/wrapper, since the `provider` value must resolve to one concrete type at
 the `PostgresProviderModelExecution::new(...)` site in `main.rs`), not merely
-add a match arm. Adapter PRs after that just slot into whatever mechanism that
-PR establishes. This distinction is worth stating in a track's goal prompt so
-the adapter author does not assume a registry exists.
+add a match arm. Introducing that mechanism is also a *decision*, not mere
+implementation: it chooses a dispatch architecture the specification does not
+fix and closes the recorded multi-provider open question in
+[configuration-and-credentials](../spec/configuration-and-credentials.md), so
+the wiring PR carries the dated `docs/decisions.md` entry and is weighed under
+the decision process in [AGENTS.md](../../AGENTS.md) (foundation weight if its
+resolution moves a boundary) before implementation. Adapter PRs after that just
+slot into whatever mechanism that PR establishes. This distinction is worth
+stating in a track's goal prompt so the adapter author does not assume a
+registry exists.
 
 ## 4. Per-adapter test pattern to replicate
 
