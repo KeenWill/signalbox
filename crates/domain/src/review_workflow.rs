@@ -371,6 +371,7 @@ pub struct ReviewTarget {
     head_revision: ReviewKey,
     base_revision: Option<ReviewKey>,
     stack_parent: Option<ReviewTargetParentRef>,
+    ancestry: Vec<ReviewTargetId>,
 }
 
 impl ReviewTarget {
@@ -392,6 +393,9 @@ impl ReviewTarget {
             if parent.id == id {
                 return Err(ReviewTargetError::SelfParent { target: id });
             }
+            if parent.ancestry.contains(&id) {
+                return Err(ReviewTargetError::CyclicParent { target: id });
+            }
             if parent.provider != provider || parent.repository != repository {
                 return Err(ReviewTargetError::ForeignParent { target: id });
             }
@@ -402,6 +406,12 @@ impl ReviewTarget {
                 return Err(ReviewTargetError::DisconnectedParent { target: id });
             }
         }
+        let ancestry = stack_parent.map_or_else(Vec::new, |parent| {
+            let mut ancestry = Vec::with_capacity(parent.ancestry.len() + 1);
+            ancestry.push(parent.id);
+            ancestry.extend_from_slice(&parent.ancestry);
+            ancestry
+        });
         Ok(Self {
             id,
             provider,
@@ -410,6 +420,7 @@ impl ReviewTarget {
             head_revision,
             base_revision,
             stack_parent: stack_parent.map(ReviewTargetParentRef::from_target),
+            ancestry,
         })
     }
 
@@ -447,6 +458,11 @@ impl ReviewTarget {
     pub const fn stack_parent(&self) -> Option<&ReviewTargetParentRef> {
         self.stack_parent.as_ref()
     }
+
+    /// Borrows the complete nearest-first canonical parent chain.
+    pub fn ancestry(&self) -> &[ReviewTargetId] {
+        &self.ancestry
+    }
 }
 
 /// Invalid immutable target snapshot.
@@ -460,6 +476,11 @@ pub enum ReviewTargetError {
     /// The target names itself as its stack parent.
     SelfParent {
         /// The self-parented target.
+        target: ReviewTargetId,
+    },
+    /// The complete parent chain repeats the target.
+    CyclicParent {
+        /// The target whose proposed chain contains itself.
         target: ReviewTargetId,
     },
     /// The parent belongs to another provider or repository.
@@ -3749,6 +3770,17 @@ mod tests {
 
     use super::*;
 
+    /// Target identity repeated to close the ancestry cycle under test.
+    const CYCLIC_ROOT_TARGET: u128 = 90;
+    /// Distinct intermediate target in the ancestry-cycle fixture.
+    const CYCLIC_PARENT_TARGET: u128 = 91;
+    /// Arbitrary root revision; only exact continuity with the parent matters.
+    const CYCLIC_ROOT_HEAD: &str = "cyclic-root-head";
+    /// Arbitrary parent revision; only exact continuity with the child matters.
+    const CYCLIC_PARENT_HEAD: &str = "cyclic-parent-head";
+    /// Arbitrary proposed child revision in the rejected cycle.
+    const CYCLIC_CHILD_HEAD: &str = "cyclic-child-head";
+
     fn target_id(value: u128) -> ReviewTargetId {
         ReviewTargetId::from_uuid(Uuid::from_u128(value))
     }
@@ -4590,6 +4622,44 @@ mod tests {
         );
     }
 
+    /// INV-040: complete stack ancestry cannot repeat the target being
+    /// constructed.
+    #[test]
+    fn inv040_review_target_rejects_transitive_parent_cycle() {
+        let root = ReviewTarget::try_new(
+            target_id(CYCLIC_ROOT_TARGET),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key(CYCLIC_ROOT_HEAD),
+            None,
+            None,
+        )
+        .expect("fixture root target is canonical");
+        let parent = ReviewTarget::try_new(
+            target_id(CYCLIC_PARENT_TARGET),
+            root.provider().clone(),
+            root.repository().clone(),
+            ReviewTargetSubject::Commit,
+            key(CYCLIC_PARENT_HEAD),
+            Some(root.head_revision().clone()),
+            Some(&root),
+        )
+        .expect("fixture parent extends the root");
+        let error = ReviewTarget::try_new(
+            root.id(),
+            root.provider().clone(),
+            root.repository().clone(),
+            ReviewTargetSubject::Commit,
+            key(CYCLIC_CHILD_HEAD),
+            Some(parent.head_revision().clone()),
+            Some(&parent),
+        )
+        .expect_err("the complete canonical chain cannot contain the child");
+
+        assert_eq!(error, ReviewTargetError::CyclicParent { target: root.id() });
+    }
+
     /// INV-040: a valid parent reference retains canonical scope and head
     /// evidence from the supplied snapshot.
     #[test]
@@ -4620,6 +4690,7 @@ mod tests {
         assert_eq!(edge.provider(), parent.provider());
         assert_eq!(edge.repository(), parent.repository());
         assert_eq!(edge.head_revision(), parent.head_revision());
+        assert_eq!(child.ancestry(), &[parent.id()]);
     }
 
     /// INV-001: review identities remain distinct while composite references

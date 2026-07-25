@@ -5274,6 +5274,7 @@ pub struct ReviewTarget { /* immutable snapshot */ }
 pub enum ReviewTargetError {
     MissingChangeRequestBase { target: ReviewTargetId },
     SelfParent { target: ReviewTargetId },
+    CyclicParent { target: ReviewTargetId },
     ForeignParent { target: ReviewTargetId },
     MissingParentBase { target: ReviewTargetId },
     DisconnectedParent { target: ReviewTargetId },
@@ -5289,7 +5290,7 @@ impl ReviewTarget {
         stack_parent: Option<&ReviewTarget>,
     ) -> Result<Self, ReviewTargetError>;
     // accessors: id(), provider(), repository(), subject(), head_revision(),
-    // base_revision(), stack_parent()
+    // base_revision(), stack_parent(), ancestry()
 }
 
 pub struct ReviewRunRef { /* target + run */ }
