@@ -10,7 +10,8 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, ModelCallDisposition, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, SessionInputPosition, TurnAttemptId, TurnId,
+    SemanticTranscriptEntryId, SessionId, SessionInputPosition, ToolAttemptId, TurnAttemptId,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -27,6 +28,7 @@ const INPUT_ACCEPTED: &str = "input_accepted";
 const TURN_ACTIVATED: &str = "turn_activated";
 const TURN_FAILED: &str = "turn_failed";
 const MODEL_CALL_TRANSITION: &str = "model_call_transition";
+const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
 const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
@@ -41,6 +43,8 @@ type OutboxSlotRow = (
     Option<i16>,
     Option<Uuid>,
 );
+
+type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
 
 /// One committed outbox event offered to the hub's single dispatcher consumer.
 ///
@@ -111,6 +115,15 @@ pub enum DispatchedOutboxEventKind {
         /// Exact committed call state.
         state: DispatchedModelCallState,
     },
+    /// A tool batch crossed one durable presentation boundary.
+    ToolBatchTransition {
+        /// Owning turn.
+        turn: TurnId,
+        /// Model call that proposed the batch.
+        producing_call: ModelCallId,
+        /// Exact durable batch state.
+        state: DispatchedToolBatchState,
+    },
     /// A turn committed authoritative assistant content and completed.
     TurnCompleted {
         /// Completed turn.
@@ -144,11 +157,40 @@ pub enum DispatchedOutboxEventKind {
     TurnReconciliationRequired {
         /// Turn requiring reconciliation.
         turn: TurnId,
-        /// Exact ambiguous model call.
-        call: ModelCallId,
+        /// Exact ambiguous operation.
+        operation: DispatchedReconciliationOperation,
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
     },
+}
+
+/// Durable tool-batch boundary carried by one dispatched transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedToolBatchState {
+    /// The proposal frontier committed.
+    Proposed {
+        /// Exact yielded frontier containing assistant tool-use entries.
+        frontier: ContextFrontierId,
+    },
+    /// Proposal-ordered results committed for continuation.
+    ResultsProjected {
+        /// Exact result frontier.
+        frontier: ContextFrontierId,
+    },
+    /// One exact attempt requires an owner recovery decision.
+    RecoveryRequired {
+        /// Ambiguous tool attempt.
+        attempt: ToolAttemptId,
+    },
+}
+
+/// Exact operation that made a turn require reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedReconciliationOperation {
+    /// Ambiguous provider call.
+    ModelCall(ModelCallId),
+    /// Ambiguous tool attempt.
+    ToolAttempt(ToolAttemptId),
 }
 
 /// Durable model-call state carried by one dispatched transition.
@@ -531,21 +573,43 @@ async fn load_event(
         TURN_ACTIVATED => {
             let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
                 "SELECT event.turn_id, event.current_attempt_id,
-                        turn.turn_id IS NOT NULL AS lifecycle_correlated
+                        (
+                            initial_attempt.turn_attempt_id IS NOT NULL
+                            AND turn.turn_id IS NOT NULL
+                            AND (
+                                (
+                                    turn.state_kind = 'active'
+                                    AND (
+                                        turn.active_phase_kind <> 'running'
+                                        OR authoritative_attempt.turn_attempt_id
+                                            IS NOT NULL
+                                    )
+                                )
+                                OR (
+                                    turn.state_kind = 'terminal'
+                                    AND authoritative_attempt.turn_attempt_id
+                                        IS NOT NULL
+                                )
+                            )
+                        ) AS lifecycle_correlated
                    FROM turn_activated_outbox_event AS event
                    LEFT JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
                     AND turn.session_id = event.session_id
-                    AND (
-                        (
-                            turn.state_kind = 'active'
-                            AND turn.current_attempt_id = event.current_attempt_id
-                        )
-                        OR (
-                            turn.state_kind = 'terminal'
-                            AND turn.terminal_attempt_id = event.current_attempt_id
-                        )
-                    )
+                   LEFT JOIN turn_attempt AS initial_attempt
+                     ON initial_attempt.turn_attempt_id =
+                        event.current_attempt_id
+                    AND initial_attempt.turn_id = event.turn_id
+                    AND initial_attempt.session_id = event.session_id
+                    AND initial_attempt.continued_from_attempt_id IS NULL
+                   LEFT JOIN turn_attempt AS authoritative_attempt
+                     ON authoritative_attempt.turn_attempt_id =
+                        CASE turn.state_kind
+                            WHEN 'active' THEN turn.current_attempt_id
+                            WHEN 'terminal' THEN turn.terminal_attempt_id
+                        END
+                    AND authoritative_attempt.turn_id = event.turn_id
+                    AND authoritative_attempt.session_id = event.session_id
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
@@ -613,13 +677,6 @@ async fn load_event(
                         )
                         OR (
                             turn.terminal_attempt_id IS NOT NULL
-                            AND (
-                                SELECT count(*)
-                                  FROM turn_attempt AS counted_attempt
-                                 WHERE counted_attempt.turn_id = event.turn_id
-                                   AND counted_attempt.session_id =
-                                       event.session_id
-                            ) = 1
                             AND EXISTS (
                                 SELECT 1
                                   FROM turn_attempt AS terminal_attempt
@@ -651,24 +708,9 @@ async fn load_event(
                             AND (
                                 (
                                     turn.terminal_model_call_id IS NULL
-                                    AND NOT EXISTS (
-                                        SELECT 1
-                                          FROM model_call AS any_call
-                                         WHERE any_call.turn_id = event.turn_id
-                                           AND any_call.session_id =
-                                               event.session_id
-                                    )
                                 )
                                 OR (
                                     turn.terminal_model_call_id IS NOT NULL
-                                    AND (
-                                        SELECT count(*)
-                                          FROM model_call AS counted_call
-                                         WHERE counted_call.turn_id =
-                                               event.turn_id
-                                           AND counted_call.session_id =
-                                               event.session_id
-                                    ) = 1
                                     AND EXISTS (
                                         SELECT 1
                                           FROM model_call AS terminal_call
@@ -778,6 +820,163 @@ async fn load_event(
             DispatchedOutboxEventKind::ModelCallTransition {
                 turn: TurnId::from_uuid(row.try_get("turn_id")?),
                 call: ModelCallId::from_uuid(row.try_get("model_call_id")?),
+                state,
+            }
+        }
+        TOOL_BATCH_TRANSITION => {
+            let row: Option<ToolBatchTransitionRow> = sqlx::query_as(
+                "SELECT event.turn_id, event.producing_model_call_id,
+                            event.transition_kind, event.frontier_id,
+                            event.tool_attempt_id,
+                            CASE event.transition_kind
+                                WHEN 'proposed' THEN
+                                    event.frontier_id =
+                                        round.boundary_frontier_id
+                                    AND event.tool_attempt_id IS NULL
+                                WHEN 'results_projected' THEN
+                                    event.frontier_id IS NOT NULL
+                                    AND event.frontier_id <>
+                                        round.boundary_frontier_id
+                                    AND event.tool_attempt_id IS NULL
+                                    AND result_frontier.member_count =
+                                        boundary_frontier.member_count
+                                        + round.request_count
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                          FROM context_frontier_member
+                                               AS boundary_member
+                                          LEFT JOIN context_frontier_member
+                                                    AS result_prefix
+                                            ON result_prefix.owning_session_id =
+                                               event.session_id
+                                           AND result_prefix.context_frontier_id =
+                                               event.frontier_id
+                                           AND result_prefix.member_position =
+                                               boundary_member.member_position
+                                           AND result_prefix.source_session_id =
+                                               boundary_member.source_session_id
+                                           AND result_prefix.semantic_entry_id =
+                                               boundary_member.semantic_entry_id
+                                         WHERE
+                                            boundary_member.owning_session_id =
+                                            event.session_id
+                                           AND
+                                            boundary_member.context_frontier_id =
+                                            round.boundary_frontier_id
+                                           AND
+                                            result_prefix.semantic_entry_id IS NULL
+                                    )
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                          FROM tool_request AS request
+                                          LEFT JOIN semantic_transcript_entry
+                                                    AS result
+                                            ON result.source_session_id =
+                                               event.session_id
+                                           AND result.payload_kind IN (
+                                                'tool_execution_result',
+                                                'tool_denied',
+                                                'tool_closed_by_turn_end'
+                                           )
+                                           AND (
+                                                result.tool_result_request_id =
+                                                    request.request_id
+                                                OR EXISTS (
+                                                    SELECT 1
+                                                      FROM tool_attempt
+                                                           AS result_attempt
+                                                     WHERE
+                                                        result_attempt.attempt_id =
+                                                        result.tool_result_attempt_id
+                                                       AND
+                                                        result_attempt.request_id =
+                                                        request.request_id
+                                                )
+                                           )
+                                          LEFT JOIN context_frontier_member
+                                                    AS member
+                                            ON member.owning_session_id =
+                                               event.session_id
+                                           AND member.context_frontier_id =
+                                               event.frontier_id
+                                           AND member.member_position =
+                                               boundary_frontier.member_count
+                                               + request.request_ordinal + 1
+                                           AND member.source_session_id =
+                                               result.source_session_id
+                                           AND member.semantic_entry_id =
+                                               result.semantic_entry_id
+                                         WHERE
+                                            request.producing_model_call_id =
+                                            event.producing_model_call_id
+                                           AND member.semantic_entry_id IS NULL
+                                    )
+                                WHEN 'recovery_required' THEN
+                                    event.frontier_id IS NULL
+                                    AND recovery_attempt.attempt_id =
+                                        event.tool_attempt_id
+                                    AND recovery_request.producing_model_call_id =
+                                        event.producing_model_call_id
+                                ELSE false
+                            END
+                       FROM tool_batch_transition_outbox_event AS event
+                       JOIN tool_round AS round
+                         ON round.producing_model_call_id =
+                            event.producing_model_call_id
+                        AND round.turn_id = event.turn_id
+                        AND round.session_id = event.session_id
+                       JOIN context_frontier AS boundary_frontier
+                         ON boundary_frontier.owning_session_id =
+                            event.session_id
+                        AND boundary_frontier.context_frontier_id =
+                            round.boundary_frontier_id
+                       LEFT JOIN context_frontier AS result_frontier
+                         ON result_frontier.owning_session_id =
+                            event.session_id
+                        AND result_frontier.context_frontier_id =
+                            event.frontier_id
+                       LEFT JOIN tool_attempt AS recovery_attempt
+                         ON recovery_attempt.attempt_id =
+                            event.tool_attempt_id
+                        AND recovery_attempt.turn_id = event.turn_id
+                        AND recovery_attempt.session_id = event.session_id
+                        AND recovery_attempt.state_kind = 'terminal'
+                        AND recovery_attempt.terminal_disposition_kind =
+                            'ambiguous'
+                       LEFT JOIN tool_request AS recovery_request
+                         ON recovery_request.request_id =
+                            recovery_attempt.request_id
+                      WHERE event.event_sequence = $1
+                        AND event.session_id = $2",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?;
+            let (turn, producing_call, transition, frontier, attempt, valid) =
+                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+            if !valid {
+                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+            }
+            let state = match (transition.as_str(), frontier, attempt) {
+                ("proposed", Some(frontier), None) => DispatchedToolBatchState::Proposed {
+                    frontier: ContextFrontierId::from_uuid(frontier),
+                },
+                ("results_projected", Some(frontier), None) => {
+                    DispatchedToolBatchState::ResultsProjected {
+                        frontier: ContextFrontierId::from_uuid(frontier),
+                    }
+                }
+                ("recovery_required", None, Some(attempt)) => {
+                    DispatchedToolBatchState::RecoveryRequired {
+                        attempt: ToolAttemptId::from_uuid(attempt),
+                    }
+                }
+                _ => return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into()),
+            };
+            DispatchedOutboxEventKind::ToolBatchTransition {
+                turn: TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(producing_call),
                 state,
             }
         }
@@ -939,24 +1138,11 @@ async fn load_event(
                         (
                             turn.terminal_model_call_id IS NULL
                             AND terminal_call.model_call_id IS NULL
-                            AND NOT EXISTS (
-                                SELECT 1
-                                  FROM model_call AS any_call
-                                 WHERE any_call.turn_id = event.turn_id
-                                   AND any_call.session_id = event.session_id
-                            )
                         )
                         OR (
                             turn.terminal_model_call_id IS NOT NULL
                             AND terminal_call.model_call_id =
                                 turn.terminal_model_call_id
-                            AND (
-                                SELECT count(*)
-                                  FROM model_call AS counted_call
-                                 WHERE counted_call.turn_id = event.turn_id
-                                   AND counted_call.session_id =
-                                       event.session_id
-                            ) = 1
                         )
                     )",
             )
@@ -973,9 +1159,9 @@ async fn load_event(
             }
         }
         TURN_RECONCILIATION_REQUIRED => {
-            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+            let row: Option<(Uuid, Option<Uuid>, Option<Uuid>, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
-                        event.terminal_frontier_id
+                        event.tool_attempt_id, event.terminal_frontier_id
                    FROM turn_reconciliation_required_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
@@ -983,36 +1169,20 @@ async fn load_event(
                     AND turn.state_kind = 'terminal'
                     AND turn.terminal_disposition_kind = 'reconciliation_required'
                     AND turn.terminal_frontier_id = event.terminal_frontier_id
-                    AND turn.terminal_model_call_id = event.model_call_id
-                   JOIN model_call AS call
-                     ON call.model_call_id = event.model_call_id
-                    AND call.turn_id = event.turn_id
-                    AND call.session_id = event.session_id
-                    AND call.turn_attempt_id = turn.terminal_attempt_id
-                    AND call.state_kind = 'terminal'
-                    AND call.terminal_disposition_kind = 'ambiguous'
-                   JOIN turn_attempt AS terminal_attempt
-                     ON terminal_attempt.turn_attempt_id =
-                        turn.terminal_attempt_id
-                    AND terminal_attempt.turn_id = event.turn_id
-                    AND terminal_attempt.session_id = event.session_id
-                    AND terminal_attempt.state_kind = 'ended'
-                    AND terminal_attempt.end_disposition
-                        IN ('ambiguous', 'lost')
                     AND (
                         (
-                            terminal_attempt.end_variant =
-                                'after_cancellation'
-                            AND terminal_attempt.interrupt_command_id
-                                IS NOT NULL
-                            AND terminal_attempt.interrupt_predecessor_turn_id =
-                                event.turn_id
+                            event.model_call_id IS NOT NULL
+                            AND event.tool_attempt_id IS NULL
+                            AND turn.terminal_model_call_id =
+                                event.model_call_id
+                            AND turn.terminal_tool_attempt_id IS NULL
                         )
                         OR (
-                            terminal_attempt.end_variant = 'without_stop'
-                            AND terminal_attempt.interrupt_command_id IS NULL
-                            AND terminal_attempt.interrupt_predecessor_turn_id
-                                IS NULL
+                            event.model_call_id IS NULL
+                            AND event.tool_attempt_id IS NOT NULL
+                            AND turn.terminal_model_call_id IS NULL
+                            AND turn.terminal_tool_attempt_id =
+                                event.tool_attempt_id
                         )
                     )
                   WHERE event.event_sequence = $1
@@ -1022,11 +1192,122 @@ async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
-            let (turn, call, terminal_frontier) =
+            let (turn, call, tool_attempt, terminal_frontier) =
                 row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            let operation = match (call, tool_attempt) {
+                (Some(call), None) => {
+                    let valid: Option<bool> = sqlx::query_scalar(
+                        "SELECT true
+                           FROM turn_lifecycle AS turn
+                           JOIN model_call AS call
+                             ON call.model_call_id = $3
+                            AND call.turn_id = turn.turn_id
+                            AND call.session_id = turn.session_id
+                            AND call.turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND call.state_kind = 'terminal'
+                            AND call.terminal_disposition_kind = 'ambiguous'
+                           JOIN turn_attempt AS terminal_attempt
+                             ON terminal_attempt.turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND terminal_attempt.turn_id = turn.turn_id
+                            AND terminal_attempt.session_id = turn.session_id
+                            AND terminal_attempt.state_kind = 'ended'
+                            AND terminal_attempt.end_disposition
+                                IN ('ambiguous', 'lost')
+                            AND (
+                                (
+                                    terminal_attempt.end_variant =
+                                        'after_cancellation'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NOT NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id =
+                                        turn.turn_id
+                                )
+                                OR (
+                                    terminal_attempt.end_variant =
+                                        'without_stop'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id
+                                        IS NULL
+                                )
+                            )
+                          WHERE turn.turn_id = $1
+                            AND turn.session_id = $2
+                            AND turn.terminal_model_call_id = $3",
+                    )
+                    .bind(turn)
+                    .bind(stored_session)
+                    .bind(call)
+                    .fetch_optional(&mut **transaction)
+                    .await?;
+                    if valid.is_none() {
+                        return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                    }
+                    DispatchedReconciliationOperation::ModelCall(ModelCallId::from_uuid(call))
+                }
+                (None, Some(attempt)) => {
+                    let valid: Option<bool> = sqlx::query_scalar(
+                        "SELECT true
+                           FROM turn_lifecycle AS turn
+                           JOIN tool_attempt AS attempt
+                             ON attempt.attempt_id = $3
+                            AND attempt.turn_id = turn.turn_id
+                            AND attempt.session_id = turn.session_id
+                            AND attempt.issuing_turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND attempt.state_kind = 'terminal'
+                            AND attempt.terminal_disposition_kind = 'ambiguous'
+                           JOIN turn_attempt AS terminal_attempt
+                             ON terminal_attempt.turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND terminal_attempt.turn_id = turn.turn_id
+                            AND terminal_attempt.session_id = turn.session_id
+                            AND terminal_attempt.state_kind = 'ended'
+                            AND terminal_attempt.end_disposition
+                                IN ('ambiguous', 'lost')
+                            AND (
+                                (
+                                    terminal_attempt.end_variant =
+                                        'after_cancellation'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NOT NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id =
+                                        turn.turn_id
+                                )
+                                OR (
+                                    terminal_attempt.end_variant =
+                                        'without_stop'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id
+                                        IS NULL
+                                )
+                            )
+                          WHERE turn.turn_id = $1
+                            AND turn.session_id = $2
+                            AND turn.terminal_tool_attempt_id = $3",
+                    )
+                    .bind(turn)
+                    .bind(stored_session)
+                    .bind(attempt)
+                    .fetch_optional(&mut **transaction)
+                    .await?;
+                    if valid.is_none() {
+                        return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                    }
+                    DispatchedReconciliationOperation::ToolAttempt(ToolAttemptId::from_uuid(
+                        attempt,
+                    ))
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                }
+            };
             DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn: TurnId::from_uuid(turn),
-                call: ModelCallId::from_uuid(call),
+                operation,
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
@@ -1132,6 +1413,12 @@ pub(crate) enum OutboxEvent {
         call: ModelCallId,
         state: ModelCallOutboxState,
     },
+    ToolBatchTransition {
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        state: ToolBatchOutboxState,
+    },
     TurnCompleted {
         session: SessionId,
         turn: TurnId,
@@ -1157,6 +1444,12 @@ pub(crate) enum OutboxEvent {
         call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
+    TurnToolReconciliationRequired {
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 pub(crate) enum ModelCallOutboxState {
@@ -1164,6 +1457,12 @@ pub(crate) enum ModelCallOutboxState {
     InFlight,
     CancellationRequested,
     Terminal(ModelCallDisposition),
+}
+
+pub(crate) enum ToolBatchOutboxState {
+    Proposed(ContextFrontierId),
+    ResultsProjected(ContextFrontierId),
+    RecoveryRequired(ToolAttemptId),
 }
 
 pub(crate) async fn append(
@@ -1206,6 +1505,12 @@ pub(crate) async fn append(
             call,
             state,
         } => append_model_call_transition(connection, session, turn, call, state).await,
+        OutboxEvent::ToolBatchTransition {
+            session,
+            turn,
+            producing_call,
+            state,
+        } => append_tool_batch_transition(connection, session, turn, producing_call, state).await,
         OutboxEvent::TurnCompleted {
             session,
             turn,
@@ -1253,7 +1558,66 @@ pub(crate) async fn append(
             append_turn_reconciliation_required(connection, session, turn, call, terminal_frontier)
                 .await
         }
+        OutboxEvent::TurnToolReconciliationRequired {
+            session,
+            turn,
+            attempt,
+            terminal_frontier,
+        } => {
+            append_turn_tool_reconciliation_required(
+                connection,
+                session,
+                turn,
+                attempt,
+                terminal_frontier,
+            )
+            .await
+        }
     }
+}
+
+async fn append_tool_batch_transition(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    state: ToolBatchOutboxState,
+) -> Result<(), sqlx::Error> {
+    let (transition, frontier, attempt) = match state {
+        ToolBatchOutboxState::Proposed(frontier) => ("proposed", Some(frontier), None),
+        ToolBatchOutboxState::ResultsProjected(frontier) => {
+            ("results_projected", Some(frontier), None)
+        }
+        ToolBatchOutboxState::RecoveryRequired(attempt) => {
+            ("recovery_required", None, Some(attempt))
+        }
+    };
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_batch_transition_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, producing_model_call_id, transition_kind, frontier_id,
+             tool_attempt_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6, $7, $8
+           FROM header",
+    )
+    .bind(TOOL_BATCH_TRANSITION)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(producing_call.into_uuid())
+    .bind(transition)
+    .bind(frontier.map(ContextFrontierId::into_uuid))
+    .bind(attempt.map(ToolAttemptId::into_uuid))
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn append_session_created(
@@ -1475,6 +1839,38 @@ async fn append_turn_reconciliation_required(
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .bind(call.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_turn_tool_reconciliation_required(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+    terminal_frontier: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_reconciliation_required_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, tool_attempt_id, terminal_frontier_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6
+           FROM header",
+    )
+    .bind(TURN_RECONCILIATION_REQUIRED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(attempt.into_uuid())
     .bind(terminal_frontier.into_uuid())
     .execute(connection)
     .await?;

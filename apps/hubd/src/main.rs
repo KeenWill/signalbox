@@ -18,9 +18,9 @@ use std::{
 
 use signalbox_application::{
     ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnService, StartupScanService, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator,
+    InProcessToolDispatchGate, ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop,
+    SchedulerLoopExit, StartEligibleTurnService, StartupScanService,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -456,10 +456,12 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let process_runtime = ProcessRuntime::new(
         listener,
         scheduler_pool.clone(),
         eligibility_nudge,
+        tool_dispatch_gate,
         model_configuration,
     );
     let (execution, fatal_execution) =

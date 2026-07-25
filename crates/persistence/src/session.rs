@@ -5,10 +5,9 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::SessionReader;
 use signalbox_domain::{
-    DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionReconstitutionFailure, SessionReconstitutionInput,
-    TranscriptAncestry,
+    DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -16,14 +15,12 @@ use crate::create_session_from_imported_frontier::{
     self, ImportedSessionCorruption, ImportedSessionRepositoryError,
 };
 use crate::mapping::{
-    PositiveOrdinalMappingError, defaults_version_from_numeric, session_id_from_uuid,
-    session_id_to_uuid,
+    PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
+    defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
 };
 
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
-const TOOL_APPROVAL_DISABLED: &str = "disabled";
-const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 
 /// A durable shape that cannot reconstruct one complete current session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,7 +336,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    tool_approval: String,
+    dangerous_tool_auto_approval: String,
 ) -> Result<SessionConfigurationDefaults, SessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
@@ -357,16 +354,17 @@ fn decode_selection(
             .into());
         }
     };
-    let tool_approval = match tool_approval.as_str() {
-        TOOL_APPROVAL_DISABLED => DangerousToolAutoApproval::Disabled,
-        TOOL_APPROVAL_APPROVE_ALL => DangerousToolAutoApproval::ApproveAll,
-        _ => {
-            return Err(SessionCorruption::Unsupported {
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            SessionRepositoryError::from(SessionCorruption::Unsupported {
                 field: "dangerous tool auto approval",
-                value: tool_approval,
-            }
-            .into());
-        }
-    };
-    Ok(SessionConfigurationDefaults::with_dangerous_tool_auto_approval(model, tool_approval))
+                value: dangerous_tool_auto_approval,
+            })
+        })?;
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
 }

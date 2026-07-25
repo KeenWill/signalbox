@@ -6,18 +6,19 @@ use rust_decimal::Decimal;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
     CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
-    CreateSessionReconstitutionInput, DangerousToolAutoApproval, DirectModelSelection,
-    DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    ReconstitutedSessionCreation, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    TranscriptAncestry,
+    CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
+    ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::command_registry::{self, CommandKind, RegistryCorruption, RegistryInspectionError};
 use crate::mapping::{
-    PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-    durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+    PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
+    dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
+    defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
+    session_id_to_uuid,
 };
 use crate::outbox;
 
@@ -26,8 +27,6 @@ const STORAGE_VERSION: i16 = 2;
 const OWNER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
-const TOOL_APPROVAL_DISABLED: &str = "disabled";
-const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 
 /// The committed outcome of handling one prepared creation command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,7 +201,7 @@ impl CreateSessionRepository {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
-            Some(CommandKind::SubmitInput) => {
+            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -235,11 +234,10 @@ impl CreateSessionRepository {
                 }
                 Some(
                     CommandKind::CreateSessionFromImportedFrontier
-                    | CommandKind::ReplaceSessionDefaults,
+                    | CommandKind::ReplaceSessionDefaults
+                    | CommandKind::SubmitInput
+                    | CommandKind::DecideToolRequest,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
-                Some(CommandKind::SubmitInput) => {
-                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
-                }
                 None => {
                     return Err(
                         CreateSessionCorruption::Inconsistent("winner claim disappeared").into(),
@@ -276,11 +274,10 @@ impl CreateSessionRepository {
             }
             Some(
                 CommandKind::CreateSessionFromImportedFrontier
-                | CommandKind::ReplaceSessionDefaults,
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::SubmitInput
+                | CommandKind::DecideToolRequest,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
-            Some(CommandKind::SubmitInput) => {
-                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
-            }
         }
     }
 }
@@ -356,7 +353,7 @@ async fn insert_prepared(
     .bind(stored_selection.kind)
     .bind(stored_selection.direct)
     .bind(stored_selection.alias)
-    .bind(encode_tool_approval(
+    .bind(dangerous_tool_auto_approval_to_str(
         defaults.defaults().dangerous_tool_auto_approval(),
     ))
     .execute(&mut *connection)
@@ -388,7 +385,7 @@ async fn insert_prepared(
     .bind(command_selection.kind)
     .bind(command_selection.direct)
     .bind(command_selection.alias)
-    .bind(encode_tool_approval(
+    .bind(dangerous_tool_auto_approval_to_str(
         command
             .initial_configuration_defaults()
             .dangerous_tool_auto_approval(),
@@ -447,7 +444,7 @@ async fn load_from_connection(
             c.model_selection_kind AS command_model_kind,
             c.direct_model_selection_id AS command_direct_id,
             c.model_alias_id AS command_alias_id,
-            c.dangerous_tool_auto_approval AS command_tool_approval,
+            c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -458,7 +455,7 @@ async fn load_from_connection(
             v.model_selection_kind AS stored_model_kind,
             v.direct_model_selection_id AS stored_direct_id,
             v.model_alias_id AS stored_alias_id,
-            v.dangerous_tool_auto_approval AS stored_tool_approval
+            v.dangerous_tool_auto_approval AS stored_tool_auto_approval
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -502,7 +499,7 @@ fn decode_complete(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
-        required(&row, "command_tool_approval")?,
+        required(&row, "command_tool_auto_approval")?,
         typed_version,
         "command model selection",
     )?;
@@ -524,7 +521,7 @@ fn decode_complete(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
-        required(&row, "stored_tool_approval")?,
+        required(&row, "stored_tool_auto_approval")?,
         typed_version,
         "stored model selection",
     )?;
@@ -620,7 +617,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    tool_approval: String,
+    dangerous_tool_auto_approval: String,
     storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, CreateSessionRepositoryError> {
@@ -636,32 +633,27 @@ fn decode_selection(
             return Err(CreateSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
-    let tool_approval = decode_tool_approval(tool_approval, field)?;
-    if storage_version == 1 && tool_approval != DangerousToolAutoApproval::Disabled {
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            CreateSessionRepositoryError::from(CreateSessionCorruption::Unsupported {
+                field: "dangerous tool auto approval",
+                value: dangerous_tool_auto_approval,
+            })
+        })?;
+    if storage_version == 1
+        && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
+    {
         return Err(CreateSessionCorruption::Inconsistent(
             "version-one dangerous tool auto approval",
         )
         .into());
     }
-    Ok(SessionConfigurationDefaults::with_dangerous_tool_auto_approval(model, tool_approval))
-}
-
-const fn encode_tool_approval(value: DangerousToolAutoApproval) -> &'static str {
-    match value {
-        DangerousToolAutoApproval::Disabled => TOOL_APPROVAL_DISABLED,
-        DangerousToolAutoApproval::ApproveAll => TOOL_APPROVAL_APPROVE_ALL,
-    }
-}
-
-fn decode_tool_approval(
-    value: String,
-    field: &'static str,
-) -> Result<DangerousToolAutoApproval, CreateSessionRepositoryError> {
-    match value.as_str() {
-        TOOL_APPROVAL_DISABLED => Ok(DangerousToolAutoApproval::Disabled),
-        TOOL_APPROVAL_APPROVE_ALL => Ok(DangerousToolAutoApproval::ApproveAll),
-        _ => Err(CreateSessionCorruption::Unsupported { field, value }.into()),
-    }
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
 }
 
 async fn inspect_registry(

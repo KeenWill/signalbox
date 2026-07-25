@@ -195,7 +195,7 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
     .await?;
 
     let command = imported_command(0x301, &conversation, ImportedSessionRelationship::Resume);
-    let repository = ImportedSessionRepository::new(pool);
+    let repository = ImportedSessionRepository::new(pool.clone());
     let mut next_semantic = 0x610_u128;
     let first = repository
         .handle(
@@ -234,8 +234,8 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
 }
 
 /// S28 / INV-002 / INV-008 / INV-038 / INV-039: the purpose-specific command
-/// load reconstitutes the complete version-two command, defaults, result,
-/// semantic prefix, and seed.
+/// load reconstitutes the complete stored command, defaults, result, semantic
+/// prefix, and seed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_checked_seed()

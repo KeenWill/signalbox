@@ -4,8 +4,9 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, TurnId,
+    AcceptedInputId, DangerousToolAutoApproval, DurableCommandId,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, ToolAttemptId,
+    ToolRequestId, TurnId,
 };
 use sqlx::types::Uuid;
 
@@ -60,6 +61,23 @@ pub fn input_position_from_numeric(
     SessionInputPosition::try_from_u64(ordinal).ok_or(PositiveOrdinalMappingError::NonPositive)
 }
 
+/// Encodes the dangerous blanket posture as its closed storage spelling.
+pub fn dangerous_tool_auto_approval_to_str(value: DangerousToolAutoApproval) -> &'static str {
+    match value {
+        DangerousToolAutoApproval::Disabled => "disabled",
+        DangerousToolAutoApproval::ApproveAll => "approve_all",
+    }
+}
+
+/// Decodes the closed dangerous blanket storage spelling.
+pub fn dangerous_tool_auto_approval_from_str(value: &str) -> Option<DangerousToolAutoApproval> {
+    match value {
+        "disabled" => Some(DangerousToolAutoApproval::Disabled),
+        "approve_all" => Some(DangerousToolAutoApproval::ApproveAll),
+        _ => None,
+    }
+}
+
 fn positive_u64_from_numeric(value: Decimal) -> Result<u64, PositiveOrdinalMappingError> {
     if !value.fract().is_zero() {
         return Err(PositiveOrdinalMappingError::Fractional);
@@ -98,6 +116,26 @@ pub fn turn_id_to_uuid(value: TurnId) -> Uuid {
 /// Decodes a turn identity from a PostgreSQL `uuid` column.
 pub fn turn_id_from_uuid(value: Uuid) -> TurnId {
     TurnId::from_uuid(value)
+}
+
+/// Encodes a logical tool-request identity for a PostgreSQL `uuid` column.
+pub fn tool_request_id_to_uuid(value: ToolRequestId) -> Uuid {
+    value.into_uuid()
+}
+
+/// Decodes a logical tool-request identity from a PostgreSQL `uuid` column.
+pub fn tool_request_id_from_uuid(value: Uuid) -> ToolRequestId {
+    ToolRequestId::from_uuid(value)
+}
+
+/// Encodes a physical tool-attempt identity for a PostgreSQL `uuid` column.
+pub fn tool_attempt_id_to_uuid(value: ToolAttemptId) -> Uuid {
+    value.into_uuid()
+}
+
+/// Decodes a physical tool-attempt identity from a PostgreSQL `uuid` column.
+pub fn tool_attempt_id_from_uuid(value: Uuid) -> ToolAttemptId {
+    ToolAttemptId::from_uuid(value)
 }
 
 /// Why a PostgreSQL `uuid` value is not a valid durable-command identity.

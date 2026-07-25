@@ -11,18 +11,17 @@ use signalbox_domain::{
     ContextFrontierId, CreateSessionFromImportedFrontier,
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionFailure,
-    CreateSessionFromImportedFrontierReconstitutionInput, DangerousToolAutoApproval,
-    DirectModelSelection, DurableCommandId, ImportedConversation, ImportedConversationId,
-    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
-    ImportedSessionRelationship, ImportedSessionSeedHeaderReconstitutionInput,
-    ImportedSessionSeedReconstitutionInput, ImportedTranscriptEntryId, ImportedTranscriptPosition,
-    ModelAlias, ModelSelectionRequest, PreparedCreateSessionFromImportedFrontier,
-    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
-    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, TranscriptAncestry,
+    CreateSessionFromImportedFrontierReconstitutionInput, DirectModelSelection, DurableCommandId,
+    ImportedConversation, ImportedConversationId, ImportedSessionReconstitutionFailure,
+    ImportedSessionReconstitutionInput, ImportedSessionRelationship,
+    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionInput,
+    ImportedTranscriptEntryId, ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier, ResolvedContextFrontierReconstitutionInput,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -36,16 +35,15 @@ use crate::{
         ImportedConversationRepositoryError,
     },
     mapping::{
-        DurableCommandIdMappingError, PositiveOrdinalMappingError, defaults_version_from_numeric,
-        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        session_id_from_uuid, session_id_to_uuid,
+        DurableCommandIdMappingError, PositiveOrdinalMappingError,
+        dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
+        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
     },
     outbox,
 };
 
 const STORAGE_VERSION: i16 = 2;
-const TOOL_APPROVAL_DISABLED: &str = "disabled";
-const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 const OWNER_INITIATED: &str = "owner_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
 const APPLIED: &str = "applied";
@@ -465,7 +463,7 @@ async fn insert_prepared(
     .bind(stored_selection.kind)
     .bind(stored_selection.direct)
     .bind(stored_selection.alias)
-    .bind(encode_tool_approval(
+    .bind(dangerous_tool_auto_approval_to_str(
         defaults.defaults().dangerous_tool_auto_approval(),
     ))
     .execute(&mut *connection)
@@ -505,7 +503,7 @@ async fn insert_prepared(
     .bind(command_selection.kind)
     .bind(command_selection.direct)
     .bind(command_selection.alias)
-    .bind(encode_tool_approval(
+    .bind(dangerous_tool_auto_approval_to_str(
         command
             .initial_configuration_defaults()
             .dangerous_tool_auto_approval(),
@@ -617,7 +615,7 @@ async fn load_creation_from_connection(
             c.model_selection_kind AS command_model_kind,
             c.direct_model_selection_id AS command_direct_id,
             c.model_alias_id AS command_alias_id,
-            c.dangerous_tool_auto_approval AS command_tool_approval,
+            c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -632,7 +630,7 @@ async fn load_creation_from_connection(
             v.model_selection_kind AS stored_model_kind,
             v.direct_model_selection_id AS stored_direct_id,
             v.model_alias_id AS stored_alias_id,
-            v.dangerous_tool_auto_approval AS stored_tool_approval
+            v.dangerous_tool_auto_approval AS stored_tool_auto_approval
          FROM durable_command AS d
          LEFT JOIN create_session_from_imported_frontier_command AS c
            ON c.command_id = d.command_id
@@ -699,7 +697,7 @@ async fn load_creation_from_connection(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
-        required(&row, "command_tool_approval")?,
+        required(&row, "command_tool_auto_approval")?,
         typed_version,
         "command model selection",
     )?;
@@ -715,11 +713,12 @@ async fn load_creation_from_connection(
     let provenance = decode_stored_provenance(&row, &conversation)?;
     let defaults_session = session_id_from_uuid(required(&row, "defaults_session_id")?);
     let defaults_version = decode_ordinal(&row, "stored_defaults_version")?;
-    let defaults = decode_selection(
+    let defaults = decode_versioned_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
-        required(&row, "stored_tool_approval")?,
+        required(&row, "stored_tool_auto_approval")?,
+        typed_version,
         "stored model selection",
     )?;
     let projection = load_seed_projection(connection, stored_session, &conversation).await?;
@@ -1124,7 +1123,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    tool_approval: String,
+    dangerous_tool_auto_approval: String,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -1139,43 +1138,33 @@ fn decode_selection(
             return Err(ImportedSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            ImportedSessionRepositoryError::from(ImportedSessionCorruption::Unsupported {
+                field: "dangerous tool auto approval",
+                value: dangerous_tool_auto_approval,
+            })
+        })?;
     Ok(
         SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
             model,
-            decode_tool_approval(tool_approval, field)?,
+            dangerous_tool_auto_approval,
         ),
     )
-}
-
-const fn encode_tool_approval(value: DangerousToolAutoApproval) -> &'static str {
-    match value {
-        DangerousToolAutoApproval::Disabled => TOOL_APPROVAL_DISABLED,
-        DangerousToolAutoApproval::ApproveAll => TOOL_APPROVAL_APPROVE_ALL,
-    }
-}
-
-fn decode_tool_approval(
-    value: String,
-    field: &'static str,
-) -> Result<DangerousToolAutoApproval, ImportedSessionRepositoryError> {
-    match value.as_str() {
-        TOOL_APPROVAL_DISABLED => Ok(DangerousToolAutoApproval::Disabled),
-        TOOL_APPROVAL_APPROVE_ALL => Ok(DangerousToolAutoApproval::ApproveAll),
-        _ => Err(ImportedSessionCorruption::Unsupported { field, value }.into()),
-    }
 }
 
 fn decode_versioned_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    tool_approval: String,
+    dangerous_tool_auto_approval: String,
     storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
-    let defaults = decode_selection(kind, direct, alias, tool_approval, field)?;
+    let defaults = decode_selection(kind, direct, alias, dangerous_tool_auto_approval, field)?;
     if storage_version == 1
-        && defaults.dangerous_tool_auto_approval() != DangerousToolAutoApproval::Disabled
+        && defaults.dangerous_tool_auto_approval()
+            != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
         return Err(ImportedSessionCorruption::Inconsistent(
             "version-one dangerous tool auto approval",

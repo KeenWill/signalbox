@@ -18,7 +18,7 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     ImportConversationOutcome, ImportConversationService, ImportedConversationIdGenerator,
-    InProcessEligibilityWorkSource,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -316,6 +316,7 @@ impl RunningRuntime {
             listener,
             pool.clone(),
             eligibility_nudge,
+            InProcessToolDispatchGate::default(),
             model_configuration,
         );
         let (shutdown, shutdown_receiver) = watch::channel(false);

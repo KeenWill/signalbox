@@ -4,14 +4,16 @@ use std::{collections::BTreeSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StartupScanRepository, StartupScanSessionOutcome,
+    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator, StartupScanRepository,
+    StartupScanSessionOutcome, ToolCrashClosureIdentities,
 };
 use signalbox_domain::{
-    AcceptedInputId, AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
-    AttemptEnd, CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
+    CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
     PendingSteeringReclassificationIdentity, PreparedAcceptedInputTurnFailure,
+    ReconstitutedToolAttempt,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
-    TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    ToolAttemptCrashOutcome, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
@@ -22,16 +24,23 @@ use crate::{
     },
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        persist_terminal_outcome, require_live_execution_for_restart,
+        fail_tool_crash_in_transaction, insert_snapshot, persist_terminal_outcome,
+        require_live_execution_for_restart,
     },
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
+    tool_loop::{
+        ToolLoopRepositoryError, load_active_batch_from_connection, persist_ended_attempt,
+        persist_result_entries, persist_tool_recovery_wait,
+    },
 };
 
 /// Which fresh startup-recovery identity collided durably.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupScanIdentityCollision {
+    /// A proposed tool-closure semantic-entry identity already exists.
+    ToolClosureEntry,
     /// The proposed `TurnFailed` entry identity already exists.
     FailureEntry,
     /// The proposed terminal context-frontier identity already exists.
@@ -43,6 +52,7 @@ pub enum StartupScanIdentityCollision {
 impl fmt::Display for StartupScanIdentityCollision {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let identity = match self {
+            Self::ToolClosureEntry => "tool-closure semantic-entry",
             Self::FailureEntry => "failure semantic-entry",
             Self::TerminalFrontier => "terminal context-frontier",
             Self::ReclassifiedTurn => "reclassified successor-turn",
@@ -228,23 +238,17 @@ impl PostgresStartupScanRepository {
     }
 
     /// Locks one session and atomically terminalizes its prior-process attempt.
-    pub async fn recover<NextTurn>(
+    pub async fn recover<Generator>(
         &self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-        next_reclassified_turn: NextTurn,
+        ids: &mut Generator,
     ) -> Result<StartupScanSessionOutcome, StartupScanRepositoryError>
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        Generator: StartupScanIdGenerator + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let decision = recover_in_transaction(
-            &mut transaction,
-            session,
-            identities,
-            next_reclassified_turn,
-        )
-        .await;
+        let decision = recover_in_transaction(&mut transaction, session, identities, ids).await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -275,28 +279,27 @@ impl StartupScanRepository for PostgresStartupScanRepository {
         PostgresStartupScanRepository::active_sessions(self).await
     }
 
-    async fn recover<NextTurn>(
+    async fn recover<Generator>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-        next_reclassified_turn: NextTurn,
+        ids: &mut Generator,
     ) -> Result<StartupScanSessionOutcome, Self::Error>
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        Generator: StartupScanIdGenerator + Send,
     {
-        PostgresStartupScanRepository::recover(self, session, identities, next_reclassified_turn)
-            .await
+        PostgresStartupScanRepository::recover(self, session, identities, ids).await
     }
 }
 
-async fn recover_in_transaction<NextTurn>(
+async fn recover_in_transaction<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
-    next_reclassified_turn: NextTurn,
+    ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
 where
-    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    Generator: StartupScanIdGenerator + Send,
 {
     // This is the same scheduler-row lock ordering used by every lifecycle
     // writer. Reconstitution and all guarded writes happen while it is held.
@@ -315,22 +318,22 @@ where
         identities,
         session_exists,
         scheduler_session,
-        next_reclassified_turn,
+        ids,
     )
     .await
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
-async fn recover_locked_session<NextTurn>(
+async fn recover_locked_session<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
     session_exists: bool,
     scheduler_session: Option<Uuid>,
-    mut next_reclassified_turn: NextTurn,
+    ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
 where
-    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    Generator: StartupScanIdGenerator + Send,
 {
     if scheduler_session.is_none() {
         if session_exists {
@@ -373,6 +376,93 @@ where
         .first()
         .map(signalbox_domain::PendingSteeringInput::accepted_input);
 
+    if let Some(batch) =
+        load_active_batch_from_connection(connection, requested_session, active_turn.turn())
+            .await
+            .map_err(map_tool_loop_error)?
+    {
+        let Some(current) =
+            batch
+                .requests()
+                .iter()
+                .find_map(|request| match batch.attempt(request.id()) {
+                    Some(ReconstitutedToolAttempt::Current(current)) => Some(current.clone()),
+                    Some(ReconstitutedToolAttempt::Ended(_)) | None => None,
+                })
+        else {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::ResumableToolBatch {
+                    turn: active_turn.turn(),
+                },
+            ));
+        };
+        let outcome = current.classify_crash_loss();
+        let ended = match &outcome {
+            ToolAttemptCrashOutcome::KnownFailed(ended)
+            | ToolAttemptCrashOutcome::Ambiguous(ended) => ended,
+        };
+        persist_ended_attempt(connection, ended)
+            .await
+            .map_err(map_tool_loop_error)?;
+        match &outcome {
+            ToolAttemptCrashOutcome::Ambiguous(ended) => {
+                persist_tool_recovery_wait(connection, ended, true)
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                return Ok(TransactionDecision::Commit(
+                    StartupScanSessionOutcome::RecoveredToolAttempt(Box::new(outcome)),
+                ));
+            }
+            ToolAttemptCrashOutcome::KnownFailed(_) => {
+                let closure = ToolCrashClosureIdentities::new(
+                    (0..batch.requests().len())
+                        .map(|_| ids.next_tool_closure_entry_id())
+                        .collect(),
+                    ids.next_tool_closure_frontier_id(),
+                    FailedModelCallTurnIdentities::new(
+                        identities.failure_entry(),
+                        identities.terminal_frontier(),
+                    ),
+                );
+                let closed_batch = load_active_batch_from_connection(
+                    connection,
+                    requested_session,
+                    active_turn.turn(),
+                )
+                .await
+                .map_err(map_tool_loop_error)?
+                .ok_or(StartupScanCorruption::Missing("crash-closed tool batch"))?;
+                let projection = closed_batch
+                    .prepare_failure_projection(
+                        closure.result_entries().to_vec(),
+                        closure.result_frontier(),
+                    )
+                    .map_err(|_| {
+                        StartupScanCorruption::Inconsistent("known tool crash closure projection")
+                    })?;
+                persist_result_entries(connection, &projection)
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                insert_snapshot(connection, projection.snapshot())
+                    .await
+                    .map_err(map_model_call_error)?;
+                fail_tool_crash_in_transaction(
+                    connection,
+                    requested_session,
+                    active_turn.turn(),
+                    &projection,
+                    closure.failure().clone(),
+                    |accepted_input| ids.next_reclassified_turn_id(accepted_input),
+                )
+                .await
+                .map_err(map_model_call_error)?;
+                return Ok(TransactionDecision::Commit(
+                    StartupScanSessionOutcome::RecoveredToolAttempt(Box::new(outcome)),
+                ));
+            }
+        }
+    }
+
     let model_execution = require_live_execution_for_restart(connection, requested_session)
         .await
         .map_err(map_model_call_error)?;
@@ -389,7 +479,7 @@ where
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {
                 let accepted_input = pending.accepted_input();
-                let proposed_turn = next_reclassified_turn(accepted_input);
+                let proposed_turn = ids.next_reclassified_turn_id(accepted_input);
                 record_reclassified_turn_candidate(
                     model_execution.turn(),
                     proposed_turn,
@@ -429,7 +519,7 @@ where
         let mut reclassifications = Vec::new();
         for pending in model_execution.active_turn().pending_steering() {
             let accepted_input = pending.accepted_input();
-            let proposed_turn = next_reclassified_turn(accepted_input);
+            let proposed_turn = ids.next_reclassified_turn_id(accepted_input);
             record_reclassified_turn_candidate(
                 model_execution.turn(),
                 proposed_turn,
@@ -595,7 +685,10 @@ async fn insert_prepared_failure(
                 terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_model_call_id = NULL,
-                terminal_disposition_kind = 'failed'
+                terminal_disposition_kind = 'failed',
+                active_tool_round_call_id = NULL,
+                approval_tool_request_id = NULL,
+                recovery_tool_attempt_id = NULL
           WHERE turn_id = $2
             AND session_id = $3
             AND origin_accepted_input_id = $4
@@ -654,6 +747,22 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
+        }
+    }
+}
+
+fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryError {
+    match error {
+        ToolLoopRepositoryError::Database { source, .. } => source.into(),
+        ToolLoopRepositoryError::IdentityCollision => {
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ToolClosureEntry,
+            )
+        }
+        ToolLoopRepositoryError::Corruption(_)
+        | ToolLoopRepositoryError::DifferentCommandKind
+        | ToolLoopRepositoryError::InvalidTransition(_) => {
+            StartupScanCorruption::Inconsistent("tool-attempt restart state").into()
         }
     }
 }
@@ -735,8 +844,9 @@ mod tests {
 
     use super::{
         StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-        commit_failure_is_ambiguous, record_reclassified_turn_candidate,
+        commit_failure_is_ambiguous, map_tool_loop_error, record_reclassified_turn_candidate,
     };
+    use crate::tool_loop::ToolLoopRepositoryError;
 
     /// INV-034: a generated source-turn identity is a retryable collision, not
     /// durable corruption.
@@ -768,6 +878,16 @@ mod tests {
             Err(StartupScanRepositoryError::IdentityCollision(
                 StartupScanIdentityCollision::ReclassifiedTurn
             ))
+        ));
+    }
+
+    #[test]
+    fn tool_closure_identity_collision_remains_retryable_at_startup_boundary() {
+        assert!(matches!(
+            map_tool_loop_error(ToolLoopRepositoryError::IdentityCollision),
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ToolClosureEntry
+            )
         ));
     }
 

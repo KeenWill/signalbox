@@ -56,8 +56,9 @@ impl TranscriptSnapshot {
             .map_err(|_| ClientError::Protocol("test request identity was invalid"))?;
         let mut spool = tempfile::tempfile()?;
         for message in messages {
-            let frame = ServerFrame::try_new_for_version(ProtocolVersion::Two, request_id, message)
-                .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
+            let frame =
+                ServerFrame::try_new_for_version(ProtocolVersion::Three, request_id, message)
+                    .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
         }
         spool.flush()?;

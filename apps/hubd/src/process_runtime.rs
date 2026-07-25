@@ -11,8 +11,9 @@ use std::{
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    InProcessEligibilityNudge, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    InProcessEligibilityNudge, InProcessToolDispatchGate, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, SubmitInputTransaction, UuidV7SessionIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, DeliveryRequest, DirectModelSelection,
@@ -25,23 +26,25 @@ use signalbox_persistence::{
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessModelSelection,
-        ProcessReadError, ProcessReadRepository, ProcessSessionAncestry, ProcessTranscriptEntry,
-        ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
+        ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
+        ProcessSessionAncestry, ProcessTranscriptEntry, ProcessTranscriptItem,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CurrentModelCall, CurrentModelCallState, ErrorCode,
     ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-    FrameEncodeError, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
-    MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
+    FrameEncodeError, FrameValidationError, IMPORTED_TRANSCRIPT_PROTOCOL_VERSION,
+    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_FRAME_BYTES,
+    ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
+    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
     TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments, decode_client_line,
     encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
@@ -71,6 +74,7 @@ const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 struct ConnectionServices {
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: Arc<HubModelConfiguration>,
     updates: broadcast::Sender<ProcessUpdate>,
     inbound_frame_budget: Arc<Semaphore>,
@@ -84,6 +88,7 @@ pub struct ProcessRuntime {
     listener: LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
 }
 
@@ -93,12 +98,14 @@ impl ProcessRuntime {
         listener: LocalProcessListener,
         pool: PgPool,
         eligibility_nudge: InProcessEligibilityNudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
         model_configuration: HubModelConfiguration,
     ) -> Self {
         Self {
             listener,
             pool,
             eligibility_nudge,
+            tool_dispatch_gate,
             model_configuration,
         }
     }
@@ -111,6 +118,7 @@ impl ProcessRuntime {
             &self.listener,
             self.pool.clone(),
             self.eligibility_nudge,
+            self.tool_dispatch_gate,
             self.model_configuration,
             updates.clone(),
             shutdown.clone(),
@@ -161,6 +169,7 @@ async fn serve_connections(
     listener: &LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
     model_configuration: HubModelConfiguration,
     updates: broadcast::Sender<ProcessUpdate>,
     mut shutdown: watch::Receiver<bool>,
@@ -170,6 +179,7 @@ async fn serve_connections(
     let services = ConnectionServices {
         pool,
         eligibility_nudge,
+        tool_dispatch_gate,
         model_configuration: Arc::new(model_configuration),
         updates,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
@@ -296,8 +306,7 @@ async fn serve_connection(
             }
         };
         drop(frame_buffer_permit);
-        let version = frame.version();
-        let (request_id, request) = frame.into_parts();
+        let (version, request_id, request) = frame.into_parts();
         let follows = matches!(request, ClientRequest::FollowSession { .. });
         handle_request(
             &mut writer,
@@ -418,6 +427,7 @@ where
                 expected_defaults_version,
                 &services.pool,
                 &services.eligibility_nudge,
+                &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
             )
             .await
@@ -629,6 +639,17 @@ where
             )
             .await
         }
+        SnapshotSpoolError::Encode(FrameEncodeError::Validation(
+            FrameValidationError::MessageRequiresNewerVersion,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(3),
+            )
+            .await
+        }
         SnapshotSpoolError::Encode(error) => Err(ProcessConnectionError::Encode(error)),
         SnapshotSpoolError::EncodeInvariant => Err(ProcessConnectionError::EncodeInvariant),
     }
@@ -707,16 +728,23 @@ struct ConfiguredSubmitInputTransaction<'configuration> {
 impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle<NextTurn>(
+    async fn handle<NextTurn, NextToolCancellation>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
     ) -> Result<SubmitInputOutcome, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (
+                Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
+            ) + Send,
     {
         let outcome = self
             .repository
@@ -726,6 +754,7 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
                 turn,
                 cancellation_identities,
                 next_reclassified_turn,
+                next_tool_cancellation,
                 |alias| self.model_configuration.resolve_alias(alias),
             )
             .await?;
@@ -753,23 +782,24 @@ async fn handle_submit_input<Writer>(
     expected_defaults_version: CanonicalU64,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
+    tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_requires_version_two(version, pool, session).await {
-        Ok(true) => {
+    match selected_session_required_protocol_version(version, pool, session).await {
+        Ok(Some(required_version)) => {
             return write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::requires_version_two(),
+                ProtocolError::unsupported_version(required_version),
             )
             .await;
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             return write_process_read_error(writer, version, request_id, error).await;
         }
@@ -821,6 +851,7 @@ where
             model_configuration,
         },
         eligibility_nudge.clone(),
+        tool_dispatch_gate.clone(),
     );
     match service.execute(request).await {
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
@@ -925,20 +956,42 @@ fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {
     UserContent::try_text(content).map_err(|_| ())
 }
 
-async fn selected_session_requires_version_two(
+async fn selected_session_required_protocol_version(
     version: ProtocolVersion,
     pool: &PgPool,
     session: SessionId,
-) -> Result<bool, ProcessReadError> {
-    if version == ProtocolVersion::Two {
-        return Ok(false);
+) -> Result<Option<u64>, ProcessReadError> {
+    if version == ProtocolVersion::Three {
+        return Ok(None);
     }
-    Ok(matches!(
-        ProcessReadRepository::new(pool.clone())
-            .session_ancestry(session)
-            .await?,
-        Some(ProcessSessionAncestry::ImportedConversation)
+    let repository = ProcessReadRepository::new(pool.clone());
+    let has_tool_history = repository.session_has_tool_history(session).await?;
+    let ancestry = if version.as_u64() < IMPORTED_TRANSCRIPT_PROTOCOL_VERSION {
+        repository.session_ancestry(session).await?
+    } else {
+        None
+    };
+    Ok(required_protocol_version_for_selected_session(
+        version,
+        has_tool_history,
+        ancestry,
     ))
+}
+
+fn required_protocol_version_for_selected_session(
+    version: ProtocolVersion,
+    has_tool_history: bool,
+    ancestry: Option<ProcessSessionAncestry>,
+) -> Option<u64> {
+    if has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
+        Some(ProtocolVersion::Three.as_u64())
+    } else if version == ProtocolVersion::One
+        && matches!(ancestry, Some(ProcessSessionAncestry::ImportedConversation))
+    {
+        Some(IMPORTED_TRANSCRIPT_PROTOCOL_VERSION)
+    } else {
+        None
+    }
 }
 
 async fn handle_read_transcript<Writer>(
@@ -953,17 +1006,17 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_requires_version_two(version, pool, selected_session).await {
-        Ok(true) => {
+    match selected_session_required_protocol_version(version, pool, selected_session).await {
+        Ok(Some(required_version)) => {
             return write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::requires_version_two(),
+                ProtocolError::unsupported_version(required_version),
             )
             .await;
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             return write_process_read_error(writer, version, request_id, error).await;
         }
@@ -999,7 +1052,7 @@ where
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the follow stream keeps its request, snapshot, update, and shutdown boundaries explicit"
+    reason = "the versioned follow stream keeps each protocol and runtime boundary explicit"
 )]
 async fn handle_follow_session<Writer>(
     writer: &mut Writer,
@@ -1015,17 +1068,17 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_requires_version_two(version, pool, selected_session).await {
-        Ok(true) => {
+    match selected_session_required_protocol_version(version, pool, selected_session).await {
+        Ok(Some(required_version)) => {
             return write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::requires_version_two(),
+                ProtocolError::unsupported_version(required_version),
             )
             .await;
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             return write_process_read_error(writer, version, request_id, error).await;
         }
@@ -1108,18 +1161,27 @@ where
         if update.session != selected_session {
             continue;
         }
+        let message = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(update.cursor),
+            session_id,
+            event: update.event.wire(),
+        };
+        if version.as_u64() < message.minimum_protocol_version() {
+            return run_until_shutdown(
+                &mut shutdown,
+                write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::unsupported_version(message.minimum_protocol_version()),
+                ),
+            )
+            .await
+            .unwrap_or(Ok(()));
+        }
         let Some(event_write) = run_until_shutdown(
             &mut shutdown,
-            write_message(
-                writer,
-                version,
-                request_id,
-                ServerMessage::SessionEvent {
-                    cursor: CanonicalU64::new(update.cursor),
-                    session_id,
-                    event: update.event.wire(),
-                },
-            ),
+            write_message(writer, version, request_id, message),
         )
         .await
         else {
@@ -1332,6 +1394,106 @@ where
             )
             .await?;
             write_content(writer, version, request_id, *entry_index, content).await
+        }
+        ProcessTranscriptEntry::AssistantToolUse {
+            entry_index,
+            source_session,
+            entry,
+            turn,
+            model_call,
+            request,
+            name,
+            arguments,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::AssistantToolUse {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        model_call_id: wire_uuid(model_call.into_uuid()),
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                        tool_name: name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index,
+            source_session,
+            entry,
+            request,
+            attempt,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ToolExecutionResult {
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                        tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::ToolDenied {
+            entry_index,
+            source_session,
+            entry,
+            request,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ToolDenied {
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::ToolClosed {
+            entry_index,
+            source_session,
+            entry,
+            request,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ToolClosed {
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
         }
         ProcessTranscriptEntry::TurnFailed {
             entry_index,
@@ -1625,6 +1787,18 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_model_call_id: wire_uuid(recovery_call.into_uuid()),
         },
+        ProcessTurnState::ActiveAwaitingToolApproval { request } => {
+            TurnState::ActiveAwaitingToolApproval {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            }
+        }
+        ProcessTurnState::ActiveAwaitingToolRecovery {
+            ended_attempt,
+            recovery_attempt,
+        } => TurnState::ActiveAwaitingToolRecovery {
+            ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
+            recovery_tool_attempt_id: wire_uuid(recovery_attempt.into_uuid()),
+        },
         ProcessTurnState::Failed {
             terminal_frontier,
             terminal_attempt,
@@ -1676,11 +1850,20 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         ProcessTurnState::ReconciliationRequired {
             terminal_frontier,
             terminal_attempt,
-            terminal_call,
-        } => TurnState::ReconciliationRequired {
-            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
-            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
-            terminal_model_call_id: wire_uuid(terminal_call.into_uuid()),
+            operation,
+        } => match operation {
+            ProcessReconciliationOperation::ModelCall(call) => TurnState::ReconciliationRequired {
+                terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+                terminal_model_call_id: wire_uuid(call.into_uuid()),
+            },
+            ProcessReconciliationOperation::ToolAttempt(attempt) => {
+                TurnState::ToolReconciliationRequired {
+                    terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                    terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+                    terminal_tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                }
+            }
         },
     }
 }
@@ -1858,13 +2041,25 @@ struct ProtocolError {
 }
 
 impl ProtocolError {
+    const fn unsupported_version(required_version: u64) -> Self {
+        Self {
+            code: ErrorCode::UnsupportedVersion,
+            message: match required_version {
+                2 => "the selected session requires protocol version 2",
+                3 => "the selected session requires protocol version 3",
+                _ => "the protocol version is unsupported",
+            },
+            detail: ErrorDetail::none(),
+        }
+    }
+
     const fn without_detail(code: ErrorCode) -> Self {
         Self {
             code,
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1, 2"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -1890,14 +2085,6 @@ impl ProtocolError {
             Self::without_detail(ErrorCode::CommitAmbiguous)
         } else {
             Self::without_detail(ErrorCode::Unavailable)
-        }
-    }
-
-    const fn requires_version_two() -> Self {
-        Self {
-            code: ErrorCode::UnsupportedVersion,
-            message: "the selected session requires protocol version 2",
-            detail: ErrorDetail::none(),
         }
     }
 
@@ -1945,6 +2132,11 @@ enum ProcessUpdateEvent {
         call: signalbox_domain::ModelCallId,
         state: DispatchedModelCallState,
     },
+    ToolBatchTransition {
+        turn: signalbox_domain::TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        state: DispatchedToolBatchState,
+    },
     TurnCompleted {
         turn: signalbox_domain::TurnId,
         call: signalbox_domain::ModelCallId,
@@ -1968,7 +2160,7 @@ enum ProcessUpdateEvent {
     },
     TurnReconciliationRequired {
         turn: signalbox_domain::TurnId,
-        call: signalbox_domain::ModelCallId,
+        operation: DispatchedReconciliationOperation,
         terminal_frontier: signalbox_domain::ContextFrontierId,
     },
 }
@@ -2011,6 +2203,15 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                     state: *state,
                 }
             }
+            DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call,
+                state,
+            } => Self::ToolBatchTransition {
+                turn: *turn,
+                producing_call: *producing_call,
+                state: *state,
+            },
             DispatchedOutboxEventKind::TurnCompleted {
                 turn,
                 call,
@@ -2042,11 +2243,11 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
             },
             DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
-                call,
+                operation,
                 terminal_frontier,
             } => Self::TurnReconciliationRequired {
                 turn: *turn,
-                call: *call,
+                operation: *operation,
                 terminal_frontier: *terminal_frontier,
             },
         }
@@ -2079,6 +2280,29 @@ impl ProcessUpdateEvent {
                 turn_id: wire_uuid(turn.into_uuid()),
                 model_call_id: wire_uuid(call.into_uuid()),
                 state: wire_model_call_state(*state),
+            },
+            Self::ToolBatchTransition {
+                turn,
+                producing_call,
+                state,
+            } => SessionEvent::ToolBatchTransition {
+                turn_id: wire_uuid(turn.into_uuid()),
+                model_call_id: wire_uuid(producing_call.into_uuid()),
+                state: match state {
+                    DispatchedToolBatchState::Proposed { frontier } => ToolBatchState::Proposed {
+                        frontier_id: wire_uuid(frontier.into_uuid()),
+                    },
+                    DispatchedToolBatchState::ResultsProjected { frontier } => {
+                        ToolBatchState::ResultsProjected {
+                            frontier_id: wire_uuid(frontier.into_uuid()),
+                        }
+                    }
+                    DispatchedToolBatchState::RecoveryRequired { attempt } => {
+                        ToolBatchState::RecoveryRequired {
+                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        }
+                    }
+                },
             },
             Self::TurnCompleted {
                 turn,
@@ -2120,12 +2344,23 @@ impl ProcessUpdateEvent {
             },
             Self::TurnReconciliationRequired {
                 turn,
-                call,
+                operation,
                 terminal_frontier,
-            } => SessionEvent::TurnReconciliationRequired {
-                turn_id: wire_uuid(turn.into_uuid()),
-                model_call_id: wire_uuid(call.into_uuid()),
-                terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            } => match operation {
+                DispatchedReconciliationOperation::ModelCall(call) => {
+                    SessionEvent::TurnReconciliationRequired {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        model_call_id: wire_uuid(call.into_uuid()),
+                        terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                    }
+                }
+                DispatchedReconciliationOperation::ToolAttempt(attempt) => {
+                    SessionEvent::TurnToolReconciliationRequired {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+                    }
+                }
             },
         }
     }
@@ -2280,12 +2515,12 @@ mod tests {
 
     use signalbox_domain::{
         ContextFrontierId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
         ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ProtocolVersion, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry,
+        ProtocolVersion, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry,
         TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
     };
     use tokio::{
@@ -2302,15 +2537,18 @@ mod tests {
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SnapshotSpoolError,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_snapshot_reader_permit, admitted_user_content, inspect_connection_completion,
-        read_frame_line, run_until_shutdown, snapshot_reader_capacity, wire_model_call_state,
-        wire_turn_state, write_content, write_snapshot_spool_error, write_transcript_entry,
+        read_frame_line, required_protocol_version_for_selected_session, run_until_shutdown,
+        snapshot_reader_capacity, wire_model_call_state, wire_turn_state, write_content,
+        write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
+            DispatchedReconciliationOperation, DispatchedToolBatchState,
         },
         process_read::{
-            ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessTranscriptEntry,
+            ProcessImportedContentKind, ProcessImportedSourceSpeaker,
+            ProcessReconciliationOperation, ProcessSessionAncestry, ProcessTranscriptEntry,
             ProcessTurnState,
         },
     };
@@ -2325,6 +2563,55 @@ mod tests {
         assert_eq!(
             ProtocolError::mutation_unavailable(true).code,
             ErrorCode::CommitAmbiguous
+        );
+        assert!(
+            ProtocolError::unsupported_version(2)
+                .message
+                .contains("version 2")
+        );
+        assert!(
+            ProtocolError::unsupported_version(3)
+                .message
+                .contains("version 3")
+        );
+    }
+
+    #[test]
+    fn legacy_session_compatibility_requires_the_first_representable_version() {
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::One,
+                false,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            Some(2)
+        );
+        for version in [ProtocolVersion::One, ProtocolVersion::Two] {
+            assert_eq!(
+                required_protocol_version_for_selected_session(
+                    version,
+                    true,
+                    Some(ProcessSessionAncestry::OwnerInitiated),
+                ),
+                Some(3),
+                "tool history takes precedence over retained-version ancestry"
+            );
+        }
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Three,
+                true,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Two,
+                false,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
         );
     }
 
@@ -2853,7 +3140,7 @@ mod tests {
             wire_turn_state(&ProcessTurnState::ReconciliationRequired {
                 terminal_frontier: frontier,
                 terminal_attempt: attempt,
-                terminal_call: call,
+                operation: ProcessReconciliationOperation::ModelCall(call),
             }),
             TurnState::ReconciliationRequired {
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
@@ -2878,7 +3165,7 @@ mod tests {
         let reconciliation =
             ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
-                call,
+                operation: DispatchedReconciliationOperation::ModelCall(call),
                 terminal_frontier: frontier,
             });
         assert_eq!(
@@ -2887,6 +3174,24 @@ mod tests {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
+            }
+        );
+        let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(6));
+        let recovery = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::ToolBatchTransition {
+            turn,
+            producing_call: call,
+            state: DispatchedToolBatchState::RecoveryRequired {
+                attempt: tool_attempt,
+            },
+        });
+        assert_eq!(
+            recovery.wire(),
+            SessionEvent::ToolBatchTransition {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                state: ToolBatchState::RecoveryRequired {
+                    tool_attempt_id: CanonicalUuid::from_uuid(tool_attempt.into_uuid()),
+                },
             }
         );
     }

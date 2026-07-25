@@ -14,7 +14,7 @@ use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
     ModelCallDisposition, ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent,
-    TurnState, decode_server_line, encode_server_line,
+    ToolBatchState, TurnState, decode_server_line, encode_server_line,
 };
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
@@ -348,7 +348,9 @@ async fn await_turn_terminal(
                     if let Some(terminal) = terminal_event_state(&event, turn_id) {
                         return Ok(terminal);
                     }
-                    if model_call_recovery_transition(&event, turn_id) {
+                    if model_call_recovery_transition(&event, turn_id)
+                        || tool_recovery_transition(&event, turn_id)
+                    {
                         let mut refreshed = transcript(client, session_id).await?;
                         let refreshed_state = refreshed.turn_state(turn_id)?;
                         let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())?
@@ -379,6 +381,17 @@ async fn await_turn_terminal(
     }
 }
 
+fn tool_recovery_transition(event: &SessionEvent, selected_turn: CanonicalUuid) -> bool {
+    matches!(
+        event,
+        SessionEvent::ToolBatchTransition {
+            turn_id,
+            state: ToolBatchState::RecoveryRequired { .. },
+            ..
+        } if *turn_id == selected_turn
+    )
+}
+
 fn model_call_recovery_transition(event: &SessionEvent, selected_turn: CanonicalUuid) -> bool {
     matches!(
         event,
@@ -398,13 +411,18 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
         Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
-        Some(TurnState::ReconciliationRequired { .. }) => {
-            Ok(Some(TurnTerminal::ReconciliationRequired))
-        }
-        Some(TurnState::Queued { .. } | TurnState::ActiveRunning { .. }) => Ok(None),
-        Some(TurnState::ActiveAwaitingModelCallRecovery { .. }) => {
-            Err(ClientError::TurnRecoveryRequired)
-        }
+        Some(
+            TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. },
+        ) => Ok(Some(TurnTerminal::ReconciliationRequired)),
+        Some(
+            TurnState::Queued { .. }
+            | TurnState::ActiveRunning { .. }
+            | TurnState::ActiveAwaitingToolApproval { .. },
+        ) => Ok(None),
+        Some(
+            TurnState::ActiveAwaitingModelCallRecovery { .. }
+            | TurnState::ActiveAwaitingToolRecovery { .. },
+        ) => Err(ClientError::TurnRecoveryRequired),
         None => Err(ClientError::Protocol(
             "follow snapshot omitted the submitted turn",
         )),
@@ -431,15 +449,22 @@ fn terminal_event_state(
         SessionEvent::TurnReconciliationRequired { turn_id, .. } if *turn_id == selected_turn => {
             Some(TurnTerminal::ReconciliationRequired)
         }
+        SessionEvent::TurnToolReconciliationRequired { turn_id, .. }
+            if *turn_id == selected_turn =>
+        {
+            Some(TurnTerminal::ReconciliationRequired)
+        }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnFailed { .. }
         | SessionEvent::TurnRefused { .. }
         | SessionEvent::TurnCancelled { .. }
-        | SessionEvent::TurnReconciliationRequired { .. } => None,
+        | SessionEvent::TurnReconciliationRequired { .. }
+        | SessionEvent::TurnToolReconciliationRequired { .. } => None,
     }
 }
 
@@ -533,6 +558,35 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         } => Some(SnapshotSelection::Cancelled {
             turn_id: *turn_id,
             terminal_entry_id: *cancellation_entry_id,
+        }),
+        SessionEvent::ToolBatchTransition {
+            turn_id,
+            model_call_id,
+            state: ToolBatchState::Proposed { .. },
+        } => Some(SnapshotSelection::ToolBatchProposed {
+            turn_id: *turn_id,
+            model_call_id: *model_call_id,
+        }),
+        SessionEvent::ToolBatchTransition {
+            turn_id,
+            model_call_id,
+            state: ToolBatchState::ResultsProjected { .. },
+        } => Some(SnapshotSelection::ToolBatchResults {
+            turn_id: *turn_id,
+            model_call_id: *model_call_id,
+        }),
+        SessionEvent::ToolBatchTransition {
+            state: ToolBatchState::RecoveryRequired { .. },
+            ..
+        } => None,
+        SessionEvent::TurnToolReconciliationRequired {
+            turn_id,
+            tool_attempt_id,
+            terminal_frontier_id,
+        } => Some(SnapshotSelection::ToolReconciliation {
+            turn_id: *turn_id,
+            tool_attempt_id: *tool_attempt_id,
+            terminal_frontier_id: *terminal_frontier_id,
         }),
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
@@ -677,8 +731,8 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, TurnState,
-        decode_client_line, encode_server_line,
+        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+        TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -691,6 +745,7 @@ mod tests {
         MAX_INPUT_CONTENT_BYTES, ProcessClient, SnapshotSelection, TurnTerminal, create,
         model_call_recovery_transition, read_input, run, socket_path, submit_input,
         terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -832,6 +887,57 @@ mod tests {
     }
 
     #[test]
+    fn selected_turn_tool_recovery_requests_authoritative_reread() {
+        let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let event = SessionEvent::ToolBatchTransition {
+            turn_id: selected_turn,
+            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            state: ToolBatchState::RecoveryRequired {
+                tool_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            },
+        };
+
+        assert!(tool_recovery_transition(&event, selected_turn));
+        assert!(!tool_recovery_transition(
+            &event,
+            CanonicalUuid::from_uuid(Uuid::from_u128(4))
+        ));
+    }
+
+    #[test]
+    fn tool_batch_events_select_their_exact_material() {
+        let turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let call = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let frontier = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        assert_eq!(
+            terminal_snapshot_selection(&SessionEvent::ToolBatchTransition {
+                turn_id: turn,
+                model_call_id: call,
+                state: ToolBatchState::Proposed {
+                    frontier_id: frontier,
+                },
+            }),
+            Some(SnapshotSelection::ToolBatchProposed {
+                turn_id: turn,
+                model_call_id: call,
+            })
+        );
+        assert_eq!(
+            terminal_snapshot_selection(&SessionEvent::ToolBatchTransition {
+                turn_id: turn,
+                model_call_id: call,
+                state: ToolBatchState::ResultsProjected {
+                    frontier_id: frontier,
+                },
+            }),
+            Some(SnapshotSelection::ToolBatchResults {
+                turn_id: turn,
+                model_call_id: call,
+            })
+        );
+    }
+
+    #[test]
     fn refused_terminal_event_requests_no_side_reread() {
         assert!(
             terminal_snapshot_selection(&SessionEvent::TurnRefused {
@@ -871,6 +977,26 @@ mod tests {
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
             })
             .is_none()
+        );
+    }
+
+    #[test]
+    fn tool_reconciliation_event_selects_terminal_tool_results() {
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let tool_attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let terminal_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+
+        assert_eq!(
+            terminal_snapshot_selection(&SessionEvent::TurnToolReconciliationRequired {
+                turn_id,
+                tool_attempt_id,
+                terminal_frontier_id,
+            }),
+            Some(SnapshotSelection::ToolReconciliation {
+                turn_id,
+                tool_attempt_id,
+                terminal_frontier_id,
+            })
         );
     }
 

@@ -80,12 +80,12 @@ impl Connection {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
-            version: ProtocolVersion::Two,
+            version: ProtocolVersion::Three,
             request_id,
             reader: BufReader::new(reader),
             writer,
         };
-        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Two, request_id, request)
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Three, request_id, request)
             .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame)?;
         connection
@@ -122,9 +122,8 @@ impl Connection {
 fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) -> bool {
     frame.version() == expected
         || matches!(
-            (expected, frame.version(), frame.message()),
+            (frame.version(), frame.message()),
             (
-                ProtocolVersion::Two,
                 ProtocolVersion::One,
                 ServerMessage::Error {
                     code: ErrorCode::MalformedFrame | ErrorCode::UnsupportedVersion,
@@ -172,26 +171,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inv033_version_two_client_admits_version_one_pre_admission_errors()
+    fn inv033_newer_version_client_admits_version_one_pre_admission_errors()
     -> Result<(), Box<dyn Error>> {
-        assert!(response_version_is_admitted(
-            ProtocolVersion::Two,
-            &error_frame(ProtocolVersion::One, ErrorCode::MalformedFrame)?
-        ));
-        assert!(response_version_is_admitted(
-            ProtocolVersion::Two,
-            &error_frame(ProtocolVersion::One, ErrorCode::UnsupportedVersion)?
-        ));
+        for expected in [ProtocolVersion::Two, ProtocolVersion::Three] {
+            assert!(response_version_is_admitted(
+                expected,
+                &error_frame(ProtocolVersion::One, ErrorCode::MalformedFrame)?
+            ));
+            assert!(response_version_is_admitted(
+                expected,
+                &error_frame(ProtocolVersion::One, ErrorCode::UnsupportedVersion)?
+            ));
+        }
         Ok(())
     }
 
     #[test]
-    fn inv033_version_two_client_rejects_version_one_application_errors()
+    fn inv033_newer_version_client_rejects_version_one_application_errors()
     -> Result<(), Box<dyn Error>> {
-        assert!(!response_version_is_admitted(
-            ProtocolVersion::Two,
-            &error_frame(ProtocolVersion::One, ErrorCode::InvalidRequest)?
-        ));
+        for expected in [ProtocolVersion::Two, ProtocolVersion::Three] {
+            assert!(!response_version_is_admitted(
+                expected,
+                &error_frame(ProtocolVersion::One, ErrorCode::InvalidRequest)?
+            ));
+        }
         Ok(())
     }
 

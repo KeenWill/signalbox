@@ -5,12 +5,12 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsTransaction};
 use signalbox_domain::{
-    DangerousToolAutoApproval, DirectModelSelection, DurableCommandId, ModelAlias,
-    ModelSelectionRequest, PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults,
-    ReplaceSessionDefaults, ReplaceSessionDefaultsAppliedResult,
-    ReplaceSessionDefaultsReconstitutionFailure, ReplaceSessionDefaultsReconstitutionInput,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionRequest,
+    PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
+    ReplaceSessionDefaultsAppliedResult, ReplaceSessionDefaultsReconstitutionFailure,
+    ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -20,8 +20,10 @@ use crate::{
         RegistryInspectionError,
     },
     mapping::{
-        PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
+        dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
+        session_id_to_uuid,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
@@ -32,8 +34,6 @@ const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";
 const CURRENT_VERSION_MISMATCH: &str = "current_version_mismatch";
 const VERSION_EXHAUSTED: &str = "version_exhausted";
-const TOOL_APPROVAL_DISABLED: &str = "disabled";
-const TOOL_APPROVAL_APPROVE_ALL: &str = "approve_all";
 
 /// The committed outcome of handling one defaults-replacement command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,7 +208,7 @@ impl ReplaceSessionDefaultsRepository {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
-            Some(CommandKind::SubmitInput) => {
+            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -240,11 +240,11 @@ impl ReplaceSessionDefaultsRepository {
                     existing_outcome(&command, &recorded)
                 }
                 Some(
-                    CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier,
+                    CommandKind::CreateSession
+                    | CommandKind::CreateSessionFromImportedFrontier
+                    | CommandKind::SubmitInput
+                    | CommandKind::DecideToolRequest,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
-                Some(CommandKind::SubmitInput) => {
-                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id }
-                }
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
                         "winner claim disappeared",
@@ -319,7 +319,7 @@ impl ReplaceSessionDefaultsRepository {
             Some(CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier) => {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
-            Some(CommandKind::SubmitInput) => {
+            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
         }
@@ -411,7 +411,7 @@ async fn insert_defaults_version(
     .bind(selection.kind)
     .bind(selection.direct)
     .bind(selection.alias)
-    .bind(encode_tool_approval(
+    .bind(dangerous_tool_auto_approval_to_str(
         installed.defaults().dangerous_tool_auto_approval(),
     ))
     .execute(&mut *connection)
@@ -448,7 +448,7 @@ async fn insert_typed_record(
     .bind(selection.kind)
     .bind(selection.direct)
     .bind(selection.alias)
-    .bind(encode_tool_approval(
+    .bind(dangerous_tool_auto_approval_to_str(
         command.replacement().dangerous_tool_auto_approval(),
     ))
     .bind(encoded_result.result_kind)
@@ -551,7 +551,7 @@ async fn load_from_connection(
             typed.model_selection_kind AS command_model_kind,
             typed.direct_model_selection_id AS command_direct_id,
             typed.model_alias_id AS command_alias_id,
-            typed.dangerous_tool_auto_approval AS command_tool_approval,
+            typed.dangerous_tool_auto_approval AS command_tool_auto_approval,
             typed.result_kind,
             typed.rejection_kind,
             typed.result_session_id,
@@ -563,7 +563,7 @@ async fn load_from_connection(
             installed.model_selection_kind AS installed_model_kind,
             installed.direct_model_selection_id AS installed_direct_id,
             installed.model_alias_id AS installed_alias_id,
-            installed.dangerous_tool_auto_approval AS installed_tool_approval
+            installed.dangerous_tool_auto_approval AS installed_tool_auto_approval
          FROM durable_command AS command
          LEFT JOIN replace_session_defaults_command AS typed
            ON typed.command_id = command.command_id
@@ -602,7 +602,7 @@ fn decode_complete(
             required(&row, "command_model_kind")?,
             row.try_get("command_direct_id")?,
             row.try_get("command_alias_id")?,
-            required(&row, "command_tool_approval")?,
+            required(&row, "command_tool_auto_approval")?,
             typed_version,
             "command model selection",
         )?,
@@ -632,7 +632,7 @@ fn decode_complete(
                 required(&row, "installed_model_kind")?,
                 row.try_get("installed_direct_id")?,
                 row.try_get("installed_alias_id")?,
-                required(&row, "installed_tool_approval")?,
+                required(&row, "installed_tool_auto_approval")?,
                 typed_version,
                 "installed model selection",
             )?;
@@ -799,7 +799,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    tool_approval: String,
+    dangerous_tool_auto_approval: String,
     storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ReplaceSessionDefaultsRepositoryError> {
@@ -817,32 +817,29 @@ fn decode_selection(
             );
         }
     };
-    let tool_approval = decode_tool_approval(tool_approval, field)?;
-    if storage_version == 1 && tool_approval != DangerousToolAutoApproval::Disabled {
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            ReplaceSessionDefaultsRepositoryError::from(
+                ReplaceSessionDefaultsCorruption::Unsupported {
+                    field: "dangerous tool auto approval",
+                    value: dangerous_tool_auto_approval,
+                },
+            )
+        })?;
+    if storage_version == 1
+        && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
+    {
         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
             "version-one dangerous tool auto approval",
         )
         .into());
     }
-    Ok(SessionConfigurationDefaults::with_dangerous_tool_auto_approval(model, tool_approval))
-}
-
-const fn encode_tool_approval(value: DangerousToolAutoApproval) -> &'static str {
-    match value {
-        DangerousToolAutoApproval::Disabled => TOOL_APPROVAL_DISABLED,
-        DangerousToolAutoApproval::ApproveAll => TOOL_APPROVAL_APPROVE_ALL,
-    }
-}
-
-fn decode_tool_approval(
-    value: String,
-    field: &'static str,
-) -> Result<DangerousToolAutoApproval, ReplaceSessionDefaultsRepositoryError> {
-    match value.as_str() {
-        TOOL_APPROVAL_DISABLED => Ok(DangerousToolAutoApproval::Disabled),
-        TOOL_APPROVAL_APPROVE_ALL => Ok(DangerousToolAutoApproval::ApproveAll),
-        _ => Err(ReplaceSessionDefaultsCorruption::Unsupported { field, value }.into()),
-    }
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
 }
 
 async fn inspect_registry(

@@ -11,6 +11,7 @@ publish.workspace = true
 signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
+serde_json = { version = "1.0.140", features = ["raw_value"] }
 
 [dev-dependencies]
 uuid = { version = "1.24.0", default-features = false }

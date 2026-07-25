@@ -74,6 +74,31 @@ pre-production schema discipline states the correct shape now.
 nullability test, [persistence-protocol](spec/persistence-protocol.md), and
 [configuration-and-credentials](spec/configuration-and-credentials.md).
 
+## 2026-07-24 — Reuse serde_json for provider-neutral tool-history rendering
+
+**Context.** The model-provider bridge must replay durable tool results as
+bounded JSON error objects and distinguish object-shaped arguments from valid
+JSON scalars or arrays that provider function-call history cannot accept, and
+the persistence process projection must render durable tool denials and failures
+as the same closed JSON error objects. `serde_json` is already pinned and used
+throughout the model-runtime layer.
+
+**Decision.** Add the existing focused `serde_json` dependency directly to
+`signalbox-model-provider-runtime` for object-shape validation and safe error
+serialization, and to `signalbox-persistence` for rendering the equivalent
+closed tool-error objects in the process transcript projection.
+
+**Rejected alternatives.** Hand-escape JSON: it would duplicate a
+security-sensitive codec. Admit non-object function arguments: provider replay
+would remain invalid. Move provider replay shapes into the domain: that would
+cross the runtime boundary. Format the persistence error objects with string
+concatenation: denial reasons are owner text and must be escaped by a real
+codec.
+
+**Affects.** `crates/model-provider-runtime/Cargo.toml` and its durable
+tool-history translation; `crates/persistence/Cargo.toml` and the `process_read`
+tool-result and denial projections.
+
 ## 2026-07-24 — Normalize bounded JSON with stack-safe Serde traversal
 
 **Context.** Tool arguments classify every syntactically valid, byte-bounded

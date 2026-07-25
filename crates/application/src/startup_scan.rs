@@ -23,6 +23,16 @@ pub trait StartupScanIdGenerator {
     /// Generates one terminal context-frontier identity.
     fn next_terminal_frontier_id(&mut self) -> ContextFrontierId;
 
+    /// Generates one proposal-order `ToolClosed` semantic-entry identity.
+    fn next_tool_closure_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        self.next_failure_entry_id()
+    }
+
+    /// Generates the yielded-plus-tool-closures frontier identity.
+    fn next_tool_closure_frontier_id(&mut self) -> ContextFrontierId {
+        self.next_terminal_frontier_id()
+    }
+
     /// Generates one successor turn for a pending steering input reclassified
     /// by call-aware restart recovery.
     fn next_reclassified_turn_id(&mut self, accepted_input: AcceptedInputId) -> TurnId;
@@ -57,6 +67,12 @@ pub enum StartupScanSessionOutcome {
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     /// A live tool attempt received crash/effect-aware restart classification.
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
+    /// A crash left only ended tool attempts; ordinary tool orchestration can
+    /// resume the durable batch without recovery mutation.
+    ResumableToolBatch {
+        /// Active turn whose result/next-attempt boundary is ready.
+        turn: TurnId,
+    },
     /// Pending steering keeps the source turn active until reclassification.
     DeferredPendingSteering {
         /// The accepted input that visibly blocks terminalization.
@@ -76,14 +92,14 @@ pub trait StartupScanRepository {
     ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
 
     /// Locks and reconstitutes one session, then commits failure atomically.
-    fn recover<NextTurn>(
+    fn recover<Generator>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-        next_reclassified_turn: NextTurn,
+        ids: &mut Generator,
     ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+        Generator: StartupScanIdGenerator + Send;
 }
 
 /// Complete result of scanning the startup inventory once.
@@ -224,12 +240,9 @@ where
                     self.ids.next_failure_entry_id(),
                     self.ids.next_terminal_frontier_id(),
                 );
-                let ids = &mut self.ids;
                 match self
                     .repository
-                    .recover(session, identities, |accepted_input| {
-                        ids.next_reclassified_turn_id(accepted_input)
-                    })
+                    .recover(session, identities, &mut self.ids)
                     .await
                 {
                     Ok(StartupScanSessionOutcome::NoActiveTurn) => break,
@@ -249,6 +262,7 @@ where
                         }
                         break;
                     }
+                    Ok(StartupScanSessionOutcome::ResumableToolBatch { .. }) => break,
                     Ok(StartupScanSessionOutcome::DeferredPendingSteering { .. }) => {
                         pending_steering_sessions.push(session);
                         break;
@@ -351,14 +365,14 @@ mod tests {
             ready(self.inventory.take().expect("one inventory response"))
         }
 
-        fn recover<NextTurn>(
+        fn recover<Generator>(
             &mut self,
             session: SessionId,
             _identities: AcceptedInputTurnFailureIdentities,
-            _next_reclassified_turn: NextTurn,
+            _ids: &mut Generator,
         ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send
         where
-            NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+            Generator: StartupScanIdGenerator + Send,
         {
             self.observed.push(session);
             ready(self.responses.pop_front().expect("one recovery response"))
