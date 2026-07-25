@@ -98,9 +98,15 @@ frame accumulation at 64 MiB. After decoding, the task consumes the frame into
 one owned request rather than cloning its payload. Submitted text moves into
 application admission: rejection drops it before awaiting response output, and
 acceptance reuses the decoded allocation. Conversation-import source bytes
-likewise move directly into one conversion invocation and are dropped before
+likewise move directly into a dedicated import admission path. At most one
+conversion-and-store operation runs at a time. A decoded import waiting for that
+permit retains its inbound-frame permit, so queued source bytes remain inside
+the existing 64 MiB aggregate frame budget; only the admitted import can retain
+the expanded aggregate or use repository work. The admitted service runs on the
+blocking pool so synchronous conversion does not occupy an asynchronous runtime
+worker. Its source and aggregate are dropped and its permit is released before
 response output. A peer that stops reading responses therefore cannot retain
-rejected input or import content after its rejection is known.
+rejected input or completed import content.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -262,7 +268,11 @@ An import `source` is the complete exact byte sequence encoded with RFC 4648
 standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
 There is no independent source-size admission rule in this slice: the existing 8
 MiB encoded-frame limit determines whether one complete request can cross the
-boundary. The source path is client-local and never appears in the request.
+boundary. Before socket I/O, the terminal's bounded reader takes at most one
+byte beyond three quarters of the frame cap, the greatest decoded byte count
+that base64 could possibly fit. It rejects a source reaching that extra byte;
+exact request encoding remains authoritative for smaller inputs. The source path
+is client-local and never appears in the request.
 
 ## Server messages
 
@@ -674,21 +684,28 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack continues to use version three; version
-four's metadata operations are core protocol and hub capabilities without new
-terminal-client UX. Older clients remain supported for representations admitted
-by their declared version as described above. The client accepts a global
+The `signalbox` binary in this stack uses version five; version four's metadata
+operations remain core protocol and hub capabilities without new terminal-client
+UX. Older clients remain supported for representations admitted by their
+declared version as described above. The client accepts a global
 `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `transcript <session-uuid>`;
-- `follow <session-uuid>`.
+- `follow <session-uuid>`;
+- `import --format <claude-code|codex> <file>`.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
 fails before socket I/O.
+
+`import` reads one bounded file snapshot before socket I/O, sends its exact
+bytes rather than its path, and prints either `inserted` or `already_imported`
+with the durable imported-conversation identity. Its complete behavior is owned
+by the
+[conversation-import operational surface](conversation-import.md#operational-surface).
 
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` first reads the
@@ -704,9 +721,9 @@ printed command identity; `send` then also requires the exact
 `--defaults-version`, and the two flags are rejected unless supplied together.
 The client never silently substitutes a new command identity for an ambiguous
 attempt. It uses a fresh nonzero request identity per connection, renders only
-known version-three messages, and exits nonzero on protocol or application
-errors other than the follow-specific `resync_required` control case, which
-reconnects for a fresh snapshot.
+known version-five messages, and exits nonzero on protocol or application errors
+other than the follow-specific `resync_required` control case, which reconnects
+for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

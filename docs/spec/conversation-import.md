@@ -285,8 +285,12 @@ complete bytes and explicit selection in one version-five local process request.
 
 The wire encodes the exact bytes as canonical padded base64. The existing 8 MiB
 frame bound determines whether a complete encoded request fits; the importer
-adds no independent source-size admission rule. A file-read failure happens
-before the request and is reported without its path. Invalid base64 is a
+adds no independent source-size admission rule. The client reads through that
+transport bound rather than allocating from the file's declared size: it stops
+after one byte beyond the greatest raw byte count that padded base64 could
+possibly fit, then rejects that impossible payload before socket I/O. Exact
+encoded-frame construction remains the final fit check. A file-read failure
+happens before the request and is reported without its path. Invalid base64 is a
 malformed frame. A selected converter's content-silent conversion failure is an
 `invalid_request`; database failure is conservatively `commit_ambiguous`, so the
 operator may retry the exact format and source bytes; integrity failure is
@@ -294,7 +298,10 @@ operator may retry the exact format and source bytes; integrity failure is
 
 Hubd selects the fixed converter, supplies UUIDv7 conversation and entry
 candidates, and invokes `ImportConversationService` against the append-only
-Postgres repository. A new exact snapshot returns
+Postgres repository. It admits one conversion-and-store operation at a time,
+keeps queued decoded sources inside the existing aggregate inbound-frame budget,
+and executes service conversion away from asynchronous runtime workers. A new
+exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion
 returns `conversation_import_already_imported { imported_conversation_id }`
 naming the existing identity. The terminal prints these as distinct `inserted`

@@ -8,6 +8,7 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
+    SourceExceedsFrame,
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
@@ -44,7 +45,7 @@ impl ClientError {
                 code: ErrorCode::CommitAmbiguous,
                 ..
             } => Self::AmbiguousMutation,
-            Self::Remote { .. } | Self::SourceFile(_) => self,
+            Self::Remote { .. } | Self::SourceFile(_) | Self::SourceExceedsFrame => self,
             Self::Io(_)
             | Self::Encode(_)
             | Self::Decode(_)
@@ -67,6 +68,9 @@ impl fmt::Display for ClientError {
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
+            Self::SourceExceedsFrame => formatter.write_str(
+                "the conversation import source cannot fit within the process frame bound",
+            ),
             Self::Encode(_) => formatter.write_str("the client could not encode its request"),
             Self::Decode(_) => formatter.write_str("the server violated the process protocol"),
             Self::Protocol(message) => write!(
@@ -112,6 +116,7 @@ impl Error for ClientError {
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::SourceExceedsFrame
             | Self::TurnRecoveryRequired
             | Self::TurnFailed
             | Self::TurnRefused

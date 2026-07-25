@@ -81,6 +81,7 @@ const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
+const MAX_CONCURRENT_IMPORTS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
@@ -93,6 +94,7 @@ struct ConnectionServices {
     model_configuration: Arc<HubModelConfiguration>,
     updates: broadcast::Sender<ProcessUpdate>,
     inbound_frame_budget: Arc<Semaphore>,
+    import_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
 }
 
@@ -198,6 +200,7 @@ async fn serve_connections(
         model_configuration: Arc::new(model_configuration),
         updates,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
+        import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
     };
     let mut connections = JoinSet::new();
@@ -251,6 +254,9 @@ fn inspect_connection_completion(
         }
         Some(Ok(Err(ProcessConnectionError::SnapshotReaderBudgetClosed))) => {
             Err(ProcessRuntimeError::SnapshotReaderBudgetClosed)
+        }
+        Some(Ok(Err(ProcessConnectionError::ImportBudgetClosed))) => {
+            Err(ProcessRuntimeError::ImportBudgetClosed)
         }
         Some(Err(error)) => Err(ProcessRuntimeError::ConnectionTask(error)),
     }
@@ -320,14 +326,25 @@ async fn serve_connection(
                 return Ok(());
             }
         };
-        drop(frame_buffer_permit);
         let (version, request_id, request) = frame.into_parts();
         let follows = matches!(request, ClientRequest::FollowSession { .. });
+        let import_permit = if matches!(&request, ClientRequest::ImportConversation { .. }) {
+            let Some(permit) =
+                acquire_import_permit(Arc::clone(&services.import_budget), &mut shutdown).await?
+            else {
+                return Ok(());
+            };
+            Some(permit)
+        } else {
+            None
+        };
+        drop(frame_buffer_permit);
         handle_request(
             &mut writer,
             version,
             request_id,
             request,
+            import_permit,
             &services,
             shutdown.clone(),
         )
@@ -380,6 +397,18 @@ async fn acquire_snapshot_reader_permit(
     }
 }
 
+async fn acquire_import_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::ImportBudgetClosed),
+    }
+}
+
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
@@ -394,6 +423,7 @@ async fn handle_request<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     request: ClientRequest,
+    import_permit: Option<OwnedSemaphorePermit>,
     services: &ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
@@ -539,6 +569,7 @@ where
             .await
         }
         ClientRequest::ImportConversation { format, source } => {
+            let import_permit = import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
             handle_import_conversation(
                 writer,
                 version,
@@ -546,6 +577,7 @@ where
                 format,
                 source.into_bytes(),
                 &services.pool,
+                import_permit,
             )
             .await
         }
@@ -559,19 +591,20 @@ async fn handle_import_conversation<Writer>(
     format: ConversationImportFormat,
     source: Vec<u8>,
     pool: &PgPool,
+    import_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let outcome = match format {
         ConversationImportFormat::ClaudeCodeSessionJsonlV2 => {
-            execute_import(ClaudeCodeJsonlConverter, &source, pool).await
+            execute_import(ClaudeCodeJsonlConverter, source, pool.clone()).await
         }
         ConversationImportFormat::CodexRolloutJsonlV1 => {
-            execute_import(CodexRolloutJsonlConverter, &source, pool).await
+            execute_import(CodexRolloutJsonlConverter, source, pool.clone()).await
         }
     };
-    drop(source);
+    drop(import_permit);
     match outcome {
         Ok(ImportConversationOutcome::Inserted { conversation }) => {
             write_message(
@@ -609,7 +642,7 @@ where
                 writer,
                 version,
                 request_id,
-                ProtocolError::mutation_unavailable(true),
+                ProtocolError::without_detail(ErrorCode::CommitAmbiguous),
             )
             .await
         }
@@ -634,37 +667,44 @@ enum OperationalImportError {
 
 async fn execute_import<Converter>(
     converter: Converter,
-    source: &[u8],
-    pool: &PgPool,
+    source: Vec<u8>,
+    pool: PgPool,
 ) -> Result<ImportConversationOutcome, OperationalImportError>
 where
-    Converter: ImportedConversationConverter,
+    Converter: ImportedConversationConverter + Send + 'static,
 {
-    let mut service = ImportConversationService::new(
-        UuidV7ImportedConversationIdGenerator,
-        converter,
-        ImportedConversationRepository::new(pool.clone()),
-    );
-    service.execute(source).await.map_err(|error| match error {
-        ImportConversationError::Conversion(_) => OperationalImportError::InvalidSource,
-        ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
-            OperationalImportError::Database
-        }
-        ImportConversationError::Store(
-            ImportedConversationRepositoryError::IdentityCollision(
-                ImportedConversationIdentityCollision::Conversation
-                | ImportedConversationIdentityCollision::TranscriptEntry,
-            )
-            | ImportedConversationRepositoryError::Corruption(_),
-        )
-        | ImportConversationError::ConverterIdentityMismatch { .. }
-        | ImportConversationError::ConverterFormatMismatch { .. }
-        | ImportConversationError::ConverterEntryIdentitySequenceMismatch
-        | ImportConversationError::StoreSourceDigestMismatch { .. }
-        | ImportConversationError::StoreInsertedIdentityMismatch { .. } => {
-            OperationalImportError::Internal
-        }
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            let mut service = ImportConversationService::new(
+                UuidV7ImportedConversationIdGenerator,
+                converter,
+                ImportedConversationRepository::new(pool),
+            );
+            service.execute(&source).await.map_err(|error| match error {
+                ImportConversationError::Conversion(_) => OperationalImportError::InvalidSource,
+                ImportConversationError::Store(ImportedConversationRepositoryError::Database(
+                    _,
+                )) => OperationalImportError::Database,
+                ImportConversationError::Store(
+                    ImportedConversationRepositoryError::IdentityCollision(
+                        ImportedConversationIdentityCollision::Conversation
+                        | ImportedConversationIdentityCollision::TranscriptEntry,
+                    )
+                    | ImportedConversationRepositoryError::Corruption(_),
+                )
+                | ImportConversationError::ConverterIdentityMismatch { .. }
+                | ImportConversationError::ConverterFormatMismatch { .. }
+                | ImportConversationError::ConverterEntryIdentitySequenceMismatch
+                | ImportConversationError::StoreSourceDigestMismatch { .. }
+                | ImportConversationError::StoreInsertedIdentityMismatch { .. } => {
+                    OperationalImportError::Internal
+                }
+            })
+        })
     })
+    .await
+    .map_err(|_| OperationalImportError::Internal)?
 }
 
 async fn handle_create_session<Writer>(
@@ -806,6 +846,7 @@ impl SnapshotSpoolError {
             ProcessConnectionError::Encode(error) => Self::Encode(error),
             ProcessConnectionError::EncodeInvariant
             | ProcessConnectionError::InboundFrameBudgetClosed
+            | ProcessConnectionError::ImportBudgetClosed
             | ProcessConnectionError::SnapshotReaderBudgetClosed => Self::EncodeInvariant,
         }
     }
@@ -2970,6 +3011,7 @@ enum ProcessConnectionError {
     Encode(FrameEncodeError),
     EncodeInvariant,
     InboundFrameBudgetClosed,
+    ImportBudgetClosed,
     SnapshotReaderBudgetClosed,
 }
 
@@ -2997,6 +3039,9 @@ impl fmt::Display for ProcessConnectionError {
             Self::InboundFrameBudgetClosed => {
                 "the local process connection lost its inbound frame budget"
             }
+            Self::ImportBudgetClosed => {
+                "the local process connection lost its conversation import budget"
+            }
             Self::SnapshotReaderBudgetClosed => {
                 "the local process connection lost its snapshot reader budget"
             }
@@ -3011,6 +3056,7 @@ impl Error for ProcessConnectionError {
             Self::Encode(error) => Some(error),
             Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
+            | Self::ImportBudgetClosed
             | Self::SnapshotReaderBudgetClosed => None,
         }
     }
@@ -3029,6 +3075,8 @@ pub enum ProcessRuntimeError {
     EncodeInvariant,
     /// The runtime-owned aggregate inbound frame budget closed unexpectedly.
     InboundFrameBudgetClosed,
+    /// The runtime-owned conversation-import budget closed unexpectedly.
+    ImportBudgetClosed,
     /// The runtime-owned snapshot-reader budget closed unexpectedly.
     SnapshotReaderBudgetClosed,
     /// The application pool cannot reserve capacity outside snapshot reads.
@@ -3054,6 +3102,9 @@ impl fmt::Display for ProcessRuntimeError {
             }
             Self::InboundFrameBudgetClosed => {
                 "the local process server lost its inbound frame budget"
+            }
+            Self::ImportBudgetClosed => {
+                "the local process server lost its conversation import budget"
             }
             Self::SnapshotReaderBudgetClosed => {
                 "the local process server lost its snapshot reader budget"
@@ -3082,6 +3133,7 @@ impl Error for ProcessRuntimeError {
             Self::CleanupSocket(error) => Some(error),
             Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
+            | Self::ImportBudgetClosed
             | Self::SnapshotReaderBudgetClosed
             | Self::InsufficientPoolCapacity
             | Self::UnexpectedDispatcherRetry => None,
@@ -3091,11 +3143,18 @@ impl Error for ProcessRuntimeError {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, io, sync::Arc};
+    use std::{
+        error::Error,
+        io,
+        sync::{Arc, mpsc},
+        thread,
+    };
 
+    use signalbox_application::ImportedConversationConverter;
     use signalbox_domain::{
-        ContextFrontierId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        SemanticTranscriptEntryId, SessionId, ToolAttemptId, TurnAttemptId, TurnId,
+        ContextFrontierId, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, SemanticTranscriptEntryId,
+        SessionId, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
@@ -3103,6 +3162,7 @@ mod tests {
         ProtocolVersion, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry,
         TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
     };
+    use sqlx::postgres::PgPoolOptions;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
         sync::{Semaphore, watch},
@@ -3112,12 +3172,14 @@ mod tests {
 
     use super::{
         INBOUND_READ_AHEAD_BYTES, IncomingLine, MAX_ACTIVE_CONNECTIONS,
-        MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS, MAX_FRAME_BYTES,
+        MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
+        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SnapshotSpoolError,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_snapshot_reader_permit, admitted_user_content, inspect_connection_completion,
-        read_frame_line, required_protocol_version_for_selected_session, run_until_shutdown,
+        acquire_import_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_snapshot_reader_permit,
+        admitted_user_content, execute_import, inspect_connection_completion, read_frame_line,
+        required_protocol_version_for_selected_session, run_until_shutdown,
         snapshot_reader_capacity, wire_model_call_state, wire_turn_state, write_content,
         write_snapshot_spool_error, write_transcript_entry,
     };
@@ -3374,6 +3436,81 @@ mod tests {
                 .is_none()
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_budget_admits_one_retained_aggregate_at_a_time() -> Result<(), Box<dyn Error>> {
+        assert_eq!(MAX_CONCURRENT_IMPORTS, 1);
+        let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS));
+        let (_shutdown, shutdown_receiver) = watch::channel(false);
+        let first = acquire_import_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
+            .await?
+            .ok_or_else(|| io::Error::other("the first import must acquire its permit"))?;
+
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                acquire_import_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+            )
+            .await
+            .is_err(),
+            "a second retained import aggregate must wait"
+        );
+
+        drop(first);
+        let second = timeout(
+            Duration::from_secs(1),
+            acquire_import_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+        )
+        .await??
+        .ok_or_else(|| io::Error::other("the released import permit must be acquired"))?;
+        drop(second);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_conversion_runs_off_the_async_worker() -> Result<(), Box<dyn Error>> {
+        let async_worker = thread::current().id();
+        let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+
+        let outcome = execute_import(
+            ThreadReportingRejectConverter(thread_sender),
+            Vec::new(),
+            pool,
+        )
+        .await;
+        let conversion_worker = thread_receiver.recv_timeout(Duration::from_secs(1))?;
+
+        assert_eq!(outcome, Err(OperationalImportError::InvalidSource));
+        assert_ne!(conversion_worker, async_worker);
+        Ok(())
+    }
+
+    struct ThreadReportingRejectConverter(mpsc::SyncSender<thread::ThreadId>);
+
+    impl ImportedConversationConverter for ThreadReportingRejectConverter {
+        type Error = io::Error;
+
+        fn format(&self) -> ImportedConversationFormat {
+            ImportedConversationFormat::CodexRolloutJsonlV1
+        }
+
+        fn convert<NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: &[u8],
+            _next_entry_id: NextEntryId,
+        ) -> Result<ImportedConversation, Self::Error>
+        where
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            self.0
+                .send(thread::current().id())
+                .map_err(|_| io::Error::other("the test thread receiver closed"))?;
+            Err(io::Error::other("fixture conversion rejection"))
+        }
     }
 
     #[test]
