@@ -154,41 +154,77 @@ model, real credentials from environment-protected secrets never exposed to fork
 PRs, main-only or manually dispatched — verifies each bump before it lands under
 us.
 
-### Codex CLI wrap [blocked-on: INV-025/026 request-boundary reconciliation] [size: S-M]
+Owner direction, 2026-07-25 (orientation only; the invariant amendment and its
+decision-log entries land with the pickup spec-diff, not here): the CLI-wrap
+path is the supported subscription integration, and the direct-transport
+reimplementation below is parked by owner call — a cost/priority judgment,
+revisitable later. The rationale is that the choice is reversible by
+construction: the wrapped CLI is an intended external-control surface, and the
+runtime trait seam keeps a future direct adapter a drop-in replacement behind
+the same two-method contract.
 
-The lead track of the three once unblocked. `codex exec --json`; the
-thread/turn/item event taxonomy is cleanly namespaced with an unambiguous
-turn.completed/turn.failed terminal (the demanding part of the evidence model).
-CLI owns subscription auth — zero credential handling. Officially sanctioned
-automation path; only real event risk is schema drift between CLI versions (pin
-a version, snapshot-test). The subprocess request-boundary question above
-(INV-025/026) is a foundation decision the spec-diff must settle and the owner
-must accept before implementation starts.
+On open tension (1) above, the owner set the dispatch-boundary direction — it
+governs any subprocess adapter, both wrap tracks included: INV-025/026 are
+reconciled by re-anchoring the invariant's subject to the adapter's unit of
+irrevocable dispatch — one HTTPS request for the direct adapters, one process
+spawn for a subprocess adapter. At that boundary the invariants hold at full
+strength: at most one spawn per prepared call, never a respawn on ambiguity,
+process death without a terminal marker is BoundaryLoss evidence, and the
+platform owns every retry decision. The CLI's internal requests are
+provider-internal — the same epistemic position the direct adapters already hold
+toward a provider's server side. Accepted costs, stated: evidence granularity
+coarsens to the handed inputs plus the emitted event stream; the CLI's internal
+retries burn subscription capacity the platform cannot itemize (mitigated by
+capturing emitted rate-limit events); and a platform retry after BoundaryLoss
+can duplicate provider-side effects, which is cost-only for chat calls.
+Cancellation prefers the CLI's protocol-level interrupt with process kill as the
+fallback, and the evidence distinguishes the two. The formal invariant-text
+amendment and its decision entry land with the pickup spec-diff, not now.
 
-### Claude Code CLI wrap [blocked-on: INV-025/026 request-boundary reconciliation] [size: S-M]
+On statelessness: stateless-exact integration is the aim — each prepared call
+spawns a fresh invocation with the full context rendered in, so every existing
+frontier-exactness law holds unmodified. A stateful facade is admitted only
+where genuinely needed, through provider-owned external sessions held as durable
+pointers with explicit adoption modes (the
+none/import_only/adopt_resume/adopt_fork vocabulary above); choosing where that
+line falls is the pickup spec-diff's job.
+
+### Codex CLI wrap [blocked-on: owner commission call] [size: S-M]
+
+The lead track of the three — the wrap path the owner chose on 2026-07-25.
+`codex exec --json`; the thread/turn/item event taxonomy is cleanly namespaced
+with an unambiguous turn.completed/turn.failed terminal (the demanding part of
+the evidence model). CLI owns subscription auth — zero credential handling. An
+intended external-control surface; only real event risk is schema drift between
+CLI versions (pin a version, snapshot-test). Boundary direction is set (the
+owner direction above); the formal invariant amendment lands with the pickup
+spec-diff. What remains is the owner's commission call on pickup timing — not
+selectable by goal mode until then.
+
+### Claude Code CLI wrap [blocked-on: owner commission call] [size: S-M]
 
 `claude -p --output-format stream-json --verbose` (+
 `--include-partial-messages` for deltas). Clean result terminal message; CLI
 owns subscription auth. Fragility: the full stream-json event set is
 undocumented and version-fragile — snapshot-test. Do not use `--bare` for
-subscription runs (it forces an API key). Same blocker as the Codex track: the
-subprocess request-boundary reconciliation (INV-025/026) is a foundation
-decision the spec-diff must settle and the owner must accept first.
+subscription runs (it forces an API key). Same position as the Codex track: the
+owner's dispatch-boundary direction above applies here too (one process spawn is
+the unit of irrevocable dispatch), the formal amendment lands with the pickup
+spec-diff, and pickup waits on the owner's commission call.
 
-### Codex-subscription Rust reimplementation [blocked-on: owner ToS-cost decision] [size: L-XL]
+### Codex-subscription Rust reimplementation [blocked-on: owner revisit — wrap path chosen] [size: L-XL]
 
 Reimplements the open-source Codex CLI's direct subscription transport
 (chatgpt.com backend Responses endpoint, OAuth/PKCE token lifecycle, SSE
 Responses events) in Rust — no subprocess. Wire types + SSE are mechanical (M,
-done twice already); the token-refresh lifecycle, credential store, anti-abuse
-identity headers, and error taxonomy are the L-XL part. HIGH fragility
-(undocumented internal endpoint that can change silently) and a real
-ToS/account-standing risk: it calls an internal endpoint impersonating the
-official client identity, and subscription terms generally restrict programmatic
-access — personal-use-on-own-account can still draw rate-limits or flags.
-Deferred deliberately: a wrapped CLI de-risks the same wire behavior first; take
-this only if subprocess overhead proves unacceptable, and record the accepted
-cost before starting. Codex source is Apache-2.0 (attribution/patent terms).
+done twice already); the token-refresh lifecycle, credential store, identity
+headers, and error taxonomy are the L-XL part. HIGH fragility: an undocumented
+internal endpoint that can change silently. Parked by owner call on 2026-07-25
+(the owner direction above) as a cost/priority judgment: the wrap path de-risks
+the same wire behavior at a fraction of the build-and-carry cost, and the
+runtime trait seam keeps this a drop-in replacement, so take it up again only if
+subprocess overhead proves unacceptable — and record the accepted cost before
+starting. Codex source is Apache-2.0 (attribution/patent terms).
 
 ## Provider account pools and limit-aware dispatch [blocked-on: provider dispatch mechanism (first subscription-runtime wiring); owner design pass] [size: M-L]
 
@@ -215,8 +251,8 @@ no-automatic-retry doctrine, while re-dispatching the failed turn on another
 account is automatic retry in effect and needs an explicit owner decision; (2)
 retry/backoff conditions per error kind (retry-after-honoring cooldowns for
 RateLimited, account-dead for QuotaExhausted, spread for Overloaded); (3) for
-subscription accounts, the terms-of-service texture of multi-account spreading —
-the same bucket as the existing owner ToS-cost gate on the reimplementation
+subscription accounts, the cost texture of multi-account spreading — an owner
+call, the same bucket as the owner-revisit parking on the reimplementation
 track.
 
 ## Native client rewire, macOS first [blocked-on: client stack + snapshot import merges] [size: L]
