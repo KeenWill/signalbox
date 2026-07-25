@@ -738,6 +738,7 @@ impl ReviewRun {
         validate_run_state(
             input.reference,
             input.workflow,
+            input.policy,
             input.state,
             input.pass_evidence,
         )
@@ -760,16 +761,21 @@ impl ReviewRun {
         next: ReviewRunState,
         pass_evidence: Option<ReviewPassEvidence>,
     ) -> Result<Self, ReviewRunTransitionError> {
-        validate_run_state(self.reference, self.workflow, next, pass_evidence).map_err(
-            |failure| ReviewRunTransitionError {
-                attempt: Box::new(ReviewRunTransitionAttempt {
-                    current: self.state,
-                    next,
-                    pass_evidence,
-                }),
-                failure: ReviewRunTransitionFailure::Evidence(failure),
-            },
-        )?;
+        validate_run_state(
+            self.reference,
+            self.workflow,
+            self.policy,
+            next,
+            pass_evidence,
+        )
+        .map_err(|failure| ReviewRunTransitionError {
+            attempt: Box::new(ReviewRunTransitionAttempt {
+                current: self.state,
+                next,
+                pass_evidence,
+            }),
+            failure: ReviewRunTransitionFailure::Evidence(failure),
+        })?;
         let permitted = match (self.state, next) {
             (ReviewRunState::Queued, ReviewRunState::Running { .. }) => true,
             (ReviewRunState::Queued, ReviewRunState::Cancelled { last_pass: None }) => true,
@@ -838,6 +844,7 @@ impl ReviewRun {
 fn validate_run_state(
     reference: ReviewRunRef,
     workflow: ReviewWorkflowKind,
+    policy: ReviewPolicy,
     state: ReviewRunState,
     pass_evidence: Option<ReviewPassEvidence>,
 ) -> Result<(), ReviewRunEvidenceFailure> {
@@ -861,6 +868,9 @@ fn validate_run_state(
     }
     if !workflow_matches_pass_kind(workflow, evidence.kind) {
         return Err(ReviewRunEvidenceFailure::PassKindMismatch);
+    }
+    if evidence.policy != policy {
+        return Err(ReviewRunEvidenceFailure::PassPolicyMismatch);
     }
     if !run_state_matches_pass(state, evidence.state) {
         return Err(ReviewRunEvidenceFailure::PassStateMismatch);
@@ -923,6 +933,8 @@ pub enum ReviewRunEvidenceFailure {
     PassMismatch,
     /// The canonical pass kind is incompatible with the run workflow.
     PassKindMismatch,
+    /// The canonical pass evidence carries another policy than the run.
+    PassPolicyMismatch,
     /// The canonical pass outcome differs from the run projection.
     PassStateMismatch,
 }
@@ -1133,6 +1145,7 @@ impl ReviewPassTurnEvidence {
 pub struct ReviewPassReconstitutionInput {
     reference: ReviewPassRef,
     kind: ReviewPassKind,
+    workflow_run: ReviewRunRef,
     workflow: ReviewWorkflowKind,
     session: SessionId,
     accepted_input: AcceptedInputId,
@@ -1147,6 +1160,7 @@ impl ReviewPassReconstitutionInput {
     pub const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
+        workflow_run: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         session: SessionId,
         accepted_input: AcceptedInputId,
@@ -1157,6 +1171,7 @@ impl ReviewPassReconstitutionInput {
         Self {
             reference,
             kind,
+            workflow_run,
             workflow,
             session,
             accepted_input,
@@ -1174,6 +1189,11 @@ impl ReviewPassReconstitutionInput {
     /// Returns the pass kind.
     pub const fn kind(self) -> ReviewPassKind {
         self.kind
+    }
+
+    /// Returns the run whose canonical row supplied the workflow.
+    pub const fn workflow_run(self) -> ReviewRunRef {
+        self.workflow_run
     }
 
     /// Returns the canonical parent run workflow.
@@ -1370,6 +1390,9 @@ impl ReviewPass {
 fn validate_pass_reconstitution(
     input: ReviewPassReconstitutionInput,
 ) -> Option<ReviewPassReconstitutionFailure> {
+    if input.workflow_run != input.reference.run() {
+        return Some(ReviewPassReconstitutionFailure::ForeignWorkflowRun);
+    }
     if !workflow_matches_pass_kind(input.workflow, input.kind) {
         return Some(ReviewPassReconstitutionFailure::RunWorkflowMismatch);
     }
@@ -1510,6 +1533,8 @@ impl ReviewPassConstructionError {
 /// Why stored pass facts cannot reconstruct one canonical pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewPassReconstitutionFailure {
+    /// The workflow discriminator was loaded from another run's row.
+    ForeignWorkflowRun,
     /// The pass kind is incompatible with its canonical run workflow.
     RunWorkflowMismatch,
     /// The accepted input belongs to another session.
@@ -2843,6 +2868,7 @@ mod tests {
         let input = ReviewPassReconstitutionInput::new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
+            run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
             accepted_input_id(5),
@@ -3305,6 +3331,7 @@ mod tests {
         let input = ReviewPassReconstitutionInput::new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
+            run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
             accepted_input_id(5),
@@ -3404,6 +3431,72 @@ mod tests {
         assert_eq!(mismatch.input(), &mismatched);
     }
 
+    /// S29 / INV-040: canonical pass evidence must carry the run's frozen
+    /// policy.
+    #[test]
+    fn s29_inv040_run_reconstitution_rejects_foreign_pass_policy() {
+        let state = ReviewRunState::Succeeded {
+            concluding_pass: pass_ref(3),
+        };
+        let foreign_policy = ReviewPolicy::try_new(
+            ReviewPolicyVersion::try_new(2).expect("positive version"),
+            ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
+            ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+        )
+        .expect("later versions admit their own ordered threshold tuples");
+        let mismatched = ReviewRunReconstitutionInput::new(
+            run_ref(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            state,
+            Some(ReviewPassEvidence::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                foreign_policy,
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
+            )),
+        );
+        let error = ReviewRun::try_reconstitute(mismatched)
+            .expect_err("pass evidence under another policy cannot support the run");
+        assert_eq!(
+            error.failure(),
+            ReviewRunEvidenceFailure::PassPolicyMismatch
+        );
+        assert_eq!(error.input(), &mismatched);
+    }
+
+    /// INV-040: the workflow discriminator must come from the pass's own run
+    /// row.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_foreign_workflow_run() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                ReviewRunRef::new(target_id(1), run_id(9)),
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(5),
+                session_id(4),
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::Completed,
+                    Some(frontier_id(8)),
+                )),
+            ),
+            ReviewPassReconstitutionFailure::ForeignWorkflowRun,
+        );
+    }
+
     /// S29 / INV-040: a run that names a pass requires independently loaded
     /// canonical pass evidence.
     #[test]
@@ -3438,6 +3531,7 @@ mod tests {
         let exact = ReviewPassReconstitutionInput::new(
             pass_ref(3),
             ReviewPassKind::ReadOnlyReview,
+            run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
             accepted_input_id(5),
@@ -3466,6 +3560,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3493,6 +3588,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3514,6 +3610,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3538,6 +3635,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3565,6 +3663,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3592,6 +3691,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3619,6 +3719,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3646,6 +3747,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3707,6 +3809,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
@@ -3732,6 +3835,7 @@ mod tests {
             ReviewPassReconstitutionInput::new(
                 pass_ref(3),
                 ReviewPassKind::ReadOnlyReview,
+                run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
                 accepted_input_id(5),
