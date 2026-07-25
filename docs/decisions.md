@@ -10,6 +10,52 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Consume passes whose external observation is unchanged
+
+**Context.** Omitting both the observation row and pass result preserves compact
+state history, but leaves the succeeded import pass eligible for later result
+binding. After another pass changes the external state, replaying that old pass
+could turn its formerly unchanged report into a new durable transition.
+
+**Decision.** An unchanged report still appends no observation row. Its
+succeeded external-context-import pass instead binds one immutable
+`ExternalLinkNoChange` result naming the exact reservation and reported state.
+That result consumes the pass exactly once without treating the poll as
+meaning-bearing external history. This supersedes only the earlier
+[unchanged-observation decision's](#2026-07-25--do-not-record-unchanged-external-observations)
+choice to leave that pass result absent.
+
+**Rejected alternatives.** Leaving the result absent permits later reuse.
+Appending every unchanged report makes history grow with polling frequency.
+Rejecting an equal report loses successful orchestration evidence without
+consuming the pass.
+
+**Affects.** Review-pass results, external-link observation admission, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind every blocked publication to its reservation
+
+**Context.** Publication may use target-, run-, or finding-associated
+reservations. A finding-event result can authenticate only the last form, so a
+blocked write through either other association otherwise retains no durable
+connection between its pass and attempted reservation.
+
+**Decision.** Every blocked external-publication pass binds its exact pending
+reservation and nonempty reason. A finding-associated operation that also blocks
+the finding uses the reservation-bearing `FindingEvent` result. Other blocked
+publications use `ExternalLinkPublicationBlocked`, which admits every
+reservation association. Later reconciliation must attach that same reservation.
+
+**Rejected alternatives.** Restricting publication to finding associations
+removes target- and run-level publication already admitted by the external-link
+model. Leaving a blocked result absent cannot authenticate retry or
+reconciliation. Binding two results to one pass defeats result immutability.
+
+**Affects.** Review-pass result shapes, publication reconciliation, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
 ## 2026-07-25 — Bind blocked publication to its attempted reservation
 
 **Context.** A blocked external-publication pass can follow an ambiguous write
