@@ -181,8 +181,9 @@ recovery.
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).
 Present titles, tags, and attribute keys are nonempty; every metadata string
-rejects U+0000. Attribute values may be empty. Duplicate tags and duplicate
-decoded attribute member names are invalid requests. Tag order and attribute
+rejects U+0000. Attribute values may be empty. Duplicate tags are invalid
+requests. Repeating a decoded attribute member name is a `malformed_frame` under
+the frame-wide duplicate-object-member rule above. Tag order and attribute
 member order do not affect durable command equality. Wire validation enforces
 the domain capacity contract: at most 262,144 total UTF-8 bytes across the
 object, at most 256 tags, at most 256 attributes, and at most 1,024 UTF-8 bytes

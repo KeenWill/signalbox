@@ -275,9 +275,12 @@ attributes, not archived, and no last-writer stamp. Creation therefore does not
 fabricate an actor that its command does not carry.
 
 A single-session metadata read collects the root, tags, and attributes in one
-read-only repeatable-read transaction. It therefore returns either the complete
-initial projection or one complete committed replacement, never a combination of
-separately committed snapshots.
+read-only repeatable-read transaction that selects the owning session row.
+Missing session identity returns the typed absent outcome used by the process
+boundary's `not_found` response; only an existing session without a metadata
+root returns the complete initial projection. A successful read therefore
+returns either that initial projection or one complete committed replacement,
+never a combination of separately committed snapshots.
 
 `ReplaceSessionMetadata` carries durable command identity, target session,
 actor, and one complete replacement snapshot. Its replay equality covers every
@@ -292,12 +295,14 @@ stamp. An equal replay returns that exact recorded result and timestamp. The
 database timestamp is result evidence, not caller intent or a global ordering
 token, so it does not participate in command equality.
 
-There is deliberately no expected or installed metadata version and no edit
-history. Two distinct writes are last-writer-wins after serialization on the
-session row; a full replacement can overwrite an earlier writer's unrelated
-field. Callers that need to preserve fields read the current snapshot before
-forming the replacement. Durable command replay prevents an ambiguous retry from
-becoming a second logical write, but it does not provide optimistic concurrency.
+There is deliberately no expected or installed metadata version and no versioned
+metadata-history API. Two distinct writes are last-writer-wins after
+serialization on the session row; a full replacement can overwrite an earlier
+writer's unrelated field. Callers that need to preserve fields read the current
+snapshot before forming the replacement. The owner-global durable-command
+contract retains each command's payload and typed result for replay, so those
+records preserve prior replacement values; they are not an optimistic-
+concurrency mechanism or a metadata-history projection.
 
 Archive is organizational visibility state only. Archiving never cancels,
 pauses, rejects, or rewrites accepted, queued, active, or terminal work and
