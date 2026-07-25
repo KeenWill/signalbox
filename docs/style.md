@@ -228,7 +228,9 @@ ever needs them (principle 5).
 
 ### C. Arbitrary versus load-bearing, spelled out
 
-Three house forms, all already present in the repository:
+Three house forms; the first two appear in the repository at the citations
+below, and the third pairs TS-4's one-knob fixture with a naming convention this
+guide introduces:
 
 - **Doc-commented constants** for a test module's cast of identities —
   `crates/domain/src/provider_evidence.rs:790-795` is the model:
@@ -251,8 +253,10 @@ Three house forms, all already present in the repository:
   by construction; no reader will mistake it for load-bearing.
 
 - **One-knob fixtures** (TS-4) so arbitrary plumbing never reaches the test body
-  at all, and `ARBITRARY_`-prefixed constants (`ARBITRARY_SESSION_ID`) where a
-  value must appear literally but any value would do.
+  at all, and — where a value must appear literally but any value would do — an
+  `ARBITRARY_`-prefixed constant such as `ARBITRARY_SESSION_ID`. The prefix is a
+  convention this guide introduces; no constant in the tree carries it yet, so
+  the first use establishes it.
 
 **Worked example** — `checkpoint_restart_model_call` combines both problems in
 one signature (`postgres_integration.rs:1036-1040`, twelve call sites):
@@ -277,7 +281,8 @@ enum RestartCheckpoint {
     Authorized,
 }
 
-/// Seeds are arbitrary; each fixture in a test needs a distinct one.
+// Seeds are arbitrary; each fixture in a test needs a distinct one.
+// (`//`, not `///`: a doc comment on a statement trips `unused_doc_comments`.)
 let prepared =
     checkpoint_restart_model_call(&pool, seed_a(), RestartCheckpoint::Prepared).await?;
 let issued =
