@@ -1,0 +1,6 @@
+{"type":"system","uuid":"legacy-0","sessionId":"legacy-session","timestamp":"2025-01-01T00:00:00Z","subtype":"init"}
+{"type":"user","uuid":"legacy-1","parentUuid":"legacy-0","sessionId":"legacy-session","message":{"role":"user","content":"Inspect synthetic.txt"}}
+{"type":"assistant","uuid":"legacy-2","parentUuid":"legacy-1","sessionId":"legacy-session","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Need inspect.","signature":"sig-synthetic"},{"type":"tool_use","id":"tool-1","name":"read_file","input":{"path":"synthetic.txt","line":1},"caller":{"kind":"assistant"}}]}}
+{"type":"user","uuid":"legacy-3","parentUuid":"legacy-2","sessionId":"legacy-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","is_error":false,"content":[{"type":"text","text":"fixture body"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}},{"type":"tool_reference","tool_name":"read_file"}]}]}}
+{"type":"assistant","uuid":"legacy-4","parentUuid":"legacy-3","sessionId":"legacy-session","message":{"role":"assistant","content":[{"type":"fallback","reason":"synthetic-model-switch"}]}}
+{"type":"assistant","uuid":"legacy-5","parentUuid":"legacy-4","sessionId":"legacy-session","message":{"role":"assistant","content":"Done."}}

@@ -1,0 +1,3 @@
+{"type":"user","uuid":"observed-middle","parentUuid":"missing-before-fixture","message":{"role":"user","content":"Retained suffix."}}
+{"type":"assistant","uuid":"observed-after-gap","parentUuid":"missing-inside-fixture","message":{"role":"assistant","content":[{"type":"future_block","payload":{"nested":[1,1.0,1e0]}},{"type":"text","text":"Retained after gap."}]}}
+{"type":"user","uuid":null,"parentUuid":"observed-after-gap","message":{"role":"user","content":null}}

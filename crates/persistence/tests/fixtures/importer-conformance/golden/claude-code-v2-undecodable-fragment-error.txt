@@ -1,0 +1,2 @@
+failure: InvalidJson { line: 2 }
+entry_identity_calls: 0

@@ -2762,6 +2762,12 @@ impl ResolvedContextFrontierReconstitutionInput {
         snapshot: ContextFrontierId,
         ordered_entries: Vec<SemanticTranscriptEntryRef>,
     ) -> Self;
+    pub fn derive_appending(
+        &self,
+        snapshot: ContextFrontierId,
+        appended_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self;
+    pub fn entry_count(&self) -> usize;
     pub fn reconstitute(self) -> Option<ResolvedContextFrontierSnapshot>;
     // accessors: owning_session(), snapshot(), ordered_entries()
 }
@@ -2771,6 +2777,12 @@ pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // consumed by scheduling and model-call aggregate seams
 impl ResolvedContextFrontierSnapshot {
     pub fn entry_count(&self) -> usize;
+    pub fn appended_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef>
+           + DoubleEndedIterator
+           + '_;
+    pub fn immediate_semantic_prefix(&self) -> Option<ContextFrontier>;
     pub fn ordered_entries(
         &self,
     ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + DoubleEndedIterator + '_;

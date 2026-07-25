@@ -5,11 +5,14 @@ consumes it were verified through PR #177 (`agent/terminal-client`). The
 conversation-import stack adds protocol version two for the conservative
 imported transcript-snapshot projection described here. The tool-loop stack adds
 protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. The implementation in this stack
-speaks versions one through three, and its terminal client selects version
-three. This page is the normative boundary between a local client process and
-`signalbox-hubd`; domain values, PostgreSQL records, and wire messages remain
-distinct representations.
+their closed message vocabularies unchanged. The session-metadata stack adds
+protocol version four for paginated metadata listing, single-session metadata
+reads, and durable complete-snapshot replacement; versions one through three
+retain their closed request and message vocabularies unchanged. The
+implementation in this stack speaks versions one through four, and its terminal
+client continues to select version three. This page is the normative boundary
+between a local client process and `signalbox-hubd`; domain values, PostgreSQL
+records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -17,7 +20,7 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-All three versions use one Unix domain stream socket. The hub requires its path
+All four versions use one Unix domain stream socket. The hub requires its path
 in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
 `signalbox-hubd` binds the socket with owner-only `0600` permissions. The
@@ -113,7 +116,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`, `2`, or `3`;
+- `version`: JSON integer `1`, `2`, `3`, or `4`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -125,18 +128,18 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one, two, or three
+spellings decode to the same name. A version other than one, two, three, or four
 produces an `unsupported_version` error naming the supported versions, then the
 server closes the connection. Every response uses the request's admitted
 version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A terminal client speaking version two or three
-admits that version-one fallback only for `malformed_frame` or
-`unsupported_version`, then applies the ordinary request-identity check; every
-other response-version mismatch fails locally. A server error uses
-`request_id = "0"` only when the incoming frame prevents recovery of a valid
-nonzero identity; zero is never a valid client identity or success-response
-identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
-the shortest ASCII decimal form are invalid.
+the pre-admission fallback. A client speaking version two, three, or four admits
+that version-one fallback only for `malformed_frame` or `unsupported_version`,
+then applies the ordinary request-identity check; every other response-version
+mismatch fails locally. A server error uses `request_id = "0"` only when the
+incoming frame prevents recovery of a valid nonzero identity; zero is never a
+valid client identity or success-response identity. Leading zeroes, a plus sign,
+whitespace, and any spelling other than the shortest ASCII decimal form are
+invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -149,13 +152,16 @@ errors self-describing without connection-global negotiation state.
 Request objects carry a required string `type` and reject fields not admitted by
 that variant.
 
-| Type              | Additional required members                                                                                                        | Meaning                                                                                                                                                            |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `create_session`  | `command_id` (canonical UUID string), `initial_model_selection` (selection object)                                                 | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                             |
-| `list_sessions`   | none                                                                                                                               | Read all current sessions as summaries, ordered by session identity.                                                                                               |
-| `submit_input`    | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string) | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                    |
-| `read_transcript` | `session_id` (canonical UUID string)                                                                                               | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                     |
-| `follow_session`  | `session_id` (canonical UUID string)                                                                                               | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session. |
+| Type                       | Version | Additional required members                                                                                                                                                                 | Meaning                                                                                                                                                            |
+| -------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create_session`           | 1+      | `command_id` (canonical UUID string), `initial_model_selection` (selection object)                                                                                                          | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                             |
+| `list_sessions`            | 1+      | none                                                                                                                                                                                        | Read all current sessions as legacy summaries, ordered by session identity.                                                                                        |
+| `submit_input`             | 1+      | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                          | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                    |
+| `read_transcript`          | 1+      | `session_id` (canonical UUID string)                                                                                                                                                        | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                     |
+| `follow_session`           | 1+      | `session_id` (canonical UUID string)                                                                                                                                                        | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session. |
+| `list_session_metadata`    | 4       | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null) | Read one filtered metadata-summary page in session-identity order.                                                                                                 |
+| `read_session_metadata`    | 4       | `session_id` (canonical UUID string)                                                                                                                                                        | Read one complete current metadata snapshot.                                                                                                                       |
+| `replace_session_metadata` | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                     | Durably replace one complete metadata snapshot as the owner actor.                                                                                                 |
 
 A selection object is exactly one of:
 
@@ -172,16 +178,58 @@ ambiguous submission with the same command identity, session, content, expected
 version, and treatment; changing any of them is a conflicting reuse, not
 recovery.
 
+A metadata object has exactly `title` (string or null), `tags` (string array),
+`attributes` (an object whose values are strings), and `archived` (boolean).
+Present titles, tags, and attribute keys are nonempty; every metadata string
+rejects U+0000. Attribute values may be empty. Duplicate tags produce
+`malformed_frame`. Repeating a decoded attribute member name also produces
+`malformed_frame` under the frame-wide duplicate-object-member rule above. Tag
+order and attribute member order do not affect durable command equality. Wire
+validation enforces the domain capacity contract: at most 262,144 total UTF-8
+bytes across the object, at most 256 tags, at most 256 attributes, and at most
+1,024 UTF-8 bytes in each tag or attribute key. Those bounds leave
+response-envelope and worst-case JSON-escaping headroom below the 8 MiB frame
+limit while bounding normalized satellite work when a complete accepted object
+is echoed by a read or replacement receipt. The exact capacity choice is
+recorded in the
+[metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
+
+`list_session_metadata` admits one through 100 results. `required_tags` is an
+exact AND-filter, a present `title_contains` is nonempty and applies an exact
+case-sensitive substring filter, `include_archived = false` selects the default
+all-non-archived view, and `after_session_id` is an exclusive keyset cursor. An
+empty tag array, null title query, false archive switch, page size 50, and null
+cursor form the ordinary default request; the wire carries every field
+explicitly. At most 256 required tags are admitted. They are nonempty, reject
+U+0000, and carry at most 1,024 UTF-8 bytes each; a title query rejects U+0000;
+and all required tags plus the title query carry at most 262,144 UTF-8 bytes.
+Every metadata-object and metadata-filter string, shape, cardinality, and byte
+rule in these two paragraphs is client-frame field or size validation. A
+violation returns `malformed_frame` before application construction.
+`invalid_request` is reserved for the fail-closed case where an admitted wire
+value cannot construct the corresponding application input; no currently valid
+metadata frame is intended to reach that mapping error.
+
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in all three versions. If a turn is already active, the normal typed
+treatment in all four versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
 Versions two and three admit the same request vocabulary as version one and add
-no new mutation authority. A version-one `submit_input`, `read_transcript`, or
-`follow_session` request that selects imported ancestry returns a version-one
-`unsupported_version` error naming version two before mutation or snapshot
-construction.
+no new mutation authority. Version four retains that vocabulary and adds only
+the three metadata requests. A metadata request carried under version one, two,
+or three is classified as `malformed_frame` because its supported version does
+not admit that request variant; it never reaches application construction. A
+version-one `submit_input`, `read_transcript`, or `follow_session` request that
+selects imported ancestry returns a version-one `unsupported_version` error
+naming version two before mutation or snapshot construction.
+
+Version four also inherits every transcript, turn-state, entry, and event shape
+admitted by version three, including the imported representations introduced by
+version two and the tool-bearing representations introduced by version three. A
+version-four `read_transcript`, `follow_session`, or `submit_input` therefore
+never requires a downgrade or a version newer than four for a representation
+already admitted by version three.
 
 Tool-free native sessions remain readable and mutable through every version. A
 version-one or version-two `read_transcript` or `follow_session` request whose
@@ -207,13 +255,20 @@ exact capacity choice is recorded in the
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
-that variant. Every accepted `create_session` or `submit_input` request produces
-exactly one of:
+that variant. Every accepted `create_session`, `submit_input`, or
+`replace_session_metadata` request produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`;
+- `session_metadata_replaced` with `session_id`, the complete `metadata`
+  snapshot installed by that recorded handling, and its non-null `last_writer`;
+  or
 - `error` with a stable `code` and a non-sensitive `message`.
+
+A replayed metadata receipt remains the exact snapshot installed by its original
+handling even if a later command has replaced the current metadata. A caller
+that needs current state issues `read_session_metadata`.
 
 In the server shapes below, notation such as `queued` or
 `terminal { disposition }` means a closed JSON object with `"type":"queued"` or
@@ -232,17 +287,46 @@ strings. Request identities, ordinal versions, indices, counts, and outbox
 cursors are canonical decimal strings, preserving their full unsigned 64-bit
 range without JSON-number precision loss.
 
+Version four's metadata list is a bounded sequence:
+
+1. `session_metadata_page_start`;
+2. zero through 100 `session_metadata_summary` messages in strictly increasing
+   session-identity order; and
+3. `session_metadata_page_end { session_count, next_after_session_id }`.
+
+Each summary carries `session_id`, current `defaults_version`,
+`model_selection`, `dangerous_tool_auto_approval`, `title`, sorted `tags`,
+`archived`, and `last_writer`. `dangerous_tool_auto_approval` is a JSON boolean:
+`false` encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags
+are strictly increasing by lexicographic UTF-8 byte sequence. Attributes are
+intentionally absent from the list projection. The end cursor is null when no
+later match existed in the page snapshot; otherwise it equals the last emitted
+session identity. The page sequence is spooled before output and becomes
+authoritative only after its count, ordering, and cursor validate.
+
+`session_metadata` is the successful single-session read and
+`session_metadata_replaced` is the successful write receipt. Both carry
+`session_id`, the complete metadata object, and `last_writer`. The initial
+unwritten snapshot has the empty non-archived metadata object and a null
+`last_writer`; an applied replacement always has a non-null last writer. A
+last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
+microseconds since the Unix epoch) and the closed actor object `owner`. No
+non-owner metadata writer is constructible through this boundary; additional
+actor variants require the later slice that introduces their constructing
+authority. Actor is provenance, not wire authentication or authorization.
+
 An application rejection is an `error` with `code = "rejected"` and a required
-`detail` object whose variants are closed. For the version-one treatment, its
-exact variants are `session_not_found { session_id }`,
+`detail` object whose variants are closed. The version-one input treatment
+admits `session_not_found { session_id }`,
 `active_turn_present { session_id, active_turn_id }`,
 `defaults_version_mismatch { session_id, expected, current }`,
 `unknown_model_alias { session_id, alias_id }`, and
-`acceptance_position_exhausted { session_id, last }`. Other error codes have no
-`detail`. An equal replay returns the same success or rejection projection as
-the first handling.
+`acceptance_position_exhausted { session_id, last }`. A version-four
+`replace_session_metadata` rejection admits exactly
+`session_not_found { session_id }`. Other error codes have no `detail`. An equal
+replay returns the same success or rejection projection as the first handling.
 
-The error-code set in all three versions is:
+The error-code set in all four versions is:
 
 | Code                  | Meaning                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -257,10 +341,10 @@ The error-code set in all three versions is:
 | `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                    |
 | `internal`            | Fail-closed corruption or a hub defect stopped the request.                                          |
 
-For `create_session` and `submit_input`, a lost commit response maps to
-`commit_ambiguous`; the client retries the exact command identity and payload to
-discover the recorded outcome. A definitely pre-commit infrastructure failure
-maps to `unavailable`.
+For `create_session`, `submit_input`, and `replace_session_metadata`, a lost
+commit response maps to `commit_ambiguous`; the client retries the exact command
+identity and payload to discover the recorded outcome. A definitely pre-commit
+infrastructure failure maps to `unavailable`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
@@ -525,7 +609,7 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-All three versions forward durable transition events only. Provider token deltas
+All four versions forward durable transition events only. Provider token deltas
 remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
@@ -567,10 +651,11 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version three; older clients remain
-supported for representations admitted by their declared version as described
-above. It accepts a global `--socket <path>` override or reads
-`SIGNALBOX_SOCKET_PATH`, and provides:
+The `signalbox` binary in this stack continues to use version three; version
+four's metadata operations are core protocol and hub capabilities without new
+terminal-client UX. Older clients remain supported for representations admitted
+by their declared version as described above. The client accepts a global
+`--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
@@ -638,4 +723,6 @@ Deferred transport, compatibility, update-stream, retention, and operation
 questions are cataloged under
 [Protocols and persistence](../open-questions.md#protocols-and-persistence);
 later client-form choices are cataloged under
-[Client scope](../open-questions.md#client-scope).
+[Client scope](../open-questions.md#client-scope). Richer metadata query
+language and creation-derived visibility are cataloged under
+[Session organization, visibility, and retention](../open-questions.md#session-organization-visibility-and-retention).

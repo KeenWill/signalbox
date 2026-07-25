@@ -517,4 +517,4 @@ so neither private corpus is selected implicitly.
   [model-call-execution](model-call-execution.md).
 - Imported-conversation archive, retention, and destructive deletion policy
   remain part of the open
-  [archive lifecycle](../open-questions.md#archival-and-retention).
+  [archive lifecycle](../open-questions.md#session-organization-visibility-and-retention).

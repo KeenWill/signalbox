@@ -398,18 +398,21 @@ seed frontier from the selected normalized imported prefix), eligibility
 activation, startup recovery, model-call closure (completion, refusal, and known
 failure in `crates/domain/src/model_execution.rs` derive terminal snapshots),
 and the fail-closed reconstitution seams that rebuild a stored snapshot only
-from its complete materialized membership. Persistence materializes complete
-snapshot membership (`context_frontier` + `context_frontier_member`), inserts
-only; a deferred constraint trigger
+from its complete resolved membership. The
+[persistence protocol](persistence-protocol.md#relational-representation) owns
+the header-plus-prefix-delta representation; a deferred constraint trigger
 (`context_frontier_requires_complete_membership`) re-asserts complete contiguous
-membership — exact declared count, positions `1..count` — at commit, and
-reconstitution rejects any stored snapshot whose resolved membership disagrees
+resolved membership — exact declared count, positions `1..count` — at commit.
+Reconstitution rejects any stored snapshot whose resolved membership disagrees
 with the complete entry set — one identifier can never resolve differently.
-Imported ancestry resolves only through the checked session-creation producer;
-its separate one-to-one `ImportedSessionSeed` must name the exact stored
-frontier identity whose membership matches the selected imported prefix.
-Equal-content reminting fails reconstitution. `SingleSource` ancestry resolution
-remains unimplemented. `TranscriptFrontier` itself is
+In-memory append derivation structurally shares the immutable ordered prefix,
+membership index, and lineage index; complete iteration and comparison retain
+the same values and ordering. Imported ancestry resolves only through the
+checked session-creation producer; its separate one-to-one `ImportedSessionSeed`
+must name the exact stored frontier identity whose membership matches the
+selected imported prefix. Substituting an equal-content reminted identity for
+that seed fails reconstitution. `SingleSource` ancestry resolution remains
+unimplemented. `TranscriptFrontier` itself is
 [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution

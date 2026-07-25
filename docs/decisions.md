@@ -175,6 +175,137 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Bound session metadata for storage and process frames
+
+**Context.** Metadata is echoed in complete read and replacement frames, while
+tags and attribute keys are stored in composite PostgreSQL B-tree indexes.
+Unbounded valid domain values could therefore exceed either the 8 MiB process
+frame or a finite index-entry capacity only after mutation handling. A byte-only
+aggregate bound still admits tens of thousands of short normalized satellites or
+required-tag predicates in one otherwise valid request.
+
+**Decision.** Admit at most 262,144 total UTF-8 bytes across a metadata
+snapshot, counting title, every tag, and every attribute key and value.
+Additionally admit at most 256 tags and 256 attributes, and bound each indexed
+tag and attribute key to 1,024 UTF-8 bytes. Apply the same 262,144 byte
+aggregate bound, 256-tag cardinality bound, and per-tag bound to list filters.
+These are provisional capacity limits enforced before mutation or database
+access and by storage checks where one row owns the bounded value.
+
+**Rejected alternatives.** Relying on the inbound frame cap leaves no headroom
+for response envelopes and worst-case JSON escaping. Depending on PostgreSQL to
+reject oversized index tuples turns a valid domain value into infrastructure
+failure. A byte-only bound leaves normalized row and predicate counts
+pathological. Hash-only indexes would change exact-match and corruption
+semantics for a capacity problem that explicit bounds solve.
+
+**Affects.** Session-metadata domain construction, list-query admission,
+protocol version four, migration `202607260101`, and their boundary tests.
+
+## 2026-07-25 — Add session-metadata protocol version four
+
+**Status.** Proposed foundation decision; owner acceptance is the merge of this
+specification diff together with its implementing stack.
+
+**Context.** Process-protocol versions one through three are closed, and their
+`list_sessions` summaries have no metadata, filtering, or pagination. The
+metadata slice needs list, read, and durable replacement frames without changing
+the wire language an existing client already admitted.
+
+**Decision.** Add typed `ProtocolVersion::Four`. Retain every version-one
+through version-three request and message shape unchanged. Version four adds
+distinct `list_session_metadata`, `read_session_metadata`, and
+`replace_session_metadata` requests plus their response families. Client-frame
+validation rejects those requests under older typed versions, and server-frame
+validation rejects their messages likewise. Version four inherits every
+version-three transcript and event representation, including the imported and
+tool-bearing shapes introduced by versions two and three. Metadata and
+metadata-filter shape, string, cardinality, and byte rules are client-frame
+validation, whose failures are `malformed_frame`; `invalid_request` remains the
+fail-closed application-mapping error. The version-four last-writer actor object
+admits only `owner`, the sole actor this boundary constructs. The current
+terminal client remains on version three; this slice supplies the core wire and
+hub adapter, not new terminal UX.
+
+**Rejected alternatives.** Adding fields to `list_sessions` changes a closed
+shape in place. Reinterpreting version three weakens captured-frame meaning.
+Moving metadata into untyped JSON extensions defeats the protocol's exhaustive
+validation. Advancing the terminal client without a commissioned interaction
+design expands this core slice.
+
+**Affects.** [process-protocol](spec/process-protocol.md),
+`crates/process-protocol`, `apps/hubd`, and process-protocol integration tests.
+
+## 2026-07-25 — Store replaceable session metadata as satellites
+
+**Status.** Proposed foundation decision; owner acceptance is the merge of this
+specification diff together with its implementing stack.
+
+**Context.** Titles, tags, attributes, and archive state organize sessions but
+do not change conversational identity, provenance, defaults, transcript, or
+lifecycle. A single-owner deployment needs truthful retry behavior and
+last-writer attribution, but the commissioned scope explicitly rejects aggregate
+versioning and full edit history.
+
+**Decision.** Represent metadata as one complete replaceable snapshot outside
+the `Session` aggregate: optional exact title, exact flat tag set, exact
+string-to-string attribute map, and archive boolean. Persist a mutable root plus
+normalized tag and attribute satellites only after the first write; absence
+means the empty, non-archived snapshot with no last writer. A durable
+`ReplaceSessionMetadata` command atomically replaces the whole snapshot and
+records PostgreSQL statement time (microsecond precision), sampled in a separate
+statement after acquiring the target session lock, plus its actor. Equal replay
+returns that recorded stamp. Append-only internal installation evidence records
+each applied receipt when it becomes current and rejects installing the same
+receipt again; this enforces one physical application without exposing aggregate
+versioning or a metadata-history API. Archive is view-only: it neither cancels
+work nor cascades, and restore only clears the flag.
+
+**Rejected alternatives.** Adding fields to `Session` makes organizational state
+part of the conversational aggregate. Per-field patch commands complicate replay
+and attribution without a commissioned merge policy. Compare-and-set versioning
+contradicts the accepted last-writer posture. Treating archive as a lifecycle
+transition silently abandons or moves work. PostgreSQL transaction time is fixed
+before a transaction waits for the writer lock, so a later winning write could
+otherwise carry an earlier stamp than the snapshot it replaced.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[identity-and-commands](spec/identity-and-commands.md), migration
+`202607260101`, the domain/application metadata boundary, persistence adapters,
+and version-four process frames.
+
+## 2026-07-25 — Share immutable context-frontier prefixes
+
+**Context.** Complete membership rows and independently materialized domain
+snapshots repeated every retained prefix. An append-one history therefore stored
+and loaded a quadratic number of references, and scheduling reconstitution
+rebuilt the same ordered prefixes at hundreds of entries. The accepted frontier
+semantics already permit parent-plus-append storage when every identity resolves
+to the same exact sequence.
+
+**Decision.** Store each frontier header with an optional same-session prefix
+and only its absolute-position suffix rows; resolve and validate the complete
+ordered-distinct sequence through the immutable prefix chain. Scheduling loads
+the union of required chains and each delta once. Domain snapshots use `rpds`
+persistent vectors, ordered sets, and ordered maps so append derivation shares
+prefix content and indexes while preserving all public equality, iteration,
+rejection, and fail-closed reconstitution behavior.
+
+**Rejected alternatives.** An additional member-table index cannot remove rows
+that encode the repeated prefixes. Inferring every frontier from one maximum
+snapshot loses exact per-identity corruption checks. Digests or serialized
+arrays weaken relational completeness and foreign-key enforcement. A custom
+persistent tree would add local unsafe or balancing machinery already provided
+by a focused MIT-licensed crate.
+
+**Affects.** Migration `202607260300`, persistence frontier writes and
+scheduling reads, domain frontier materialization, the public domain spine, and
+the implemented frontier sections of
+[persistence-protocol](spec/persistence-protocol.md) and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Every
+existing composite frontier identity and complete resolved sequence is
+unchanged.
+
 ## 2026-07-24 — Preserve accepted IANA time-zone identifiers
 
 **Context.** Jiff's IANA lookup accepts aliases, but the lookup result does not

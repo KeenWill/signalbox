@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"Before undecodable fragment."}}
+{"type":"assistant","message":{"role":"assistant","content":"synthetic \uD800 fragment"}}
