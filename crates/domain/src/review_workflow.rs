@@ -1369,7 +1369,7 @@ impl ReviewPass {
             return Err(ReviewPassConstructionError {
                 reference,
                 kind,
-                run_evidence,
+                run_evidence: Box::new(run_evidence),
                 session,
                 accepted_input,
                 accepted_input_session,
@@ -1607,11 +1607,11 @@ pub enum ReviewPassConstructionFailure {
 }
 
 /// Rejected queued-pass construction retaining all supplied facts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewPassConstructionError {
     reference: ReviewPassRef,
     kind: ReviewPassKind,
-    run_evidence: ReviewRunEvidence,
+    run_evidence: Box<ReviewRunEvidence>,
     session: SessionId,
     accepted_input: AcceptedInputId,
     accepted_input_session: SessionId,
@@ -1620,37 +1620,37 @@ pub struct ReviewPassConstructionError {
 
 impl ReviewPassConstructionError {
     /// Returns the rejected pass reference.
-    pub const fn reference(self) -> ReviewPassRef {
+    pub const fn reference(&self) -> ReviewPassRef {
         self.reference
     }
 
     /// Returns the rejected pass kind.
-    pub const fn kind(self) -> ReviewPassKind {
+    pub const fn kind(&self) -> ReviewPassKind {
         self.kind
     }
 
     /// Returns the canonical parent workflow supplied for the pass.
-    pub const fn workflow(self) -> ReviewWorkflowKind {
-        self.run_evidence.workflow()
+    pub const fn workflow(&self) -> ReviewWorkflowKind {
+        self.run_evidence.workflow
     }
 
     /// Returns the independently supplied canonical parent-run evidence.
-    pub const fn run_evidence(self) -> ReviewRunEvidence {
-        self.run_evidence
+    pub const fn run_evidence(&self) -> ReviewRunEvidence {
+        *self.run_evidence
     }
 
     /// Returns the pass and canonical accepted-input sessions.
-    pub const fn sessions(self) -> (SessionId, SessionId) {
+    pub const fn sessions(&self) -> (SessionId, SessionId) {
         (self.session, self.accepted_input_session)
     }
 
     /// Returns the accepted input whose association did not match.
-    pub const fn accepted_input(self) -> AcceptedInputId {
+    pub const fn accepted_input(&self) -> AcceptedInputId {
         self.accepted_input
     }
 
     /// Returns why construction was rejected.
-    pub const fn failure(self) -> ReviewPassConstructionFailure {
+    pub const fn failure(&self) -> ReviewPassConstructionFailure {
         self.failure
     }
 }
