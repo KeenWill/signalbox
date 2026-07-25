@@ -70,11 +70,13 @@ one finished and awaiting owner merge:
   disposition (replies naming the pushed fixing commits) before requesting the
   next wave against the new head. A pull request whose diff touches only files
   that already opened with the non-authoritative-planning banner on its base
-  branch (for example [`docs/agents/backlog.md`](docs/agents/backlog.md)), or
-  that it adds as new files opening with that banner, gets no review request at
-  all: those files decide nothing and are reviewed for nothing. Stamping the
-  banner onto a file that already existed without one is a reclassification, not
-  an exemption — that pull request is requested and reviewed like any other.
+  branch (for example [`docs/agents/backlog.md`](docs/agents/backlog.md)) and
+  that still open with it at the pull request's head, or that it adds as new
+  files opening with that banner, gets no review request at all: those files
+  decide nothing and are reviewed for nothing. Stamping the banner onto a file
+  that already existed without one — or removing it from a file that carried it
+  — is a reclassification, not an exemption: either pull request is requested
+  and reviewed like any other.
 - Before the first review request, run the pre-push self-review checklist over
   the pull request's own diff — the first-wave findings agents can catch
   themselves:
