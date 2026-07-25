@@ -41,8 +41,10 @@ record_evidence(identity(TARGET_IDENTITY), call(SUBJECT_CALL));
 Why: an unlabeled literal costs a re-read on every future visit — the reader
 must reconstruct from context whether changing it would change the test's
 meaning. A name pays that cost once, at writing time. Corollary: when a test
-*does* care about a value, spell the literal at the assertion (TS-5, TS-6); the
-discipline is not "no literals", it is "no literals of unknown provenance."
+*does* care about a value, spell the literal at the assertion (TS-5) — or, where
+the expected value is one the fixture already states, assert against the fixture
+itself (TS-6). The discipline is not "no literals", it is "no literals of
+unknown provenance."
 
 ### 2. Position may carry meaning only where types do
 
@@ -87,13 +89,11 @@ and failure output — self-describing.
 
 ### 4. Tests are documentation, and read as such
 
-The test suite is where a maintainer learns what the system promises. So:
-duplication that helps a test read on its own beats deduplication (DAMP over
-DRY, TS-3); a test body contains its whole story (TS-1); a failure names the
-violated expectation, not just two unequal values (TS-20). This guide adds the
-label discipline to that standard: defining a five-line local struct or enum
-inside a test module is cheap, and it is exactly as legitimate a documentation
-move as a well-named test function.
+The test suite is where a maintainer learns what the system promises. TS-1,
+TS-3, and TS-20 set that standard and remain its only statement; read them
+there. This guide adds the label discipline to it: defining a five-line local
+struct or enum inside a test module is cheap, and it is exactly as legitimate a
+documentation move as a well-named test function.
 
 ### 5. Make illegal states unrepresentable before documenting legal ones
 
@@ -200,16 +200,20 @@ the accepting and overflowing outcomes are distinct at a glance:
 
 ```rust
 #[derive(Debug, PartialEq)]
-struct PrefixBudget {
-    accepted_len: usize,
-    overflowed: bool,
+enum PrefixBudget {
+    Accepted { len: usize },
+    Overflowed { accepted_len: usize },
 }
 
 assert_eq!(
     streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 2),
-    PrefixBudget { accepted_len: 1, overflowed: true }
+    PrefixBudget::Overflowed { accepted_len: 1 }
 );
 ```
+
+The minimum fix —
+`struct PrefixBudget { accepted_len: usize, overflowed: bool }` — labels the
+fields but keeps the boolean axis; prefer the enum.
 
 The same axis-erasure appears at call sites:
 `StreamDecoder::new(ExchangeFacts::default(), false)` (three call sites) and the
@@ -251,7 +255,7 @@ Three house forms, all already present in the repository:
   value must appear literally but any value would do.
 
 **Worked example** — `checkpoint_restart_model_call` combines both problems in
-one signature (`postgres_integration.rs:1036-1040`, ten call sites):
+one signature (`postgres_integration.rs:1036-1040`, twelve call sites):
 
 ```rust
 async fn checkpoint_restart_model_call(pool: &PgPool, seed: u128, authorize: bool) -> ...
@@ -345,9 +349,10 @@ signatures. For example, `input_choices(expected: u64, ...)`
 (`postgres_integration.rs:662`) takes a bare `u64` immediately converted into a
 `SessionConfigurationDefaultsVersion`; twenty-plus call sites read
 `input_choices(1, ...)` where neither the name `expected` nor the literal `1`
-reveals that the value is a defaults *version*. Take the domain type — or at
-minimum name the parameter for the concept — and the call sites explain
-themselves.
+reveals that the value is a defaults *version*. Take the domain type and the
+call sites explain themselves. Renaming the parameter alone does not reach them:
+Rust shows no argument names at a call, so `expected` and `defaults_version`
+both read as `input_choices(1, ...)` — a definition-site improvement only.
 
 ## Internal exemplars
 
