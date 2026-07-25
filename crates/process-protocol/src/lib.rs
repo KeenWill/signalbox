@@ -725,18 +725,6 @@ where
 pub enum MetadataActor {
     /// The owner wrote the snapshot.
     Owner {},
-    /// Startup recovery wrote the snapshot.
-    Recovery {},
-    /// Model output from one exact turn wrote the snapshot.
-    Model {
-        /// Attributing turn.
-        turn_id: CanonicalUuid,
-    },
-    /// Execution of one exact tool request wrote the snapshot.
-    Tool {
-        /// Attributing logical tool request.
-        tool_request_id: CanonicalUuid,
-    },
 }
 
 /// The post-lock database statement time and actor of the latest replacement.
@@ -1844,6 +1832,7 @@ pub enum ServerMessage {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         title: Option<String>,
         /// Exact sorted flat tags.
+        #[serde(deserialize_with = "deserialize_session_metadata_tags")]
         tags: Vec<String>,
         /// Whether the session is archived.
         archived: bool,
@@ -3581,6 +3570,38 @@ mod tests {
     }
 
     #[test]
+    fn metadata_summary_tag_deserializer_rejects_member_beyond_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tags =
+            serde_json::to_string(&numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1))?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+        );
+        assert_server_malformed(&json);
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_summary_tag_deserializer_accepts_exact_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut exact_tags = numbered_metadata_strings(MAX_SESSION_METADATA_TAGS);
+        exact_tags.sort();
+        let tags = serde_json::to_string(&exact_tags)?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"owner"}}}}}}}}"#
+        );
+        decode_server_line(&line(&json))?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_metadata_writer_actor_is_owner_only() {
+        assert_server_malformed(
+            r#"{"version":4,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+        );
+    }
+
+    #[test]
     fn metadata_capacity_matches_domain_and_frame_headroom()
     -> Result<(), Box<dyn std::error::Error>> {
         let exact = SessionMetadata::try_new(
@@ -3870,6 +3891,46 @@ mod tests {
     }
 
     #[test]
+    fn inv033_version_four_inherits_imported_transcript_and_tool_event_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let imported = ServerMessage::TranscriptTextEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptTextEntry::Imported {
+                imported_conversation_id: uuid(3),
+                imported_entry_id: uuid(4),
+                source_speaker: ImportedSourceSpeaker::Attested {
+                    speaker: ImportedSpeaker::User,
+                },
+            },
+        };
+        let imported_frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Four, request(1)?, imported)?;
+        assert_eq!(
+            decode_server_line(&encode_server_line(&imported_frame)?)?,
+            imported_frame
+        );
+
+        let tool_event = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(1),
+            session_id: uuid(1),
+            event: SessionEvent::TurnToolReconciliationRequired {
+                turn_id: uuid(2),
+                tool_attempt_id: uuid(3),
+                terminal_frontier_id: uuid(4),
+            },
+        };
+        let tool_frame =
+            ServerFrame::try_new_for_version(ProtocolVersion::Four, request(2)?, tool_event)?;
+        assert_eq!(
+            decode_server_line(&encode_server_line(&tool_frame)?)?,
+            tool_frame
+        );
+        Ok(())
+    }
+
+    #[test]
     fn submit_content_is_admitted_by_the_application_not_wire_decoding()
     -> Result<(), Box<dyn std::error::Error>> {
         let content = "x".repeat(MAX_CONTENT_FRAGMENT_BYTES + 1);
@@ -3929,10 +3990,7 @@ mod tests {
             },
             r#"{"type":"sessions_end","session_count":"1"}"#,
         )?;
-        let writer = MetadataLastWriter::new(
-            CanonicalU64::new(17),
-            MetadataActor::Model { turn_id: uuid(3) },
-        );
+        let writer = MetadataLastWriter::new(CanonicalU64::new(17), MetadataActor::Owner {});
         assert_server_message_round_trip(
             request(32)?,
             ServerMessage::SessionMetadataPageStart {},
@@ -3952,7 +4010,7 @@ mod tests {
                 archived: true,
                 last_writer: Some(writer),
             },
-            r#"{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"2","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"title":"Planning","tags":["daily","work"],"archived":true,"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000003"}}}"#,
+            r#"{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"2","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"title":"Planning","tags":["daily","work"],"archived":true,"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"owner"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(34)?,
@@ -3978,7 +4036,7 @@ mod tests {
                 metadata: metadata(true)?,
                 last_writer: writer,
             },
-            r#"{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true},"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000003"}}}"#,
+            r#"{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":"Planning","tags":["daily","work"],"attributes":{"run":"17","trigger":""},"archived":true},"last_writer":{"updated_at_unix_micros":"17","actor":{"type":"owner"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(6)?,

@@ -867,7 +867,9 @@ async fn spool_session_metadata_page(
         .await
         .map_err(MetadataPageSpoolError::Read)?
     {
-        let (title, tags, last_writer) = wire_list_metadata(&item);
+        let (title, tags, last_writer) = wire_list_metadata(&item)
+            .ok_or(SnapshotSpoolError::EncodeInvariant)
+            .map_err(MetadataPageSpoolError::Spool)?;
         write_spool_message(
             &mut file,
             version,
@@ -2117,12 +2119,16 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
 
 fn wire_list_metadata(
     item: &SessionMetadataListItem,
-) -> (Option<String>, Vec<String>, Option<MetadataLastWriter>) {
-    (
+) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
+    let last_writer = match item.last_writer() {
+        Some(writer) => Some(wire_metadata_last_writer(writer)?),
+        None => None,
+    };
+    Some((
         item.title().map(str::to_owned),
         item.tags().map(str::to_owned).collect(),
-        item.last_writer().map(wire_metadata_last_writer),
-    )
+        last_writer,
+    ))
 }
 
 fn wire_metadata_snapshot(
@@ -2139,26 +2145,22 @@ fn wire_metadata_snapshot(
         content.archived(),
     )
     .ok()?;
-    Some((
-        metadata,
-        snapshot.last_writer().map(wire_metadata_last_writer),
-    ))
+    let last_writer = match snapshot.last_writer() {
+        Some(writer) => Some(wire_metadata_last_writer(writer)?),
+        None => None,
+    };
+    Some((metadata, last_writer))
 }
 
-fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
-    MetadataLastWriter::new(
+fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Option<MetadataLastWriter> {
+    let actor = match writer.actor() {
+        Actor::Owner => MetadataActor::Owner {},
+        Actor::Recovery | Actor::Model { .. } | Actor::Tool { .. } => return None,
+    };
+    Some(MetadataLastWriter::new(
         CanonicalU64::new(writer.updated_at().as_unix_micros()),
-        match writer.actor() {
-            Actor::Owner => MetadataActor::Owner {},
-            Actor::Recovery => MetadataActor::Recovery {},
-            Actor::Model { turn } => MetadataActor::Model {
-                turn_id: wire_uuid(turn.into_uuid()),
-            },
-            Actor::Tool { request } => MetadataActor::Tool {
-                tool_request_id: wire_uuid(request.into_uuid()),
-            },
-        },
-    )
+        actor,
+    ))
 }
 
 const fn wire_imported_source_speaker(

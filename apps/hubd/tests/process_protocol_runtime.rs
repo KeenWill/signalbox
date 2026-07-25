@@ -167,6 +167,11 @@ impl Connection {
         Ok(())
     }
 
+    async fn raw_request(&mut self, frame: &str) -> Result<(), Box<dyn Error>> {
+        self.writer.write_all(frame.as_bytes()).await?;
+        Ok(())
+    }
+
     async fn response(&mut self) -> Result<ServerFrame, Box<dyn Error>> {
         let mut line = Vec::new();
         if self.reader.read_until(b'\n', &mut line).await? == 0 {
@@ -436,6 +441,37 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
     assert!(matches!(
         end.message(),
         ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-033: metadata wire-shape failures are malformed frames, not application
+/// request rejections.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let required_tags = (0..=256)
+        .map(|index| format!("tag-{index:03}"))
+        .collect::<Vec<_>>();
+    let frame = format!(
+        "{{\"version\":4,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
+        serde_json::to_string(&required_tags)?
+    );
+
+    connection.raw_request(&frame).await?;
+
+    let response = response_within(&mut connection).await?;
+    assert_eq!(response.version(), ProtocolVersion::Four);
+    assert!(matches!(
+        response.message(),
+        ServerMessage::Error {
+            code: ErrorCode::MalformedFrame,
+            ..
+        }
     ));
 
     drop(connection);
