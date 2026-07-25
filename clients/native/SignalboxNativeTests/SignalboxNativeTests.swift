@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import SignalboxNative
 
@@ -304,6 +305,27 @@ final class SignalboxNativeTests: XCTestCase {
             "Missing required field at events[1].event.created_from."
         )
     }
+
+    func testUnknownStreamFramesDoNotCreateSyntheticEventIDs() async throws {
+        let fixtureService = MockSignalboxService()
+        let sessions = try await fixtureService.listSessions(archived: false)
+        let session = try XCTUnwrap(sessions.first)
+        let service = UnknownFrameSignalboxService()
+        let viewModel = SessionDetailViewModel(session: session) { service }
+        let frameHandled = expectation(description: "unknown frame recorded")
+        let observation = viewModel.$unhandledFrameKinds
+            .filter { $0["turn_started"] == 1 }
+            .first()
+            .sink { _ in frameHandled.fulfill() }
+
+        viewModel.connectStream()
+        await fulfillment(of: [frameHandled], timeout: 1)
+
+        XCTAssertTrue(viewModel.events.isEmpty)
+        XCTAssertTrue(viewModel.timelineItems.isEmpty)
+        XCTAssertEqual(viewModel.unhandledFrameKinds, ["turn_started": 1])
+        withExtendedLifetime(observation) {}
+    }
 }
 
 private actor StubSignalboxWebSocketTransport: SignalboxWebSocketTransport {
@@ -330,6 +352,55 @@ private actor StubSignalboxWebSocketTransport: SignalboxWebSocketTransport {
 
 private enum StubSignalboxWebSocketTransportError: Error {
     case endOfStream
+}
+
+private final class UnknownFrameSignalboxService: SignalboxClientProtocol, @unchecked Sendable {
+    func testConnection() async throws {}
+    func listTemplates() async throws -> [SignalboxTemplate] { [] }
+    func listRunners() async throws -> [SignalboxRunner] { [] }
+    func listSessions(archived: Bool) async throws -> [SignalboxSessionMetadata] { [] }
+    func createSession(request: SignalboxCreateSessionRequest) async throws -> SignalboxSessionView {
+        throw SignalboxClientError.requestFailed("not implemented")
+    }
+    func patchSessionArchive(
+        sessionID: SignalboxSessionID,
+        isArchived: Bool
+    ) async throws -> SignalboxSessionMetadata {
+        throw SignalboxClientError.requestFailed("not implemented")
+    }
+    func listEvents(sessionID: SignalboxSessionID) async throws -> [SignalboxStoredEvent] { [] }
+    func appendUserMessage(
+        sessionID: SignalboxSessionID,
+        text: String
+    ) async throws -> SignalboxAppendUserMessageResponse {
+        throw SignalboxClientError.requestFailed("not implemented")
+    }
+    func confirmInvocation(
+        sessionID: SignalboxSessionID,
+        invocationID: SignalboxToolInvocationID
+    ) async throws {}
+    func denyInvocation(
+        sessionID: SignalboxSessionID,
+        invocationID: SignalboxToolInvocationID,
+        reason: String?
+    ) async throws {}
+    func listArtifacts(sessionID: SignalboxSessionID) async throws -> [SignalboxArtifact] { [] }
+    func listMonitorSessions() async throws -> [SignalboxMonitorSessionSummary] { [] }
+
+    func streamMessages(
+        sessionID: SignalboxSessionID
+    ) -> AsyncThrowingStream<SignalboxServerMessage, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(
+                .unknown(
+                    kind: "turn_started",
+                    payload: ["turn_id": .string("turn-1")],
+                    decodingDiagnostic: nil
+                )
+            )
+            continuation.finish()
+        }
+    }
 }
 
 private actor QuietSignalboxWebSocketTransport: SignalboxWebSocketTransport {

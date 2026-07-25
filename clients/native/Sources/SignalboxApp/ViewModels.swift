@@ -330,6 +330,8 @@ final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var status: SignalboxSessionStatus = SignalboxSessionStatus(state: .idle)
     @Published private(set) var events: [SignalboxStoredEvent] = []
     @Published private(set) var artifacts: [SignalboxArtifact] = []
+    @Published private(set) var unhandledFrameKinds: [String: Int] = [:]
+    @Published private(set) var latestStreamDiagnostic: String?
     @Published var composerText: String = ""
     @Published var errorMessage: String?
     @Published var isStreaming = false
@@ -488,20 +490,14 @@ final class SessionDetailViewModel: ObservableObject {
         case .heartbeat:
             break
         case .diagnostic(let diagnostic):
+            latestStreamDiagnostic = diagnostic.message
             errorMessage = diagnostic.message
-        case .unknown(let kind, let payload, let decodingDiagnostic):
-            events.append(
-                SignalboxStoredEvent(
-                    eventID: SignalboxEventID(rawValue: (events.last?.eventID.rawValue ?? 0) + 1),
-                    event: .unknown(
-                        SignalboxUnknownEvent(
-                            kind: kind,
-                            payload: payload,
-                            decodingDiagnostic: decodingDiagnostic
-                        )
-                    )
-                )
-            )
+        case .unknown(let kind, _, let decodingDiagnostic):
+            unhandledFrameKinds[kind, default: 0] += 1
+            if let decodingDiagnostic {
+                latestStreamDiagnostic = decodingDiagnostic.message
+                errorMessage = decodingDiagnostic.message
+            }
         }
     }
 
