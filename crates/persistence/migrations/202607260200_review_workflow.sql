@@ -43,6 +43,7 @@ CREATE TABLE review_target (
                 subject_kind = 'change_request'
                 AND change_request_number IS NOT NULL
                 AND change_request_number BETWEEN 1 AND 18446744073709551615
+                AND base_revision IS NOT NULL
             )
             OR (
                 subject_kind = 'commit'
@@ -265,6 +266,8 @@ CREATE FUNCTION guard_review_run_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    canonical_pass_state text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.state_kind IS DISTINCT FROM 'queued'
@@ -322,6 +325,23 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF NEW.state_pass_id IS NOT NULL THEN
+        SELECT state_kind
+          INTO canonical_pass_state
+          FROM review_pass
+         WHERE pass_id = NEW.state_pass_id
+           AND run_id = NEW.run_id
+           AND target_id = NEW.target_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'review run referenced pass is missing'
+                USING ERRCODE = '23514';
+        END IF;
+        IF canonical_pass_state IS DISTINCT FROM NEW.state_kind THEN
+            RAISE EXCEPTION 'review run state contradicts canonical pass'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
     RETURN NEW;
 END;
 $$;
@@ -335,6 +355,9 @@ CREATE FUNCTION guard_review_pass_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    canonical_turn_state text;
+    canonical_turn_disposition text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.state_kind IS DISTINCT FROM 'queued'
@@ -393,6 +416,49 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF NEW.turn_id IS NOT NULL THEN
+        SELECT state_kind, terminal_disposition_kind
+          INTO canonical_turn_state, canonical_turn_disposition
+          FROM turn_lifecycle
+         WHERE turn_id = NEW.turn_id
+           AND session_id = NEW.session_id
+           AND origin_accepted_input_id = NEW.accepted_input_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'review pass referenced turn is missing'
+                USING ERRCODE = '23514';
+        END IF;
+        IF NOT (
+            (
+                NEW.state_kind = 'running'
+                AND canonical_turn_state = 'active'
+                AND canonical_turn_disposition IS NULL
+            )
+            OR (
+                NEW.state_kind = 'succeeded'
+                AND canonical_turn_state = 'terminal'
+                AND canonical_turn_disposition = 'completed'
+            )
+            OR (
+                NEW.state_kind = 'failed'
+                AND canonical_turn_state = 'terminal'
+                AND canonical_turn_disposition IN ('failed', 'refused')
+            )
+            OR (
+                NEW.state_kind = 'blocked'
+                AND canonical_turn_state = 'terminal'
+                AND canonical_turn_disposition = 'reconciliation_required'
+            )
+            OR (
+                NEW.state_kind = 'cancelled'
+                AND canonical_turn_state = 'terminal'
+                AND canonical_turn_disposition = 'cancelled'
+            )
+        ) THEN
+            RAISE EXCEPTION 'review pass state contradicts canonical turn'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
     RETURN NEW;
 END;
 $$;
@@ -415,7 +481,7 @@ CREATE TABLE review_finding (
     file_path text NOT NULL,
     line_start bigint,
     line_end bigint,
-    diff_side text NOT NULL,
+    diff_side text,
     title text NOT NULL,
     body text NOT NULL,
     severity text NOT NULL,
@@ -453,7 +519,10 @@ CREATE TABLE review_finding (
             )
         ),
     CONSTRAINT review_finding_diff_side_closed
-        CHECK (diff_side IN ('left', 'right')),
+        CHECK (
+            diff_side IS NULL
+            OR diff_side IN ('left', 'right')
+        ),
     CONSTRAINT review_finding_severity_closed
         CHECK (
             severity IN (
@@ -475,6 +544,31 @@ CREATE TABLE review_finding (
 
 CREATE INDEX review_finding_run_index
     ON review_finding (run_id, target_id, finding_id);
+
+CREATE FUNCTION guard_review_finding_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.diff_side IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_target
+            WHERE target_id = NEW.target_id
+              AND base_revision IS NOT NULL
+       )
+    THEN
+        RAISE EXCEPTION 'diff-relative finding requires a target base'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER review_finding_insert_is_guarded
+BEFORE INSERT ON review_finding
+FOR EACH ROW
+EXECUTE FUNCTION guard_review_finding_insert();
 
 CREATE TRIGGER review_finding_is_append_only
 BEFORE UPDATE OR DELETE ON review_finding

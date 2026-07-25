@@ -15,9 +15,10 @@ use signalbox_domain::{
     ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
     ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
     ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput, ReviewPassRef,
-    ReviewPassState, ReviewPassTurnEvidence, ReviewPolicy, ReviewPolicyVersion, ReviewRun,
-    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
-    ReviewText, ReviewWorkflowKind, SessionId, TurnId,
+    ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
+    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunPassEvidence,
+    ReviewRunReconstitutionInput, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId,
+    ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -79,7 +80,7 @@ impl ReviewWorkflowStore {
         .bind(target.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
-        row.map(decode_target).transpose()
+        row.map(|row| decode_target(&row)).transpose()
     }
 
     /// Inserts one queued run with its complete frozen policy.
@@ -119,11 +120,22 @@ impl ReviewWorkflowStore {
         run: ReviewRunId,
     ) -> Result<Option<ReviewRun>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
-            "SELECT run_id, target_id, workflow_kind, policy_version,
-                    minimum_judge_confidence, minimum_publication_confidence,
-                    state_kind, state_pass_id
-               FROM review_run
-              WHERE run_id = $1",
+            "SELECT workflow_run.run_id, workflow_run.target_id,
+                    workflow_run.workflow_kind, workflow_run.policy_version,
+                    workflow_run.minimum_judge_confidence,
+                    workflow_run.minimum_publication_confidence,
+                    workflow_run.state_kind, workflow_run.state_pass_id,
+                    canonical_pass.pass_id AS evidence_pass_id,
+                    canonical_pass.run_id AS evidence_pass_run_id,
+                    canonical_pass.target_id AS evidence_pass_target_id,
+                    canonical_pass.state_kind AS evidence_pass_state_kind,
+                    canonical_pass.turn_id AS evidence_pass_turn_id,
+                    canonical_pass.output_frontier_id
+                        AS evidence_pass_output_frontier_id
+               FROM review_run AS workflow_run
+               LEFT JOIN review_pass AS canonical_pass
+                 ON canonical_pass.pass_id = workflow_run.state_pass_id
+              WHERE workflow_run.run_id = $1",
         )
         .bind(run.into_uuid())
         .fetch_optional(&self.pool)
@@ -140,14 +152,15 @@ impl ReviewWorkflowStore {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
             .bind(run.into_uuid())
+            .bind(encode_run_state(next).1.map(ReviewPassId::into_uuid))
             .fetch_optional(&mut *transaction)
             .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
             return Ok(None);
         };
-        let current = decode_run(row)?;
-        let transitioned = current.transition(next).map_err(|error| {
+        let (current, pass_evidence) = decode_run_for_transition(row)?;
+        let transitioned = current.transition(next, pass_evidence).map_err(|error| {
             ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Run(error))
         })?;
         let (state_kind, state_pass) = encode_run_state(transitioned.state());
@@ -212,6 +225,9 @@ impl ReviewWorkflowStore {
                     canonical_turn.session_id AS turn_session_id,
                     canonical_turn.origin_accepted_input_id
                         AS turn_accepted_input_id,
+                    canonical_turn.state_kind AS turn_state_kind,
+                    canonical_turn.terminal_disposition_kind
+                        AS turn_terminal_disposition_kind,
                     canonical_turn.terminal_frontier_id
                         AS turn_terminal_frontier_id
                FROM review_pass AS workflow_pass
@@ -237,14 +253,15 @@ impl ReviewWorkflowStore {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
             .bind(pass.into_uuid())
+            .bind(encode_pass_state(next).turn.map(TurnId::into_uuid))
             .fetch_optional(&mut *transaction)
             .await?;
         let Some(row) = row else {
             transaction.rollback().await?;
             return Ok(None);
         };
-        let current = decode_pass(row)?;
-        let transitioned = current.transition(next).map_err(|error| {
+        let (current, turn_evidence) = decode_pass_for_transition(row)?;
+        let transitioned = current.transition(next, turn_evidence).map_err(|error| {
             ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Pass(error))
         })?;
         let state = encode_pass_state(transitioned.state());
@@ -303,7 +320,7 @@ impl ReviewWorkflowStore {
         .bind(location.file_path().as_str())
         .bind(line_start)
         .bind(line_end)
-        .bind(encode_diff_side(location.diff_side()))
+        .bind(location.diff_side().map(encode_diff_side))
         .bind(content.title().as_str())
         .bind(content.body().as_str())
         .bind(encode_severity(content.severity()))
@@ -330,9 +347,8 @@ impl ReviewWorkflowStore {
                 error,
             ))
         })?;
-        let reference = next.proposal().reference();
         let mut transaction = self.pool.begin().await?;
-        insert_finding_event(&mut transaction, reference, &event).await?;
+        insert_finding_event(&mut transaction, &event).await?;
         transaction.commit().await?;
         Ok(Some(next))
     }
@@ -344,11 +360,20 @@ impl ReviewWorkflowStore {
     ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
-            "SELECT finding_id, run_id, target_id, producing_pass_id, file_path,
-                    line_start, line_end, diff_side, title, body, severity,
-                    confidence, category, recommended_fix
-               FROM review_finding
-              WHERE finding_id = $1",
+            "SELECT finding.finding_id, finding.run_id, finding.target_id,
+                    finding.producing_pass_id, finding.file_path,
+                    finding.line_start, finding.line_end, finding.diff_side,
+                    finding.title, finding.body, finding.severity,
+                    finding.confidence, finding.category,
+                    finding.recommended_fix,
+                    target.provider_key, target.repository_key,
+                    target.subject_kind, target.change_request_number,
+                    target.head_revision, target.base_revision,
+                    target.stack_parent_target_id
+               FROM review_finding AS finding
+               JOIN review_target AS target
+                 ON target.target_id = finding.target_id
+              WHERE finding.finding_id = $1",
         )
         .bind(finding.into_uuid())
         .fetch_optional(&mut *transaction)
@@ -585,9 +610,9 @@ async fn begin_repeatable_read(
 
 async fn insert_finding_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    finding: ReviewFindingRef,
     event: &ReviewFindingEvent,
 ) -> Result<(), ReviewWorkflowStoreError> {
+    let finding = event.finding();
     let encoded = encode_finding_event(event.kind());
     sqlx::query(
         "INSERT INTO review_finding_event
@@ -613,7 +638,7 @@ async fn insert_finding_event(
     Ok(())
 }
 
-fn decode_target(row: PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> {
+fn decode_target(row: &PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> {
     let id = target_id(row.try_get("target_id")?);
     let subject_kind: String = row.try_get("subject_kind")?;
     let change_request_number: Option<Decimal> = row.try_get("change_request_number")?;
@@ -646,6 +671,53 @@ fn decode_target(row: PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> {
 }
 
 fn decode_run(row: PgRow) -> Result<ReviewRun, ReviewWorkflowStoreError> {
+    let pass_evidence = decode_run_pass_evidence(&row)?;
+    reconstitute_run(&row, pass_evidence)
+}
+
+fn decode_run_for_transition(
+    row: PgRow,
+) -> Result<(ReviewRun, Option<ReviewRunPassEvidence>), ReviewWorkflowStoreError> {
+    let canonical_evidence = decode_run_pass_evidence(&row)?;
+    let (_, _, _, state) = decode_run_facts(&row)?;
+    let current_evidence = projected_current_run_pass_evidence(state, canonical_evidence)?;
+    Ok((
+        reconstitute_run(&row, current_evidence)?,
+        canonical_evidence,
+    ))
+}
+
+fn reconstitute_run(
+    row: &PgRow,
+    pass_evidence: Option<ReviewRunPassEvidence>,
+) -> Result<ReviewRun, ReviewWorkflowStoreError> {
+    let (reference, workflow, policy, state) = decode_run_facts(row)?;
+    ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
+        reference,
+        workflow,
+        policy,
+        state,
+        pass_evidence,
+    ))
+    .map_err(|error| {
+        corruption(
+            "review_run",
+            format!("domain reconstitution failed: {:?}", error.failure()),
+        )
+    })
+}
+
+fn decode_run_facts(
+    row: &PgRow,
+) -> Result<
+    (
+        ReviewRunRef,
+        ReviewWorkflowKind,
+        ReviewPolicy,
+        ReviewRunState,
+    ),
+    ReviewWorkflowStoreError,
+> {
     let reference = ReviewRunRef::new(
         target_id(row.try_get("target_id")?),
         run_id(row.try_get("run_id")?),
@@ -664,11 +736,93 @@ fn decode_run(row: PgRow) -> Result<ReviewRun, ReviewWorkflowStoreError> {
     let state_kind: String = row.try_get("state_kind")?;
     let state_pass: Option<Uuid> = row.try_get("state_pass_id")?;
     let state = decode_run_state(reference, &state_kind, state_pass)?;
-    ReviewRun::try_reconstitute(reference, decode_workflow_kind(&workflow)?, policy, state)
-        .map_err(|error| corruption("review_run", format!("{error:?}")))
+    Ok((reference, decode_workflow_kind(&workflow)?, policy, state))
+}
+
+fn decode_run_pass_evidence(
+    row: &PgRow,
+) -> Result<Option<ReviewRunPassEvidence>, ReviewWorkflowStoreError> {
+    let pass: Option<Uuid> = row.try_get("evidence_pass_id")?;
+    let run: Option<Uuid> = row.try_get("evidence_pass_run_id")?;
+    let target: Option<Uuid> = row.try_get("evidence_pass_target_id")?;
+    let state_kind: Option<String> = row.try_get("evidence_pass_state_kind")?;
+    let turn: Option<Uuid> = row.try_get("evidence_pass_turn_id")?;
+    let frontier: Option<Uuid> = row.try_get("evidence_pass_output_frontier_id")?;
+    match (pass, run, target, state_kind) {
+        (None, None, None, None) if turn.is_none() && frontier.is_none() => Ok(None),
+        (Some(pass), Some(run), Some(target), Some(state_kind)) => {
+            Ok(Some(ReviewRunPassEvidence::new(
+                ReviewPassRef::new(
+                    ReviewRunRef::new(target_id(target), run_id(run)),
+                    pass_id(pass),
+                ),
+                decode_pass_state(&state_kind, turn, frontier)?,
+            )))
+        }
+        _ => Err(corruption(
+            "review_run",
+            String::from("torn canonical pass evidence"),
+        )),
+    }
+}
+
+fn projected_current_run_pass_evidence(
+    state: ReviewRunState,
+    canonical: Option<ReviewRunPassEvidence>,
+) -> Result<Option<ReviewRunPassEvidence>, ReviewWorkflowStoreError> {
+    let Some(expected) = encode_run_state(state).1 else {
+        return Ok(None);
+    };
+    let Some(canonical) = canonical else {
+        return Err(corruption(
+            "review_run",
+            String::from("referenced pass row is missing"),
+        ));
+    };
+    if canonical.reference().pass() != expected {
+        return Err(corruption(
+            "review_run",
+            String::from("canonical pass identity mismatch"),
+        ));
+    }
+    let projected = match state {
+        ReviewRunState::Running { .. } => ReviewPassState::Running {
+            turn: pass_state_turn(canonical.state()).ok_or_else(|| {
+                corruption(
+                    "review_run",
+                    String::from("canonical pass has no turn for running projection"),
+                )
+            })?,
+        },
+        _ => canonical.state(),
+    };
+    Ok(Some(ReviewRunPassEvidence::new(
+        canonical.reference(),
+        projected,
+    )))
 }
 
 fn decode_pass(row: PgRow) -> Result<ReviewPass, ReviewWorkflowStoreError> {
+    let turn_evidence = decode_pass_turn_evidence(&row)?;
+    reconstitute_pass(&row, turn_evidence)
+}
+
+fn decode_pass_for_transition(
+    row: PgRow,
+) -> Result<(ReviewPass, Option<ReviewPassTurnEvidence>), ReviewWorkflowStoreError> {
+    let canonical_evidence = decode_pass_turn_evidence(&row)?;
+    let state = decode_pass_row_state(&row)?;
+    let current_evidence = projected_current_pass_turn_evidence(state, canonical_evidence)?;
+    Ok((
+        reconstitute_pass(&row, current_evidence)?,
+        canonical_evidence,
+    ))
+}
+
+fn reconstitute_pass(
+    row: &PgRow,
+    turn_evidence: Option<ReviewPassTurnEvidence>,
+) -> Result<ReviewPass, ReviewWorkflowStoreError> {
     let reference = ReviewPassRef::new(
         ReviewRunRef::new(
             target_id(row.try_get("target_id")?),
@@ -682,25 +836,6 @@ fn decode_pass(row: PgRow) -> Result<ReviewPass, ReviewWorkflowStoreError> {
     let accepted_input_session = row
         .try_get::<Option<Uuid>, _>("accepted_input_session_id")?
         .ok_or_else(|| corruption("review_pass", String::from("accepted input row is missing")))?;
-    let evidence_turn: Option<Uuid> = row.try_get("evidence_turn_id")?;
-    let evidence_session: Option<Uuid> = row.try_get("turn_session_id")?;
-    let evidence_input: Option<Uuid> = row.try_get("turn_accepted_input_id")?;
-    let evidence_frontier: Option<Uuid> = row.try_get("turn_terminal_frontier_id")?;
-    let turn_evidence = match (evidence_turn, evidence_session, evidence_input) {
-        (None, None, None) => None,
-        (Some(turn), Some(session), Some(accepted_input)) => Some(ReviewPassTurnEvidence::new(
-            turn_id(turn),
-            session_id(session),
-            accepted_input_id(accepted_input),
-            evidence_frontier.map(context_frontier_id),
-        )),
-        _ => {
-            return Err(corruption(
-                "review_pass",
-                String::from("torn canonical turn evidence"),
-            ));
-        }
-    };
     ReviewPass::try_reconstitute(ReviewPassReconstitutionInput::new(
         reference,
         decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
@@ -716,6 +851,93 @@ fn decode_pass(row: PgRow) -> Result<ReviewPass, ReviewWorkflowStoreError> {
             format!("domain reconstitution failed: {:?}", error.failure()),
         )
     })
+}
+
+fn decode_pass_row_state(row: &PgRow) -> Result<ReviewPassState, ReviewWorkflowStoreError> {
+    decode_pass_state(
+        &row.try_get::<String, _>("state_kind")?,
+        row.try_get("turn_id")?,
+        row.try_get("output_frontier_id")?,
+    )
+}
+
+fn decode_pass_turn_evidence(
+    row: &PgRow,
+) -> Result<Option<ReviewPassTurnEvidence>, ReviewWorkflowStoreError> {
+    let turn: Option<Uuid> = row.try_get("evidence_turn_id")?;
+    let session: Option<Uuid> = row.try_get("turn_session_id")?;
+    let accepted_input: Option<Uuid> = row.try_get("turn_accepted_input_id")?;
+    let state: Option<String> = row.try_get("turn_state_kind")?;
+    let disposition: Option<String> = row.try_get("turn_terminal_disposition_kind")?;
+    let frontier: Option<Uuid> = row.try_get("turn_terminal_frontier_id")?;
+    match (turn, session, accepted_input, state) {
+        (None, None, None, None) if disposition.is_none() && frontier.is_none() => Ok(None),
+        (Some(turn), Some(session), Some(accepted_input), Some(state)) => {
+            Ok(Some(ReviewPassTurnEvidence::new(
+                turn_id(turn),
+                session_id(session),
+                accepted_input_id(accepted_input),
+                decode_turn_outcome(&state, disposition.as_deref())?,
+                frontier.map(context_frontier_id),
+            )))
+        }
+        _ => Err(corruption(
+            "review_pass",
+            String::from("torn canonical turn evidence"),
+        )),
+    }
+}
+
+fn projected_current_pass_turn_evidence(
+    state: ReviewPassState,
+    canonical: Option<ReviewPassTurnEvidence>,
+) -> Result<Option<ReviewPassTurnEvidence>, ReviewWorkflowStoreError> {
+    let Some(expected_turn) = pass_state_turn(state) else {
+        return Ok(None);
+    };
+    let Some(canonical) = canonical else {
+        return Err(corruption(
+            "review_pass",
+            String::from("referenced turn row is missing"),
+        ));
+    };
+    if canonical.turn() != expected_turn {
+        return Err(corruption(
+            "review_pass",
+            String::from("canonical turn identity mismatch"),
+        ));
+    }
+    let (outcome, frontier) = match state {
+        ReviewPassState::Running { .. } => (ReviewPassTurnOutcome::Active, None),
+        _ => (canonical.outcome(), canonical.terminal_frontier()),
+    };
+    Ok(Some(ReviewPassTurnEvidence::new(
+        canonical.turn(),
+        canonical.session(),
+        canonical.accepted_input(),
+        outcome,
+        frontier,
+    )))
+}
+
+fn decode_turn_outcome(
+    state: &str,
+    disposition: Option<&str>,
+) -> Result<ReviewPassTurnOutcome, ReviewWorkflowStoreError> {
+    match (state, disposition) {
+        ("active", None) => Ok(ReviewPassTurnOutcome::Active),
+        ("terminal", Some("completed")) => Ok(ReviewPassTurnOutcome::Completed),
+        ("terminal", Some("refused")) => Ok(ReviewPassTurnOutcome::Refused),
+        ("terminal", Some("failed")) => Ok(ReviewPassTurnOutcome::Failed),
+        ("terminal", Some("cancelled")) => Ok(ReviewPassTurnOutcome::Cancelled),
+        ("terminal", Some("reconciliation_required")) => {
+            Ok(ReviewPassTurnOutcome::ReconciliationRequired)
+        }
+        _ => Err(corruption(
+            "review_pass",
+            format!("invalid canonical turn outcome {state}/{disposition:?}"),
+        )),
+    }
 }
 
 fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewWorkflowStoreError> {
@@ -747,7 +969,9 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
         ReviewFindingLocation::new(
             review_key(row.try_get("file_path")?, "review_finding")?,
             line_range,
-            decode_diff_side(&row.try_get::<String, _>("diff_side")?)?,
+            row.try_get::<Option<String>, _>("diff_side")?
+                .map(|side| decode_diff_side(&side))
+                .transpose()?,
         ),
         review_text(row.try_get("title")?, "review_finding")?,
         review_text(row.try_get("body")?, "review_finding")?,
@@ -758,7 +982,8 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
             .map(|value| review_text(value, "review_finding"))
             .transpose()?,
     );
-    ReviewFindingProposal::try_new(reference, producing_pass, content)
+    let target = decode_target(row)?;
+    ReviewFindingProposal::try_new(reference, producing_pass, &target, content)
         .map_err(|error| corruption("review_finding", format!("{error:?}")))
 }
 
@@ -815,6 +1040,7 @@ fn decode_finding_event(
         }
     };
     Ok(ReviewFindingEvent::new(
+        finding,
         ReviewEventOrdinal::try_new(positive_u32(
             row.try_get("event_ordinal")?,
             "review_finding_event",
@@ -1035,6 +1261,17 @@ struct EncodedPassState {
     kind: &'static str,
     turn: Option<TurnId>,
     frontier: Option<ContextFrontierId>,
+}
+
+fn pass_state_turn(state: ReviewPassState) -> Option<TurnId> {
+    match state {
+        ReviewPassState::Queued | ReviewPassState::Cancelled { turn: None } => None,
+        ReviewPassState::Running { turn }
+        | ReviewPassState::Succeeded { turn, .. }
+        | ReviewPassState::Failed { turn }
+        | ReviewPassState::Blocked { turn }
+        | ReviewPassState::Cancelled { turn: Some(turn) } => Some(turn),
+    }
 }
 
 fn encode_pass_state(state: ReviewPassState) -> EncodedPassState {

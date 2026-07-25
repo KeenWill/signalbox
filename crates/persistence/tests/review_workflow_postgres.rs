@@ -9,6 +9,9 @@ mod support;
 
 use std::error::Error;
 
+use signalbox_application::{
+    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
+};
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession,
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
@@ -18,20 +21,22 @@ use signalbox_domain::{
     ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
     ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingId,
     ReviewFindingLocation, ReviewFindingProposal, ReviewFindingRef, ReviewFindingSeverity,
-    ReviewKey, ReviewLineRange, ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassRef,
-    ReviewPassState, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
+    ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassId,
+    ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
+    ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunPassEvidence, ReviewRunRef, ReviewRunState,
     ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry,
-    TurnId, UserContent,
+    TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     review_workflow::{
         ReserveExternalLinkOutcome, ReviewWorkflowInsertionError, ReviewWorkflowStore,
-        ReviewWorkflowStoreError,
+        ReviewWorkflowStoreError, ReviewWorkflowTransitionError,
     },
+    start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -81,16 +86,43 @@ fn text(value: &str) -> ReviewText {
     ReviewText::try_new(String::from(value)).expect("fixture text is admitted")
 }
 
-async fn insert_queued_turn(
+#[derive(Debug)]
+struct FixedActivationIds {
+    origin_entry: Option<SemanticTranscriptEntryId>,
+    starting_frontier: Option<ContextFrontierId>,
+    initial_attempt: Option<TurnAttemptId>,
+}
+
+impl StartEligibleTurnIdGenerator for FixedActivationIds {
+    fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        self.origin_entry
+            .take()
+            .expect("one activation is expected")
+    }
+
+    fn next_starting_frontier_id(&mut self) -> ContextFrontierId {
+        self.starting_frontier
+            .take()
+            .expect("one activation is expected")
+    }
+
+    fn next_initial_attempt_id(&mut self) -> TurnAttemptId {
+        self.initial_attempt
+            .take()
+            .expect("one activation is expected")
+    }
+}
+
+async fn insert_active_turn(
     pool: &PgPool,
     session: SessionId,
     accepted_input: AcceptedInputId,
     turn: TurnId,
 ) {
-    insert_queued_turn_with_offset(pool, session, accepted_input, turn, 0).await;
+    insert_active_turn_with_offset(pool, session, accepted_input, turn, 0).await;
 }
 
-async fn insert_queued_turn_with_offset(
+async fn insert_active_turn_with_offset(
     pool: &PgPool,
     session: SessionId,
     accepted_input: AcceptedInputId,
@@ -153,18 +185,51 @@ async fn insert_queued_turn_with_offset(
         )
         .await
         .expect("fixture input and queued turn persist");
+
+    let mut activation = StartEligibleTurnService::new(
+        FixedActivationIds {
+            origin_entry: Some(SemanticTranscriptEntryId::from_uuid(uuid(0x130 + offset))),
+            starting_frontier: Some(ContextFrontierId::from_uuid(uuid(0x131 + offset))),
+            initial_attempt: Some(TurnAttemptId::from_uuid(uuid(0x132 + offset))),
+        },
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let outcome = activation
+        .execute(session)
+        .await
+        .expect("fixture turn activates");
+    assert!(matches!(outcome, StartEligibleTurnOutcome::Activated(_)));
 }
 
-fn finding(reference: ReviewFindingRef, producing_pass: ReviewPassRef) -> ReviewFinding {
+fn finding(
+    reference: ReviewFindingRef,
+    producing_pass: ReviewPassRef,
+    target: &ReviewTarget,
+) -> ReviewFinding {
+    finding_with_side(
+        reference,
+        producing_pass,
+        target,
+        Some(ReviewFindingDiffSide::Right),
+    )
+}
+
+fn finding_with_side(
+    reference: ReviewFindingRef,
+    producing_pass: ReviewPassRef,
+    target: &ReviewTarget,
+    diff_side: Option<ReviewFindingDiffSide>,
+) -> ReviewFinding {
     ReviewFinding::new(
         ReviewFindingProposal::try_new(
             reference,
             producing_pass,
+            target,
             ReviewFindingContent::new(
                 ReviewFindingLocation::new(
                     key("src/review.rs"),
                     Some(ReviewLineRange::try_new(11, 14).expect("ordered fixture range")),
-                    ReviewFindingDiffSide::Right,
+                    diff_side,
                 ),
                 text("Guard the exact evidence edge"),
                 text("The transition must retain the producing turn."),
@@ -182,6 +247,7 @@ fn finding(reference: ReviewFindingRef, producing_pass: ReviewPassRef) -> Review
 struct PersistedReviewPassFixture {
     store: ReviewWorkflowStore,
     target: ReviewTargetId,
+    target_snapshot: ReviewTarget,
     run: ReviewRunRef,
     pass: ReviewPassRef,
 }
@@ -191,22 +257,21 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
     let session = SessionId::from_uuid(uuid(0x201));
     let accepted_input = AcceptedInputId::from_uuid(uuid(0x202));
     let turn = TurnId::from_uuid(uuid(0x203));
-    insert_queued_turn(pool, session, accepted_input, turn).await;
+    insert_active_turn(pool, session, accepted_input, turn).await;
 
     let target = ReviewTargetId::from_uuid(uuid(0x301));
+    let target_snapshot = ReviewTarget::try_new(
+        target,
+        key("example-code-host"),
+        key("example/repository"),
+        ReviewTargetSubject::Commit,
+        key("0123456789abcdef"),
+        Some(key("fedcba9876543210")),
+        None,
+    )
+    .expect("fixture target topology is valid");
     store
-        .insert_target(
-            &ReviewTarget::try_new(
-                target,
-                key("example-code-host"),
-                key("example/repository"),
-                ReviewTargetSubject::Commit,
-                key("0123456789abcdef"),
-                None,
-                None,
-            )
-            .expect("fixture target topology is valid"),
-        )
+        .insert_target(&target_snapshot)
         .await
         .expect("target persists");
     let run = ReviewRunRef::new(target, ReviewRunId::from_uuid(uuid(0x302)));
@@ -236,6 +301,7 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
     PersistedReviewPassFixture {
         store,
         target,
+        target_snapshot,
         run,
         pass,
     }
@@ -262,7 +328,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     let session = SessionId::from_uuid(uuid(0x201));
     let accepted_input = AcceptedInputId::from_uuid(uuid(0x202));
     let turn = TurnId::from_uuid(uuid(0x203));
-    insert_queued_turn(&pool, session, accepted_input, turn).await;
+    insert_active_turn(&pool, session, accepted_input, turn).await;
 
     let target_id = ReviewTargetId::from_uuid(uuid(0x301));
     let target = ReviewTarget::try_new(
@@ -306,7 +372,16 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
 
     let running_pass = pass
         .clone()
-        .transition(ReviewPassState::Running { turn })
+        .transition(
+            ReviewPassState::Running { turn },
+            Some(ReviewPassTurnEvidence::new(
+                turn,
+                session,
+                accepted_input,
+                ReviewPassTurnOutcome::Active,
+                None,
+            )),
+        )
         .expect("queued pass activates");
     assert_eq!(
         store
@@ -317,9 +392,12 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     );
     let running_run = run
         .clone()
-        .transition(ReviewRunState::Running {
-            active_pass: pass_ref,
-        })
+        .transition(
+            ReviewRunState::Running {
+                active_pass: pass_ref,
+            },
+            Some(ReviewRunPassEvidence::new(pass_ref, running_pass.state())),
+        )
         .expect("queued run activates");
     assert_eq!(
         store
@@ -330,12 +408,13 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     );
 
     let finding_ref = ReviewFindingRef::new(run_ref, ReviewFindingId::from_uuid(uuid(0x304)));
-    let open_finding = finding(finding_ref, pass_ref);
+    let open_finding = finding(finding_ref, pass_ref, &target);
     store
         .insert_finding(&open_finding)
         .await
         .expect("open finding persists");
     let accepted_event = ReviewFindingEvent::new(
+        finding_ref,
         ReviewEventOrdinal::one(),
         pass_ref,
         ReviewFindingEventKind::Accepted,
@@ -397,6 +476,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         Some(attached.clone())
     );
     let posted_event = ReviewFindingEvent::new(
+        finding_ref,
         ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
         pass_ref,
         ReviewFindingEventKind::Posted {
@@ -452,7 +532,7 @@ async fn inv040_pass_loader_rejects_cross_wired_canonical_evidence() -> Result<(
     let other_session = SessionId::from_uuid(uuid(0x211));
     let other_input = AcceptedInputId::from_uuid(uuid(0x212));
     let other_turn = TurnId::from_uuid(uuid(0x213));
-    insert_queued_turn_with_offset(&pool, other_session, other_input, other_turn, 0x1_000).await;
+    insert_active_turn_with_offset(&pool, other_session, other_input, other_turn, 0x1_000).await;
 
     sqlx::query(
         "ALTER TABLE review_pass
@@ -533,6 +613,241 @@ async fn inv040_pass_loader_rejects_cross_wired_canonical_evidence() -> Result<(
     Ok(())
 }
 
+/// INV-040: a run projection may report only the canonical outcome of its
+/// referenced pass.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_run_projection_rejects_noncanonical_pass_outcome() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let turn = TurnId::from_uuid(uuid(0x203));
+    fixture
+        .store
+        .transition_pass(fixture.pass.pass(), ReviewPassState::Running { turn })
+        .await?
+        .expect("fixture pass exists");
+    fixture
+        .store
+        .transition_run(
+            fixture.run.run(),
+            ReviewRunState::Running {
+                active_pass: fixture.pass,
+            },
+        )
+        .await?
+        .expect("fixture run exists");
+
+    let guarded = sqlx::query(
+        "UPDATE review_run
+            SET state_kind = 'succeeded'
+          WHERE run_id = $1",
+    )
+    .bind(fixture.run.run().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("run success requires a canonically succeeded pass");
+    assert_sqlstate(&guarded, "23514");
+
+    sqlx::query(
+        "ALTER TABLE review_run
+         DISABLE TRIGGER review_run_change_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_run
+            SET state_kind = 'succeeded'
+          WHERE run_id = $1",
+    )
+    .bind(fixture.run.run().into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await
+        .expect_err("loader must reject a run/pass outcome contradiction");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed review-run corruption");
+    };
+    assert_eq!(error.aggregate(), "review_run");
+    assert!(error.detail().contains("PassStateMismatch"));
+
+    Ok(())
+}
+
+/// INV-040: a pass projection may report only the canonical outcome of its
+/// referenced turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_pass_projection_rejects_noncanonical_turn_outcome() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let turn = TurnId::from_uuid(uuid(0x203));
+    fixture
+        .store
+        .transition_pass(fixture.pass.pass(), ReviewPassState::Running { turn })
+        .await?
+        .expect("fixture pass exists");
+
+    let guarded = sqlx::query(
+        "UPDATE review_pass
+            SET state_kind = 'failed'
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("pass failure requires a canonically failed or refused turn");
+    assert_sqlstate(&guarded, "23514");
+
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_change_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET state_kind = 'failed'
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = fixture
+        .store
+        .load_pass(fixture.pass.pass())
+        .await
+        .expect_err("loader must reject a pass/turn outcome contradiction");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed review-pass corruption");
+    };
+    assert_eq!(error.aggregate(), "review_pass");
+    assert!(error.detail().contains("TurnOutcomeMismatch"));
+
+    Ok(())
+}
+
+/// INV-040: appending an event through another same-run finding fails before
+/// persistence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_event_rejects_foreign_owner() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let first = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x330)));
+    let second = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x331)));
+    fixture
+        .store
+        .insert_finding(&finding(first, fixture.pass, &fixture.target_snapshot))
+        .await?;
+    fixture
+        .store
+        .insert_finding(&finding(second, fixture.pass, &fixture.target_snapshot))
+        .await?;
+
+    let error = fixture
+        .store
+        .append_finding_event(
+            first.finding(),
+            ReviewFindingEvent::new(
+                second,
+                ReviewEventOrdinal::one(),
+                fixture.pass,
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await
+        .expect_err("event owner must equal the loaded finding");
+    let ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Finding(error)) =
+        error
+    else {
+        panic!("expected a typed finding transition rejection");
+    };
+    assert_eq!(
+        error.failure(),
+        ReviewFindingTransitionFailure::ForeignEventFinding
+    );
+
+    Ok(())
+}
+
+/// INV-040: file-relative findings admit no diff side, while a diff-relative
+/// location requires a canonical target base.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_finding_diff_side_requires_target_base() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(0x340)),
+        key("example-code-host"),
+        key("example/base-free-repository"),
+        ReviewTargetSubject::Commit,
+        key("0123456789abcdef"),
+        None,
+        None,
+    )
+    .expect("a commit target need not name a comparison revision");
+    fixture.store.insert_target(&target).await?;
+    let run = ReviewRunRef::new(target.id(), ReviewRunId::from_uuid(uuid(0x341)));
+    let pass = ReviewPassRef::new(run, ReviewPassId::from_uuid(uuid(0x342)));
+    fixture
+        .store
+        .insert_run(&ReviewRun::new(
+            run,
+            ReviewWorkflowKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+        ))
+        .await?;
+    fixture
+        .store
+        .insert_pass(
+            &ReviewPass::try_new(
+                pass,
+                ReviewPassKind::ReadOnlyReview,
+                SessionId::from_uuid(uuid(0x201)),
+                AcceptedInputId::from_uuid(uuid(0x202)),
+                SessionId::from_uuid(uuid(0x201)),
+            )
+            .expect("fixture input belongs to its session"),
+        )
+        .await?;
+    let file_relative = ReviewFindingRef::new(run, ReviewFindingId::from_uuid(uuid(0x343)));
+    let file_relative = finding_with_side(file_relative, pass, &target, None);
+    fixture.store.insert_finding(&file_relative).await?;
+    assert_eq!(
+        fixture
+            .store
+            .load_finding(file_relative.proposal().reference().finding())
+            .await?,
+        Some(file_relative)
+    );
+
+    let diff_relative = sqlx::query(
+        "INSERT INTO review_finding
+            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             line_start, line_end, diff_side, title, body, severity,
+             confidence, category, recommended_fix)
+         VALUES (
+             $1, $2, $3, $4, 'src/lib.rs',
+             1, 1, 'right', 'Finding', 'Body', 'high',
+             9000, 'correctness', NULL
+         )",
+    )
+    .bind(uuid(0x344))
+    .bind(run.run().into_uuid())
+    .bind(target.id().into_uuid())
+    .bind(pass.pass().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("diff-relative finding requires target comparison evidence");
+    assert_sqlstate(&diff_relative, "23514");
+
+    Ok(())
+}
+
 /// INV-040 / INV-041: new rows admit only queued run/pass state and a pending
 /// pre-effect external-link reservation.
 #[tokio::test(flavor = "multi_thread")]
@@ -547,7 +862,16 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
         .await
         .expect("pass loads")
         .expect("fixture pass exists")
-        .transition(ReviewPassState::Running { turn })
+        .transition(
+            ReviewPassState::Running { turn },
+            Some(ReviewPassTurnEvidence::new(
+                turn,
+                SessionId::from_uuid(uuid(0x201)),
+                AcceptedInputId::from_uuid(uuid(0x202)),
+                ReviewPassTurnOutcome::Active,
+                None,
+            )),
+        )
         .expect("queued pass activates");
     assert!(matches!(
         fixture.store.insert_pass(&running_pass).await,
@@ -562,9 +886,15 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
         .await
         .expect("run loads")
         .expect("fixture run exists")
-        .transition(ReviewRunState::Running {
-            active_pass: fixture.pass,
-        })
+        .transition(
+            ReviewRunState::Running {
+                active_pass: fixture.pass,
+            },
+            Some(ReviewRunPassEvidence::new(
+                fixture.pass,
+                running_pass.state(),
+            )),
+        )
         .expect("queued run activates");
     assert!(matches!(
         fixture.store.insert_run(&running_run).await,
@@ -574,8 +904,9 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
     ));
 
     let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x306)));
-    let accepted_finding = finding(finding_ref, fixture.pass)
+    let accepted_finding = finding(finding_ref, fixture.pass, &fixture.target_snapshot)
         .apply(ReviewFindingEvent::new(
+            finding_ref,
             ReviewEventOrdinal::one(),
             fixture.pass,
             ReviewFindingEventKind::Accepted,
@@ -665,13 +996,13 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
              stack_parent_target_id)
          VALUES (
              $1, 'example-code-host', 'example/repository',
-             'change_request', NULL, '0123456789abcdef', NULL, NULL
+             'change_request', 42, '0123456789abcdef', NULL, NULL
          )",
     )
     .bind(uuid(0x601))
     .execute(&pool)
     .await
-    .expect_err("change-request targets require their positive number");
+    .expect_err("change-request targets require their frozen comparison revision");
     assert_sqlstate(&missing_change_request, "23514");
 
     let noncanonical_policy = sqlx::query(
@@ -712,7 +1043,11 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
         ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x604)));
     fixture
         .store
-        .insert_finding(&finding(reason_finding, fixture.pass))
+        .insert_finding(&finding(
+            reason_finding,
+            fixture.pass,
+            &fixture.target_snapshot,
+        ))
         .await
         .expect("reason-shape fixture persists");
     let missing_reason = sqlx::query(
@@ -736,7 +1071,11 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
         ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x605)));
     fixture
         .store
-        .insert_finding(&finding(posted_finding, fixture.pass))
+        .insert_finding(&finding(
+            posted_finding,
+            fixture.pass,
+            &fixture.target_snapshot,
+        ))
         .await
         .expect("posted-shape fixture persists");
     fixture
@@ -744,6 +1083,7 @@ async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<
         .append_finding_event(
             posted_finding.finding(),
             ReviewFindingEvent::new(
+                posted_finding,
                 ReviewEventOrdinal::one(),
                 fixture.pass,
                 ReviewFindingEventKind::Accepted,
@@ -910,7 +1250,11 @@ async fn inv040_finding_event_serialization_is_fk_compatible() -> Result<(), Box
     let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x309)));
     fixture
         .store
-        .insert_finding(&finding(finding_ref, fixture.pass))
+        .insert_finding(&finding(
+            finding_ref,
+            fixture.pass,
+            &fixture.target_snapshot,
+        ))
         .await
         .expect("open finding persists");
 
@@ -960,7 +1304,11 @@ async fn inv040_gapped_finding_history_is_rejected() -> Result<(), Box<dyn Error
         ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x306)));
     fixture
         .store
-        .insert_finding(&finding(second_finding_ref, fixture.pass))
+        .insert_finding(&finding(
+            second_finding_ref,
+            fixture.pass,
+            &fixture.target_snapshot,
+        ))
         .await
         .expect("second open finding persists");
     let gap = sqlx::query(
@@ -999,7 +1347,7 @@ async fn inv040_cross_wired_pass_ancestry_is_rejected() -> Result<(), Box<dyn Er
                 key("example/other-repository"),
                 ReviewTargetSubject::Commit,
                 key("abcdef0123456789"),
-                None,
+                Some(key("9876543210fedcba")),
                 None,
             )
             .expect("other target topology is valid"),
