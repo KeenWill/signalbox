@@ -200,6 +200,7 @@ impl SessionMetadataListQuery {
         page_size: u64,
         after_session: Option<SessionId>,
     ) -> Result<Self, SessionMetadataListQueryError> {
+        let mut total_utf8_bytes = 0usize;
         let mut canonical_tags = BTreeSet::new();
         for tag in required_tags {
             if tag.is_empty() {
@@ -207,6 +208,13 @@ impl SessionMetadataListQuery {
             }
             if tag.contains('\0') {
                 return Err(SessionMetadataListQueryError::TagContainsNul);
+            }
+            if tag.len() > SessionMetadataContent::MAX_INDEXED_UTF8_BYTES {
+                return Err(SessionMetadataListQueryError::TagExceedsIndexedUtf8Bytes);
+            }
+            total_utf8_bytes = total_utf8_bytes.saturating_add(tag.len());
+            if total_utf8_bytes > SessionMetadataContent::MAX_TOTAL_UTF8_BYTES {
+                return Err(SessionMetadataListQueryError::TotalUtf8BytesExceeded);
             }
             if !canonical_tags.insert(tag) {
                 return Err(SessionMetadataListQueryError::DuplicateTag);
@@ -218,6 +226,10 @@ impl SessionMetadataListQuery {
             }
             if query.contains('\0') {
                 return Err(SessionMetadataListQueryError::TitleSearchContainsNul);
+            }
+            total_utf8_bytes = total_utf8_bytes.saturating_add(query.len());
+            if total_utf8_bytes > SessionMetadataContent::MAX_TOTAL_UTF8_BYTES {
+                return Err(SessionMetadataListQueryError::TotalUtf8BytesExceeded);
             }
         }
         if !(1..=100).contains(&page_size) {
@@ -266,12 +278,16 @@ pub enum SessionMetadataListQueryError {
     EmptyTag,
     /// One required tag contained U+0000.
     TagContainsNul,
+    /// One required tag exceeded the indexed-string UTF-8 byte bound.
+    TagExceedsIndexedUtf8Bytes,
     /// The same exact required tag was supplied more than once.
     DuplicateTag,
     /// A present title substring was empty.
     EmptyTitleSearch,
     /// A present title substring contained U+0000.
     TitleSearchContainsNul,
+    /// All filter strings together exceeded the query UTF-8 byte bound.
+    TotalUtf8BytesExceeded,
     /// Page size was outside 1 through 100.
     PageSizeOutOfRange,
 }
@@ -486,8 +502,10 @@ mod tests {
         }
     }
 
+    /// INV-012: reserved owner-global identifiers fail before transaction
+    /// construction and therefore claim no command meaning.
     #[test]
-    fn reserved_command_identities_fail_before_transaction_construction() {
+    fn inv012_reserved_command_identities_fail_before_transaction_construction() {
         let target = session_id(1);
 
         assert_eq!(
@@ -508,10 +526,8 @@ mod tests {
         );
     }
 
-    /// INV-020: the implemented application boundary attributes every
-    /// metadata replacement to the owner.
     #[test]
-    fn inv020_replacement_orchestration_fixes_owner_actor() {
+    fn replacement_orchestration_fixes_owner_actor() {
         let request =
             ReplaceSessionMetadataRequest::try_new(command_id(1), session_id(2), metadata(true))
                 .expect("ordinary command identity is admitted");
@@ -669,6 +685,48 @@ mod tests {
         assert_eq!(error, SessionMetadataListQueryError::DuplicateTag);
     }
 
+    #[test]
+    fn list_query_accepts_exact_total_utf8_byte_bound() {
+        let title = "x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES);
+
+        let query =
+            SessionMetadataListQuery::try_new(Vec::new(), Some(title.clone()), false, 50, None)
+                .expect("the aggregate filter bound is inclusive");
+
+        assert_eq!(query.title_contains(), Some(title.as_str()));
+    }
+
+    #[test]
+    fn list_query_rejects_total_utf8_bytes_over_bound() {
+        let error = SessionMetadataListQuery::try_new(
+            Vec::new(),
+            Some("x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES + 1)),
+            false,
+            50,
+            None,
+        )
+        .expect_err("one byte above the aggregate filter bound is rejected");
+
+        assert_eq!(error, SessionMetadataListQueryError::TotalUtf8BytesExceeded);
+    }
+
+    #[test]
+    fn list_query_rejects_required_tag_over_indexed_utf8_byte_bound() {
+        let error = SessionMetadataListQuery::try_new(
+            vec!["x".repeat(SessionMetadataContent::MAX_INDEXED_UTF8_BYTES + 1)],
+            None,
+            false,
+            50,
+            None,
+        )
+        .expect_err("an oversized indexed required tag is rejected");
+
+        assert_eq!(
+            error,
+            SessionMetadataListQueryError::TagExceedsIndexedUtf8Bytes
+        );
+    }
+
     #[derive(Debug)]
     struct FakePage;
 
@@ -773,8 +831,11 @@ mod tests {
         assert_eq!(item.session(), session);
         assert_eq!(item.defaults_version(), version);
         assert_eq!(item.defaults(), defaults());
-        assert_eq!(item.title(), Some("Planning"));
-        assert_eq!(item.tags().collect::<Vec<_>>(), ["daily"]);
+        assert_eq!(item.title(), snapshot.content().title());
+        assert_eq!(
+            item.tags().collect::<Vec<_>>(),
+            snapshot.content().tags().collect::<Vec<_>>()
+        );
         assert!(item.archived());
         assert_eq!(item.last_writer(), snapshot.last_writer());
     }

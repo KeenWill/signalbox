@@ -15,8 +15,9 @@ use crate::{Actor, DurableCommandId, SessionId};
 ///
 /// Strings retain exact Unicode scalar order. Construction rejects U+0000,
 /// which PostgreSQL text cannot represent, and rejects empty titles, tags, and
-/// attribute keys. Whitespace-only values remain valid and no normalization,
-/// trimming, or case folding occurs.
+/// attribute keys. The complete snapshot and each indexed string are bounded.
+/// Whitespace-only values remain valid and no normalization, trimming, or case
+/// folding occurs.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionMetadataContent {
     title: Option<String>,
@@ -26,6 +27,12 @@ pub struct SessionMetadataContent {
 }
 
 impl SessionMetadataContent {
+    /// Maximum total UTF-8 bytes in one complete metadata snapshot.
+    pub const MAX_TOTAL_UTF8_BYTES: usize = 262_144;
+
+    /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
+    pub const MAX_INDEXED_UTF8_BYTES: usize = 1_024;
+
     /// Constructs the canonical empty, non-archived metadata value.
     pub fn empty() -> Self {
         Self {
@@ -46,15 +53,22 @@ impl SessionMetadataContent {
         attributes: Vec<(String, String)>,
         archived: bool,
     ) -> Result<Self, SessionMetadataContentError> {
+        let mut total_utf8_bytes = 0;
         if let Some(value) = title.as_deref() {
             validate_nonempty(value, SessionMetadataContentError::EmptyTitle)?;
             validate_storable(value, SessionMetadataContentError::TitleContainsNul)?;
+            add_utf8_bytes(&mut total_utf8_bytes, value)?;
         }
 
         let mut canonical_tags = BTreeSet::new();
         for tag in tags {
             validate_nonempty(&tag, SessionMetadataContentError::EmptyTag)?;
             validate_storable(&tag, SessionMetadataContentError::TagContainsNul)?;
+            validate_indexed(
+                &tag,
+                SessionMetadataContentError::TagExceedsIndexedUtf8Bytes,
+            )?;
+            add_utf8_bytes(&mut total_utf8_bytes, &tag)?;
             if !canonical_tags.insert(tag) {
                 return Err(SessionMetadataContentError::DuplicateTag);
             }
@@ -64,10 +78,16 @@ impl SessionMetadataContent {
         for (key, value) in attributes {
             validate_nonempty(&key, SessionMetadataContentError::EmptyAttributeKey)?;
             validate_storable(&key, SessionMetadataContentError::AttributeKeyContainsNul)?;
+            validate_indexed(
+                &key,
+                SessionMetadataContentError::AttributeKeyExceedsIndexedUtf8Bytes,
+            )?;
+            add_utf8_bytes(&mut total_utf8_bytes, &key)?;
             validate_storable(
                 &value,
                 SessionMetadataContentError::AttributeValueContainsNul,
             )?;
+            add_utf8_bytes(&mut total_utf8_bytes, &value)?;
             if canonical_attributes.insert(key, value).is_some() {
                 return Err(SessionMetadataContentError::DuplicateAttributeKey);
             }
@@ -126,6 +146,26 @@ fn validate_storable(
     }
 }
 
+fn validate_indexed(
+    value: &str,
+    failure: SessionMetadataContentError,
+) -> Result<(), SessionMetadataContentError> {
+    if value.len() > SessionMetadataContent::MAX_INDEXED_UTF8_BYTES {
+        Err(failure)
+    } else {
+        Ok(())
+    }
+}
+
+fn add_utf8_bytes(total: &mut usize, value: &str) -> Result<(), SessionMetadataContentError> {
+    *total = total.saturating_add(value.len());
+    if *total > SessionMetadataContent::MAX_TOTAL_UTF8_BYTES {
+        Err(SessionMetadataContentError::TotalUtf8BytesExceeded)
+    } else {
+        Ok(())
+    }
+}
+
 /// Why a complete metadata value could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionMetadataContentError {
@@ -137,16 +177,22 @@ pub enum SessionMetadataContentError {
     EmptyTag,
     /// One tag contained U+0000.
     TagContainsNul,
+    /// One tag exceeded the indexed-string UTF-8 byte bound.
+    TagExceedsIndexedUtf8Bytes,
     /// The caller supplied the same exact tag more than once.
     DuplicateTag,
     /// One attribute key was empty.
     EmptyAttributeKey,
     /// One attribute key contained U+0000.
     AttributeKeyContainsNul,
+    /// One attribute key exceeded the indexed-string UTF-8 byte bound.
+    AttributeKeyExceedsIndexedUtf8Bytes,
     /// One attribute value contained U+0000.
     AttributeValueContainsNul,
     /// The caller supplied the same exact attribute key more than once.
     DuplicateAttributeKey,
+    /// All metadata strings together exceeded the snapshot UTF-8 byte bound.
+    TotalUtf8BytesExceeded,
 }
 
 /// PostgreSQL transaction time at microsecond precision.
@@ -584,6 +630,11 @@ impl ReconstitutedReplaceSessionMetadata {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
+
     use uuid::Uuid;
 
     use super::{
@@ -613,6 +664,12 @@ mod tests {
             archived,
         )
         .expect("fixture metadata is valid")
+    }
+
+    fn command_hash(command: &ReplaceSessionMetadata) -> u64 {
+        let mut state = DefaultHasher::new();
+        command.hash(&mut state);
+        state.finish()
     }
 
     #[test]
@@ -794,6 +851,65 @@ mod tests {
     }
 
     #[test]
+    fn metadata_accepts_exact_total_utf8_byte_bound() {
+        let title = "x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES);
+
+        let content =
+            SessionMetadataContent::try_new(Some(title.clone()), Vec::new(), Vec::new(), false)
+                .expect("the aggregate byte bound is inclusive");
+
+        assert_eq!(content.title(), Some(title.as_str()));
+    }
+
+    #[test]
+    fn metadata_rejects_total_utf8_bytes_over_bound() {
+        let error = SessionMetadataContent::try_new(
+            Some("x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES + 1)),
+            Vec::new(),
+            Vec::new(),
+            false,
+        )
+        .expect_err("one byte above the aggregate bound is rejected");
+
+        assert_eq!(error, SessionMetadataContentError::TotalUtf8BytesExceeded);
+    }
+
+    #[test]
+    fn metadata_rejects_tag_over_indexed_utf8_byte_bound() {
+        let error = SessionMetadataContent::try_new(
+            None,
+            vec!["x".repeat(SessionMetadataContent::MAX_INDEXED_UTF8_BYTES + 1)],
+            Vec::new(),
+            false,
+        )
+        .expect_err("an oversized indexed tag is rejected");
+
+        assert_eq!(
+            error,
+            SessionMetadataContentError::TagExceedsIndexedUtf8Bytes
+        );
+    }
+
+    #[test]
+    fn metadata_rejects_attribute_key_over_indexed_utf8_byte_bound() {
+        let error = SessionMetadataContent::try_new(
+            None,
+            Vec::new(),
+            vec![(
+                "x".repeat(SessionMetadataContent::MAX_INDEXED_UTF8_BYTES + 1),
+                String::new(),
+            )],
+            false,
+        )
+        .expect_err("an oversized indexed attribute key is rejected");
+
+        assert_eq!(
+            error,
+            SessionMetadataContentError::AttributeKeyExceedsIndexedUtf8Bytes
+        );
+    }
+
+    #[test]
     fn initial_snapshot_has_no_last_writer() {
         let session = session_id(1);
         let snapshot = SessionMetadataSnapshot::initial(session);
@@ -803,8 +919,9 @@ mod tests {
         assert_eq!(snapshot.last_writer(), None);
     }
 
+    /// INV-013: archive is metadata on the same durable session identity.
     #[test]
-    fn recorded_snapshot_retains_exact_last_writer() {
+    fn inv013_recorded_snapshot_preserves_identity_and_archive_state() {
         let session = session_id(1);
         let content = metadata(true);
         let writer = SessionMetadataLastWriter::new(
@@ -816,6 +933,7 @@ mod tests {
 
         assert_eq!(snapshot.session(), session);
         assert_eq!(snapshot.content(), &content);
+        assert!(snapshot.content().archived());
         assert_eq!(snapshot.last_writer(), Some(writer));
     }
 
@@ -835,10 +953,73 @@ mod tests {
             Actor::Owner,
             metadata(false),
         );
+        let another_session = ReplaceSessionMetadata::new(
+            command_id(1),
+            session_id(4),
+            Actor::Owner,
+            metadata(false),
+        );
+        let another_actor = ReplaceSessionMetadata::new(
+            command_id(1),
+            session_id(2),
+            Actor::Recovery,
+            metadata(false),
+        );
+        let another_title = ReplaceSessionMetadata::new(
+            command_id(1),
+            session_id(2),
+            Actor::Owner,
+            SessionMetadataContent::try_new(
+                Some(String::from("Other")),
+                vec![String::from("daily"), String::from("work")],
+                vec![
+                    (String::from("run"), String::from("17")),
+                    (String::from("trigger"), String::new()),
+                ],
+                false,
+            )
+            .expect("comparison fixture is valid"),
+        );
+        let another_tags = ReplaceSessionMetadata::new(
+            command_id(1),
+            session_id(2),
+            Actor::Owner,
+            SessionMetadataContent::try_new(
+                Some(String::from("Planning")),
+                vec![String::from("daily"), String::from("other")],
+                vec![
+                    (String::from("run"), String::from("17")),
+                    (String::from("trigger"), String::new()),
+                ],
+                false,
+            )
+            .expect("comparison fixture is valid"),
+        );
+        let another_attributes = ReplaceSessionMetadata::new(
+            command_id(1),
+            session_id(2),
+            Actor::Owner,
+            SessionMetadataContent::try_new(
+                Some(String::from("Planning")),
+                vec![String::from("daily"), String::from("work")],
+                vec![
+                    (String::from("run"), String::from("18")),
+                    (String::from("trigger"), String::new()),
+                ],
+                false,
+            )
+            .expect("comparison fixture is valid"),
+        );
         let another_archive_state =
             ReplaceSessionMetadata::new(command_id(1), session_id(2), Actor::Owner, metadata(true));
 
         assert_eq!(first, another_identity);
+        assert_eq!(command_hash(&first), command_hash(&another_identity));
+        assert_ne!(first, another_session);
+        assert_ne!(first, another_actor);
+        assert_ne!(first, another_title);
+        assert_ne!(first, another_tags);
+        assert_ne!(first, another_attributes);
         assert_ne!(first, another_archive_state);
     }
 
@@ -937,9 +1118,34 @@ mod tests {
         assert_eq!(error.into_parts().0.command(), &command);
     }
 
+    /// INV-012: an applied result cannot name another session.
+    #[test]
+    fn inv012_applied_reconstitution_rejects_cross_wired_session() {
+        let command = ReplaceSessionMetadata::new(
+            command_id(1),
+            session_id(2),
+            Actor::Owner,
+            metadata(false),
+        );
+        let error = ReplaceSessionMetadataReconstitutionInput::applied(
+            command.clone(),
+            session_id(3),
+            SessionMetadataUpdatedAt::from_unix_micros(17),
+            command.actor(),
+        )
+        .reconstitute()
+        .expect_err("a different applied-result session fails closed");
+
+        assert_eq!(
+            error.failure(),
+            ReplaceSessionMetadataReconstitutionFailure::ResultSessionMismatch
+        );
+        assert_eq!(error.input().command(), &command);
+    }
+
     /// INV-012: a terminal result cannot name another session.
     #[test]
-    fn inv012_reconstitution_rejects_cross_wired_session() {
+    fn inv012_rejected_reconstitution_rejects_cross_wired_session() {
         let command = ReplaceSessionMetadata::new(
             command_id(1),
             session_id(2),

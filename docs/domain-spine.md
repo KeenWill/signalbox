@@ -3545,6 +3545,8 @@ impl ReconstitutedReplaceSessionDefaults {
 ```rust
 pub struct SessionMetadataContent { /* private */ }
 impl SessionMetadataContent {
+    pub const MAX_TOTAL_UTF8_BYTES: usize;
+    pub const MAX_INDEXED_UTF8_BYTES: usize;
     pub fn empty() -> Self;
     pub fn try_new(
         title: Option<String>,
@@ -3563,11 +3565,14 @@ pub enum SessionMetadataContentError {
     TitleContainsNul,
     EmptyTag,
     TagContainsNul,
+    TagExceedsIndexedUtf8Bytes,
     DuplicateTag,
     EmptyAttributeKey,
     AttributeKeyContainsNul,
+    AttributeKeyExceedsIndexedUtf8Bytes,
     AttributeValueContainsNul,
     DuplicateAttributeKey,
+    TotalUtf8BytesExceeded,
 }
 
 pub struct SessionMetadataUpdatedAt(/* private */);
@@ -4639,9 +4644,11 @@ impl SessionMetadataListQuery {
 pub enum SessionMetadataListQueryError {
     EmptyTag,
     TagContainsNul,
+    TagExceedsIndexedUtf8Bytes,
     DuplicateTag,
     EmptyTitleSearch,
     TitleSearchContainsNul,
+    TotalUtf8BytesExceeded,
     PageSizeOutOfRange,
 }
 
