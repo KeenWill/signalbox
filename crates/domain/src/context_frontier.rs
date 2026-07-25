@@ -22,7 +22,13 @@
     )
 )]
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    fmt,
+    sync::{Arc, OnceLock},
+};
+
+use rpds::{RedBlackTreeMapSync, RedBlackTreeSetSync, VectorSync};
 
 use crate::SessionId;
 
@@ -148,10 +154,9 @@ impl SemanticTranscriptEntryRef {
 ///     };
 /// }
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedContextFrontierSnapshot {
     frontier: ContextFrontier,
-    ordered_entries: Box<[SemanticTranscriptEntryRef]>,
+    content: FrontierContent,
 }
 
 /// Complete checked values supplied for one stored context snapshot.
@@ -159,11 +164,42 @@ pub struct ResolvedContextFrontierSnapshot {
 /// This input cannot independently construct a resolved snapshot. The
 /// scheduling reconstitution seam validates complete membership together with
 /// every semantic entry and lifecycle correlation that authorizes a start.
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedContextFrontierReconstitutionInput {
     owning_session: SessionId,
     snapshot: ContextFrontierId,
-    ordered_entries: Vec<SemanticTranscriptEntryRef>,
+    content: ReconstitutionContent,
+    materialized_entries: OnceLock<Box<[SemanticTranscriptEntryRef]>>,
+}
+
+#[derive(Clone)]
+struct FrontierContent {
+    ordered_entries: VectorSync<SemanticTranscriptEntryRef>,
+    membership: RedBlackTreeSetSync<SemanticTranscriptEntryRef>,
+    lineage: RedBlackTreeMapSync<ContextFrontierId, Arc<ContentToken>>,
+    token: Arc<ContentToken>,
+    validation_nodes: VectorSync<Arc<FrontierContentNode>>,
+    immediate_prefix: Option<ContextFrontier>,
+    appended_entry_count: usize,
+}
+
+struct FrontierContentNode {
+    ordered_entries: VectorSync<SemanticTranscriptEntryRef>,
+    appended_start: usize,
+    token: Arc<ContentToken>,
+}
+
+#[derive(Clone)]
+struct ReconstitutionContent {
+    frontier: FrontierContent,
+    first_duplicate: Option<SemanticTranscriptEntryRef>,
+}
+
+#[derive(Debug)]
+struct ContentToken;
+
+#[derive(Default)]
+pub(crate) struct ContextFrontierEntryValidationCache {
+    validated_nodes: BTreeSet<*const ContentToken>,
 }
 
 impl ResolvedContextFrontierReconstitutionInput {
@@ -173,10 +209,37 @@ impl ResolvedContextFrontierReconstitutionInput {
         snapshot: ContextFrontierId,
         ordered_entries: Vec<SemanticTranscriptEntryRef>,
     ) -> Self {
+        let content = ReconstitutionContent::from_complete(snapshot, ordered_entries);
         Self {
             owning_session,
             snapshot,
-            ordered_entries,
+            content,
+            materialized_entries: OnceLock::new(),
+        }
+    }
+
+    /// Supplies a complete stored successor by sharing this input's exact
+    /// prefix and appending the stored suffix.
+    ///
+    /// The values remain inert: only a complete aggregate reconstitution seam
+    /// can validate their storage and lifecycle correlations. This operation
+    /// preserves the first repeated exact reference, if any, for that later
+    /// validation.
+    pub fn derive_appending(
+        &self,
+        snapshot: ContextFrontierId,
+        appended_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self {
+        Self {
+            owning_session: self.owning_session,
+            snapshot,
+            content: self.content.derive_appending(
+                self.owning_session,
+                self.snapshot,
+                snapshot,
+                appended_entries,
+            ),
+            materialized_entries: OnceLock::new(),
         }
     }
 
@@ -190,9 +253,23 @@ impl ResolvedContextFrontierReconstitutionInput {
         self.snapshot
     }
 
+    /// Returns the complete stored member count without materializing a slice.
+    pub fn entry_count(&self) -> usize {
+        self.content.frontier.ordered_entries.len()
+    }
+
     /// Returns the complete stored ordered membership.
     pub fn ordered_entries(&self) -> &[SemanticTranscriptEntryRef] {
-        &self.ordered_entries
+        self.materialized_entries
+            .get_or_init(|| {
+                self.content
+                    .frontier
+                    .ordered_entries
+                    .iter()
+                    .copied()
+                    .collect()
+            })
+            .as_ref()
     }
 
     /// Validates this complete stored membership for an aggregate that owns
@@ -203,27 +280,36 @@ impl ResolvedContextFrontierReconstitutionInput {
     /// returned value proves only snapshot shape; the consuming aggregate
     /// remains responsible for ownership and boundary correlation.
     pub fn reconstitute(self) -> Option<ResolvedContextFrontierSnapshot> {
-        let (owning_session, snapshot, ordered_entries) = self.into_parts();
-        ResolvedContextFrontierSnapshot::try_from_candidate(
-            owning_session,
-            snapshot,
-            ordered_entries,
-        )
-        .ok()
+        ResolvedContextFrontierSnapshot::try_from_reconstitution_input(self).ok()
     }
 
-    #[allow(
-        dead_code,
-        reason = "checked scheduling reconstitution consumes this inert input"
-    )]
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        SessionId,
-        ContextFrontierId,
-        Vec<SemanticTranscriptEntryRef>,
-    ) {
-        (self.owning_session, self.snapshot, self.ordered_entries)
+    pub(crate) fn first_missing_entry(
+        &self,
+        validation: &mut ContextFrontierEntryValidationCache,
+        mut contains: impl FnMut(&SemanticTranscriptEntryRef) -> bool,
+    ) -> Option<SemanticTranscriptEntryRef> {
+        let mut unvalidated_nodes = Vec::new();
+        for node in self.content.frontier.validation_nodes.iter().rev() {
+            let token = Arc::as_ptr(&node.token);
+            if validation.validated_nodes.contains(&token) {
+                break;
+            }
+            unvalidated_nodes.push(node.as_ref());
+        }
+
+        for node in unvalidated_nodes.into_iter().rev() {
+            for entry in FrontierEntryRange::new(
+                &node.ordered_entries,
+                node.appended_start,
+                node.ordered_entries.len(),
+            ) {
+                if !contains(&entry) {
+                    return Some(entry);
+                }
+            }
+            validation.validated_nodes.insert(Arc::as_ptr(&node.token));
+        }
+        None
     }
 }
 
@@ -246,7 +332,31 @@ impl ResolvedContextFrontierSnapshot {
 
         Ok(Self {
             frontier: ContextFrontier::new(owning_session, snapshot),
-            ordered_entries: ordered_entries.into_boxed_slice(),
+            content: FrontierContent::from_distinct(snapshot, ordered_entries),
+        })
+    }
+
+    pub(crate) fn try_from_reconstitution_input(
+        input: ResolvedContextFrontierReconstitutionInput,
+    ) -> Result<Self, ContextFrontierSnapshotConstructionError> {
+        if let Some(duplicate) = input.content.first_duplicate {
+            return Err(ContextFrontierSnapshotConstructionError::new(
+                input.owning_session,
+                input.snapshot,
+                input
+                    .content
+                    .frontier
+                    .ordered_entries
+                    .iter()
+                    .copied()
+                    .collect(),
+                ContextFrontierSnapshotConstructionRejection::DuplicateEntry { entry: duplicate },
+            ));
+        }
+
+        Ok(Self {
+            frontier: ContextFrontier::new(input.owning_session, input.snapshot),
+            content: input.content.frontier,
         })
     }
 
@@ -270,15 +380,15 @@ impl ResolvedContextFrontierSnapshot {
             ));
         }
 
-        let mut seen = self
-            .ordered_entries
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let duplicate = appended_entries
-            .iter()
-            .copied()
-            .find(|entry| !seen.insert(*entry));
+        let mut membership = self.content.membership.clone();
+        let duplicate = appended_entries.iter().copied().find(|entry| {
+            if membership.contains(entry) {
+                true
+            } else {
+                membership.insert_mut(*entry);
+                false
+            }
+        });
         if let Some(entry) = duplicate {
             return Err(ContextFrontierSnapshotDerivationError::new(
                 next_snapshot,
@@ -287,14 +397,31 @@ impl ResolvedContextFrontierSnapshot {
             ));
         }
 
-        let mut ordered_entries =
-            Vec::with_capacity(self.ordered_entries.len() + appended_entries.len());
-        ordered_entries.extend_from_slice(&self.ordered_entries);
-        ordered_entries.extend_from_slice(&appended_entries);
+        let appended_entry_count = appended_entries.len();
+        let mut ordered_entries = self.content.ordered_entries.clone();
+        ordered_entries.extend(appended_entries);
+        let token = Arc::new(ContentToken);
+        let mut lineage = self.content.lineage.clone();
+        lineage.insert_mut(next_snapshot, token.clone());
+        let node = Arc::new(FrontierContentNode {
+            ordered_entries: ordered_entries.clone(),
+            appended_start: ordered_entries.len() - appended_entry_count,
+            token: token.clone(),
+        });
+        let mut validation_nodes = self.content.validation_nodes.clone();
+        validation_nodes.push_back_mut(node);
 
         Ok(Self {
             frontier: ContextFrontier::new(self.frontier.owning_session, next_snapshot),
-            ordered_entries: ordered_entries.into_boxed_slice(),
+            content: FrontierContent {
+                ordered_entries,
+                membership,
+                lineage,
+                token,
+                validation_nodes,
+                immediate_prefix: Some(self.frontier),
+                appended_entry_count,
+            },
         })
     }
 
@@ -305,20 +432,30 @@ impl ResolvedContextFrontierSnapshot {
 
     /// Returns the number of exact source-qualified semantic entries.
     pub fn entry_count(&self) -> usize {
-        self.ordered_entries.len()
+        self.content.ordered_entries.len()
     }
 
     /// Iterates over the complete semantic entries in their exact order.
     pub fn ordered_entries(
         &self,
     ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + DoubleEndedIterator + '_ {
-        self.ordered_entries.iter().copied()
+        self.content.ordered_entries.iter().copied()
     }
 
     /// Explicitly compares complete ordered semantic contents while ignoring
     /// frontier identity.
     pub fn same_semantic_content(&self, other: &Self) -> bool {
-        self.ordered_entries == other.ordered_entries
+        (self.entry_count() == other.entry_count()
+            && (self.content.is_shared_prefix_of(
+                self.frontier.snapshot,
+                &self.content.token,
+                &other.content,
+            ) || other.content.is_shared_prefix_of(
+                other.frontier.snapshot,
+                &other.content.token,
+                &self.content,
+            )))
+            || self.content.ordered_entries == other.content.ordered_entries
     }
 
     /// Returns whether this complete ordered content is a prefix of `later`.
@@ -326,9 +463,287 @@ impl ResolvedContextFrontierSnapshot {
     /// This is a content relationship only. It does not prove that `later`
     /// was selected or committed by an accepted lifecycle transition.
     pub fn is_semantic_prefix_of(&self, later: &Self) -> bool {
-        later.ordered_entries.starts_with(&self.ordered_entries)
+        if self.content.is_shared_prefix_of(
+            self.frontier.snapshot,
+            &self.content.token,
+            &later.content,
+        ) {
+            return true;
+        }
+        if self.entry_count() > later.entry_count() {
+            return false;
+        }
+        self.ordered_entries()
+            .eq(later.ordered_entries().take(self.entry_count()))
+    }
+
+    /// Returns the structurally shared immediate semantic prefix, when this
+    /// snapshot was derived by exact append.
+    ///
+    /// This is a representation hint only. It does not prove that either
+    /// snapshot exists durably or that a lifecycle transition selected it.
+    pub fn immediate_semantic_prefix(&self) -> Option<ContextFrontier> {
+        self.content.immediate_prefix
+    }
+
+    /// Iterates over the exact suffix appended to the immediate shared prefix.
+    ///
+    /// A snapshot constructed without a shared prefix reports its complete
+    /// membership as the suffix.
+    pub fn appended_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + DoubleEndedIterator + '_ {
+        let start = self
+            .entry_count()
+            .saturating_sub(self.content.appended_entry_count);
+        FrontierEntryRange::new(&self.content.ordered_entries, start, self.entry_count())
+    }
+
+    pub(crate) fn has_semantic_prefix_and_suffix(
+        &self,
+        prefix: &Self,
+        suffix: impl ExactSizeIterator<Item = SemanticTranscriptEntryRef>,
+    ) -> bool {
+        if !prefix.is_semantic_prefix_of(self)
+            || self.entry_count() != prefix.entry_count() + suffix.len()
+        {
+            return false;
+        }
+        suffix.enumerate().all(|(offset, expected)| {
+            self.content
+                .ordered_entries
+                .get(prefix.entry_count() + offset)
+                .is_some_and(|actual| *actual == expected)
+        })
+    }
+
+    pub(crate) fn ordered_entries_range(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + DoubleEndedIterator + '_ {
+        FrontierEntryRange::new(&self.content.ordered_entries, start, end)
     }
 }
+
+impl FrontierContent {
+    fn from_distinct(
+        snapshot: ContextFrontierId,
+        ordered_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self {
+        let membership = ordered_entries.iter().copied().collect();
+        let appended_entry_count = ordered_entries.len();
+        let ordered_entries: VectorSync<SemanticTranscriptEntryRef> =
+            ordered_entries.into_iter().collect();
+        let token = Arc::new(ContentToken);
+        let mut lineage = RedBlackTreeMapSync::new_sync();
+        lineage.insert_mut(snapshot, token.clone());
+        let node = Arc::new(FrontierContentNode {
+            ordered_entries: ordered_entries.clone(),
+            appended_start: 0,
+            token: token.clone(),
+        });
+        Self {
+            ordered_entries,
+            membership,
+            lineage,
+            token,
+            validation_nodes: VectorSync::new_sync().push_back(node),
+            immediate_prefix: None,
+            appended_entry_count,
+        }
+    }
+
+    fn is_shared_prefix_of(
+        &self,
+        snapshot: ContextFrontierId,
+        token: &Arc<ContentToken>,
+        later: &Self,
+    ) -> bool {
+        self.ordered_entries.len() <= later.ordered_entries.len()
+            && later
+                .lineage
+                .get(&snapshot)
+                .is_some_and(|later_token| Arc::ptr_eq(token, later_token))
+    }
+}
+
+impl ReconstitutionContent {
+    fn from_complete(
+        snapshot: ContextFrontierId,
+        ordered_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self {
+        let mut membership = RedBlackTreeSetSync::new_sync();
+        let mut first_duplicate = None;
+        for entry in &ordered_entries {
+            if first_duplicate.is_none() && membership.contains(entry) {
+                first_duplicate = Some(*entry);
+            } else {
+                membership.insert_mut(*entry);
+            }
+        }
+        let mut frontier = FrontierContent::from_distinct(snapshot, ordered_entries);
+        frontier.membership = membership;
+        Self {
+            frontier,
+            first_duplicate,
+        }
+    }
+
+    fn derive_appending(
+        &self,
+        owning_session: SessionId,
+        source_snapshot: ContextFrontierId,
+        snapshot: ContextFrontierId,
+        appended_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self {
+        let appended_entry_count = appended_entries.len();
+        let mut membership = self.frontier.membership.clone();
+        let mut first_duplicate = self.first_duplicate;
+        for entry in &appended_entries {
+            if first_duplicate.is_none() && membership.contains(entry) {
+                first_duplicate = Some(*entry);
+            } else {
+                membership.insert_mut(*entry);
+            }
+        }
+        let mut ordered_entries = self.frontier.ordered_entries.clone();
+        ordered_entries.extend(appended_entries);
+        let token = Arc::new(ContentToken);
+        let mut lineage = self.frontier.lineage.clone();
+        lineage.insert_mut(snapshot, token.clone());
+        let node = Arc::new(FrontierContentNode {
+            ordered_entries: ordered_entries.clone(),
+            appended_start: ordered_entries.len() - appended_entry_count,
+            token: token.clone(),
+        });
+        let mut validation_nodes = self.frontier.validation_nodes.clone();
+        validation_nodes.push_back_mut(node);
+        Self {
+            frontier: FrontierContent {
+                ordered_entries,
+                membership,
+                lineage,
+                token,
+                validation_nodes,
+                immediate_prefix: Some(ContextFrontier::new(owning_session, source_snapshot)),
+                appended_entry_count,
+            },
+            first_duplicate,
+        }
+    }
+}
+
+struct FrontierEntryRange<'a> {
+    entries: &'a VectorSync<SemanticTranscriptEntryRef>,
+    front: usize,
+    back: usize,
+}
+
+impl<'a> FrontierEntryRange<'a> {
+    fn new(entries: &'a VectorSync<SemanticTranscriptEntryRef>, front: usize, back: usize) -> Self {
+        Self {
+            entries,
+            front,
+            back,
+        }
+    }
+}
+
+impl Iterator for FrontierEntryRange<'_> {
+    type Item = SemanticTranscriptEntryRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            return None;
+        }
+        let entry = self.entries.get(self.front).copied();
+        if entry.is_some() {
+            self.front += 1;
+        }
+        entry
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back - self.front;
+        (remaining, Some(remaining))
+    }
+}
+
+impl DoubleEndedIterator for FrontierEntryRange<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.entries.get(self.back).copied()
+    }
+}
+
+impl ExactSizeIterator for FrontierEntryRange<'_> {}
+
+impl Clone for ResolvedContextFrontierReconstitutionInput {
+    fn clone(&self) -> Self {
+        Self {
+            owning_session: self.owning_session,
+            snapshot: self.snapshot,
+            content: self.content.clone(),
+            materialized_entries: OnceLock::new(),
+        }
+    }
+}
+
+impl fmt::Debug for ResolvedContextFrontierReconstitutionInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedContextFrontierReconstitutionInput")
+            .field("owning_session", &self.owning_session)
+            .field("snapshot", &self.snapshot)
+            .field("ordered_entries", &self.ordered_entries())
+            .finish()
+    }
+}
+
+impl PartialEq for ResolvedContextFrontierReconstitutionInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.owning_session == other.owning_session
+            && self.snapshot == other.snapshot
+            && self.content.frontier.ordered_entries == other.content.frontier.ordered_entries
+    }
+}
+
+impl Eq for ResolvedContextFrontierReconstitutionInput {}
+
+impl Clone for ResolvedContextFrontierSnapshot {
+    fn clone(&self) -> Self {
+        Self {
+            frontier: self.frontier,
+            content: self.content.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for ResolvedContextFrontierSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedContextFrontierSnapshot")
+            .field("frontier", &self.frontier)
+            .field(
+                "ordered_entries",
+                &self.ordered_entries().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl PartialEq for ResolvedContextFrontierSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.frontier == other.frontier
+            && self.content.ordered_entries == other.content.ordered_entries
+    }
+}
+
+impl Eq for ResolvedContextFrontierSnapshot {}
 
 fn first_duplicate(entries: &[SemanticTranscriptEntryRef]) -> Option<SemanticTranscriptEntryRef> {
     let mut seen = BTreeSet::new();
@@ -467,6 +882,10 @@ mod tests {
         entry_from(session_id(1), entry)
     }
 
+    fn distinct_entries(count: u128) -> Vec<SemanticTranscriptEntryRef> {
+        (1..=count).map(entry).collect()
+    }
+
     fn entry_from(source_session: SessionId, entry: u128) -> SemanticTranscriptEntryRef {
         SemanticTranscriptEntryRef::from_source(source_session, semantic_transcript_entry_id(entry))
     }
@@ -596,6 +1015,114 @@ mod tests {
             )
             .reconstitute()
             .is_none()
+        );
+    }
+
+    /// INV-015: complete reconstitution preserves the exact order of a
+    /// frontier large enough to exercise structurally shared tree nodes.
+    #[test]
+    fn inv015_long_frontier_reconstitution_preserves_complete_order() {
+        let ordered_entries = distinct_entries(512);
+        let input = ResolvedContextFrontierReconstitutionInput::new(
+            session_id(1),
+            context_frontier_id(1),
+            ordered_entries.clone(),
+        );
+
+        let resolved = input
+            .reconstitute()
+            .expect("the long frontier contains distinct exact references");
+
+        assert_eq!(resolved.entry_count(), ordered_entries.len());
+        assert_eq!(
+            resolved.ordered_entries().collect::<Vec<_>>(),
+            ordered_entries
+        );
+    }
+
+    /// S09 / INV-015: long-frontier derivation shares the exact source prefix,
+    /// appends only the stated suffix, and leaves the source unchanged.
+    #[test]
+    fn s09_inv015_long_frontier_derivation_preserves_source_prefix() {
+        let source_entries = distinct_entries(512);
+        let appended_entries = vec![entry(513), entry(514)];
+        let source = snapshot(session_id(1), 1, source_entries.clone());
+
+        let derived = source
+            .derive_appending_candidate(context_frontier_id(2), appended_entries.clone())
+            .expect("the long frontier suffix is distinct");
+
+        assert_eq!(source.ordered_entries().collect::<Vec<_>>(), source_entries);
+        assert!(source.is_semantic_prefix_of(&derived));
+        assert_eq!(
+            derived.appended_entries().collect::<Vec<_>>(),
+            appended_entries
+        );
+        assert_eq!(derived.entry_count(), 514);
+    }
+
+    /// S09 / INV-015: hundreds of one-entry derivations retain one exact
+    /// ordered frontier without rebuilding or mutating any semantic prefix.
+    #[test]
+    fn s09_inv015_long_frontier_chain_preserves_every_append() {
+        let root = snapshot(session_id(1), 1, vec![entry(1)]);
+        let terminal = (2..=512).fold(root, |source, index| {
+            source
+                .derive_appending_candidate(context_frontier_id(index), vec![entry(index)])
+                .expect("each fresh exact entry extends the retained prefix")
+        });
+
+        assert_eq!(terminal.entry_count(), 512);
+        assert_eq!(
+            terminal.ordered_entries().collect::<Vec<_>>(),
+            distinct_entries(512)
+        );
+    }
+
+    /// INV-015: scheduling validation traverses a shared 512-entry chain once
+    /// even when the complete descendant is presented before its root.
+    #[test]
+    fn inv015_long_shared_reconstitution_validates_each_entry_once() {
+        let root = ResolvedContextFrontierReconstitutionInput::new(
+            session_id(1),
+            context_frontier_id(1),
+            vec![entry(1)],
+        );
+        let terminal = (2..=512).fold(root.clone(), |source, index| {
+            source.derive_appending(context_frontier_id(index), vec![entry(index)])
+        });
+        let mut validation = ContextFrontierEntryValidationCache::default();
+        let mut visits = 0usize;
+
+        assert_eq!(
+            terminal.first_missing_entry(&mut validation, |_| {
+                visits += 1;
+                true
+            }),
+            None
+        );
+        assert_eq!(
+            root.first_missing_entry(&mut validation, |_| {
+                visits += 1;
+                true
+            }),
+            None
+        );
+        assert_eq!(visits, 512);
+    }
+
+    /// INV-015: a duplicate late in a long retained prefix is still rejected
+    /// with the complete source and append inputs unchanged.
+    #[test]
+    fn inv015_long_frontier_derivation_rejects_retained_duplicate_unchanged() {
+        let source = snapshot(session_id(1), 1, distinct_entries(512));
+        let appended_entries = vec![entry(513), entry(512)];
+
+        assert_derivation_rejects_unchanged(
+            &source,
+            context_frontier_id(2),
+            appended_entries,
+            ContextFrontierSnapshotDerivationRejection::DuplicateEntry { entry: entry(512) },
         );
     }
 

@@ -1212,15 +1212,13 @@ pub(crate) async fn load_terminal_result_attempts(
     };
     let rows = sqlx::query(
         "SELECT attempt.*
-           FROM context_frontier_member AS member
+           FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
            JOIN tool_attempt AS attempt
              ON attempt.attempt_id = entry.tool_result_attempt_id
-          WHERE member.owning_session_id = $1
-            AND member.context_frontier_id = $2
-            AND member.member_position > $3
+          WHERE member.member_position > $3
             AND member.member_position <= $3 + $4
             AND entry.payload_kind = 'tool_execution_result'
           ORDER BY member.member_position",
@@ -1264,15 +1262,13 @@ pub(crate) async fn load_terminal_result_denials(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
                 approval.owner_command_id
-           FROM context_frontier_member AS member
+           FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
            JOIN tool_approval_decision AS approval
              ON approval.request_id = entry.tool_result_request_id
-          WHERE member.owning_session_id = $1
-            AND member.context_frontier_id = $2
-            AND member.member_position > $3
+          WHERE member.member_position > $3
             AND member.member_position <= $3 + $4
             AND entry.payload_kind = 'tool_denied'
           ORDER BY member.member_position",
@@ -1304,9 +1300,7 @@ async fn load_snapshot(
     .ok_or(ToolLoopCorruption::Missing("tool round frontier"))?;
     let rows = sqlx::query_as::<_, (Decimal, Uuid, Uuid)>(
         "SELECT member_position, source_session_id, semantic_entry_id
-           FROM context_frontier_member
-          WHERE owning_session_id = $1
-            AND context_frontier_id = $2
+           FROM resolve_context_frontier_members($1, $2)
           ORDER BY member_position",
     )
     .bind(session_id_to_uuid(session))

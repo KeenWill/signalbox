@@ -1889,9 +1889,7 @@ async fn load_transcript_entry_count(
     )?;
     let actual_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
-           FROM context_frontier_member
-          WHERE owning_session_id = $1
-            AND context_frontier_id = $2",
+           FROM resolve_context_frontier_members($1, $2)",
     )
     .bind(session_id_to_uuid(session))
     .bind(frontier.into_uuid())
@@ -1951,7 +1949,7 @@ async fn load_transcript_entry(
             result_attempt.error_detail AS result_error_detail,
             transcript_approval.decision_kind AS transcript_decision_kind,
             transcript_approval.denial_reason AS transcript_denial_reason
-           FROM context_frontier_member AS member
+           FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
@@ -1978,9 +1976,7 @@ async fn load_transcript_entry(
                     entry.imported_conversation_id
             AND imported.imported_transcript_entry_id =
                     entry.imported_transcript_entry_id
-          WHERE member.owning_session_id = $1
-            AND member.context_frontier_id = $2
-            AND member.member_position = $3",
+          WHERE member.member_position = $3",
     )
     .bind(session_id_to_uuid(session))
     .bind(frontier.into_uuid())
