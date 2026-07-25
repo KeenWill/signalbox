@@ -5,6 +5,8 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::error::Error;
 
 use signalbox_domain::{
@@ -37,6 +39,8 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
+
+use support::blocked_backends_reached;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_review_workflow_integration";
@@ -329,7 +333,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .append_finding_event(finding_ref.finding(), accepted_event)
             .await
             .expect("finding event persists"),
-        Some(accepted_finding)
+        Some(accepted_finding.clone())
     );
 
     let link_id = ReviewExternalLinkId::from_uuid(uuid(0x305));
@@ -375,6 +379,23 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .await
             .expect("attachment persists"),
         Some(attached.clone())
+    );
+    let posted_event = ReviewFindingEvent::new(
+        ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+        pass_ref,
+        ReviewFindingEventKind::Posted {
+            link: signalbox_domain::ReviewFindingExternalLinkRef::new(finding_ref, link_id),
+        },
+    );
+    let posted_finding = accepted_finding
+        .apply(posted_event.clone())
+        .expect("accepted finding may record an attached publication");
+    assert_eq!(
+        store
+            .append_finding_event(finding_ref.finding(), posted_event)
+            .await
+            .expect("posted event persists after attachment"),
+        Some(posted_finding)
     );
     let observation = ReviewExternalLinkObservation::new(
         ReviewEventOrdinal::one(),
@@ -442,6 +463,21 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
         ))
     ));
 
+    let finding_ref = ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x306)));
+    let accepted_finding = finding(finding_ref, fixture.pass)
+        .apply(ReviewFindingEvent::new(
+            ReviewEventOrdinal::one(),
+            fixture.pass,
+            ReviewFindingEventKind::Accepted,
+        ))
+        .expect("open finding accepts judgment");
+    assert!(matches!(
+        fixture.store.insert_finding(&accepted_finding).await,
+        Err(ReviewWorkflowStoreError::InvalidInsertion(
+            ReviewWorkflowInsertionError::FindingNotOpen { .. }
+        ))
+    ));
+
     let attached_reservation = ReviewExternalLink::reserve(
         ReviewExternalLinkId::from_uuid(uuid(0x307)),
         ReviewExternalLinkAssociation::Target(fixture.target),
@@ -462,6 +498,257 @@ async fn inv040_inv041_new_records_require_initial_shapes() -> Result<(), Box<dy
             ReviewWorkflowInsertionError::ExternalLinkNotPending
         ))
     ));
+
+    Ok(())
+}
+
+/// INV-040 / INV-041: nullable SQL shapes, exact version-one policy, and
+/// evidence-preserving transition guards reject representations the domain
+/// cannot construct.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_inv041_schema_closes_review_workflow_shapes() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+
+    let missing_change_request = sqlx::query(
+        "INSERT INTO review_target
+            (target_id, provider_key, repository_key, subject_kind,
+             change_request_number, head_revision, base_revision,
+             stack_parent_target_id)
+         VALUES (
+             $1, 'example-code-host', 'example/repository',
+             'change_request', NULL, '0123456789abcdef', NULL, NULL
+         )",
+    )
+    .bind(uuid(0x601))
+    .execute(&pool)
+    .await
+    .expect_err("change-request targets require their positive number");
+    assert_sqlstate(&missing_change_request, "23514");
+
+    let noncanonical_policy = sqlx::query(
+        "INSERT INTO review_run
+            (run_id, target_id, workflow_kind, policy_version,
+             minimum_judge_confidence, minimum_publication_confidence,
+             state_kind, state_pass_id)
+         VALUES ($1, $2, 'read_only_review', 1, 7001, 8000, 'queued', NULL)",
+    )
+    .bind(uuid(0x602))
+    .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("version one requires the exact 7000/8000 threshold tuple");
+    assert_sqlstate(&noncanonical_policy, "23514");
+
+    let half_populated_range = sqlx::query(
+        "INSERT INTO review_finding
+            (finding_id, run_id, target_id, producing_pass_id, file_path,
+             line_start, line_end, diff_side, title, body, severity,
+             confidence, category, recommended_fix)
+         VALUES (
+             $1, $2, $3, $4, 'src/lib.rs',
+             1, NULL, 'right', 'Finding', 'Body', 'high',
+             9000, 'correctness', NULL
+         )",
+    )
+    .bind(uuid(0x603))
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("finding line ranges are absent or fully populated");
+    assert_sqlstate(&half_populated_range, "23514");
+
+    let reason_finding =
+        ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x604)));
+    fixture
+        .store
+        .insert_finding(&finding(reason_finding, fixture.pass))
+        .await
+        .expect("reason-shape fixture persists");
+    let missing_reason = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, external_link_id,
+             external_link_association_kind)
+         VALUES ($1, 1, $2, $3, $4, $2, 'rejected', NULL, NULL, NULL, NULL)",
+    )
+    .bind(reason_finding.finding().into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("rejected events require a reason");
+    assert_sqlstate(&missing_reason, "23514");
+
+    let posted_finding =
+        ReviewFindingRef::new(fixture.run, ReviewFindingId::from_uuid(uuid(0x605)));
+    fixture
+        .store
+        .insert_finding(&finding(posted_finding, fixture.pass))
+        .await
+        .expect("posted-shape fixture persists");
+    fixture
+        .store
+        .append_finding_event(
+            posted_finding.finding(),
+            ReviewFindingEvent::new(
+                ReviewEventOrdinal::one(),
+                fixture.pass,
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await
+        .expect("accepted event persists");
+    let pending_link = ReviewExternalLinkId::from_uuid(uuid(0x606));
+    fixture
+        .store
+        .reserve_external_link(ReviewExternalLink::reserve(
+            pending_link,
+            ReviewExternalLinkAssociation::Finding(posted_finding),
+            key("example-code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        ))
+        .await
+        .expect("pending reservation persists");
+    let posted_without_attachment = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, external_link_id,
+             external_link_association_kind)
+         VALUES ($1, 2, $2, $3, $4, $2, 'posted', NULL, NULL, $5, 'finding')",
+    )
+    .bind(posted_finding.finding().into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(fixture.pass.pass().into_uuid())
+    .bind(pending_link.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("posted status requires attached external-effect evidence");
+    assert_sqlstate(&posted_without_attachment, "23503");
+
+    let turn = TurnId::from_uuid(uuid(0x203));
+    fixture
+        .store
+        .transition_pass(fixture.pass.pass(), ReviewPassState::Running { turn })
+        .await
+        .expect("pass activation persists");
+    fixture
+        .store
+        .transition_run(
+            fixture.run.run(),
+            ReviewRunState::Running {
+                active_pass: fixture.pass,
+            },
+        )
+        .await
+        .expect("run activation persists");
+
+    let erased_run_pass = sqlx::query(
+        "UPDATE review_run
+            SET state_kind = 'cancelled', state_pass_id = NULL
+          WHERE run_id = $1",
+    )
+    .bind(fixture.run.run().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("running cancellation retains the active pass");
+    assert_sqlstate(&erased_run_pass, "23514");
+
+    let erased_pass_turn = sqlx::query(
+        "UPDATE review_pass
+            SET state_kind = 'cancelled', turn_id = NULL
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("running cancellation retains the active turn");
+    assert_sqlstate(&erased_pass_turn, "23514");
+
+    Ok(())
+}
+
+/// INV-041: a multi-row external-link load observes one database snapshot
+/// while a concurrent attachment and observation commit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_external_link_load_is_one_repeatable_snapshot() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x607));
+    let reservation = ReviewExternalLink::reserve(
+        link,
+        ReviewExternalLinkAssociation::Target(fixture.target),
+        key("example-code-host"),
+        ReviewExternalObjectKind::ReviewComment,
+    );
+    fixture
+        .store
+        .reserve_external_link(reservation.clone())
+        .await
+        .expect("pending reservation persists");
+
+    let mut writer = pool.begin().await?;
+    sqlx::query(
+        "LOCK TABLE review_external_link_observation
+         IN ACCESS EXCLUSIVE MODE",
+    )
+    .execute(&mut *writer)
+    .await?;
+
+    let loading_store = fixture.store.clone();
+    let loading = tokio::spawn(async move { loading_store.load_external_link(link).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "external-link load reaches the held observation relation"
+    );
+
+    sqlx::query(
+        "INSERT INTO review_external_link_attachment
+            (external_link_id, target_id, pass_run_id, pass_id,
+             provider_key, object_kind, external_object_key)
+         VALUES ($1, $2, $3, $4, 'example-code-host', 'review_comment', 'comment-87')",
+    )
+    .bind(link.into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&mut *writer)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_external_link_observation
+            (external_link_id, observation_ordinal, target_id,
+             pass_run_id, pass_id, object_state)
+         VALUES ($1, 1, $2, $3, $4, 'current')",
+    )
+    .bind(link.into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&mut *writer)
+    .await?;
+    writer.commit().await?;
+
+    let during_commit = loading.await??.expect("reservation remains visible");
+    assert_eq!(
+        during_commit, reservation,
+        "one repeatable snapshot cannot tear attachment from observation"
+    );
+
+    let after_commit = fixture
+        .store
+        .load_external_link(link)
+        .await?
+        .expect("committed external link loads");
+    assert!(after_commit.attachment().is_some());
+    assert_eq!(after_commit.observations().len(), 1);
 
     Ok(())
 }

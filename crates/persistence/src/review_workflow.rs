@@ -13,12 +13,12 @@ use signalbox_domain::{
     ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
     ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind,
     ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
-    ReviewFindingRef, ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassId,
-    ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPolicy, ReviewPolicyVersion, ReviewRun,
-    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
-    ReviewText, ReviewWorkflowKind, SessionId, TurnId,
+    ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
+    ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPolicy,
+    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget,
+    ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId, TurnId,
 };
-use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 /// PostgreSQL adapter for the review-workflow bounded context.
 #[derive(Clone, Debug)]
@@ -249,11 +249,18 @@ impl ReviewWorkflowStore {
         Ok(Some(transitioned))
     }
 
-    /// Inserts immutable finding content and its complete event history.
+    /// Inserts immutable finding content in its initial open state.
     pub async fn insert_finding(
         &self,
         finding: &ReviewFinding,
     ) -> Result<(), ReviewWorkflowStoreError> {
+        if finding.status() != ReviewFindingStatus::Open {
+            return Err(ReviewWorkflowStoreError::InvalidInsertion(
+                ReviewWorkflowInsertionError::FindingNotOpen {
+                    status: finding.status(),
+                },
+            ));
+        }
         let proposal = finding.proposal();
         let reference = proposal.reference();
         let pass = proposal.producing_pass();
@@ -289,9 +296,6 @@ impl ReviewWorkflowStore {
         .bind(content.recommended_fix().map(ReviewText::as_str))
         .execute(&mut *transaction)
         .await?;
-        for event in finding.events() {
-            insert_finding_event(&mut transaction, reference, event).await?;
-        }
         transaction.commit().await?;
         Ok(())
     }
@@ -322,6 +326,7 @@ impl ReviewWorkflowStore {
         &self,
         finding: ReviewFindingId,
     ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
             "SELECT finding_id, run_id, target_id, producing_pass_id, file_path,
                     line_start, line_end, diff_side, title, body, severity,
@@ -330,9 +335,10 @@ impl ReviewWorkflowStore {
               WHERE finding_id = $1",
         )
         .bind(finding.into_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
         let Some(row) = row else {
+            transaction.commit().await?;
             return Ok(None);
         };
         let proposal = decode_finding_proposal(&row)?;
@@ -345,20 +351,20 @@ impl ReviewWorkflowStore {
               ORDER BY event_ordinal",
         )
         .bind(finding.into_uuid())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
         let events = event_rows
             .into_iter()
             .map(|row| decode_finding_event(&row, proposal.reference()))
             .collect::<Result<Vec<_>, _>>()?;
-        ReviewFinding::try_reconstitute(proposal, events)
-            .map(Some)
-            .map_err(|error| {
-                corruption(
-                    "review_finding",
-                    format!("domain reconstitution failed: {:?}", error.failure()),
-                )
-            })
+        let finding = ReviewFinding::try_reconstitute(proposal, events).map_err(|error| {
+            corruption(
+                "review_finding",
+                format!("domain reconstitution failed: {:?}", error.failure()),
+            )
+        })?;
+        transaction.commit().await?;
+        Ok(Some(finding))
     }
 
     /// Idempotently inserts one canonical pre-effect external-link reservation.
@@ -480,6 +486,7 @@ impl ReviewWorkflowStore {
         &self,
         link: ReviewExternalLinkId,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
             "SELECT external_link_id, target_id, association_kind, run_id,
                     finding_id, provider_key, object_kind
@@ -487,9 +494,10 @@ impl ReviewWorkflowStore {
               WHERE external_link_id = $1",
         )
         .bind(link.into_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
         let Some(row) = row else {
+            transaction.commit().await?;
             return Ok(None);
         };
         let (id, association, provider, kind) = decode_external_link_root(&row)?;
@@ -499,7 +507,7 @@ impl ReviewWorkflowStore {
               WHERE external_link_id = $1",
         )
         .bind(link.into_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?
         .map(|row| decode_external_link_attachment(&row))
         .transpose()?;
@@ -511,12 +519,12 @@ impl ReviewWorkflowStore {
               ORDER BY observation_ordinal",
         )
         .bind(link.into_uuid())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?
         .into_iter()
         .map(|row| decode_external_link_observation(&row))
         .collect::<Result<Vec<_>, _>>()?;
-        ReviewExternalLink::try_reconstitute(
+        let link = ReviewExternalLink::try_reconstitute(
             id,
             association,
             provider,
@@ -524,9 +532,20 @@ impl ReviewWorkflowStore {
             attachment,
             observations,
         )
-        .map(Some)
-        .map_err(|error| corruption("review_external_link", format!("{error:?}")))
+        .map_err(|error| corruption("review_external_link", format!("{error:?}")))?;
+        transaction.commit().await?;
+        Ok(Some(link))
     }
+}
+
+async fn begin_repeatable_read(
+    pool: &PgPool,
+) -> Result<Transaction<'_, Postgres>, ReviewWorkflowStoreError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
 }
 
 async fn insert_finding_event(
@@ -1314,6 +1333,11 @@ pub enum ReviewWorkflowInsertionError {
         /// Rejected current state.
         state: ReviewPassState,
     },
+    /// A finding insertion already carried lifecycle history.
+    FindingNotOpen {
+        /// Rejected current status.
+        status: ReviewFindingStatus,
+    },
     /// A reservation insertion already carried post-effect evidence.
     ExternalLinkNotPending,
 }
@@ -1326,6 +1350,9 @@ impl fmt::Display for ReviewWorkflowInsertionError {
             }
             Self::PassNotQueued { state } => {
                 write!(formatter, "new review pass is not queued: {state:?}")
+            }
+            Self::FindingNotOpen { status } => {
+                write!(formatter, "new review finding is not open: {status:?}")
             }
             Self::ExternalLinkNotPending => {
                 formatter.write_str("new review external-link reservation is not pending")

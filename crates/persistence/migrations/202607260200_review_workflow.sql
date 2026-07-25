@@ -41,6 +41,7 @@ CREATE TABLE review_target (
         CHECK (
             (
                 subject_kind = 'change_request'
+                AND change_request_number IS NOT NULL
                 AND change_request_number BETWEEN 1 AND 18446744073709551615
             )
             OR (
@@ -100,6 +101,13 @@ CREATE TABLE review_run (
             minimum_judge_confidence BETWEEN 0 AND 10000
             AND minimum_publication_confidence BETWEEN 0 AND 10000
             AND minimum_publication_confidence >= minimum_judge_confidence
+            AND (
+                policy_version <> 1
+                OR (
+                    minimum_judge_confidence = 7000
+                    AND minimum_publication_confidence = 8000
+                )
+            )
         ),
     CONSTRAINT review_run_state_closed
         CHECK (
@@ -294,7 +302,7 @@ BEGIN
                 'blocked',
                 'cancelled'
             )
-            AND NEW.state_pass_id = OLD.state_pass_id
+            AND NEW.state_pass_id IS NOT DISTINCT FROM OLD.state_pass_id
         ) THEN
             RAISE EXCEPTION 'invalid running review run transition'
                 USING ERRCODE = '23514';
@@ -354,7 +362,7 @@ BEGIN
                 'blocked',
                 'cancelled'
             )
-            AND NEW.turn_id = OLD.turn_id
+            AND NEW.turn_id IS NOT DISTINCT FROM OLD.turn_id
         ) THEN
             RAISE EXCEPTION 'invalid running review pass transition'
                 USING ERRCODE = '23514';
@@ -417,7 +425,9 @@ CREATE TABLE review_finding (
                 AND line_end IS NULL
             )
             OR (
-                line_start BETWEEN 1 AND 4294967295
+                line_start IS NOT NULL
+                AND line_end IS NOT NULL
+                AND line_start BETWEEN 1 AND 4294967295
                 AND line_end BETWEEN line_start AND 4294967295
             )
         ),
@@ -622,6 +632,7 @@ CREATE TABLE review_finding_event (
             )
             OR (
                 event_kind IN ('rejected', 'blocked_with_reason')
+                AND reason IS NOT NULL
                 AND octet_length(reason) BETWEEN 1 AND 65536
                 AND referenced_finding_id IS NULL
                 AND external_link_id IS NULL
@@ -676,6 +687,15 @@ CREATE TABLE review_finding_event (
             run_id,
             finding_id,
             association_kind
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT review_finding_event_attachment_fk
+        FOREIGN KEY (external_link_id, target_id)
+        REFERENCES review_external_link_attachment (
+            external_link_id,
+            target_id
         )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
