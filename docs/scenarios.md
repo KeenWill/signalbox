@@ -924,9 +924,11 @@ those tests.
 - **Durable commands:** Freeze a target snapshot and complete policy; create a
   queued run and pass only after the pass input is accepted in its exact
   session; project the pass from that input's canonical turn; append each
-  proposed finding's own contiguous event history. Publication, when requested
-  by later orchestration, reserves its link before the external call and
-  attaches the canonical provider-wide object identity afterward.
+  proposed finding's own contiguous event history, with each event named by its
+  pass result. Duplicate and superseded events authenticate an open or accepted
+  referenced finding before committing. Publication, when requested by later
+  orchestration, reserves its link before the external call and attaches the
+  canonical provider-wide object identity afterward.
 - **State transitions:** Follow the closed target, run, pass, finding, and
   external-link machines in the
   [review-workflows specification](spec/review-workflows.md). The S29 fixture
@@ -938,10 +940,11 @@ those tests.
   sessions and turns own execution evidence; Postgres loads and correlates both;
   future orchestration coordinates adapters.
 - **Failure behavior:** A foreign accepted input, turn, pass, finding event,
-  frontier, or lifecycle outcome fails reconstitution as corruption. A pending
-  external reservation does not prove absence of an external effect and is not
-  retried automatically. No transcript content or general-purpose artifact is
-  copied into workflow rows.
+  event-result commitment, referenced-finding status, frontier, or lifecycle
+  outcome fails reconstitution as corruption. Finding-reference cycles fail at
+  admission. A pending external reservation does not prove absence of an
+  external effect and is not retried automatically. No transcript content or
+  general-purpose artifact is copied into workflow rows.
 - **Required invariants:** INV-001, INV-002, INV-007, INV-025, INV-026, INV-040,
   INV-041.
 - **Remaining questions:** Application commands, scheduling, prompts,
