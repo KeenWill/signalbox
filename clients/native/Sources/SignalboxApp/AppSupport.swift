@@ -38,10 +38,7 @@ final class SignalboxSettingsViewModel: ObservableObject {
         self.userDefaults = userDefaults
         self.serverURLText = userDefaults.string(forKey: NativeAppConstants.serverURLDefaultsKey)
             ?? NativeAppConstants.defaultServerURL
-        let storedAPIKey = keychain.readSecret(
-            service: NativeAppConstants.serviceName,
-            account: NativeAppConstants.apiKeyAccount
-        ) ?? ""
+        let storedAPIKey = keychain.readSecret() ?? ""
         self.apiKey = storedAPIKey
         self.connectionStatus = storedAPIKey.isEmpty ? .notConfigured : .unknown
     }
@@ -99,11 +96,7 @@ final class SignalboxSettingsViewModel: ObservableObject {
 
     private func saveSettings() throws {
         userDefaults.set(serverURLText.trimmingCharacters(in: .whitespacesAndNewlines), forKey: NativeAppConstants.serverURLDefaultsKey)
-        try keychain.writeSecret(
-            apiKey,
-            service: NativeAppConstants.serviceName,
-            account: NativeAppConstants.apiKeyAccount
-        )
+        try keychain.writeSecret(apiKey)
     }
 }
 
@@ -128,8 +121,19 @@ enum ConnectionStatus: Equatable {
 }
 
 struct KeychainSecretStore: Sendable {
-    func readSecret(service: String, account: String) -> String? {
-        var query = baseQuery(service: service, account: account)
+    private let service: String
+    private let account: String
+
+    init(
+        service: String = NativeAppConstants.serviceName,
+        account: String = NativeAppConstants.apiKeyAccount
+    ) {
+        self.service = service
+        self.account = account
+    }
+
+    func readSecret() -> String? {
+        var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -141,9 +145,9 @@ struct KeychainSecretStore: Sendable {
         return String(data: data, encoding: .utf8)
     }
 
-    func writeSecret(_ secret: String, service: String, account: String) throws {
+    func writeSecret(_ secret: String) throws {
         let data = Data(secret.utf8)
-        let query = baseQuery(service: service, account: account)
+        let query = baseQuery()
         let attributes = [kSecValueData as String: data]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         switch status {
@@ -161,11 +165,11 @@ struct KeychainSecretStore: Sendable {
         }
     }
 
-    func deleteSecret(service: String, account: String) {
-        SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+    func deleteSecret() {
+        SecItemDelete(baseQuery() as CFDictionary)
     }
 
-    private func baseQuery(service: String, account: String) -> [String: Any] {
+    private func baseQuery() -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

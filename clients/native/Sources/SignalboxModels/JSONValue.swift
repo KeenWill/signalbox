@@ -68,7 +68,10 @@ public enum SignalboxJSONCoding {
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let rawValue = try container.decode(String.self)
-            return try SignalboxDateParser.parse(rawValue)
+            return try SignalboxDateParser.parse(
+                rawValue,
+                codingPath: decoder.codingPath
+            )
         }
         return decoder
     }
@@ -78,6 +81,48 @@ public enum SignalboxJSONCoding {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
         return encoder
+    }
+}
+
+public struct SignalboxDecodingDiagnostic: Equatable, Sendable {
+    public let message: String
+
+    public init(message: String) {
+        self.message = message
+    }
+
+    public init(error: Error) {
+        switch error {
+        case DecodingError.keyNotFound(let key, let context):
+            self.message = "Missing required field at \(Self.path(context.codingPath + [key]))."
+        case DecodingError.typeMismatch(_, let context):
+            self.message = "Unexpected field type at \(Self.path(context.codingPath))."
+        case DecodingError.valueNotFound(_, let context):
+            self.message = "Missing required value at \(Self.path(context.codingPath))."
+        case DecodingError.dataCorrupted(let context):
+            self.message = "Invalid field value at \(Self.path(context.codingPath))."
+        default:
+            self.message = "Could not decode the server payload."
+        }
+    }
+
+    private static func path(_ codingPath: [any CodingKey]) -> String {
+        let components = codingPath.map { key in
+            if let index = key.intValue {
+                return "[\(index)]"
+            }
+            return key.stringValue
+        }
+        guard !components.isEmpty else {
+            return "the payload"
+        }
+        return components.reduce(into: "") { path, component in
+            if component.hasPrefix("[") {
+                path += component
+            } else {
+                path += path.isEmpty ? component : ".\(component)"
+            }
+        }
     }
 }
 
@@ -95,6 +140,13 @@ public enum SignalboxDateParser {
     }
 
     public static func parse(_ rawValue: String) throws -> Date {
+        try parse(rawValue, codingPath: [])
+    }
+
+    static func parse(
+        _ rawValue: String,
+        codingPath: [any CodingKey]
+    ) throws -> Date {
         if let date = fractionalFormatter().date(from: rawValue) {
             return date
         }
@@ -103,7 +155,7 @@ public enum SignalboxDateParser {
         }
         throw DecodingError.dataCorrupted(
             .init(
-                codingPath: [],
+                codingPath: codingPath,
                 debugDescription: "Invalid server timestamp: \(rawValue)"
             )
         )

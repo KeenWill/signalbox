@@ -1,0 +1,66 @@
+name: Swift
+
+on:
+  pull_request:
+    paths:
+      - "clients/native/**"
+      - ".github/workflows/swift.yml"
+  push:
+    branches: [main]
+    paths:
+      - "clients/native/**"
+      - ".github/workflows/swift.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Not `validate`: rust.yml already publishes a job by that name, and a status
+  # check is identified by its job name alone, so two `validate` jobs would be
+  # one ambiguous check that branch protection cannot require independently.
+  swift-validate:
+    # macos-latest is the macOS 26 arm64 image. The project was created with
+    # Xcode 26.4.1 and targets iOS 26.4, so it needs an Xcode 26.4+ toolchain
+    # with a matching simulator runtime; the image ships Xcode 26.6 with the
+    # iOS 26.5 runtime, and the pin below keeps CI on the same Xcode build
+    # (26.6 / 17F113) the tree was last validated with locally instead of
+    # following the image's rolling default.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+          xcodebuild -version
+      - name: Build (iOS Simulator, Debug)
+        run: clients/native/scripts/build-xcode.sh
+      # Runs the canonical test script with the UI-test bundle excluded. The
+      # UI and screenshot-capture suites need an interactive simulator
+      # session (and the Tart VM shards for the full device matrix), so they
+      # stay a manual/local flow via clients/native/scripts for now; the
+      # remaining suite is the unit-test bundle, which still runs against a
+      # booted simulator the script resolves itself.
+      #
+      # That bundle is SignalboxNativeTests, the only unit-test target the
+      # imported xcodeproj wires. The snapshot's Tests/SignalboxAppTests,
+      # Tests/SignalboxClientTests, and Tests/SignalboxModelsTests are
+      # unreachable until the rewire restores their targets (see the known
+      # issues in clients/native/README.md), so a green run here is not full
+      # client unit coverage — the step name says which bundle ran.
+      - name: Run unit tests (SignalboxNativeTests bundle)
+        run: clients/native/scripts/test-xcode.sh
+        env:
+          SIGNALBOX_NATIVE_SKIP_TESTING: SignalboxNativeUITests
+      - name: Check privacy boundary
+        run: clients/native/scripts/check-privacy.sh
+      - name: Check Tart scripts (dry run)
+        run: clients/native/scripts/tart/check-tart-scripts.sh
+      # Pure sha256 hashing against Screenshots/MANIFEST.sha256 — no
+      # simulator involved, so it is cheap enough to run here even though
+      # recapturing goldens is a manual flow.
+      - name: Check screenshot goldens
+        run: clients/native/scripts/check-screenshot-goldens.sh

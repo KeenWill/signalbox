@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 @testable import SignalboxApp
 import SignalboxClient
@@ -110,18 +111,22 @@ final class ViewModelTests: XCTestCase {
 
         viewModel.connectStream()
         await waitForControlledStreamInvocationCount(1, viewModel: viewModel, service: controlledService)
+        let staleCompletionRejected = expectation(description: "stale completion rejected")
+        let staleCompletionObservation = viewModel.$ignoredStaleStreamCompletionCount
+            .filter { $0 == 1 }
+            .first()
+            .sink { _ in staleCompletionRejected.fulfill() }
         viewModel.disconnectStream()
         viewModel.connectStream()
         await waitForControlledStreamInvocationCount(2, viewModel: viewModel, service: controlledService)
 
-        XCTAssertTrue(viewModel.isStreaming)
-        controlledService.finishStream(at: 0)
-        await Task.yield()
+        await fulfillment(of: [staleCompletionRejected], timeout: 1)
         XCTAssertTrue(viewModel.isStreaming)
 
         controlledService.finishStream(at: 1)
         await waitForControlledStreamToStop(viewModel)
         XCTAssertFalse(viewModel.isStreaming)
+        withExtendedLifetime(staleCompletionObservation) {}
     }
 
     func testDetailStreamHelloRefreshesArtifactsAfterInitialSnapshot() async {
