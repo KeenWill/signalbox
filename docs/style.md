@@ -17,7 +17,9 @@ disciplines that apply to production and test code alike:
    A run of same-typed positions — booleans worst of all — must become labeled
    structure.
 
-Every worked example in the appendix is a real excerpt from this repository.
+Every worked example in the appendix starts from a real excerpt of this
+repository, abridged where the text says so; the rewrite that follows each
+excerpt is proposed, not existing code.
 
 ## Core principles
 
@@ -26,7 +28,8 @@ Every worked example in the appendix is a real excerpt from this repository.
 A literal spelled at a use site is a claim: *this exact value matters here*.
 Values that only need to exist — an ID that must merely be distinct, a string
 that must merely be non-empty — live behind names that say so: a constant, a
-doc-commented fixture parameter, or a generator.
+fixture parameter whose role the fixture's own item-level doc comment states, or
+a generator.
 
 ```text
 // Ambiguous: is 7 the point of this test, or just "some id"?
@@ -128,7 +131,7 @@ labeled. Match with field names and `..` for the fields a given arm does not
 care about — the pattern then states exactly which facts the arm depends on.
 
 **Worked example** —
-`crates/persistence/tests/postgres_integration.rs:6632-6651` asserts a migration
+`crates/persistence/tests/postgres_integration.rs:6633-6652` asserts a migration
 backfill through a six-way tuple:
 
 ```rust
@@ -252,7 +255,7 @@ guide introduces:
   from serves*. This guide reaches that file the next time it is modified.
 
 - **Namespaced generators** for values whose only obligation is distinctness —
-  `next_test_submit_uuid()` in `postgres_integration.rs:128-131` brands its IDs
+  `next_test_submit_uuid()` in `postgres_integration.rs:129-132` brands its IDs
   with a `0xfeed_cafe_dead_beef` prefix. A value from a generator is arbitrary
   by construction; no reader will mistake it for load-bearing.
 
@@ -263,14 +266,14 @@ guide introduces:
   the first use establishes it.
 
 **Worked example** — `checkpoint_restart_model_call` combines both problems in
-one signature (`postgres_integration.rs:1036-1040`, twelve call sites):
+one signature (`postgres_integration.rs:1037-1041`, twelve call sites):
 
 ```rust
 async fn checkpoint_restart_model_call(pool: &PgPool, seed: u128, authorize: bool) -> ...
 
 let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
 let issued   = checkpoint_restart_model_call(&pool, 0x3000, true).await?;
-let stopped  = checkpoint_restart_model_call(&pool, 0x3500, true).await?;   // :5634-5636
+let stopped  = checkpoint_restart_model_call(&pool, 0x3500, true).await?;   // :5635-5637
 ```
 
 The bools are blind — only the variable names hint that `true` means the call
@@ -355,7 +358,7 @@ The domain crate's ID discipline (`SessionId`, `TurnId`, `AcceptedInputId`,
 differ in type, so they cannot be confused (principle 2, and Rust API Guidelines
 C-NEWTYPE). Extend the same discipline to counts and versions in helper
 signatures. For example, `input_choices(expected: u64, ...)`
-(`postgres_integration.rs:662`) takes a bare `u64` immediately converted into a
+(`postgres_integration.rs:663`) takes a bare `u64` immediately converted into a
 `SessionConfigurationDefaultsVersion`; twenty-plus call sites read
 `input_choices(1, ...)` where neither the name `expected` nor the literal `1`
 reveals that the value is a defaults *version*. Take the domain type and the
@@ -372,7 +375,7 @@ Where the repository already does this well; point reviews here.
   `InterruptImmediatelyAfter { predecessor }` (principles 3 and 5).
 - `crates/domain/src/provider_evidence.rs:790-795` — doc-commented test
   constants distinguishing load-bearing from arbitrary identities (principle 1).
-- `crates/persistence/tests/postgres_integration.rs:128-131` —
+- `crates/persistence/tests/postgres_integration.rs:129-132` —
   `next_test_submit_uuid()`, arbitrary-by-construction IDs under a visible
   namespace (principle 1).
 - The domain crate's ID newtypes and state enums throughout —
