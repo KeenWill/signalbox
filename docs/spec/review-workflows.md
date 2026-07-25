@@ -131,10 +131,12 @@ A `ReviewFinding` is immutable proposed content owned by one canonically
 succeeded read-only-review pass. It stores an exact file path, an optional
 closed positive line range and diff side, title, body, severity, confidence,
 category, and optional recommended fix. A diff side is admitted only when the
-finding's target snapshot carries an exact base revision; a file-relative line
-range needs no base. Its current status is derived from an append-only ordered
-event history rather than a freely writable status field. Severity is the closed
-vocabulary `Info`, `Low`, `Medium`, `High`, or `Critical`.
+finding's target snapshot carries an exact base revision. Its closed vocabulary
+is `Left`, identifying the base or removed side, and `Right`, identifying the
+head or added side. A file-relative line range needs no base. Its current status
+is derived from an append-only ordered event history rather than a freely
+writable status field. Severity is the closed vocabulary `Info`, `Low`,
+`Medium`, `High`, or `Critical`.
 
 The initial state is `Open`. The nine-state machine is:
 
@@ -155,25 +157,28 @@ findings may be posted, fixed, blocked with a nonempty reason, deduplicated,
 superseded, or made stale. Posted findings may be fixed, blocked, superseded, or
 made stale. Blocked findings may later be fixed, superseded, or made stale; a
 finding blocked by publication may also become posted after reconciliation
-attaches the external object. Rejected, duplicate, superseded, stale, and fixed
-are terminal. Every event carries its owning finding reference, a contiguous
-one-based ordinal, and a same-target pass reference. The event pass's run stores
-the exact `ReviewPolicy` frozen by the finding's producing run, so judgment,
-deduplication, and every later classification remain under one policy even
-though their one-pass workflows use separate run identities. Event and pass
-kinds are compatible only as follows: accepted, rejected, and stale events name
-a judgment pass; duplicate and superseded events name a deduplication pass;
-posted names an external-publication or external-context-import pass; fixed
-names a finding-repair pass; and blocked-with-reason names either an
+supplies an attached external link not consumed by any earlier posted event for
+that finding. Each posted event consumes its link as publication evidence.
+Rejected, duplicate, superseded, stale, and fixed are terminal. Every event
+carries its owning finding reference, a contiguous one-based ordinal, and a
+same-target pass reference. The event pass's run stores the exact `ReviewPolicy`
+frozen by the finding's producing run, so judgment, deduplication, and every
+later classification remain under one policy even though their one-pass
+workflows use separate run identities. Event and pass kinds are compatible only
+as follows: accepted, rejected, and stale events name a judgment pass; duplicate
+and superseded events name a deduplication pass; posted names an
+external-publication or external-context-import pass; fixed names a
+finding-repair pass; and blocked-with-reason names either an
 external-publication or finding-repair pass. Every event except
 blocked-with-reason names a canonically succeeded pass; blocked-with-reason
 names a canonically blocked pass. Reconstitution validates the complete history
 and fails closed on a foreign owner, policy mismatch, gaps, illegal edges,
 incompatible pass kind or outcome, self-reference, foreign-run finding
-references, or a publication event whose external link is not an attached link
-associated with that finding or whose external object kind is not review,
-review-thread, inline-review-comment, or general change-request-comment. A
-posted event's pass is the attachment's exact producing pass.
+references, reuse of a link consumed by an earlier posted event, or a
+publication event whose external link is not an attached link associated with
+that finding or whose external object kind is not review, review-thread,
+inline-review-comment, or general change-request-comment. A posted event's pass
+is the attachment's exact producing pass.
 
 ## External links and posting reservations
 
