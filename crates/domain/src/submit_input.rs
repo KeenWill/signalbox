@@ -3893,46 +3893,52 @@ mod tests {
     }
 
     /// S07 / S10 / INV-012 / INV-028: the recorded parked-approval interrupt
-    /// rejection reconstructs exactly and rejects cross-wired delivery or
-    /// active-turn facts.
+    /// rejection reconstructs exactly.
     #[test]
     fn s07_s10_inv012_inv028_parked_approval_interrupt_rejection_reconstitutes_exactly() {
-        let replayed =
+        let session = session_id(1);
+        let active_turn = turn_id(7);
+
+        assert_reconstitutes_rejection(
             SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
-                interrupt_command(1, turn_id(7)),
+                interrupt_command(1, active_turn),
                 Actor::Owner,
-                session_id(1),
-                turn_id(7),
+                session,
+                active_turn,
                 source_turn_origin(),
-            )
-            .reconstitute()
-            .expect("a parked-approval interrupt rejection reconstructs");
-        assert!(matches!(
-            replayed.result(),
-            SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
-                    session,
-                    active_turn,
-                },
-            ) if *session == session_id(1) && *active_turn == turn_id(7)
-        ));
+            ),
+            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                session,
+                active_turn,
+            },
+        );
+    }
+
+    /// S07 / S10 / INV-012 / INV-028: parked-approval interrupt rejection
+    /// replay fails closed when the command's delivery or expected active turn
+    /// is cross-wired against the recorded rejection.
+    #[test]
+    fn s07_s10_inv012_inv028_parked_approval_interrupt_rejection_evidence_is_exact() {
+        let session = session_id(1);
+        let active_turn = turn_id(7);
+        let other_turn = turn_id(9);
 
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
-                interrupt_command(1, turn_id(9)),
+                interrupt_command(1, other_turn),
                 Actor::Owner,
-                session_id(1),
-                turn_id(7),
+                session,
+                active_turn,
                 source_turn_origin(),
             ),
             SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
         );
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
-                safe_point_command(1, turn_id(7)),
+                safe_point_command(1, active_turn),
                 Actor::Owner,
-                session_id(1),
-                turn_id(7),
+                session,
+                active_turn,
                 source_turn_origin(),
             ),
             SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
