@@ -1,15 +1,16 @@
 # Persistence protocol
 
 The baseline persistence protocol was verified through PR #175
-(`agent/stop-requests`). This page covers the Postgres representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+(`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
+(`agent/review-process-amendments`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.

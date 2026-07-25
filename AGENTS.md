@@ -66,21 +66,25 @@ one finished and awaiting owner merge:
 - A review request is posted only once CI is green on the exact head it names,
   and that head SHA is named in the request. A wave's fixes are never pushed
   while a requested review on a prior head is still in flight; let the in-flight
-  review land, disposition it, then push and request the next wave against the
-  new head. A pull request whose diff touches only files that open with the
-  non-authoritative-planning banner (for example
+  review land, push the fixes for its accepted findings, then complete its
+  disposition (replies naming the pushed fixing commits) before requesting the
+  next wave against the new head. A pull request whose diff touches only files
+  that open with the non-authoritative-planning banner (for example
   [`docs/agents/backlog.md`](docs/agents/backlog.md)) gets no review request at
   all: those files decide nothing and are reviewed for nothing.
 - Before the first review request, run the pre-push self-review checklist over
   the pull request's own diff — the first-wave findings agents can catch
   themselves:
-  - grep the diff's own `#[test]` bodies for `for`/`while` loops and
-    `match`/`if` selecting between test cases, and unroll or split them per
-    `docs/agents/testing-style.md` rule 2 before pushing;
+  - grep the diff's own test bodies — under `#[test]`, `#[tokio::test]`, or any
+    other test attribute — for `for`/`while` loops and `if`/`match`
+    conditionals, and unroll or split them per `docs/agents/testing-style.md`
+    rule 2 before pushing;
   - confirm each added assertion compares against a fixture accessor, not a
     literal re-encoding a value the fixture already states (rule 6);
-  - confirm every new INV-tagged test is linked from the enforcement column of
-    [`docs/invariants.md`](docs/invariants.md) in the same diff (rule 17);
+  - confirm every new INV-tagged test is bound from the enforcement column of
+    [`docs/invariants.md`](docs/invariants.md) — bindings are by file and INV
+    tag (rule 17), so add a citation in the same diff only when the test's file
+    is not already cited for that tag;
   - re-verify any count or inventory the diff states against the current head;
   - bump the touched `docs/spec/` page's verified-against-ref line.
 - External reviews are re-requested after a change that could alter what a
@@ -113,9 +117,11 @@ one finished and awaiting owner merge:
   finding made against a stale head is declined by standing policy, naming the
   fixing commit; a finding materially identical to one dispositioned in a prior
   wave is a re-raise, declined by the same standing policy with a link to the
-  prior thread. When more than half of a wave's accepted findings are defects in
-  code the previous wave's fixes introduced, stop and escalate to the owner
-  instead of continuing the loop.
+  prior thread. Neither standing decline applies to a finding that reproduces on
+  the current head: a defect reintroduced by a later wave's edits is live and is
+  dispositioned on its merits. When more than half of a wave's accepted findings
+  are defects in code the previous wave's fixes introduced, stop and escalate to
+  the owner instead of continuing the loop.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
