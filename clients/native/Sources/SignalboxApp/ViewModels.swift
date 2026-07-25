@@ -348,18 +348,24 @@ final class SessionDetailViewModel: ObservableObject {
     private var serviceProvider: () -> (any SignalboxClientProtocol)?
     private var streamTask: Task<Void, Never>?
     private var activeStreamID: UUID?
-    private var eventNormalizer = SignalboxIncrementalEventNormalizer()
+    private let eventNormalizer = SignalboxIncrementalEventNormalizer()
+    private var hasLoadedHistorySnapshot = false
     private var streamHistorySynchronization: StreamHistorySynchronization?
     private var streamHelloTimeoutTask: Task<Void, Never>?
     private let streamHelloTimeout: Duration
+    private let waitForStreamHello: @Sendable (Duration) async throws -> Void
 
     init(
         session: SignalboxSessionMetadata,
         streamHelloTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout,
+        waitForStreamHello: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        },
         serviceProvider: @escaping () -> (any SignalboxClientProtocol)?
     ) {
         self.session = session
         self.streamHelloTimeout = streamHelloTimeout
+        self.waitForStreamHello = waitForStreamHello
         self.serviceProvider = serviceProvider
     }
 
@@ -423,17 +429,23 @@ final class SessionDetailViewModel: ObservableObject {
         }
         if !synchronized, !Task.isCancelled {
             await load()
-            connectStream()
+            connectStream(synchronizeHistory: true)
         }
     }
 
     func connectStream() {
+        connectStream(
+            synchronizeHistory: hasLoadedHistorySnapshot || !eventNormalizer.records.isEmpty
+        )
+    }
+
+    private func connectStream(synchronizeHistory: Bool) {
         guard streamTask == nil, let service = serviceProvider() else {
             return
         }
         _ = startStream(
             service: service,
-            synchronizeHistory: !eventNormalizer.records.isEmpty,
+            synchronizeHistory: synchronizeHistory,
             completion: nil
         )
     }
@@ -498,9 +510,10 @@ final class SessionDetailViewModel: ObservableObject {
         }
         if synchronizeHistory {
             let helloTimeout = streamHelloTimeout
+            let waitForStreamHello = waitForStreamHello
             streamHelloTimeoutTask = Task { [weak self] in
                 do {
-                    try await Task.sleep(for: helloTimeout)
+                    try await waitForStreamHello(helloTimeout)
                 } catch {
                     return
                 }
@@ -645,8 +658,8 @@ final class SessionDetailViewModel: ObservableObject {
             }
             replaceEvents(with: synchronizedEvents)
             self.artifacts = synchronizedArtifacts
-            synchronization.bufferedMessages.forEach(apply)
             errorMessage = nil
+            synchronization.bufferedMessages.forEach(apply)
             synchronization.completion?.resume(returning: true)
         } catch {
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
@@ -678,7 +691,8 @@ final class SessionDetailViewModel: ObservableObject {
             return
         }
         guard let completion = synchronization.completion else {
-            synchronization.bufferedMessages.forEach(apply)
+            disconnectStream()
+            connectStream(synchronizeHistory: true)
             return
         }
         disconnectStream()
@@ -729,6 +743,7 @@ final class SessionDetailViewModel: ObservableObject {
     private func replaceEvents(with events: [SignalboxStoredEvent]) {
         objectWillChange.send()
         eventNormalizer.replaceAll(with: events)
+        hasLoadedHistorySnapshot = true
     }
 
     private func mergeEvents(with events: [SignalboxStoredEvent]) {

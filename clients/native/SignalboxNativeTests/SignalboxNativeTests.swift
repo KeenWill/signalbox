@@ -293,9 +293,16 @@ final class SignalboxNativeTests: XCTestCase {
     func testLoadAndConnectFallsBackWhenStreamHelloTimesOut() async throws {
         let fixture = try await streamHelloHistoryReuseFixture()
         let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let timeoutWaiter = ImmediateFirstStreamHelloTimeoutWaiter()
         let viewModel = SessionDetailViewModel(
             session: fixture.session,
-            streamHelloTimeout: StreamHelloHistoryReuseFixture.timeout
+            streamHelloTimeout: StreamHelloHistoryReuseFixture.retryTimeout,
+            waitForStreamHello: { timeout in
+                await service.waitForStreamInvocationCount(
+                    StreamHelloHistoryReuseFixture.firstStreamInvocationCount
+                )
+                try await timeoutWaiter.wait(for: timeout)
+            }
         ) { service }
 
         let loadTask = Task {
@@ -336,6 +343,128 @@ final class SignalboxNativeTests: XCTestCase {
             StreamHelloHistoryReuseFixture.expectedRecoveryListEventsCallCount
         )
         XCTAssertNil(viewModel.errorMessage)
+        viewModel.disconnectStream()
+    }
+
+    func testReconnectHelloTimeoutRetriesAuthoritativeSynchronization() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let timeoutWaiter = ImmediateFirstStreamHelloTimeoutWaiter()
+        let viewModel = SessionDetailViewModel(
+            session: fixture.session,
+            streamHelloTimeout: StreamHelloHistoryReuseFixture.retryTimeout,
+            waitForStreamHello: { timeout in
+                await service.waitForStreamInvocationCount(
+                    StreamHelloHistoryReuseFixture.firstStreamInvocationCount
+                )
+                try await timeoutWaiter.wait(for: timeout)
+            }
+        ) { service }
+        let synchronizedStatus = observeStatus(
+            .waitingForConfirmation,
+            on: viewModel
+        )
+
+        let initialLoad = Task {
+            await viewModel.load()
+        }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await initialLoad.value
+        viewModel.connectStream()
+        await service.waitForStreamInvocationCount(
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await fulfillment(
+            of: [synchronizedStatus.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertEqual(
+            service.streamInvocationCount,
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedReconnectListEventsCallCount
+        )
+        XCTAssertEqual(viewModel.events, fixture.expectedSynchronizedEvents)
+        withExtendedLifetime(synchronizedStatus.cancellable) {}
+        viewModel.disconnectStream()
+    }
+
+    func testEmptyLoadedHistoryStillSynchronizesAfterStreamHello() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(
+            fixture: fixture,
+            historyEvents: StreamHelloHistoryReuseFixture.emptyHistoryEvents
+        )
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+        let synchronizedStatus = observeStatus(
+            .waitingForConfirmation,
+            on: viewModel
+        )
+
+        let initialLoad = Task {
+            await viewModel.load()
+        }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await initialLoad.value
+        viewModel.connectStream()
+        await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await fulfillment(
+            of: [synchronizedStatus.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedReconnectListEventsCallCount
+        )
+        XCTAssertEqual(viewModel.events, fixture.helloEvents)
+        withExtendedLifetime(synchronizedStatus.cancellable) {}
+        viewModel.disconnectStream()
+    }
+
+    func testHistorySynchronizationPreservesBufferedDiagnostic() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+        let synchronizedStatus = observeStatus(
+            .waitingForConfirmation,
+            on: viewModel
+        )
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await service.waitForStreamInvocation()
+        service.sendDiagnostic()
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await loadTask.value
+        await fulfillment(
+            of: [synchronizedStatus.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            StreamHelloHistoryReuseFixture.bufferedDiagnosticMessage
+        )
+        XCTAssertEqual(
+            viewModel.latestStreamDiagnostic,
+            StreamHelloHistoryReuseFixture.bufferedDiagnosticMessage
+        )
+        withExtendedLifetime(synchronizedStatus.cancellable) {}
         viewModel.disconnectStream()
     }
 
@@ -767,13 +896,15 @@ final class SignalboxNativeTests: XCTestCase {
         let approvalSessionID = SignalboxSessionID(rawValue: MockSignalboxFixtures.approvalSessionID)
         let session = try XCTUnwrap(sessions.first { $0.id == approvalSessionID })
         let historyEvents = try await sourceService.listEvents(sessionID: session.id)
-        let expectedMergedEvents = try SignalboxJSONCoding.decoder().decode(
+        let expectedSynchronizedEvents = try SignalboxJSONCoding.decoder().decode(
             [SignalboxStoredEvent].self,
             from: Data(MockSignalboxFixtures.approvedToolEvents.utf8)
         )
         let deletedEventID = try XCTUnwrap(historyEvents.first?.eventID)
         let helloEvents = Array(
-            expectedMergedEvents.suffix(StreamHelloHistoryReuseFixture.helloWindowEventCount)
+            expectedSynchronizedEvents.suffix(
+                StreamHelloHistoryReuseFixture.helloWindowEventCount
+            )
         )
         XCTAssertEqual(
             helloEvents.count,
@@ -787,7 +918,8 @@ final class SignalboxNativeTests: XCTestCase {
             historyEvents: historyEvents,
             helloEvents: helloEvents,
             deletedEventID: deletedEventID,
-            expectedMergedEvents: expectedMergedEvents.filter {
+            expectedSynchronizedEvents: expectedSynchronizedEvents,
+            expectedMergedEvents: expectedSynchronizedEvents.filter {
                 $0.eventID != deletedEventID
             }
         )
@@ -898,6 +1030,18 @@ final class SignalboxNativeTests: XCTestCase {
         return PublishedObservation(expectation: expectation, cancellable: cancellable)
     }
 
+    private func observeStatus(
+        _ expectedStatus: SignalboxSessionState,
+        on viewModel: SessionDetailViewModel
+    ) -> PublishedObservation {
+        let expectation = expectation(description: "expected stream status applied")
+        let cancellable = viewModel.$status
+            .filter { $0.state == expectedStatus }
+            .first()
+            .sink { _ in expectation.fulfill() }
+        return PublishedObservation(expectation: expectation, cancellable: cancellable)
+    }
+
     private func observeCurrentStreamStopped(
         on viewModel: SessionDetailViewModel
     ) -> PublishedObservation {
@@ -949,21 +1093,30 @@ private struct StreamHelloHistoryReuseFixture {
     /// One failed synchronized load plus one fallback load.
     static let expectedRecoveryListEventsCallCount = 2
 
+    /// One initial snapshot plus one hello-bounded reconnect snapshot.
+    static let expectedReconnectListEventsCallCount = 2
+
     /// The recovery fixture fails only its first history request.
     static let initialHistoryFailureCount = 1
 
     /// A local actor handoff should comfortably complete within this bound.
     static let observationTimeout: TimeInterval = 1
 
-    /// The timeout regression advances immediately without using wall-clock time.
-    static let timeout: Duration = .zero
+    /// A retry remains pending long enough for its hello to cancel the deadline.
+    static let retryTimeout: Duration = .seconds(60)
+
+    static let firstStreamInvocationCount = 1
+    static let retryStreamInvocationCount = 2
 
     static let streamHelloKind = "stream_hello"
+    static let bufferedDiagnosticMessage = "Controlled buffered diagnostic"
+    static let emptyHistoryEvents: [SignalboxStoredEvent] = []
 
     let session: SignalboxSessionMetadata
     let historyEvents: [SignalboxStoredEvent]
     let helloEvents: [SignalboxStoredEvent]
     let deletedEventID: SignalboxEventID
+    let expectedSynchronizedEvents: [SignalboxStoredEvent]
     let expectedMergedEvents: [SignalboxStoredEvent]
 }
 
@@ -1129,6 +1282,22 @@ private enum StubSignalboxWebSocketTransportError: Error {
     case endOfStream
 }
 
+private final class ImmediateFirstStreamHelloTimeoutWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invocationCount = 0
+
+    func wait(for timeout: Duration) async throws {
+        let expiresImmediately = lock.withLock {
+            invocationCount += 1
+            return invocationCount == StreamHelloHistoryReuseFixture.firstStreamInvocationCount
+        }
+        guard !expiresImmediately else {
+            return
+        }
+        try await Task.sleep(for: timeout)
+    }
+}
+
 private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol, @unchecked Sendable {
     /// This service intentionally models no artifacts on either load.
     private static let noArtifacts: [SignalboxArtifact] = []
@@ -1137,19 +1306,23 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     )
 
     private let fixture: StreamHelloHistoryReuseFixture
+    private let historyEvents: [SignalboxStoredEvent]
     private let lock = NSLock()
     private var lockedListEventsCallCount = 0
+    private var lockedStreamInvocationCount = 0
     private var lockedHistoryFailuresRemaining: Int
     private var listEventsContinuation: CheckedContinuation<[SignalboxStoredEvent], Never>?
     private var listEventsInvocationWaiters: [CheckedContinuation<Void, Never>] = []
     private var streamContinuation: AsyncThrowingStream<SignalboxServerMessage, Error>.Continuation?
-    private var streamInvocationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var streamInvocationWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
 
     init(
         fixture: StreamHelloHistoryReuseFixture,
+        historyEvents: [SignalboxStoredEvent]? = nil,
         historyFailureCount: Int = 0
     ) {
         self.fixture = fixture
+        self.historyEvents = historyEvents ?? fixture.historyEvents
         self.lockedHistoryFailuresRemaining = historyFailureCount
     }
 
@@ -1159,14 +1332,26 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         }
     }
 
+    var streamInvocationCount: Int {
+        lock.withLock {
+            lockedStreamInvocationCount
+        }
+    }
+
     func waitForStreamInvocation() async {
+        await waitForStreamInvocationCount(
+            StreamHelloHistoryReuseFixture.firstStreamInvocationCount
+        )
+    }
+
+    func waitForStreamInvocationCount(_ expectedCount: Int) async {
         await withCheckedContinuation { continuation in
             lock.lock()
-            if streamContinuation != nil {
+            if lockedStreamInvocationCount >= expectedCount {
                 lock.unlock()
                 continuation.resume()
             } else {
-                streamInvocationWaiters.append(continuation)
+                streamInvocationWaiters[expectedCount, default: []].append(continuation)
                 lock.unlock()
             }
         }
@@ -1204,6 +1389,22 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         )
     }
 
+    func sendDiagnostic() {
+        let continuation = lock.withLock {
+            guard let continuation = streamContinuation else {
+                preconditionFailure("No stream invocation is ready")
+            }
+            return continuation
+        }
+        continuation.yield(
+            .diagnostic(
+                SignalboxDecodingDiagnostic(
+                    message: StreamHelloHistoryReuseFixture.bufferedDiagnosticMessage
+                )
+            )
+        )
+    }
+
     func sendDeletedEventAndFinish() {
         let continuation = lock.withLock {
             guard let continuation = streamContinuation else {
@@ -1224,7 +1425,7 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
             listEventsContinuation = nil
             return continuation
         }
-        continuation.resume(returning: fixture.historyEvents)
+        continuation.resume(returning: historyEvents)
     }
 
     func testConnection() async throws {
@@ -1305,8 +1506,14 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         AsyncThrowingStream { continuation in
             lock.lock()
             streamContinuation = continuation
+            lockedStreamInvocationCount += 1
+            let invocationCount = lockedStreamInvocationCount
             let waiters = streamInvocationWaiters
-            streamInvocationWaiters = []
+                .filter { expectedCount, _ in expectedCount <= invocationCount }
+                .flatMap(\.value)
+            streamInvocationWaiters = streamInvocationWaiters.filter { expectedCount, _ in
+                expectedCount > invocationCount
+            }
             lock.unlock()
             waiters.forEach { $0.resume() }
         }
