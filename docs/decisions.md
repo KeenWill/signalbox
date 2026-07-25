@@ -10,6 +10,26 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Consume posting attachment evidence once
+
+**Context.** A finding can become blocked after it was posted and later return
+to `Posted`. Reusing the first posting's unchanged attachment would record no
+new reconciliation evidence and could replay that transition indefinitely.
+
+**Decision.** Each posted event consumes one attached external link for that
+finding. A later posted event must name another attachment not consumed by any
+earlier posted event in the finding's ordered history. The event ordinal proves
+that the new reconciliation record follows the blocking event; attachments
+remain immutable and need no adapter-defined timestamps.
+
+**Rejected alternatives.** Reusing an earlier attachment proves only the first
+publication. Comparing provider timestamps would make domain validity depend on
+host-specific clocks and timestamp semantics.
+
+**Affects.** Finding-event admission and reconstitution, external-link
+validation, the [review-workflows specification](spec/review-workflows.md), and
+the `2026072604xx` persistence slice.
+
 ## 2026-07-25 — Defer executable review-pass admission coordination
 
 **Context.** The existing session scheduler may activate an accepted input
@@ -32,20 +52,18 @@ the review domain would collapse the evidence and coordination boundaries.
 
 ## 2026-07-25 — Limit posted findings to external review content
 
-**Context.** An attached external change request or commit proves an object
-correlation but does not prove that one finding's content was published.
-Treating every external object kind as posting evidence would let unrelated
-repository objects derive `Posted`.
+**Context.** An attached repository object can prove correlation without proving
+that one finding's content was published. Treating every external object kind as
+posting evidence would let unrelated objects derive `Posted`.
 
-**Decision.** A posted finding must reference an attached review, review thread,
-inline review comment, or general change-request comment associated with that
-finding. Change-request and commit links remain valid correlations but cannot
-prove posting.
+**Decision.** A posted finding must use one of the external review-content
+object kinds owned by the
+[finding-machine specification](spec/review-workflows.md#finding-machine). Other
+external-link kinds remain valid correlations but cannot prove posting.
 
 **Rejected alternatives.** Accepting every attached object confuses repository
-identity with published review content. Restricting posting to inline comments
-alone excludes whole-review and general-comment publication forms already in the
-closed vocabulary.
+identity with published review content. Restricting posting to only one review
+form excludes other publication forms in the specification's closed vocabulary.
 
 **Affects.** Finding-event admission and reconstitution, external-link
 validation, the [review-workflows specification](spec/review-workflows.md), and
