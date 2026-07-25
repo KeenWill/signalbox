@@ -67,6 +67,7 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
             canonical_pass.pass_id AS evidence_pass_id,
             canonical_pass.run_id AS evidence_pass_run_id,
             canonical_pass.target_id AS evidence_pass_target_id,
+            canonical_pass.pass_kind AS evidence_pass_kind,
             canonical_pass.state_kind AS evidence_pass_state_kind,
             canonical_pass.turn_id AS evidence_pass_turn_id,
             canonical_pass.output_frontier_id
@@ -81,6 +82,7 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
 pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             workflow_pass.pass_id, workflow_pass.run_id,
             workflow_pass.target_id, workflow_pass.pass_kind,
+            canonical_run.workflow_kind AS run_workflow_kind,
             workflow_pass.session_id AS pass_session_id,
             workflow_pass.accepted_input_id, workflow_pass.state_kind,
             workflow_pass.turn_id, workflow_pass.output_frontier_id,
@@ -95,6 +97,9 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             canonical_turn.terminal_frontier_id
                 AS turn_terminal_frontier_id
        FROM review_pass AS workflow_pass
+       JOIN review_run AS canonical_run
+         ON canonical_run.run_id = workflow_pass.run_id
+        AND canonical_run.target_id = workflow_pass.target_id
        LEFT JOIN accepted_input AS canonical_input
          ON canonical_input.accepted_input_id =
             workflow_pass.accepted_input_id

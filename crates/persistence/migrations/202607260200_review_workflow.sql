@@ -55,9 +55,19 @@ CREATE TABLE review_target (
             stack_parent_target_id IS NULL
             OR stack_parent_target_id <> target_id
         ),
+    CONSTRAINT review_target_repository_identity_key
+        UNIQUE (target_id, provider_key, repository_key),
     CONSTRAINT review_target_parent_fk
-        FOREIGN KEY (stack_parent_target_id)
-        REFERENCES review_target (target_id)
+        FOREIGN KEY (
+            stack_parent_target_id,
+            provider_key,
+            repository_key
+        )
+        REFERENCES review_target (
+            target_id,
+            provider_key,
+            repository_key
+        )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
@@ -166,6 +176,8 @@ CREATE TABLE review_pass (
 
     CONSTRAINT review_pass_ancestry_key
         UNIQUE (pass_id, run_id, target_id),
+    CONSTRAINT review_pass_run_unique
+        UNIQUE (run_id, target_id),
     CONSTRAINT review_pass_kind_closed
         CHECK (
             pass_kind IN (
@@ -356,6 +368,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    canonical_run_workflow text;
     canonical_turn_state text;
     canonical_turn_disposition text;
 BEGIN
@@ -365,6 +378,35 @@ BEGIN
            OR NEW.output_frontier_id IS NOT NULL
         THEN
             RAISE EXCEPTION 'review pass must begin queued'
+                USING ERRCODE = '23514';
+        END IF;
+        SELECT workflow_kind
+          INTO canonical_run_workflow
+          FROM review_run
+         WHERE run_id = NEW.run_id
+           AND target_id = NEW.target_id;
+        IF canonical_run_workflow IS NULL
+           OR NOT (
+               (canonical_run_workflow = 'import_external_context'
+                AND NEW.pass_kind = 'import_external_context')
+               OR (canonical_run_workflow = 'read_only_review'
+                   AND NEW.pass_kind = 'read_only_review')
+               OR (canonical_run_workflow = 'judge_findings'
+                   AND NEW.pass_kind = 'judge')
+               OR (canonical_run_workflow = 'dedupe_findings'
+                   AND NEW.pass_kind = 'dedupe')
+               OR (canonical_run_workflow = 'publish_review'
+                   AND NEW.pass_kind = 'publish')
+               OR (canonical_run_workflow = 'fix_findings'
+                   AND NEW.pass_kind = 'fix')
+               OR (canonical_run_workflow = 'propagate_stack'
+                   AND NEW.pass_kind = 'propagate_stack')
+           )
+        THEN
+            RAISE EXCEPTION
+                'review pass kind % contradicts run workflow %',
+                NEW.pass_kind,
+                canonical_run_workflow
                 USING ERRCODE = '23514';
         END IF;
         RETURN NEW;
@@ -468,6 +510,104 @@ BEFORE INSERT OR UPDATE ON review_pass
 FOR EACH ROW
 EXECUTE FUNCTION guard_review_pass_change();
 
+CREATE FUNCTION require_review_pass_run_projection()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    canonical_run_state text;
+    canonical_run_pass uuid;
+BEGIN
+    SELECT state_kind, state_pass_id
+      INTO canonical_run_state, canonical_run_pass
+      FROM review_run
+     WHERE run_id = NEW.run_id
+       AND target_id = NEW.target_id;
+
+    IF NEW.state_kind = 'queued' THEN
+        IF canonical_run_state IS DISTINCT FROM 'queued'
+           OR canonical_run_pass IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'queued pass is not under a queued run'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.state_kind = 'cancelled' AND NEW.turn_id IS NULL THEN
+        IF canonical_run_state IS DISTINCT FROM 'cancelled'
+           OR canonical_run_pass IS NOT NULL
+        THEN
+            RAISE EXCEPTION
+                'pre-start cancelled pass contradicts its run projection'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF canonical_run_pass IS DISTINCT FROM NEW.pass_id
+          OR canonical_run_state IS DISTINCT FROM NEW.state_kind
+    THEN
+        RAISE EXCEPTION
+            'review pass state contradicts its run projection'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER review_pass_run_projection_is_guarded
+AFTER INSERT OR UPDATE ON review_pass
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_pass_run_projection();
+
+CREATE FUNCTION require_review_run_pass_projection()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    canonical_pass_id uuid;
+    canonical_pass_state text;
+    canonical_pass_turn uuid;
+BEGIN
+    SELECT pass_id, state_kind, turn_id
+      INTO canonical_pass_id, canonical_pass_state, canonical_pass_turn
+      FROM review_pass
+     WHERE run_id = NEW.run_id
+       AND target_id = NEW.target_id;
+
+    IF NEW.state_kind = 'queued' THEN
+        IF canonical_pass_id IS NOT NULL
+           AND canonical_pass_state IS DISTINCT FROM 'queued'
+        THEN
+            RAISE EXCEPTION 'queued run has a non-queued pass'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.state_kind = 'cancelled' AND NEW.state_pass_id IS NULL THEN
+        IF canonical_pass_id IS NOT NULL
+           AND (
+               canonical_pass_state IS DISTINCT FROM 'cancelled'
+               OR canonical_pass_turn IS NOT NULL
+           )
+        THEN
+            RAISE EXCEPTION
+                'pre-start cancelled run has a non-cancelled pass'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF canonical_pass_id IS DISTINCT FROM NEW.state_pass_id
+          OR canonical_pass_state IS DISTINCT FROM NEW.state_kind
+    THEN
+        RAISE EXCEPTION
+            'review run state contradicts its pass projection'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER review_run_pass_projection_is_guarded
+AFTER INSERT OR UPDATE ON review_run
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_run_pass_projection();
+
 CREATE TRIGGER review_pass_reject_delete
 BEFORE DELETE ON review_pass
 FOR EACH ROW
@@ -549,6 +689,9 @@ CREATE FUNCTION guard_review_finding_insert()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    canonical_pass_kind text;
+    canonical_pass_state text;
 BEGIN
     IF NEW.diff_side IS NOT NULL
        AND NOT EXISTS (
@@ -559,6 +702,19 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'diff-relative finding requires a target base'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT pass_kind, state_kind
+      INTO canonical_pass_kind, canonical_pass_state
+      FROM review_pass
+     WHERE pass_id = NEW.producing_pass_id
+       AND run_id = NEW.run_id
+       AND target_id = NEW.target_id;
+    IF canonical_pass_kind IS DISTINCT FROM 'read_only_review'
+       OR canonical_pass_state IS DISTINCT FROM 'succeeded'
+    THEN
+        RAISE EXCEPTION
+            'finding producer must be a succeeded read-only-review pass'
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
@@ -701,6 +857,36 @@ CREATE TABLE review_external_link_attachment (
         ON DELETE RESTRICT
 );
 
+CREATE FUNCTION guard_review_external_link_attachment_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    canonical_pass_kind text;
+    canonical_pass_state text;
+BEGIN
+    SELECT pass_kind, state_kind
+      INTO canonical_pass_kind, canonical_pass_state
+      FROM review_pass
+     WHERE pass_id = NEW.pass_id
+       AND run_id = NEW.pass_run_id
+       AND target_id = NEW.target_id;
+    IF canonical_pass_kind NOT IN ('publish', 'import_external_context')
+       OR canonical_pass_state IS DISTINCT FROM 'succeeded'
+    THEN
+        RAISE EXCEPTION
+            'external attachment requires a succeeded attaching pass'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER review_external_link_attachment_insert_is_guarded
+BEFORE INSERT ON review_external_link_attachment
+FOR EACH ROW
+EXECUTE FUNCTION guard_review_external_link_attachment_insert();
+
 CREATE TRIGGER review_external_link_attachment_is_append_only
 BEFORE UPDATE OR DELETE ON review_external_link_attachment
 FOR EACH ROW
@@ -830,7 +1016,9 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     event_pass_kind text;
+    event_pass_state text;
     previous_kind text;
+    previous_pass_kind text;
     previous_status text;
     expected_ordinal bigint;
 BEGIN
@@ -839,8 +1027,8 @@ BEGIN
      WHERE finding_id = NEW.finding_id
      FOR NO KEY UPDATE;
 
-    SELECT pass_kind
-      INTO event_pass_kind
+    SELECT pass_kind, state_kind
+      INTO event_pass_kind, event_pass_state
       FROM review_pass
      WHERE pass_id = NEW.event_pass_id
        AND run_id = NEW.event_pass_run_id
@@ -877,11 +1065,30 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    SELECT event_kind
-      INTO previous_kind
-      FROM review_finding_event
-     WHERE finding_id = NEW.finding_id
-     ORDER BY event_ordinal DESC
+    IF (
+        NEW.event_kind = 'blocked_with_reason'
+        AND event_pass_state IS DISTINCT FROM 'blocked'
+    ) OR (
+        NEW.event_kind <> 'blocked_with_reason'
+        AND event_pass_state IS DISTINCT FROM 'succeeded'
+    )
+    THEN
+        RAISE EXCEPTION
+            'finding event % is incompatible with pass state %',
+            NEW.event_kind,
+            event_pass_state
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT event.event_kind, pass.pass_kind
+      INTO previous_kind, previous_pass_kind
+      FROM review_finding_event AS event
+      JOIN review_pass AS pass
+        ON pass.pass_id = event.event_pass_id
+       AND pass.run_id = event.event_pass_run_id
+       AND pass.target_id = event.target_id
+     WHERE event.finding_id = NEW.finding_id
+     ORDER BY event.event_ordinal DESC
      LIMIT 1;
 
     SELECT COALESCE(max(event_ordinal), 0) + 1
@@ -942,13 +1149,34 @@ BEGIN
         )
         OR (
             previous_status = 'blocked_with_reason'
-            AND NEW.event_kind IN ('superseded', 'stale', 'fixed')
+            AND (
+                NEW.event_kind IN ('superseded', 'stale', 'fixed')
+                OR (
+                    NEW.event_kind = 'posted'
+                    AND previous_pass_kind = 'publish'
+                )
+            )
         )
     ) THEN
         RAISE EXCEPTION
             'invalid finding transition from % through %',
             previous_status,
             NEW.event_kind
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_kind = 'posted'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_external_link_attachment
+            WHERE external_link_id = NEW.external_link_id
+              AND target_id = NEW.target_id
+              AND pass_run_id = NEW.event_pass_run_id
+              AND pass_id = NEW.event_pass_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'posted event pass did not produce its attachment'
             USING ERRCODE = '23514';
     END IF;
 
@@ -1001,11 +1229,27 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     expected_ordinal bigint;
+    canonical_pass_kind text;
+    canonical_pass_state text;
 BEGIN
     PERFORM 1
       FROM review_external_link
      WHERE external_link_id = NEW.external_link_id
      FOR UPDATE;
+
+    SELECT pass_kind, state_kind
+      INTO canonical_pass_kind, canonical_pass_state
+      FROM review_pass
+     WHERE pass_id = NEW.pass_id
+       AND run_id = NEW.pass_run_id
+       AND target_id = NEW.target_id;
+    IF canonical_pass_kind IS DISTINCT FROM 'import_external_context'
+       OR canonical_pass_state IS DISTINCT FROM 'succeeded'
+    THEN
+        RAISE EXCEPTION
+            'external observation requires a succeeded import pass'
+            USING ERRCODE = '23514';
+    END IF;
 
     SELECT COALESCE(max(observation_ordinal), 0) + 1
       INTO expected_ordinal

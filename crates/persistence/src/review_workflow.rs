@@ -14,11 +14,11 @@ use signalbox_domain::{
     ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind,
     ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
     ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
-    ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput, ReviewPassRef,
-    ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunPassEvidence,
-    ReviewRunReconstitutionInput, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId,
-    ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId, TurnId,
+    ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput,
+    ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
+    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetParentRef, ReviewTargetSubject,
+    ReviewText, ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -59,7 +59,11 @@ impl ReviewWorkflowStore {
         .bind(change_request_number)
         .bind(target.head_revision().as_str())
         .bind(target.base_revision().map(ReviewKey::as_str))
-        .bind(target.stack_parent().map(ReviewTargetId::into_uuid))
+        .bind(
+            target
+                .stack_parent()
+                .map(|parent| parent.target().into_uuid()),
+        )
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -71,11 +75,16 @@ impl ReviewWorkflowStore {
         target: ReviewTargetId,
     ) -> Result<Option<ReviewTarget>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
-            "SELECT target_id, provider_key, repository_key, subject_kind,
-                    change_request_number, head_revision, base_revision,
-                    stack_parent_target_id
-               FROM review_target
-              WHERE target_id = $1",
+            "SELECT target.target_id, target.provider_key,
+                    target.repository_key, target.subject_kind,
+                    target.change_request_number, target.head_revision,
+                    target.base_revision, target.stack_parent_target_id,
+                    parent.provider_key AS stack_parent_provider_key,
+                    parent.repository_key AS stack_parent_repository_key
+               FROM review_target AS target
+               LEFT JOIN review_target AS parent
+                 ON parent.target_id = target.stack_parent_target_id
+              WHERE target.target_id = $1",
         )
         .bind(target.into_uuid())
         .fetch_optional(&self.pool)
@@ -128,6 +137,7 @@ impl ReviewWorkflowStore {
                     canonical_pass.pass_id AS evidence_pass_id,
                     canonical_pass.run_id AS evidence_pass_run_id,
                     canonical_pass.target_id AS evidence_pass_target_id,
+                    canonical_pass.pass_kind AS evidence_pass_kind,
                     canonical_pass.state_kind AS evidence_pass_state_kind,
                     canonical_pass.turn_id AS evidence_pass_turn_id,
                     canonical_pass.output_frontier_id
@@ -217,6 +227,7 @@ impl ReviewWorkflowStore {
         let row = sqlx::query(
             "SELECT workflow_pass.pass_id, workflow_pass.run_id,
                     workflow_pass.target_id, workflow_pass.pass_kind,
+                    canonical_run.workflow_kind AS run_workflow_kind,
                     workflow_pass.session_id AS pass_session_id,
                     workflow_pass.accepted_input_id, workflow_pass.state_kind,
                     workflow_pass.turn_id, workflow_pass.output_frontier_id,
@@ -231,6 +242,9 @@ impl ReviewWorkflowStore {
                     canonical_turn.terminal_frontier_id
                         AS turn_terminal_frontier_id
                FROM review_pass AS workflow_pass
+               JOIN review_run AS canonical_run
+                 ON canonical_run.run_id = workflow_pass.run_id
+                AND canonical_run.target_id = workflow_pass.target_id
                LEFT JOIN accepted_input AS canonical_input
                  ON canonical_input.accepted_input_id =
                     workflow_pass.accepted_input_id
@@ -282,6 +296,90 @@ impl ReviewWorkflowStore {
         Ok(Some(transitioned))
     }
 
+    /// Applies one pass transition and its matching run projection atomically.
+    pub async fn transition_run_and_pass(
+        &self,
+        run: ReviewRunId,
+        pass: ReviewPassId,
+        next_run: ReviewRunState,
+        next_pass: ReviewPassState,
+    ) -> Result<Option<(ReviewRun, ReviewPass)>, ReviewWorkflowStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let run_row = sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
+            .bind(run.into_uuid())
+            .bind(encode_run_state(next_run).1.map(ReviewPassId::into_uuid))
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some(run_row) = run_row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let pass_row = sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
+            .bind(pass.into_uuid())
+            .bind(encode_pass_state(next_pass).turn.map(TurnId::into_uuid))
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some(pass_row) = pass_row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let (current_run, _) = decode_run_for_transition(run_row)?;
+        let (current_pass, turn_evidence) = decode_pass_for_transition(pass_row)?;
+        let transitioned_pass =
+            current_pass
+                .transition(next_pass, turn_evidence)
+                .map_err(|error| {
+                    ReviewWorkflowStoreError::InvalidTransition(
+                        ReviewWorkflowTransitionError::Pass(error),
+                    )
+                })?;
+        let pass_evidence = ReviewPassEvidence::new(
+            transitioned_pass.reference(),
+            transitioned_pass.kind(),
+            transitioned_pass.state(),
+        );
+        let run_pass_evidence = match next_run {
+            ReviewRunState::Queued | ReviewRunState::Cancelled { last_pass: None } => None,
+            _ => Some(pass_evidence),
+        };
+        let transitioned_run = current_run
+            .transition(next_run, run_pass_evidence)
+            .map_err(|error| {
+                ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Run(
+                    error,
+                ))
+            })?;
+
+        let encoded_pass = encode_pass_state(transitioned_pass.state());
+        sqlx::query(
+            "UPDATE review_pass
+                SET state_kind = $2,
+                    turn_id = $3,
+                    output_frontier_id = $4
+              WHERE pass_id = $1",
+        )
+        .bind(pass.into_uuid())
+        .bind(encoded_pass.kind)
+        .bind(encoded_pass.turn.map(TurnId::into_uuid))
+        .bind(encoded_pass.frontier.map(ContextFrontierId::into_uuid))
+        .execute(&mut *transaction)
+        .await?;
+        let (run_state_kind, run_state_pass) = encode_run_state(transitioned_run.state());
+        sqlx::query(
+            "UPDATE review_run
+                SET state_kind = $2,
+                    state_pass_id = $3
+              WHERE run_id = $1",
+        )
+        .bind(run.into_uuid())
+        .bind(run_state_kind)
+        .bind(run_state_pass.map(ReviewPassId::into_uuid))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(Some((transitioned_run, transitioned_pass)))
+    }
+
     /// Inserts immutable finding content in its initial open state.
     pub async fn insert_finding(
         &self,
@@ -316,7 +414,7 @@ impl ReviewWorkflowStore {
         .bind(reference.finding().into_uuid())
         .bind(reference.run().run().into_uuid())
         .bind(reference.target().into_uuid())
-        .bind(pass.pass().into_uuid())
+        .bind(pass.reference().pass().into_uuid())
         .bind(location.file_path().as_str())
         .bind(line_start)
         .bind(line_end)
@@ -369,10 +467,23 @@ impl ReviewWorkflowStore {
                     target.provider_key, target.repository_key,
                     target.subject_kind, target.change_request_number,
                     target.head_revision, target.base_revision,
-                    target.stack_parent_target_id
+                    target.stack_parent_target_id,
+                    parent.provider_key AS stack_parent_provider_key,
+                    parent.repository_key AS stack_parent_repository_key,
+                    producing_pass.pass_kind AS producing_pass_kind,
+                    producing_pass.state_kind AS producing_pass_state_kind,
+                    producing_pass.turn_id AS producing_pass_turn_id,
+                    producing_pass.output_frontier_id
+                        AS producing_pass_output_frontier_id
                FROM review_finding AS finding
                JOIN review_target AS target
                  ON target.target_id = finding.target_id
+               LEFT JOIN review_target AS parent
+                 ON parent.target_id = target.stack_parent_target_id
+               JOIN review_pass AS producing_pass
+                 ON producing_pass.pass_id = finding.producing_pass_id
+                AND producing_pass.run_id = finding.run_id
+                AND producing_pass.target_id = finding.target_id
               WHERE finding.finding_id = $1",
         )
         .bind(finding.into_uuid())
@@ -388,6 +499,10 @@ impl ReviewWorkflowStore {
                     event.finding_run_id, event.target_id,
                     event.event_pass_id, event.event_pass_run_id,
                     event_pass.pass_kind AS event_pass_kind,
+                    event_pass.state_kind AS event_pass_state_kind,
+                    event_pass.turn_id AS event_pass_turn_id,
+                    event_pass.output_frontier_id
+                        AS event_pass_output_frontier_id,
                     event.event_kind, event.reason,
                     event.referenced_finding_id, event.external_link_id,
                     referenced_finding.producing_pass_id
@@ -406,6 +521,11 @@ impl ReviewWorkflowStore {
                     attachment.target_id AS attachment_target_id,
                     attachment.pass_run_id AS attachment_pass_run_id,
                     attachment.pass_id AS attachment_pass_id,
+                    attachment_pass.pass_kind AS attachment_pass_kind,
+                    attachment_pass.state_kind AS attachment_pass_state_kind,
+                    attachment_pass.turn_id AS attachment_pass_turn_id,
+                    attachment_pass.output_frontier_id
+                        AS attachment_pass_output_frontier_id,
                     attachment.external_object_key
                         AS attachment_external_object_key
                FROM review_finding_event AS event
@@ -427,6 +547,10 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_external_link_attachment AS attachment
                  ON attachment.external_link_id =
                     canonical_link.external_link_id
+               LEFT JOIN review_pass AS attachment_pass
+                 ON attachment_pass.pass_id = attachment.pass_id
+                AND attachment_pass.run_id = attachment.pass_run_id
+                AND attachment_pass.target_id = attachment.target_id
               WHERE event.finding_id = $1
               ORDER BY event.event_ordinal",
         )
@@ -589,10 +713,18 @@ impl ReviewWorkflowStore {
         };
         let (id, association, provider, kind) = decode_external_link_root(&row)?;
         let attachment = sqlx::query(
-            "SELECT external_link_id, pass_run_id, pass_id, target_id,
-                    external_object_key
-               FROM review_external_link_attachment
-              WHERE external_link_id = $1",
+            "SELECT attachment.external_link_id, attachment.pass_run_id,
+                    attachment.pass_id, attachment.target_id,
+                    pass.pass_kind, pass.state_kind AS pass_state_kind,
+                    pass.turn_id AS pass_turn_id,
+                    pass.output_frontier_id AS pass_output_frontier_id,
+                    attachment.external_object_key
+               FROM review_external_link_attachment AS attachment
+               JOIN review_pass AS pass
+                 ON pass.pass_id = attachment.pass_id
+                AND pass.run_id = attachment.pass_run_id
+                AND pass.target_id = attachment.target_id
+              WHERE attachment.external_link_id = $1",
         )
         .bind(link.into_uuid())
         .fetch_optional(&mut *transaction)
@@ -600,11 +732,20 @@ impl ReviewWorkflowStore {
         .map(|row| decode_external_link_attachment(&row))
         .transpose()?;
         let observations = sqlx::query(
-            "SELECT external_link_id, observation_ordinal, pass_run_id,
-                    pass_id, target_id, object_state
-               FROM review_external_link_observation
-              WHERE external_link_id = $1
-              ORDER BY observation_ordinal",
+            "SELECT observation.external_link_id,
+                    observation.observation_ordinal,
+                    observation.pass_run_id, observation.pass_id,
+                    observation.target_id, observation.object_state,
+                    pass.pass_kind, pass.state_kind AS pass_state_kind,
+                    pass.turn_id AS pass_turn_id,
+                    pass.output_frontier_id AS pass_output_frontier_id
+               FROM review_external_link_observation AS observation
+               JOIN review_pass AS pass
+                 ON pass.pass_id = observation.pass_id
+                AND pass.run_id = observation.pass_run_id
+                AND pass.target_id = observation.target_id
+              WHERE observation.external_link_id = $1
+              ORDER BY observation.observation_ordinal",
         )
         .bind(link.into_uuid())
         .fetch_all(&mut *transaction)
@@ -668,6 +809,8 @@ async fn insert_finding_event(
 
 fn decode_target(row: &PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> {
     let id = target_id(row.try_get("target_id")?);
+    let provider = review_key(row.try_get("provider_key")?, "review_target")?;
+    let repository = review_key(row.try_get("repository_key")?, "review_target")?;
     let subject_kind: String = row.try_get("subject_kind")?;
     let change_request_number: Option<Decimal> = row.try_get("change_request_number")?;
     let subject = match (subject_kind.as_str(), change_request_number) {
@@ -683,17 +826,36 @@ fn decode_target(row: &PgRow) -> Result<ReviewTarget, ReviewWorkflowStoreError> 
             ));
         }
     };
+    let stack_parent = match (
+        row.try_get::<Option<Uuid>, _>("stack_parent_target_id")?,
+        row.try_get::<Option<String>, _>("stack_parent_provider_key")?,
+        row.try_get::<Option<String>, _>("stack_parent_repository_key")?,
+    ) {
+        (None, None, None) => None,
+        (Some(target), Some(parent_provider), Some(parent_repository)) => {
+            Some(ReviewTargetParentRef::new(
+                target_id(target),
+                review_key(parent_provider, "review_target")?,
+                review_key(parent_repository, "review_target")?,
+            ))
+        }
+        _ => {
+            return Err(corruption(
+                "review_target",
+                String::from("torn canonical stack-parent evidence"),
+            ));
+        }
+    };
     ReviewTarget::try_new(
         id,
-        review_key(row.try_get("provider_key")?, "review_target")?,
-        review_key(row.try_get("repository_key")?, "review_target")?,
+        provider,
+        repository,
         subject,
         review_key(row.try_get("head_revision")?, "review_target")?,
         row.try_get::<Option<String>, _>("base_revision")?
             .map(|value| review_key(value, "review_target"))
             .transpose()?,
-        row.try_get::<Option<Uuid>, _>("stack_parent_target_id")?
-            .map(target_id),
+        stack_parent,
     )
     .map_err(|error| corruption("review_target", format!("{error:?}")))
 }
@@ -705,7 +867,7 @@ fn decode_run(row: PgRow) -> Result<ReviewRun, ReviewWorkflowStoreError> {
 
 fn decode_run_for_transition(
     row: PgRow,
-) -> Result<(ReviewRun, Option<ReviewRunPassEvidence>), ReviewWorkflowStoreError> {
+) -> Result<(ReviewRun, Option<ReviewPassEvidence>), ReviewWorkflowStoreError> {
     let canonical_evidence = decode_run_pass_evidence(&row)?;
     let (_, _, _, state) = decode_run_facts(&row)?;
     let current_evidence = projected_current_run_pass_evidence(state, canonical_evidence)?;
@@ -717,7 +879,7 @@ fn decode_run_for_transition(
 
 fn reconstitute_run(
     row: &PgRow,
-    pass_evidence: Option<ReviewRunPassEvidence>,
+    pass_evidence: Option<ReviewPassEvidence>,
 ) -> Result<ReviewRun, ReviewWorkflowStoreError> {
     let (reference, workflow, policy, state) = decode_run_facts(row)?;
     ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
@@ -769,21 +931,23 @@ fn decode_run_facts(
 
 fn decode_run_pass_evidence(
     row: &PgRow,
-) -> Result<Option<ReviewRunPassEvidence>, ReviewWorkflowStoreError> {
+) -> Result<Option<ReviewPassEvidence>, ReviewWorkflowStoreError> {
     let pass: Option<Uuid> = row.try_get("evidence_pass_id")?;
     let run: Option<Uuid> = row.try_get("evidence_pass_run_id")?;
     let target: Option<Uuid> = row.try_get("evidence_pass_target_id")?;
+    let kind: Option<String> = row.try_get("evidence_pass_kind")?;
     let state_kind: Option<String> = row.try_get("evidence_pass_state_kind")?;
     let turn: Option<Uuid> = row.try_get("evidence_pass_turn_id")?;
     let frontier: Option<Uuid> = row.try_get("evidence_pass_output_frontier_id")?;
-    match (pass, run, target, state_kind) {
-        (None, None, None, None) if turn.is_none() && frontier.is_none() => Ok(None),
-        (Some(pass), Some(run), Some(target), Some(state_kind)) => {
-            Ok(Some(ReviewRunPassEvidence::new(
+    match (pass, run, target, kind, state_kind) {
+        (None, None, None, None, None) if turn.is_none() && frontier.is_none() => Ok(None),
+        (Some(pass), Some(run), Some(target), Some(kind), Some(state_kind)) => {
+            Ok(Some(ReviewPassEvidence::new(
                 ReviewPassRef::new(
                     ReviewRunRef::new(target_id(target), run_id(run)),
                     pass_id(pass),
                 ),
+                decode_pass_kind(&kind)?,
                 decode_pass_state(&state_kind, turn, frontier)?,
             )))
         }
@@ -796,8 +960,8 @@ fn decode_run_pass_evidence(
 
 fn projected_current_run_pass_evidence(
     state: ReviewRunState,
-    canonical: Option<ReviewRunPassEvidence>,
-) -> Result<Option<ReviewRunPassEvidence>, ReviewWorkflowStoreError> {
+    canonical: Option<ReviewPassEvidence>,
+) -> Result<Option<ReviewPassEvidence>, ReviewWorkflowStoreError> {
     let Some(expected) = encode_run_state(state).1 else {
         return Ok(None);
     };
@@ -824,8 +988,9 @@ fn projected_current_run_pass_evidence(
         },
         _ => canonical.state(),
     };
-    Ok(Some(ReviewRunPassEvidence::new(
+    Ok(Some(ReviewPassEvidence::new(
         canonical.reference(),
+        canonical.kind(),
         projected,
     )))
 }
@@ -867,6 +1032,7 @@ fn reconstitute_pass(
     ReviewPass::try_reconstitute(ReviewPassReconstitutionInput::new(
         reference,
         decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
+        decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
         session_id(row.try_get("pass_session_id")?),
         accepted_input_id(row.try_get("accepted_input_id")?),
         session_id(accepted_input_session),
@@ -973,8 +1139,21 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
         target_id(row.try_get("target_id")?),
         run_id(row.try_get("run_id")?),
     );
-    let producing_pass = ReviewPassRef::new(run, pass_id(row.try_get("producing_pass_id")?));
-    let reference = ReviewFindingRef::new(producing_pass, finding_id(row.try_get("finding_id")?));
+    let producing_pass_reference =
+        ReviewPassRef::new(run, pass_id(row.try_get("producing_pass_id")?));
+    let producing_pass = ReviewPassEvidence::new(
+        producing_pass_reference,
+        decode_pass_kind(&row.try_get::<String, _>("producing_pass_kind")?)?,
+        decode_pass_state(
+            &row.try_get::<String, _>("producing_pass_state_kind")?,
+            row.try_get("producing_pass_turn_id")?,
+            row.try_get("producing_pass_output_frontier_id")?,
+        )?,
+    );
+    let reference = ReviewFindingRef::new(
+        producing_pass_reference,
+        finding_id(row.try_get("finding_id")?),
+    );
     let line_start: Option<i64> = row.try_get("line_start")?;
     let line_end: Option<i64> = row.try_get("line_end")?;
     let line_range = match (line_start, line_end) {
@@ -1031,11 +1210,19 @@ fn decode_finding_event(
             String::from("finding ancestry mismatch"),
         ));
     }
-    let pass = ReviewPassRef::new(
+    let pass_reference = ReviewPassRef::new(
         ReviewRunRef::new(row_target, run_id(row.try_get("event_pass_run_id")?)),
         pass_id(row.try_get("event_pass_id")?),
     );
-    let pass_kind = decode_pass_kind(&row.try_get::<String, _>("event_pass_kind")?)?;
+    let pass = ReviewPassEvidence::new(
+        pass_reference,
+        decode_pass_kind(&row.try_get::<String, _>("event_pass_kind")?)?,
+        decode_pass_state(
+            &row.try_get::<String, _>("event_pass_state_kind")?,
+            row.try_get("event_pass_turn_id")?,
+            row.try_get("event_pass_output_frontier_id")?,
+        )?,
+    );
     let kind: String = row.try_get("event_kind")?;
     let reason: Option<String> = row.try_get("reason")?;
     let referenced: Option<Uuid> = row.try_get("referenced_finding_id")?;
@@ -1093,7 +1280,6 @@ fn decode_finding_event(
         )?)
         .map_err(|_| corruption("review_finding_event", String::from("zero ordinal")))?,
         pass,
-        pass_kind,
         kind,
     ))
 }
@@ -1185,25 +1371,46 @@ fn decode_finding_external_link(
     let attachment_target = row.try_get::<Option<Uuid>, _>("attachment_target_id")?;
     let attachment_run = row.try_get::<Option<Uuid>, _>("attachment_pass_run_id")?;
     let attachment_pass = row.try_get::<Option<Uuid>, _>("attachment_pass_id")?;
+    let attachment_pass_kind = row.try_get::<Option<String>, _>("attachment_pass_kind")?;
+    let attachment_pass_state = row.try_get::<Option<String>, _>("attachment_pass_state_kind")?;
+    let attachment_pass_turn = row.try_get::<Option<Uuid>, _>("attachment_pass_turn_id")?;
+    let attachment_pass_frontier =
+        row.try_get::<Option<Uuid>, _>("attachment_pass_output_frontier_id")?;
     let attachment_object = row.try_get::<Option<String>, _>("attachment_external_object_key")?;
     let attachment = match (
         attachment_link,
         attachment_target,
         attachment_run,
         attachment_pass,
+        attachment_pass_kind,
+        attachment_pass_state,
         attachment_object,
     ) {
-        (None, None, None, None, None) => None,
-        (Some(link), Some(target), Some(run), Some(pass), Some(object)) => {
-            Some(ReviewExternalLinkAttachment::new(
-                external_link_id(link),
+        (None, None, None, None, None, None, None)
+            if attachment_pass_turn.is_none() && attachment_pass_frontier.is_none() =>
+        {
+            None
+        }
+        (
+            Some(link),
+            Some(target),
+            Some(run),
+            Some(pass),
+            Some(kind),
+            Some(state),
+            Some(object),
+        ) => Some(ReviewExternalLinkAttachment::new(
+            external_link_id(link),
+            ReviewPassEvidence::new(
                 ReviewPassRef::new(
                     ReviewRunRef::new(target_id(target), run_id(run)),
                     pass_id(pass),
                 ),
-                review_key(object, "review_external_link_attachment")?,
-            ))
-        }
+                decode_pass_kind(&kind)?,
+                decode_pass_state(&state, attachment_pass_turn, attachment_pass_frontier)?,
+            ),
+            review_key(object, "review_external_link_attachment")?,
+        )),
         _ => {
             return Err(corruption(
                 "review_finding_event",
@@ -1279,12 +1486,20 @@ fn decode_external_link_attachment(
 ) -> Result<ReviewExternalLinkAttachment, ReviewWorkflowStoreError> {
     Ok(ReviewExternalLinkAttachment::new(
         external_link_id(row.try_get("external_link_id")?),
-        ReviewPassRef::new(
-            ReviewRunRef::new(
-                target_id(row.try_get("target_id")?),
-                run_id(row.try_get("pass_run_id")?),
+        ReviewPassEvidence::new(
+            ReviewPassRef::new(
+                ReviewRunRef::new(
+                    target_id(row.try_get("target_id")?),
+                    run_id(row.try_get("pass_run_id")?),
+                ),
+                pass_id(row.try_get("pass_id")?),
             ),
-            pass_id(row.try_get("pass_id")?),
+            decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
+            decode_pass_state(
+                &row.try_get::<String, _>("pass_state_kind")?,
+                row.try_get("pass_turn_id")?,
+                row.try_get("pass_output_frontier_id")?,
+            )?,
         ),
         review_key(
             row.try_get("external_object_key")?,
@@ -1308,12 +1523,20 @@ fn decode_external_link_observation(
                 String::from("zero ordinal"),
             )
         })?,
-        ReviewPassRef::new(
-            ReviewRunRef::new(
-                target_id(row.try_get("target_id")?),
-                run_id(row.try_get("pass_run_id")?),
+        ReviewPassEvidence::new(
+            ReviewPassRef::new(
+                ReviewRunRef::new(
+                    target_id(row.try_get("target_id")?),
+                    run_id(row.try_get("pass_run_id")?),
+                ),
+                pass_id(row.try_get("pass_id")?),
             ),
-            pass_id(row.try_get("pass_id")?),
+            decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
+            decode_pass_state(
+                &row.try_get::<String, _>("pass_state_kind")?,
+                row.try_get("pass_turn_id")?,
+                row.try_get("pass_output_frontier_id")?,
+            )?,
         ),
         decode_external_object_state(&row.try_get::<String, _>("object_state")?)?,
     ))

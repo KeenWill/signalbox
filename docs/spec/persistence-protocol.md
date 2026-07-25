@@ -350,12 +350,16 @@ Locks per transaction, in acquisition order:
   `generation XOR ((1396852273 << 32) OR 1396852273)`, where `1396852273` is
   ASCII `SBF1`, reinterpreted unchanged as a two's-complement signed `i64` for
   PostgreSQL.
-- **Review-workflow transitions**: a run transition locks only its exact
-  `review_run` row `FOR UPDATE`; a pass transition locks only its exact
-  `review_pass` row `FOR UPDATE`. Finding-event and external-observation inserts
-  take only the corresponding schema-trigger root lock named above before
-  checking the next ordinal. Review workflow operations do not write
-  `turn_lifecycle` and therefore do not enter the session-scheduler lock order.
+- **Review-workflow transitions**: a run/pass state transition locks its exact
+  `review_run` row `FOR UPDATE` and then its exact `review_pass` row
+  `FOR UPDATE`, validates both projections, and writes both in the same
+  transaction. Deferred relational guards reject a commit containing only one
+  side of the state change. A run-only transition locks only its run row; a
+  pass-only transition locks only its pass row, and neither can commit an
+  inconsistent projection. Finding-event and external-observation inserts take
+  only the corresponding schema-trigger root lock named above before checking
+  the next ordinal. Review workflow operations do not write `turn_lifecycle` and
+  therefore do not enter the session-scheduler lock order.
 
 The guarded hub database keeps its fenced application pool and singleton guard
 behind one shutdown boundary. Graceful shutdown globally closes the pool and
