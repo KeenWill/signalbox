@@ -155,6 +155,29 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("`missing_test`", failures[0].message)
 
+    def test_named_test_with_balanced_destination_must_appear(self) -> None:
+        (self.root / "src/tests(foo).rs").write_text(
+            "#[test]\nfn existing_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "tests `missing_test` in "
+            "[`src/tests(foo).rs`](../src/tests(foo).rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test"],
+        )
+        self.assertIn("`missing_test`", failures[0].message)
+
     def test_named_test_behind_reference_link_must_appear(self) -> None:
         (self.root / "docs/invariants.md").write_text(
             "# Invariants\n\n"
@@ -421,6 +444,20 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_angle_reference_destination_honors_escaped_closer(self) -> None:
+        (self.root / "docs/target>file.md").write_text(
+            "# Target\n",
+            encoding="utf-8",
+        )
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Target][target]\n\n"
+            "[target]: <docs/target\\>file.md>\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_well_formed_inline_link_title_is_checked(self) -> None:
         (self.root / "AGENTS.md").write_text(
             '# Agent guidance\n\n[Missing](missing.md "A title")\n',
@@ -495,6 +532,32 @@ class DocsConsistencyTests(unittest.TestCase):
             ["relative-link"],
         )
         self.assertIn("`missing.md`", failures[0].message)
+
+    def test_container_end_implicitly_closes_fenced_code(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "> ```\n"
+            "> quoted code\n"
+            "[After quote](missing-quote.md)\n\n"
+            "- ```\n"
+            "  listed code\n"
+            "[After list](missing-list.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link", "relative-link"],
+        )
+        self.assertEqual(
+            failure_messages(failures),
+            [
+                "target does not exist: `missing-quote.md`",
+                "target does not exist: `missing-list.md`",
+            ],
+        )
 
     def test_invalid_backtick_fence_does_not_hide_link(self) -> None:
         (self.root / "AGENTS.md").write_text(
@@ -620,6 +683,23 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_code_span_heading_uses_rendered_literal_text(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Entity](docs/spec/example.md#amp)\n"
+            "[Whitespace](docs/spec/example.md#foo-bar)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "## `&amp;`\n\n"
+            "## `foo   bar`\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_headings_inside_markdown_containers_have_anchors(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -670,6 +750,47 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_raw_text_html_contents_do_not_define_explicit_anchors(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Script](docs/spec/example.md#script-phantom)\n"
+            "[Style](docs/spec/example.md#style-phantom)\n"
+            "[Textarea](docs/spec/example.md#textarea-phantom)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "<script>\n"
+            '<a id="script-phantom"></a>\n'
+            "</script>\n\n"
+            "<style>\n"
+            '<a id="style-phantom"></a>\n'
+            "</style>\n\n"
+            "<textarea>\n"
+            '<a id="textarea-phantom"></a>\n'
+            "</textarea>\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link", "relative-link", "relative-link"],
+        )
+        self.assertEqual(
+            failure_messages(failures),
+            [
+                "anchor `#script-phantom` does not exist in "
+                "`docs/spec/example.md`",
+                "anchor `#style-phantom` does not exist in "
+                "`docs/spec/example.md`",
+                "anchor `#textarea-phantom` does not exist in "
+                "`docs/spec/example.md`",
+            ],
+        )
 
     def test_heading_autolink_contributes_its_visible_text(self) -> None:
         (self.root / "AGENTS.md").write_text(
@@ -957,6 +1078,24 @@ class DocsConsistencyTests(unittest.TestCase):
             "This page isn't verified through PR #12 (`agent/example`).\n\n"
             "It wasn't verified through PR #13 (`agent/other`).\n\n"
             "It hasn't been verified against PR #14 (`agent/third`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_cannot_verification_reference_does_not_satisfy_page(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "This page cannot be verified against implementation through "
+            "PR #12 (`agent/example`).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
             encoding="utf-8",

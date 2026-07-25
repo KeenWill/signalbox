@@ -51,6 +51,10 @@ RAW_HTML_LITERAL_OPEN = re.compile(
     r"^ {0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t\r\n>]|$)",
     re.IGNORECASE,
 )
+RAW_HTML_TEXT_OPEN = re.compile(
+    r"^ {0,3}<(?P<tag>script|style|textarea)(?:[ \t\r\n>]|$)",
+    re.IGNORECASE,
+)
 RAW_HTML_BLOCK_TAG = re.compile(
     r"^ {0,3}</?(?:"
     r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
@@ -86,7 +90,8 @@ REFERENCE_LABEL = r"(?:\\[^\r\n]|[^\]\\\r\n])+"
 REFERENCE_DEFINITION = re.compile(
     rf"(?m)^[ \t]*\[(?P<label>{REFERENCE_LABEL})\]:[ \t]*"
     r"(?:\r?\n[ \t]+)?"
-    r"(?:<(?P<angled_destination>[^>\r\n]*)>|(?P<destination>\S+))"
+    r"(?:<(?P<angled_destination>(?:\\.|[^>\\\r\n])*)>|"
+    r"(?P<destination>\S+))"
     r"(?:(?:[ \t]+|\r?\n[ \t]+)(?:"
     r'"(?:\\.|[^"\\\r\n])*"'
     r"|'(?:\\.|[^'\\\r\n])*'"
@@ -114,6 +119,7 @@ VERIFICATION_LEAD = re.compile(
 )
 VERIFICATION_NEGATION = re.compile(
     r"(?:\b(?:not|never)(?:[ \t]+\w+){0,3}[ \t]+"
+    r"|\bcannot(?:[ \t]+\w+){0,3}[ \t]+"
     r"|\bno(?:[ \t]+\w+){1,5}[ \t]+"
     r"|\b[A-Za-z]+n['’]t(?:[ \t]+\w+){0,3}[ \t]+)$",
     re.IGNORECASE,
@@ -125,8 +131,7 @@ TEST_GROUP = re.compile(
     r"(?:[ \t]*(?:,[ \t]*(?:and[ \t]+)?|and[ \t]+)"
     r"`[A-Za-z_][A-Za-z0-9_:]*`)*"
     r")"
-    r"[ \t]+in[ \t]+"
-    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\])?)",
+    r"[ \t]+in\b",
     re.IGNORECASE,
 )
 NATURAL_TEST_BINDING = re.compile(
@@ -136,8 +141,7 @@ NATURAL_TEST_BINDING = re.compile(
     r"\btests?(?:[ \t]+named)?[ \t]+"
     r"`(?P<after>[A-Za-z_][A-Za-z0-9_:]*)`"
     r")"
-    r"[ \t]+in[ \t]+"
-    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\])?)",
+    r"[ \t]+in\b",
     re.IGNORECASE,
 )
 
@@ -184,11 +188,20 @@ def mask_range(buffer: list[str], start: int, end: int) -> None:
 
 def strip_block_quote_containers(line: str) -> str:
     """Remove repeated block-quote prefixes without consuming list markers."""
+    return block_quote_context(line)[0]
+
+
+def block_quote_context(line: str, limit: int | None = None) -> tuple[str, int]:
+    """Remove up to ``limit`` quote prefixes and return the removed depth."""
+    depth = 0
     while True:
+        if limit is not None and depth == limit:
+            return line, depth
         match = BLOCK_QUOTE_CONTAINER.match(line)
         if match is None:
-            return line
+            return line, depth
         line = line[match.end() :]
+        depth += 1
 
 
 def mask_reference_container_prefixes(text: str) -> str:
@@ -213,11 +226,15 @@ def mask_reference_container_prefixes(text: str) -> str:
 
 def fence_opening_context(
     line: str, list_content_columns: list[int]
-) -> tuple[str, int]:
+) -> tuple[str, int, int]:
     """Return fence content after active Markdown quote/list containers."""
-    content = strip_block_quote_containers(line)
+    content, quote_depth = block_quote_context(line)
     if not content.strip():
-        return content, list_content_columns[-1] if list_content_columns else 0
+        return (
+            content,
+            list_content_columns[-1] if list_content_columns else 0,
+            quote_depth,
+        )
 
     prefix = re.match(r"^[ \t]*", content).group(0)
     leading = indentation_columns(prefix)
@@ -242,12 +259,16 @@ def fence_opening_context(
             content_column += indentation_columns(marker.group(0))
             list_content_columns.append(content_column)
             remainder = remainder[marker.end() :]
-        return remainder, content_column
+        return remainder, content_column, quote_depth
 
     if list_content_columns:
         content_column = list_content_columns[-1]
-        return remove_indentation(content, content_column), content_column
-    return content, 0
+        return (
+            remove_indentation(content, content_column),
+            content_column,
+            quote_depth,
+        )
+    return content, 0, quote_depth
 
 
 def remove_indentation(line: str, columns: int) -> str:
@@ -277,21 +298,47 @@ def mask_fenced_code(text: str) -> str:
     fence_char: str | None = None
     fence_length = 0
     fence_container_indent = 0
+    fence_quote_depth = 0
     list_content_columns: list[int] = []
     for line in text.splitlines(keepends=True):
         if fence_char is None:
-            container_content, container_indent = fence_opening_context(
-                line, list_content_columns
-            )
+            (
+                container_content,
+                container_indent,
+                container_quote_depth,
+            ) = fence_opening_context(line, list_content_columns)
             match = FENCE.match(container_content)
         else:
-            quoted_content = strip_block_quote_containers(line)
-            container_content = remove_indentation(
-                quoted_content,
-                fence_container_indent,
+            quoted_content, quote_depth = block_quote_context(
+                line, fence_quote_depth
             )
-            container_indent = 0
-            match = None
+            leading = indentation_columns(
+                re.match(r"^[ \t]*", quoted_content).group(0)
+            )
+            container_ended = quote_depth < fence_quote_depth or (
+                fence_container_indent
+                and quoted_content.strip()
+                and leading < fence_container_indent
+            )
+            if container_ended:
+                fence_char = None
+                fence_length = 0
+                fence_container_indent = 0
+                fence_quote_depth = 0
+                (
+                    container_content,
+                    container_indent,
+                    container_quote_depth,
+                ) = fence_opening_context(line, list_content_columns)
+                match = FENCE.match(container_content)
+            else:
+                container_content = remove_indentation(
+                    quoted_content,
+                    fence_container_indent,
+                )
+                container_indent = 0
+                container_quote_depth = 0
+                match = None
 
         if fence_char is None and match is not None:
             fence = match.group("fence")
@@ -301,6 +348,7 @@ def mask_fenced_code(text: str) -> str:
             fence_char = fence[0]
             fence_length = len(fence)
             fence_container_indent = container_indent
+            fence_quote_depth = container_quote_depth
             mask_range(buffer, offset, offset + len(line))
         elif fence_char is not None:
             mask_range(buffer, offset, offset + len(line))
@@ -313,6 +361,7 @@ def mask_fenced_code(text: str) -> str:
                 fence_char = None
                 fence_length = 0
                 fence_container_indent = 0
+                fence_quote_depth = 0
         offset += len(line)
     return "".join(buffer)
 
@@ -438,6 +487,30 @@ def mask_raw_html_blocks(text: str) -> str:
                     terminator = None
 
         previous_blank = blank
+        offset += len(line)
+    return "".join(buffer)
+
+
+def mask_raw_text_html_blocks(text: str) -> str:
+    """Mask HTML raw-text elements whose contents cannot define anchors."""
+    buffer = list(text)
+    offset = 0
+    terminator: re.Pattern[str] | None = None
+    for line in text.splitlines(keepends=True):
+        container_content = strip_heading_containers(line)
+        if terminator is None:
+            opening = RAW_HTML_TEXT_OPEN.match(container_content)
+            if opening is not None:
+                tag = opening.group("tag")
+                terminator = re.compile(
+                    rf"</{re.escape(tag)}[ \t\r\n]*>",
+                    re.IGNORECASE,
+                )
+
+        if terminator is not None:
+            mask_range(buffer, offset, offset + len(line))
+            if terminator.search(container_content):
+                terminator = None
         offset += len(line)
     return "".join(buffer)
 
@@ -781,6 +854,45 @@ def extract_resolved_links(
     return links
 
 
+def resolved_link_at(
+    text: str, index: int, definitions: dict[str, MarkdownLink]
+) -> MarkdownLink | None:
+    """Resolve the single Markdown link immediately following ``index``."""
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    if index >= len(text) or text[index] != "[" or is_escaped(text, index):
+        return None
+
+    inline = parse_inline_link_at(text, index)
+    if inline is not None:
+        return inline[0]
+
+    label_end = find_closing_bracket(text, index)
+    if label_end is None:
+        return None
+    label = text[index + 1 : label_end]
+    reference_label = label
+    end = label_end + 1
+    if end < len(text) and text[end] == "(":
+        return None
+    if end < len(text) and text[end] == "[":
+        reference_end = find_closing_bracket(text, end)
+        if reference_end is None:
+            return None
+        reference_label = text[end + 1 : reference_end] or label
+    elif end < len(text) and text[end] == ":":
+        return None
+
+    definition = definitions.get(normalize_reference_label(reference_label))
+    if definition is None:
+        return None
+    return MarkdownLink(
+        label=label,
+        destination=definition.destination,
+        offset=index,
+    )
+
+
 def extract_markdown_links(text: str) -> list[MarkdownLink]:
     """Return inline links and reference-definition destinations."""
     links = extract_inline_links(text)
@@ -890,13 +1002,37 @@ def render_link_labels(text: str) -> str:
     return "".join(rendered)
 
 
+def protect_heading_code_spans(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Replace code spans with placeholders and return their rendered text."""
+    rendered: list[str] = []
+    replacements: list[tuple[str, str]] = []
+    copy_from = 0
+    for start, end in inline_code_ranges(text):
+        delimiter_length = 1
+        while text[start + delimiter_length] == "`":
+            delimiter_length += 1
+        content = text[start + delimiter_length : end - delimiter_length]
+        content = re.sub(r"[ \t\r\n]+", " ", content)
+        if content.startswith(" ") and content.endswith(" ") and content.strip():
+            content = content[1:-1]
+        placeholder = f"\x00{len(replacements)}\x00"
+        rendered.append(text[copy_from:start])
+        rendered.append(placeholder)
+        replacements.append((placeholder, content))
+        copy_from = end
+    rendered.append(text[copy_from:])
+    return "".join(rendered), replacements
+
+
 def render_heading_text(text: str) -> str:
+    text, code_spans = protect_heading_code_spans(text)
     text = html.unescape(text)
-    text = re.sub(r"`+([^`]*)`+", r"\1", text)
     text = render_link_labels(text)
     text = AUTOLINK.sub(r"\1", text)
     text = re.sub(r"<[^>]*>", "", text)
     text = re.sub(r"\\(.)", r"\1", text)
+    for placeholder, content in code_spans:
+        text = text.replace(placeholder, content)
     return text
 
 
@@ -928,7 +1064,9 @@ def strip_heading_containers(line: str) -> str:
 def heading_anchors(path: Path) -> frozenset[str]:
     original = path.read_text(encoding="utf-8")
     literal_text = mask_html_comments(mask_fenced_code(original))
-    anchor_text = mask_inline_code(mask_indented_code(literal_text))
+    anchor_text = mask_raw_text_html_blocks(
+        mask_inline_code(mask_indented_code(literal_text))
+    )
     explicit_anchors = {
         html.unescape(
             next(value for value in match.groups() if value is not None)
@@ -1007,14 +1145,13 @@ def named_tests(
     bindings: list[tuple[str, MarkdownLink]] = []
 
     for match in TEST_GROUP.finditer(enforcement):
-        links = extract_resolved_links(match.group("link"), definitions)
-        if len(links) != 1:
+        linked = resolved_link_at(enforcement, match.end(), definitions)
+        if linked is None:
             continue
-        linked = links[0]
         adjusted = MarkdownLink(
             label=linked.label,
             destination=linked.destination,
-            offset=match.start("link") + linked.offset,
+            offset=linked.offset,
         )
         for name in re.findall(r"`([A-Za-z_][A-Za-z0-9_:]*)`", match.group("names")):
             key = (name, adjusted.destination)
@@ -1023,14 +1160,13 @@ def named_tests(
                 bindings.append((name, adjusted))
 
     for match in NATURAL_TEST_BINDING.finditer(enforcement):
-        links = extract_resolved_links(match.group("link"), definitions)
-        if len(links) != 1:
+        linked = resolved_link_at(enforcement, match.end(), definitions)
+        if linked is None:
             continue
-        linked = links[0]
         adjusted = MarkdownLink(
             label=linked.label,
             destination=linked.destination,
-            offset=match.start("link") + linked.offset,
+            offset=linked.offset,
         )
         name = match.group("before") or match.group("after")
         key = (name, adjusted.destination)
