@@ -245,9 +245,11 @@ the sweep (INV-007).
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. Each authoritative pass first asks its
 execution composition to reconcile any active running tool round for the hinted
-session, then runs ordinary queued-turn activation. A parked approval returns
-from the pass immediately and therefore retains no scheduler worker capacity.
-Activation returns the activated turn
+session, then runs ordinary queued-turn activation. Failure of the read-only
+active-round lookup is an ordinary failed pass for later scheduler retry; only a
+failure after active-turn execution begins trips fatal recovery supervision. A
+parked approval returns from the pass immediately and therefore retains no
+scheduler worker capacity. Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
