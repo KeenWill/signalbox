@@ -10,6 +10,46 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Bind blocked publication to its attempted reservation
+
+**Context.** A blocked external-publication pass can follow an ambiguous write
+after reserving a link. A reason alone does not identify the attempted write
+when the finding has more than one pending reservation, so later reconciliation
+could attach and post through a different reservation.
+
+**Decision.** An external-publication `BlockedWithReason` event commits the
+exact pending reservation associated with its finding. A later reconciled
+`Posted` transition must attach and consume that reservation. A finding-repair
+block carries no reservation.
+
+**Rejected alternatives.** Inferring the reservation from the finding is
+ambiguous. Selecting any later attachment can attribute the external write to
+the wrong attempt. Requiring reservations for repair blocks invents external
+evidence where no publication occurred.
+
+**Affects.** Review finding-event payloads, pass results, publication
+reconciliation, the [review-workflows specification](spec/review-workflows.md),
+and the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Do not record unchanged external observations
+
+**Context.** Polling a long-lived external review object can repeatedly report
+the same state. Persisting each unchanged report makes complete aggregate loads
+grow with polling frequency rather than with meaning-bearing state changes.
+
+**Decision.** An external state equal to the latest recorded observation is a
+semantic no-op. It appends no observation and binds no pass result. A changed
+state appends the next contiguous ordinal and binds that exact observation.
+
+**Rejected alternatives.** A fixed lifetime count eventually rejects legitimate
+state changes. Paginated or snapshotted history adds a new loading contract not
+needed for the current state vocabulary. Retaining every poll preserves no
+additional domain fact.
+
+**Affects.** External-link observation admission and reconstitution, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
 ## 2026-07-25 — Give each review pass one accepted input
 
 **Context.** A session accepted input executes through one canonical turn.

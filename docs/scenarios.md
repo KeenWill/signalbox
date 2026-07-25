@@ -921,21 +921,11 @@ those tests.
 
 - **User intent:** Review one exact repository revision and trust that the
   workflow result is backed by the session execution that produced it.
-- **Durable commands:** Freeze a target snapshot and complete policy; create a
-  queued run and pass only after the pass input is accepted in its exact session
-  and is canonically classified as the origin of its own queued turn, prove that
-  no other review pass owns that input, and project the pass from that exact
-  origin turn; bind each effect-producing pass once to its exact bounded finding
-  inventory, complete finding-event payload, attachment, or observation result;
-  an attachment that posts a finding commits both effects in that one result;
-  and append each proposed finding's own contiguous event history. Duplicate and
-  superseded events authenticate an open or accepted referenced finding before
-  committing. Acceptance and posting enforce the finding's frozen judgment and
-  publication confidence thresholds. Publication, when requested by later
-  orchestration, reserves its link under the target's canonical provider before
-  the external call and attaches the canonical provider-wide object identity
-  afterward. Only a refreshed snapshot of the same canonical change request may
-  reassociate that object.
+- **Durable commands:** Record the target, execution-backed pass, exact result,
+  finding history, and any publication evidence under the
+  [review-workflows contract](spec/review-workflows.md). Publication, when
+  requested by later orchestration, reserves before the external call and
+  reconciles that same reservation afterward.
 - **State transitions:** Follow the closed target, run, pass, finding, and
   external-link machines in the
   [review-workflows specification](spec/review-workflows.md). The S29 fixture

@@ -143,9 +143,11 @@ The optional `result` is one closed `ReviewPassResult`:
 - `FindingEvent` names one exact finding, event ordinal, and projected event
   payload. The payload commits the discriminator and every meaning-bearing
   value: rejection or blocking reason, referenced finding identity plus its
-  authenticated admission status for duplicate or superseded. `Posted` is the
-  one finding event committed by the attachment result instead, because its pass
-  is also the attachment producer.
+  authenticated admission status for duplicate or superseded, and the exact
+  pending reservation attempted by a blocked external-publication pass.
+  Finding-repair blocking names no reservation. `Posted` is the one finding
+  event committed by the attachment result instead, because its pass is also the
+  attachment producer.
 - `ExternalLinkAttachment` names the exact reservation and canonical external
   object key. When attachment also posts a finding, it additionally commits that
   exact finding, event ordinal, `Posted` discriminator, and reservation in the
@@ -210,24 +212,26 @@ requires the finding's confidence to meet the frozen policy's minimum
 publication confidence; this foundation defines no override. Posted findings may
 be fixed, blocked, superseded, or made stale. Blocked findings may later be
 fixed, superseded, or made stale; a finding blocked by publication may also
-become posted after reconciliation supplies an attached external link not
-consumed by any earlier posted event for that finding. Each posted event
-consumes its link as publication evidence. Rejected, duplicate, superseded,
-stale, and fixed are terminal. Every event carries its owning finding reference,
-a contiguous one-based ordinal, and a same-target pass reference. The event
-pass's canonical run supplies its workflow and the exact `ReviewPolicy` frozen
-by the finding's producing run, so judgment, deduplication, and every later
-classification remain under one policy even though their one-pass workflows use
-separate run identities. The pass's terminal result commits to the event's exact
-finding, ordinal, and projected payload; a posted event is committed inside that
-pass's attachment result. Event and pass kinds are compatible only as follows:
-accepted, rejected, and stale events name a judgment pass; duplicate and
-superseded events name a deduplication pass; posted names an
-external-publication or external-context-import pass; fixed names a
-finding-repair pass; and blocked-with-reason names either an
+become posted after reconciliation attaches the exact reservation named by that
+blocking event, provided no earlier posted event for the finding consumed it.
+Each posted event consumes its link as publication evidence. Rejected,
+duplicate, superseded, stale, and fixed are terminal. Every event carries its
+owning finding reference, a contiguous one-based ordinal, and a same-target pass
+reference. The event pass's canonical run supplies its workflow and the exact
+`ReviewPolicy` frozen by the finding's producing run, so judgment,
+deduplication, and every later classification remain under one policy even
+though their one-pass workflows use separate run identities. The pass's terminal
+result commits to the event's exact finding, ordinal, and projected payload; a
+posted event is committed inside that pass's attachment result. Event and pass
+kinds are compatible only as follows: accepted, rejected, and stale events name
+a judgment pass; duplicate and superseded events name a deduplication pass;
+posted names an external-publication or external-context-import pass; fixed
+names a finding-repair pass; and blocked-with-reason names either an
 external-publication or finding-repair pass. Every event except
 blocked-with-reason names a canonically succeeded pass; blocked-with-reason
-names a canonically blocked pass.
+names a canonically blocked pass. An external-publication block names one exact
+pending reservation associated with its finding; a finding-repair block names
+none.
 
 Duplicate and superseded events freeze the referenced finding's canonically
 authenticated current status at admission. That status must be `Open` or
@@ -273,9 +277,11 @@ The identifier is an opaque canonical provider-wide key. An adapter qualifies a
 repository-scoped host identifier with the canonical repository key before
 constructing it. The store uniquely admits one attachment per reservation and
 one attached provider/kind/object identity per exact target snapshot. The first
-attachment also establishes that object's logical target identity. Another
-snapshot may attach the same canonical object only when both snapshots are
-change requests with the same canonical provider, repository, and positive
+attachment also establishes that object's logical target identity in an
+immutable provider/kind/object registry. Attachment admission serializes on that
+canonical object identity before reading or establishing its logical target.
+Another snapshot may attach the same canonical object only when both snapshots
+are change requests with the same canonical provider, repository, and positive
 change-request number; their exact revisions may differ. A commit or an
 unrelated change request cannot reassociate the object. Every refreshed snapshot
 uses its own reservation and succeeded import or publication pass. A reservation
@@ -287,25 +293,28 @@ transaction because it issues no external write.
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with the owning reservation identity, a same-target pass, and a
 contiguous ordinal. The observing pass and its canonical run agree on a
-succeeded external-context-import operation. Reconstitution rejects another
-reservation even when both share a target and rejects contradictory evidence
-reused under one pass identity across the attachment or observations.
-Observations describe the external object's reported state; they do not rewrite
-finding status.
+succeeded external-context-import operation. A report equal to the latest
+recorded state is a semantic no-op: it appends no observation and binds no pass
+result. A changed report appends the next ordinal and binds that exact effect.
+Reconstitution rejects another reservation even when both share a target and
+rejects contradictory evidence reused under one pass identity across the
+attachment or observations. Observations describe the external object's reported
+state; they do not rewrite finding status.
 
 ## Store and reconstitution
 
 The PostgreSQL store uses append-only target, run, pass, finding,
-pass-result-inventory, finding-event, external-link reservation, attachment, and
-observation records. The pass projection carries a nullable closed result
-discriminator and the exact scalar result payload; produced-finding result
-members are normalized references to the immutable canonical finding rows.
-Deferred relational validation compares their complete canonical
-identity-ordered inventory with every finding owned by that producing pass. The
-only mutable workflow columns are the current run and pass state projections;
-their evidence-bearing fields, including the one-time absent-to-bound result,
-change atomically under row lock, and database checks close every nullable
-shape. Immutable content and history tables reject update and delete.
+pass-result-inventory, finding-event, external-link reservation,
+external-object-identity, attachment, and observation records. The pass
+projection carries a nullable closed result discriminator and the exact scalar
+result payload; produced-finding result members are normalized references to the
+immutable canonical finding rows. Deferred relational validation compares their
+complete canonical identity-ordered inventory with every finding owned by that
+producing pass. The only mutable workflow columns are the current run and pass
+state projections; their evidence-bearing fields, including the one-time
+absent-to-bound result, change atomically under row lock, and database checks
+close every nullable shape. Immutable content and history tables reject update
+and delete. Every workflow table rejects `TRUNCATE`.
 
 Store loaders read a complete aggregate projection. The adapter decodes closed
 discriminators and assembles domain reconstitution inputs; the domain validates
