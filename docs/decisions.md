@@ -91,16 +91,17 @@ introduced.
 
 ## 2026-07-24 — Use jiff for IANA time-zone conversion
 
-**Context.** `current_time` must resolve IANA names, apply historical offsets,
-canonicalize zone names, and format whole-second RFC 3339 output. Signalbox
-should not own a time-zone parser or database, and the dependency should remain
-focused on the hub-local tool.
+**Context.** `current_time` must validate IANA names, apply historical offsets,
+preserve the exact accepted identifier, and format whole-second RFC 3339 output.
+Signalbox should not own a time-zone parser or database, and the dependency
+should remain focused on the hub-local tool.
 
 **Decision.** Add `jiff` to `signalbox-hubd` with default features disabled and
 only `std` plus `tzdb-zoneinfo` enabled. It reads the deployment's system
 zoneinfo database at runtime and supplies checked `SystemTime` conversion, IANA
-lookup, canonical names, offsets, and formatting. This focused runtime edge does
-not constrain other crates and does not warrant the large-dependency owner gate.
+lookup, offsets, and formatting; the adapter preserves the accepted input
+spelling. This focused runtime edge does not constrain other crates and does not
+warrant the large-dependency owner gate.
 
 **Rejected alternatives.** Repository-owned zone parsing duplicates mature,
 security-relevant rules. `chrono-tz` embeds generated zone data and adds build
