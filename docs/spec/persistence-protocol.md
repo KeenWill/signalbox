@@ -70,9 +70,14 @@ slot range — in its description, and sibling stacks pick disjoint blocks. Once
 stack holds a reserved block, renumbering its migrations after a base merges is
 forbidden as long as the reserved prefix still exceeds the highest prefix on
 `main`; the ordering guarantee — a strictly greater prefix than the stack's
-ultimate `main`-merge target — is checked against that target, never against the
-immediate parent branch. Why: parallel migration-bearing stacks would otherwise
-collide on the next free prefix and churn-renumber each time a sibling merges.
+ultimate `main`-merge target — is checked against that target rather than
+against a prefix the immediate parent branch carries only because a sibling
+merged into it. Within a stack the guarantee still binds against the stack's own
+migrations: a prefix a child pull request adds strictly exceeds every prefix its
+ancestor branches add, because `_sqlx_migrations` keys applied migrations by
+version, so a repeated prefix collides and a lower one applies out of order.
+Why: parallel migration-bearing stacks would otherwise collide on the next free
+prefix and churn-renumber each time a sibling merges.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
