@@ -10,6 +10,32 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Make the model-call credential reference total
+
+**Context.** A schema audit found that the nullability of
+`model_call.credential_reference` guarded phantom history. The 2026-07-22 entry
+below kept the column nullable to preserve forward migration of rows predating
+it, but no deployed database exists (the hub-fencing decision already relies on
+no schema predating the stack), and the store writes the reference on every
+`Prepared` insert, so the NULL state is unreachable and the load path's
+NULL-as-corruption arm is dead code.
+
+**Decision.** Make the column total with a forward-only migration
+(`202607240007_credential_reference_total.sql`): `SET NOT NULL` plus a non-empty
+`CHECK`. Remove the dead NULL-handling arm from the persistence load path; a
+missing row remains corruption, and a present row always carries its reference.
+This supersedes the forward-only-nullable rationale of the 2026-07-22
+credential-reference entry.
+
+**Rejected alternatives.** Keeping the nullable column preserves compatibility
+with a history that does not exist and keeps unreachable corruption handling
+alive. Waiting for a future baseline squash defers the fix without benefit;
+pre-production schema discipline states the correct shape now.
+
+**Affects.** The migration set, the persistence model-call store and its INV-014
+nullability test, [persistence-protocol](spec/persistence-protocol.md), and
+[configuration-and-credentials](spec/configuration-and-credentials.md).
+
 ## 2026-07-24 — Retain checked provider JSON as raw text
 
 **Context.** Guarded deserialization admitted deeply nested tool schemas, but an
@@ -58,20 +84,26 @@ dependency edges; no resolved package or public API is added.
 
 **Context.** The model-provider bridge must replay durable tool results as
 bounded JSON error objects and distinguish object-shaped arguments from valid
-JSON scalars or arrays that provider function-call history cannot accept.
-`serde_json` is already pinned and used throughout the model-runtime layer.
+JSON scalars or arrays that provider function-call history cannot accept, and
+the persistence process projection must render durable tool denials and failures
+as the same closed JSON error objects. `serde_json` is already pinned and used
+throughout the model-runtime layer.
 
 **Decision.** Add the existing focused `serde_json` dependency directly to
 `signalbox-model-provider-runtime` for object-shape validation and safe error
-serialization.
+serialization, and to `signalbox-persistence` for rendering the equivalent
+closed tool-error objects in the process transcript projection.
 
 **Rejected alternatives.** Hand-escape JSON: it would duplicate a
 security-sensitive codec. Admit non-object function arguments: provider replay
 would remain invalid. Move provider replay shapes into the domain: that would
-cross the runtime boundary.
+cross the runtime boundary. Format the persistence error objects with string
+concatenation: denial reasons are owner text and must be escaped by a real
+codec.
 
 **Affects.** `crates/model-provider-runtime/Cargo.toml` and its durable
-tool-history translation.
+tool-history translation; `crates/persistence/Cargo.toml` and the `process_read`
+tool-result and denial projections.
 
 ## 2026-07-24 — Normalize bounded JSON with stack-safe Serde traversal
 
@@ -95,6 +127,80 @@ focused capability.
 **Affects.** Domain tool-argument normalization, its dependency graph, and the
 crate-specific exception in `deny.toml`; stored argument kinds, canonical
 encoding, and byte limits do not change.
+
+## 2026-07-24 — Pre-production schema discipline
+
+**Context.** The schema has never had a durable deployment; every database is a
+disposable dev instance. Agent-built migrations risk inheriting production-brain
+caution — nullable columns and tolerant types chosen for backwards compatibility
+with a production that does not exist — a failure mode the owner watched consume
+his prior system.
+
+**Decision.** Until the first durable deployment, schema changes make the
+correct design choice, not the backwards-compatible one: new columns are NOT
+NULL when the domain field is total, types are as tight as the domain (CHECK,
+UNIQUE, and FK constraints where the domain implies them), and a wrong earlier
+choice is fixed rather than papered over. The migration set may additionally be
+squashed to a clean baseline at owner-chosen checkpoints, with dev databases
+recreated. Applied-migration immutability (sqlx checksums) governs any single
+live dev database but does not sanctify history. A superseding entry ends this
+discipline when the first durable deployment freezes migration history and
+append-only discipline begins. A schema audit is underway to decide whether a
+first baseline squash is warranted.
+
+**Rejected alternatives.** Append-only-forever from day one imports production
+constraints without a production. Silent per-agent judgment produced the prior
+system's rot.
+
+**Affects.** `crates/persistence/migrations`, migration-writing goal runs.
+
+## 2026-07-24 — Share the lossless JSON decoder across import edges
+
+**Context.** Codex rollout JSONL needs the same ordered-member,
+duplicate-member, exact-number, Unicode, and depth guarantees as the Claude Code
+converter. The existing bounded decoder contains no Claude-specific semantics,
+but lived inside that provider adapter.
+
+**Decision.** Move the decoder unchanged into a provider-neutral import-edge
+crate used by both converters. It continues to construct the domain's
+source-neutral structured values directly, delegates only JSON string-token
+decoding to `serde_json`, and exposes content-silent syntax, UTF-8, and depth
+failures. Provider record and block semantics remain in their separate edge
+crates.
+
+**Rejected alternatives.** Duplicating the decoder would create two subtly
+different definitions of exact JSON preservation. Depending on the Claude Code
+crate from the Codex crate would couple unrelated providers. Moving parsing into
+the domain would reverse the recorded edge boundary.
+
+**Affects.** The Claude Code and Codex converter dependencies, workspace layout,
+lossless JSON parser tests, and converter implementation ownership; no
+normalized or durable representation changes.
+
+## 2026-07-24 — Run Docker-backed integration suites concurrently in CI
+
+**Context.** GitHub-hosted Ubuntu runners provide Docker, and Signalbox's
+ignored integration tests start pinned PostgreSQL containers through
+testcontainers. The workflow ran several test binaries sequentially from a
+hand-maintained list, which delayed feedback and omitted a newly added
+import-to-native end-to-end binary.
+
+**Decision.** Run three fail-fast-disabled CI matrix suites concurrently: all
+ignored persistence test targets with the `postgres-integration` feature, all
+ignored hubd test targets, and the explicitly selected offline terminal client
+end-to-end test. Retain one aggregate `postgres-integration` job so the existing
+required-check name remains stable. Package-wide selection makes new persistence
+and hubd integration-test binaries covered by default.
+
+**Rejected alternatives.** Keeping one sequential job preserves redundant
+latency and the omission-prone binary inventory. One workspace-wide ignored test
+command would mix Docker coverage with opt-in real-provider and local-file tests
+whose external inputs are deliberately unavailable in public CI. A
+workflow-managed PostgreSQL service would duplicate the pinned, isolated
+testcontainers lifecycle already owned by each test.
+
+**Affects.** GitHub Actions integration-test coverage, feedback latency,
+required-check compatibility, and Docker-backed PostgreSQL test execution.
 
 ## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
 
@@ -475,6 +581,42 @@ deadlines would add unrelated timing semantics.
 **Affects.** Process-protocol frame ownership, submitted-input admission, and
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
+
+## 2026-07-24 — Version maximum-fidelity conversion and generic result blocks
+
+**Context.** Maximum-fidelity conversion broadens the original Claude Code
+interpretation so structurally valid source-defined message and result blocks
+are normalized instead of rejected. Reusing converter version 1 would
+reinterpret stored normalized records and violate the fixed-version converter
+contract. Maximum fidelity also adds a generic result-block variant to the
+existing [conversation-import](spec/conversation-import.md) vocabulary.
+Persistence content version 1 already includes the generic message-block tag,
+but its nested result-block tags are closed. Repository validation also needs
+source files without publishing their content.
+
+**Decision.** Preserve the original Claude Code converter-version-1
+interpretation and add converter version 2 for maximum-fidelity normalization;
+the active `ClaudeCodeJsonlConverter` emits version 2. Source digests,
+reconstitution, and persistence map the two converter versions distinctly. Also
+preserve content-encoding version 1 for every existing content shape, including
+generic message blocks. Encode content as version 2 only when it contains a
+generic result block, and reject that new nested tag beneath a version-1 header.
+Committed fixtures are synthetic. Optional local source-file validation is
+path-configured, content-silent, and excluded from ordinary test runs. A private
+repository was consulted only as non-normative provenance.
+
+**Rejected alternatives.** Reusing converter version 1 would make one version
+describe two normalization behaviors. Adding the new nested content tag beneath
+content version 1 would make one encoding version describe two vocabularies.
+Stamping every newly written content value as version 2 would needlessly reduce
+rollback readability for unchanged content. Committing source files or printing
+their transcript data would violate the public-source boundary.
+
+**Affects.** S28; INV-002/INV-038; synthetic and opt-in import tests, the Claude
+Code format enum/projector/store mapping, imported-content adapter encoding, and
+the provenance boundary of the conversation-import stack. Imported-session seed
+ownership remains recorded by
+[the separate seed decision](#2026-07-24--separate-imported-ancestry-from-its-materialized-seed-frontier).
 
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 

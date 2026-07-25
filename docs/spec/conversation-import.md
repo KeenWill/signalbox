@@ -2,10 +2,11 @@
 
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
-format-versioned converter seam, the first Claude Code JSONL converter, and the
-append-only Postgres import store. Later session creation from one imported
-frontier is owned by [sessions-and-transcript](sessions-and-transcript.md);
-native turn activation and model-call rendering are owned by
+format-versioned converter seam, Claude Code session and Codex rollout JSONL
+converters, and the append-only Postgres import store. Later session creation
+from one imported frontier is owned by
+[sessions-and-transcript](sessions-and-transcript.md); native turn activation
+and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -35,16 +36,21 @@ SHA-256 over this exact preimage:
 
 1. the ASCII domain tag `signalbox.imported-conversation.source-digest.v1`,
    prefixed by its unsigned 64-bit big-endian byte length;
-2. the ASCII format tag `claude-code-session-jsonl-v1`, prefixed by the same
-   length encoding;
+2. the converter version's ASCII format tag (`claude-code-session-jsonl-v1`,
+   `claude-code-session-jsonl-v2`, or `codex-rollout-jsonl-v1`), prefixed by the
+   same length encoding;
 3. the raw-record count as an unsigned 64-bit big-endian integer; and
 4. for each raw record in physical order, its 32-byte SHA-256 content hash
    prefixed by the unsigned 64-bit big-endian value 32.
 
 The one-record synthetic vector whose exact raw bytes are hexadecimal `7b7d` has
-raw hash `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a` and
-source-content digest
-`b836a3fb00465c2c7ec01cf2c4b2c98845cbc9cdaf28892b910ce225d2079a5c`.
+raw hash `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a`. Its
+version-1 source-content digest is
+`b836a3fb00465c2c7ec01cf2c4b2c98845cbc9cdaf28892b910ce225d2079a5c`; its
+version-2 source-content digest is
+`117ac9599571f7ff2839069ae5252236d79ea148fe518baa1f914d629fba00df`. The same
+vector's Codex rollout version-1 source-content digest is
+`67666ac67ac3b0215f3b5e5e74968c8e2f2ee7574718f4779173696cecf624df`.
 
 Reingesting the same format and exact raw record sequence returns the existing
 imported conversation identity; caller-supplied candidate identities from that
@@ -78,12 +84,14 @@ boundary.
 
 Each occurrence also carries the complete source JSON object normalized into the
 source-neutral structured-value algebra. Non-message records produce a typed
-`SourceEvent` entry rather than being dropped or recast as conversation text. A
-source-defined message block without a more specific normalized variant produces
-a typed `SourceMessageBlock`, so its boundary and type remain explicit while the
-complete normalized owning record retains every block field. The normalized
-sequence and every entry's raw-record reference make each conversion decision
-traceable back to exact source bytes.
+`SourceEvent` entry rather than being dropped or recast as conversation text.
+Under Claude Code version 2, a source-defined message block without a more
+specific normalized variant produces a typed `SourceMessageBlock`, so its
+boundary and type remain explicit while the complete normalized owning record
+retains every block field. Codex rollout version 1 applies the same generic
+variant to source-defined message and reasoning blocks. The normalized sequence
+and every entry's raw-record reference make each conversion decision traceable
+back to exact source bytes.
 
 Each occurrence additionally stores an `ImportedRawRecordConversionDigest` that
 authenticates its exact raw hash and complete normalized structured value
@@ -132,16 +140,27 @@ neighboring record, wall clock, or another field. Sidechain and metadata flags
 are provenance, not exclusion: they do not remove content or make an imported
 frontier unseedable.
 
-Claude Code version 1 maps the four text-valued provenance fields from the exact
-top-level members `uuid` (source record identifier), `parentUuid` (source parent
-record identifier), `sessionId` (source session identifier), and `timestamp`
-(source timestamp). For each, omission maps to `NotAttested`, JSON `null` maps
-to `AttestedAbsent`, and a JSON string maps to `Attested(exact text)`; every
-other JSON type rejects the complete conversion. It maps the sidechain and
-metadata-record flags from the exact top-level members `isSidechain` and
-`isMeta`, with the same omission/null behavior, an attested JSON Boolean value,
-and rejection for every other type. Repeating any of these six consulted members
-rejects the complete conversion.
+Claude Code versions 1 and 2 map the four text-valued provenance fields from the
+exact top-level members `uuid` (source record identifier), `parentUuid` (source
+parent record identifier), `sessionId` (source session identifier), and
+`timestamp` (source timestamp). For each, omission maps to `NotAttested`, JSON
+`null` maps to `AttestedAbsent`, and a JSON string maps to
+`Attested(exact text)`; every other JSON type rejects the complete conversion.
+They map the sidechain and metadata-record flags from the exact top-level
+members `isSidechain` and `isMeta`, with the same omission/null behavior, an
+attested JSON Boolean value, and rejection for every other type. Repeating any
+of these six consulted members rejects the complete conversion.
+
+Codex rollout version 1 maps source record identity from exact `payload.id`,
+source session identity from exact `payload.session_id`, and source timestamp
+from exact top-level `timestamp`. The other three metadata fields are
+`NotAttested`; the converter does not infer them from session metadata,
+filenames, adjacent records, item call identities, or item kinds. Omission,
+null, string, wrong-type, and repeated-member handling follows the same
+attestation rules above. A recognized `response_item` message also maps its
+exact `user` or `assistant` role into both speaker and message-role
+attestations. Every other role remains a `SourceEvent` with no speaker
+assertion, while the complete normalized record retains the exact source role.
 
 Imported text retains the exact decoded Unicode scalar sequence, including an
 empty sequence, whitespace, line endings, normalization distinctions, and
@@ -161,7 +180,7 @@ JSON; it is never replaced or retained as a pseudo-character.
 The closed normalized content vocabulary is:
 
 - `SourceEvent`, retaining the source record-type attestation and complete
-  normalized record for a non-message record;
+  normalized record for anything not normalized as a user or assistant message;
 - `SourceMessageBlock`, retaining the source block-type attestation and complete
   normalized owning record for a source-defined message block;
 - `Text`, retaining attested exact user or assistant text or the field's precise
@@ -170,7 +189,10 @@ The closed normalized content vocabulary is:
   structured input, and caller metadata;
 - `ToolResult`, retaining independently attested source call identity, error
   flag, and either exact text or an ordered sequence of typed text, image, and
-  tool-reference result blocks whose own fields also retain attestations;
+  tool-reference result blocks whose own fields also retain attestations; a
+  source-defined result block without a more specific normalized variant retains
+  its exact block-type attestation as `SourceResultBlock`, while the complete
+  normalized owning record retains every field;
 - `Thinking`, retaining independently attested exact thinking and signature;
 - `RedactedThinking`, retaining the source's independently attested redacted
   data;
@@ -197,10 +219,10 @@ per normalized entry, including source-event, message-content-absence, tool,
 result, thinking, redacted-thinking, and document boundaries.
 
 The converter retains `parentUuid` as source attestation but does not follow,
-repair, or use it to reorder version-1 frontiers. Duplicate source identifiers,
-missing parents, nonlinear parents, sidechains, and metadata records do not
-change the physical prefix. They also do not prevent a client from later
-selecting any imported frontier.
+repair, or use it to reorder either version's frontiers. Duplicate source
+identifiers, missing parents, nonlinear parents, sidechains, and metadata
+records do not change the physical prefix. They also do not prevent a client
+from later selecting any imported frontier.
 
 Why: a stable prefix boundary is available for every observed entry even when
 source ancestry is incomplete or ambiguous; adjacency is not recast as proof of
@@ -235,25 +257,27 @@ The converter does not read files or choose paths. Its caller supplies bytes, so
 later formats implement the same seam without adding filesystem types to the
 domain or application crates.
 
-## Claude Code session JSONL version 1
+## Claude Code session JSONL versions 1 and 2
 
 `ClaudeCodeJsonlConverter` implements
-`ClaudeCodeSessionJsonl { converter_version: 1 }`. It parses one JSON object per
-nonempty line, raw-preserves every record, and processes records in physical
-file order. Version 1 scans for LF bytes. An LF ends and is excluded from a
-record; an immediately preceding CR is also excluded as the other half of a CRLF
-delimiter. A CR anywhere else remains record content. Nonempty bytes after the
-final delimiter form a final unterminated record, while a terminal LF or CRLF
-does not create another record. An empty delimited record rejects the complete
-conversion. Version 1 never strips a UTF-8 byte-order mark: the bytes `EF BB BF`
-at the beginning of any physical record are not JSON whitespace and reject that
-record as invalid JSON.
+`ClaudeCodeSessionJsonl { converter_version: 2 }`. Version 1 remains the
+unchanged interpretation for already stored version-1 snapshots. Both versions
+parse one JSON object per nonempty line, raw-preserve every record, and process
+records in physical file order. They scan for LF bytes. An LF ends and is
+excluded from a record; an immediately preceding CR is also excluded as the
+other half of a CRLF delimiter. A CR anywhere else remains record content.
+Nonempty bytes after the final delimiter form a final unterminated record, while
+a terminal LF or CRLF does not create another record. An empty delimited record
+rejects the complete conversion. Neither version strips a UTF-8 byte-order mark:
+the bytes `EF BB BF` at the beginning of any physical record are not JSON
+whitespace and reject that record as invalid JSON.
 
 The parser retains object-member order and duplicate names in the complete
 normalized source object. At every object level, repeating a member name that
-version 1 consults to produce a normalized entry or attestation rejects the
-complete conversion. Duplicate names inside otherwise unmodeled structured
-values remain preserved and do not acquire fabricated selection semantics.
+the selected version consults to produce a normalized entry or attestation
+rejects the complete conversion. Duplicate names inside otherwise unmodeled
+structured values remain preserved and do not acquire fabricated selection
+semantics.
 
 Records then normalize as follows:
 
@@ -274,9 +298,9 @@ Records then normalize as follows:
    or null message, omitted or null content, or empty content array produces one
    precisely distinguished `MessageContentAbsent` entry.
 
-4. `text`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`, and
-   `document` blocks map to their corresponding normalized variants using these
-   exact consulted members:
+4. In both versions, `text`, `tool_use`, `tool_result`, `thinking`,
+   `redacted_thinking`, and `document` blocks map to their corresponding
+   normalized variants using these exact consulted members:
 
    - `text.text` supplies the text attestation;
    - `tool_use.id`, `.name`, `.input`, and `.caller` supply call identity, tool
@@ -286,20 +310,33 @@ Records then normalize as follows:
      `NotAttested`, null content is `AttestedAbsent`, string content is exact
      text, and array content is an ordered result-block sequence;
    - `thinking.thinking` and `.signature` supply exact thinking and signature;
-   - `redacted_thinking.data` supplies exact redacted data;
-   - `document.source` supplies the media source; and
-   - the exact block discriminator `"fallback"` maps to `SourceMessageBlock`;
-     its consulted `type` member supplies the source-block type attestation,
-     while `from`, `to`, and every other member remain in the complete
-     normalized owning record. Every other unrecognized discriminator rejects.
+   - `redacted_thinking.data` supplies exact redacted data; and
+   - `document.source` supplies the media source.
 
    A tool-result `text.text` supplies its text attestation, `image.source`
    supplies its media source, and `tool_reference.tool_name` supplies its
    tool-name attestation. Every media source consults exactly `type`,
    `media_type`, and `data`.
 
-5. An unknown content shape, content-block type, or tool-result block type fails
-   the complete conversion rather than being silently dropped or guessed.
+5. Version 1 maps the exact message-block discriminator `fallback` to
+   `SourceMessageBlock`. Any other message-block discriminator without a
+   specific variant, and every omitted or null message-block discriminator,
+   makes the version-1 projection invalid. Its tool-result block vocabulary is
+   likewise limited to `text`, `image`, and `tool_reference`; any other,
+   omitted, or null result-block discriminator makes the projection invalid.
+
+6. Version 2 maps any message-block discriminator without a specific variant,
+   including an omitted or null discriminator, to `SourceMessageBlock`. It maps
+   any result-block discriminator without a specific variant, including an
+   omitted or null discriminator, to `SourceResultBlock`. Each generic variant
+   retains the exact, explicitly absent, or unattested `type`, while the
+   complete normalized owning record and verbatim raw record retain every other
+   source field.
+
+7. A malformed content shape still fails the complete conversion rather than
+   being silently dropped or guessed. Version 2 does not reject a structurally
+   valid source-defined block merely because its discriminator has no more
+   specific normalized variant.
 
 For every consulted text member, omitted, null, and string map respectively to
 `NotAttested`, `AttestedAbsent`, and `Attested(exact text)`; any other JSON type
@@ -309,27 +346,97 @@ value. `tool_result.content` instead admits only the exact string or array
 shapes specified above; Boolean, number, and object values reject the complete
 conversion. Consulted media sources admit omitted, null, or an object whose
 three consulted members follow the text rule; every other shape fails. Each
-content or result block must be an object with exactly one consulted `type`
-member containing a recognized string. As above, repeating any consulted member
-at its object level fails the complete conversion. These rules apply
-independently, so a missing or null `tool_use.id` remains typed absence while a
-non-string value is invalid.
+content or result block must be an object with at most one consulted `type`
+member; an exact string selects a specific or version-dependent generic variant,
+omission and null follow the selected version's rules above, and any other value
+shape fails. As above, repeating any consulted member at its object level fails
+the complete conversion. These rules apply independently, so a missing or null
+`tool_use.id` remains typed absence while a non-string value is invalid.
 
-Version 1 accepts both user/final-response-only records and records containing
-structured tool traffic, signed thinking, image results, tool references,
-document blocks, model-fallback notices, attachments, and administrative source
-events.
+Both versions accept user/final-response-only records and records containing
+their recognized structured tool traffic, signed thinking, image results, tool
+references, document blocks, model-fallback notices, and administrative source
+events. Version 2 additionally retains structurally valid source-defined message
+and result blocks instead of rejecting their complete conversion.
 
-Malformed JSON, a blank line, invalid UTF-8, unsupported content, an identity
-collision inside the candidate set, a position overflow, JSON deeper than 128
-nested array or object containers, or a source with no JSON records rejects the
-complete conversion. Container depth is the count of arrays and objects on one
-root-to-value path: the required top-level record object has depth `1`, entering
-each child array or object adds `1`, and scalars add nothing. Depth `128` is
-admitted and attempting to enter a container at depth `129` rejects the whole
-source. The same count applies to every complete source record and modeled
-nested value. U+0000, empty strings, and a source containing only non-message
-records do not: raw and normalized storage retain them.
+Malformed JSON, a blank line, invalid UTF-8, malformed modeled content, an
+identity collision inside the candidate set, a position overflow, JSON deeper
+than 128 nested array or object containers, or a source with no JSON records
+rejects the complete conversion. Container depth is the count of arrays and
+objects on one root-to-value path: the required top-level record object has
+depth `1`, entering each child array or object adds `1`, and scalars add
+nothing. Depth `128` is admitted and attempting to enter a container at depth
+`129` rejects the whole source. The same count applies to every complete source
+record and modeled nested value. U+0000, empty strings, and a source containing
+only non-message records do not. In version 2, unknown source block
+discriminators likewise do not: raw and normalized storage retain them.
+
+## Codex rollout JSONL version 1
+
+`CodexRolloutJsonlConverter` implements
+`CodexRolloutJsonl { converter_version: 1 }`. It uses the same exact physical
+JSONL record, UTF-8, JSON structure, number, Unicode, 128-container depth,
+duplicate-consulted-member, and blank-line rules specified for Claude Code
+above.
+
+The converter treats `response_item` as Codex's semantic conversation stream.
+All other top-level item kinds, including `session_meta`, `turn_context`,
+`event_msg`, `world_state`, `compacted`, and source-defined future kinds,
+produce one `SourceEvent`. This retains administrative and presentation events
+without reclassifying their mirrored text or tool progress as duplicate
+conversation entries. A source event keeps its exact top-level `type`
+attestation and complete normalized record.
+
+A `response_item` must have an object-valued `payload`. Recognized payloads map
+as follows:
+
+1. A `message` with exact role `user` or `assistant` emits one entry per
+   `content` block. `input_text` and `output_text` map exact `text` to `Text`;
+   every other object-valued block maps to `SourceMessageBlock` with its exact
+   type attestation. String-valued legacy content maps to one `Text`. Omitted,
+   null, or empty-array content maps to the corresponding
+   `MessageContentAbsent`. Other roles produce one `SourceEvent` and do not
+   assert a user or assistant speaker.
+
+2. A `reasoning` item emits one `Thinking` entry for every `summary_text`,
+   `reasoning_text`, or `text` block in exact `summary` then `content` order.
+   Its exact text is the thinking attestation and signature is `NotAttested`.
+   Other object-valued blocks become `SourceMessageBlock`. An omitted
+   `encrypted_content` emits no redacted entry, null emits
+   `RedactedThinking(AttestedAbsent)`, and a string emits
+   `RedactedThinking(Attested(exact data))`. If the item emits no specific
+   entry, it remains one `SourceEvent`.
+
+3. `function_call` and `custom_tool_call` map exact `call_id` and `name` to
+   `ToolCall`. Their exact `arguments` or `input` JSON string remains a
+   source-neutral structured string rather than being reparsed as nested JSON;
+   raw and complete normalized records therefore retain its lexical form.
+   `tool_search_call` and `local_shell_call` map exact structured `arguments` or
+   `action` respectively, with no fabricated tool name. `web_search_call` maps
+   exact item `id` as its call identity and structured `action` as input, also
+   with no fabricated name. Codex does not attest caller metadata for these
+   records.
+
+4. `function_call_output` and `custom_tool_call_output` map exact `call_id` and
+   `output` to `ToolResult`. Omitted, null, and string output become
+   `NotAttested`, `AttestedAbsent`, and exact text. Array output preserves
+   order: `input_text` becomes a text result block; `input_image` becomes an
+   image result block whose kind and exact `image_url` are attested and whose
+   media type is `NotAttested`; every other object-valued block becomes
+   `SourceResultBlock`. Codex does not attest an error Boolean in these records.
+
+5. `tool_search_output` maps exact `call_id` to `ToolResult`. Its omitted or
+   null `tools` value is typed absence; an array emits one ordered
+   `SourceResultBlock` per source element, retaining an object element's exact
+   type attestation when present. The complete normalized record retains every
+   tool field.
+
+Every other structurally valid `response_item` payload type remains one
+`SourceEvent`, including response-item variants introduced after this converter
+version. A malformed modeled envelope, role, content, reasoning, tool call, tool
+result, or consulted member rejects the complete conversion. No non-message
+response item acquires a fabricated assistant speaker merely because Codex
+produced it.
 
 ## Persistence and reconstitution
 
@@ -342,6 +449,11 @@ Every encoded top-level value carries a fixed format version and payload-kind
 discriminator; a decoder rejects a value from another column kind rather than
 reinterpreting it. Encoded collection counts bound parsing but never directly
 drive capacity allocation: collections grow fallibly after each decoded element.
+Structured-value and source-metadata encodings remain at version `1`. Content
+using the existing closed vocabulary, including `SourceMessageBlock`, also
+remains at version `1`. A content value containing the new `SourceResultBlock`
+uses version `2`; content decoding retains the version-1 message-block tag and
+rejects the new result-block tag beneath a version-1 header.
 
 One transaction resolves or inserts a complete aggregate:
 
@@ -374,12 +486,12 @@ header does not exist. Once a header exists, a hash mismatch, missing blob or
 member, gap, duplicate, unknown discriminator/version, contradictory variant
 columns, invalid source value, or domain correlation failure is typed
 corruption. Complete storage records pass through the domain-owned
-reconstitution seam; adapters never default or drop a malformed value. For
-Claude Code version 1, that seam independently re-derives every expected entry
-from each complete normalized record and requires exact agreement in entry
-count, order, content, speaker, and source metadata. It also reapplies the
-128-container bound to complete records and entry-carried structured values
-(INV-002).
+reconstitution seam; adapters never default or drop a malformed value. For each
+Claude Code and Codex converter version, that seam independently re-derives
+every expected entry using that version's fixed interpretation and requires
+exact agreement in entry count, order, content, speaker, and source metadata. It
+also reapplies the 128-container bound to complete records and entry-carried
+structured values (INV-002).
 
 ## Test data and local validation
 
@@ -390,11 +502,12 @@ only aggregate counts and typed failure classes: it never prints paths, source
 identifiers, raw bytes, text, tool arguments/results, thinking, media data, or
 JSON parser excerpts. Its checks include complete conversion, raw hash
 round-trip, addressable frontier count, Postgres reconstitution, and
-second-import idempotency.
+second-import idempotency. Claude Code and Codex use separate opt-in variables,
+so neither private corpus is selected implicitly.
 
 ## Open edges
 
-- Exact mappings for additional source formats and the unimplemented import
+- Exact mappings for further source formats and the unimplemented import
   operational surfaces remain in the
   [conversation-import questions](../open-questions.md#conversation-import).
 - Rich model rendering of imported source events, content absence, tools,

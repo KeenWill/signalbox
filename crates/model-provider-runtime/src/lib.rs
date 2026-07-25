@@ -839,11 +839,19 @@ mod tests {
     }
 
     fn completion(model: &str, content: Vec<AssistantPart>) -> TerminalEvidence {
+        completion_with_finish(model, CompletionFinish::EndTurn, content)
+    }
+
+    fn completion_with_finish(
+        model: &str,
+        finish: CompletionFinish,
+        content: Vec<AssistantPart>,
+    ) -> TerminalEvidence {
         TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new(model)),
-            finish: CompletionFinish::EndTurn,
+            finish,
             content,
             usage: TokenUsage::unreported(),
         })
@@ -1182,6 +1190,43 @@ mod tests {
                 if proposal.name().as_str() == "current_time"
                     && proposal.arguments().as_str() == r#"{"timezone":"UTC"}"#
         ));
+    }
+
+    /// S10 / INV-002: tool-call content and the `ToolUse` finish reason must
+    /// agree before either terminal completion observation is constructed.
+    #[test]
+    fn s10_inv002_mismatched_tool_finish_is_known_failed() {
+        assert_eq!(
+            classify_terminal(
+                completion(
+                    "model-exact",
+                    vec![AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("provider-call-1"),
+                        name: ToolName::new("current_time"),
+                        arguments_json: String::from("{}"),
+                    })],
+                ),
+                &[],
+                "model-exact",
+            )
+            .expect("mismatched finish still classifies"),
+            ModelCallTerminalObservation::KnownFailed,
+            "tool calls without a ToolUse finish are not an admitted batch"
+        );
+        assert_eq!(
+            classify_terminal(
+                completion_with_finish(
+                    "model-exact",
+                    CompletionFinish::ToolUse,
+                    vec![AssistantPart::Text(String::from("no call"))],
+                ),
+                &[],
+                "model-exact",
+            )
+            .expect("mismatched finish still classifies"),
+            ModelCallTerminalObservation::KnownFailed,
+            "a ToolUse finish without a tool call is not an ordinary completion"
+        );
     }
 
     #[test]

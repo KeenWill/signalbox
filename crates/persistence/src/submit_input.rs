@@ -1643,6 +1643,8 @@ pub(crate) async fn load_scheduling_projection(
                             .ok_or(SubmitInputCorruption::Inconsistent(
                                 "tool approval wait evidence",
                             ))?;
+                        required_frontiers
+                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                         required_model_calls.insert(round_call);
                         ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
                             lifecycle_turn,
