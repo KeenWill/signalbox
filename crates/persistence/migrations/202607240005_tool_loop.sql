@@ -5,26 +5,6 @@
 -- rounds add their own normalized authority records and are selected by the
 -- same deferred validators only when a turn actually contains a tool round.
 
--- Tool-loop-aware command codecs use version two while version-one commands,
--- including explicit blanket postures admitted by the preceding migration,
--- remain replayable.
-ALTER TABLE create_session_command
-    DROP CONSTRAINT create_session_command_storage_version_supported,
-    ADD CONSTRAINT create_session_command_storage_version_supported
-        CHECK (storage_version IN (1, 2));
-
-ALTER TABLE replace_session_defaults_command
-    DROP CONSTRAINT replace_session_defaults_command_storage_version_supported,
-    ADD CONSTRAINT replace_session_defaults_command_storage_version_supported
-        CHECK (storage_version IN (1, 2));
-
-ALTER TABLE create_session_from_imported_frontier_command
-    DROP CONSTRAINT
-        create_session_from_imported_frontier_command_version_supported,
-    ADD CONSTRAINT
-        create_session_from_imported_frontier_command_version_supported
-        CHECK (storage_version IN (1, 2));
-
 ALTER TABLE queued_input_origin
     ADD COLUMN dangerous_tool_auto_approval text;
 
