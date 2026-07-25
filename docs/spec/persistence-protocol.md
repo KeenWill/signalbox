@@ -409,9 +409,11 @@ The scheduling load proves its own completeness — it counts
 than trusting whichever rows a filter returned. It also walks the union of the
 required frontier prefix chains once, loads each reachable header and delta
 once, and reconstitutes shared prefixes without rebuilding their complete
-membership. Active-phase, terminal-evidence, and acceptance-tail validation
-semantics are owned by
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+membership. A process transcript read likewise opens one database cursor over
+one resolution of the selected frontier chain, validates its declared count and
+contiguous positions while advancing, and decodes at most one entry row at a
+time. Active-phase, terminal-evidence, and acceptance-tail validation semantics
+are owned by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
