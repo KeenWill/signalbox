@@ -211,17 +211,33 @@ so neither retry nor crash classification can be inferred from a lost commit
 response.
 
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
-both physical-attempt checkpointing and the authorize → executor → result-commit
-window. Before inserting the next attempt, tool execution acquires the gate and
-revalidates the loaded batch in the checkpoint transaction; an interrupt that
-already consumed the batch produces `NoWork`, while an interrupt that arrives
-later waits behind the new checkpoint. Tool execution then holds the gate from
-before authorization until the returned evidence commits; interrupt handling
-acquires the same gate before its atomic command transaction. An interrupt that
+physical-attempt checkpointing, prepared-attempt preflight, the authorize →
+executor → result-commit window, in-flight crash classification, and the
+all-resolved continuation checkpoint. Before inserting the next attempt, acting
+on a loaded prepared attempt, or preparing continuation, tool execution acquires
+the gate and revalidates the loaded batch; an interrupt that already consumed
+the batch produces `NoWork`, while an interrupt that arrives later waits behind
+the checkpoint, preflight, or continuation. Tool execution holds the gate
+through a preflight closure or from before authorization until the returned
+evidence commits; interrupt handling acquires the same gate before its atomic
+command transaction. A pass that sees an `InFlight` attempt also acquires the
+gate and reloads that attempt before classifying prior-process crash loss, so a
+same-incarnation executor holding the gate finishes first. An interrupt that
 wins before authorization closes the checkpointed attempt as crash-lost and
 terminalizes without entering the executor. An interrupt that waits behind
 executor work reloads the committed result before closing the batch, so it
 cannot strand an issued request or roll back its command.
+
+If the executor returns an operator failure without trustworthy evidence after
+authorization, the service retains the dispatch gate and applies the attempt's
+effect-class crash-loss transition before surfacing that failure. A failed
+classification retains the exact attempt identity and permit for another
+classification pass, and the returned combined error preserves both the executor
+failure and the classification failure. Evidence carrying a different dispatch
+correlation follows the same classification-before-release path, surfacing the
+correlation mismatch only after closure or together with a failed
+classification. The durable attempt therefore cannot remain `InFlight` after the
+gate becomes available to an interrupt.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
@@ -358,12 +374,13 @@ only proof-bearing interruption to terminalize that wait as reconciliation
 required; resolving evidence and accepted-risk continuation remain open. Restart
 requires the running batch's exact continuation turn attempt to remain current:
 `Prepared` after a final decision or a denial-only batch, and `Running` after
-physical execution began. With no live model call, a batch is resumable when it
-has no current tool attempt and either has an approved request not yet attempted
-or has durably resolved every request. The next scheduler pass performs the
-ordinary next-attempt or atomic result-projection-and-continuation transaction
-instead of failing the turn or waiting for process-local wake state. Restart
-never requires the current continuation attempt to disappear.
+physical execution began or a preflight failure produced terminal attempt
+evidence. With no live model call, a batch is resumable when it has no current
+tool attempt and either has an approved request not yet attempted or has durably
+resolved every request. The next scheduler pass performs the ordinary
+next-attempt or atomic result-projection-and-continuation transaction instead of
+failing the turn or waiting for process-local wake state. Restart never requires
+the current continuation attempt to disappear.
 
 ## Provider bridge and `current_time`
 

@@ -926,8 +926,9 @@ struct FixedModelCallExecutionIds {
     calls: VecDeque<ModelCallId>,
     entries: VecDeque<SemanticTranscriptEntryId>,
     frontiers: VecDeque<ContextFrontierId>,
-    next_generated_identity: u128,
     turns: VecDeque<TurnId>,
+    tool_requests: VecDeque<signalbox_domain::ToolRequestId>,
+    tool_attempts: VecDeque<TurnAttemptId>,
 }
 
 impl FixedModelCallExecutionIds {
@@ -936,20 +937,17 @@ impl FixedModelCallExecutionIds {
         entries: impl IntoIterator<Item = SemanticTranscriptEntryId>,
         frontiers: impl IntoIterator<Item = ContextFrontierId>,
         turns: impl IntoIterator<Item = TurnId>,
+        tool_requests: impl IntoIterator<Item = signalbox_domain::ToolRequestId>,
+        tool_attempts: impl IntoIterator<Item = TurnAttemptId>,
     ) -> Self {
         Self {
             calls: calls.into_iter().collect(),
             entries: entries.into_iter().collect(),
             frontiers: frontiers.into_iter().collect(),
-            next_generated_identity: 1_u128 << 127,
             turns: turns.into_iter().collect(),
+            tool_requests: tool_requests.into_iter().collect(),
+            tool_attempts: tool_attempts.into_iter().collect(),
         }
-    }
-
-    fn next_generated_uuid(&mut self) -> Uuid {
-        let identity = self.next_generated_identity;
-        self.next_generated_identity += 1;
-        Uuid::from_u128(identity)
     }
 }
 
@@ -971,11 +969,15 @@ impl ModelCallExecutionIdGenerator for FixedModelCallExecutionIds {
     }
 
     fn next_tool_request_id(&mut self) -> ToolRequestId {
-        ToolRequestId::from_uuid(self.next_generated_uuid())
+        self.tool_requests
+            .pop_front()
+            .expect("tool-request identity fixture")
     }
 
     fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
-        TurnAttemptId::from_uuid(self.next_generated_uuid())
+        self.tool_attempts
+            .pop_front()
+            .expect("tool-attempt identity fixture")
     }
 
     fn next_turn_id(&mut self) -> TurnId {
@@ -1611,7 +1613,8 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             tool_attempt,
             ToolEffectClass::EffectFree,
         )
-        .await?;
+        .await?
+        .expect("the revalidated batch still has work");
     assert_eq!(prepared_attempt.state(), CurrentToolAttemptState::Prepared);
     assert!(matches!(
         tool_repository
@@ -1958,6 +1961,18 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
+    assert!(
+        tool_repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                ToolAttemptId::from_uuid(Uuid::from_u128(seed + 29)),
+                ToolEffectClass::EffectFree,
+            )
+            .await?
+            .is_none(),
+        "a winning interrupt makes stale attempt preparation a clean no-op"
+    );
 
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT entry.payload_kind
@@ -2429,6 +2444,18 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ToolAttemptEnd::KnownFailed { error }
             if error.kind() == ToolExecutionErrorKind::InvalidArguments
     ));
+    let issuing_attempt_state: String = sqlx::query_scalar(
+        "SELECT state_kind
+           FROM turn_attempt
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(schema_continuation.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        issuing_attempt_state, "running",
+        "preflight terminal evidence makes the result projection continuation-eligible"
+    );
     let mut completed_attempt_recovery_ids = FixedStartupScanIds::new([], []);
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
@@ -5320,6 +5347,10 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
                 TurnId::from_uuid(Uuid::from_u128(0x1ae2)),
                 TurnId::from_uuid(Uuid::from_u128(0x1ae3)),
             ],
+            [signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
+                0x1ce1,
+            ))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0x1ae4))],
         ),
         repository.clone(),
         repository.clone(),

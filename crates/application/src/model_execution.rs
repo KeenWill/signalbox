@@ -27,14 +27,14 @@ use signalbox_domain::{
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolApprovalDecision,
     ToolAttemptEnd, ToolDenialReason, ToolExecutionError, ToolRequest, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TurnAttemptId, TurnId, UserContent,
+    ToolResponsePartIdentity, ToolResultContent, ToolRoundModelCallIdentities, TurnAttemptId,
+    TurnId, UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{
     ClassifyOperatorFailure, NoToolCatalog, OperatorFailureClass, ResolvedToolConversationEntry,
-    ToolCatalog, ToolDefinition,
+    ToolCatalog, ToolDefinition, tool_loop::initial_tool_approval,
 };
 
 /// Non-secret durable name of the credential pinned for one model call.
@@ -691,10 +691,10 @@ enum RetainedModelCallExecutionStateKind {
     TerminalObservation {
         /// Session owning the exact issued call.
         session: SessionId,
-        /// Frozen posture used to derive tool-response identity candidates.
-        dangerous_tool_auto_approval: DangerousToolAutoApproval,
         /// Unchanged correlated observation returned by provider work.
         observation: CorrelatedModelCallTerminalObservation,
+        /// Frozen policy outcomes for each tool proposal, in proposal order.
+        tool_approvals: Box<[InitialToolApproval]>,
     },
 }
 
@@ -747,7 +747,7 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
     /// Generates a distinct logical tool-request candidate.
     fn next_tool_request_id(&mut self) -> ToolRequestId;
-    /// Generates a distinct continuation turn-attempt candidate.
+    /// Generates a distinct same-turn continuation-attempt candidate.
     fn next_turn_attempt_id(&mut self) -> TurnAttemptId;
     /// Generates a distinct reclassified successor-turn candidate.
     fn next_turn_id(&mut self) -> TurnId;
@@ -1087,7 +1087,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
     /// Returns every owned effect role for explicit composition handoff.
     #[allow(
         clippy::type_complexity,
-        reason = "the tuple preserves the service's explicit independently owned composition roles"
+        reason = "the tuple deliberately preserves the service's explicit independently owned composition roles"
     )]
     pub fn into_parts(
         self,
@@ -1195,63 +1195,56 @@ where
                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                     session: retained_session,
                     prepared,
-                } => {
-                    let dangerous_tool_auto_approval = prepared.dangerous_tool_auto_approval();
-                    match self
-                        .authorization
-                        .reread_after_ambiguous_commit(retained_session, &prepared)
-                        .await
-                    {
-                        Ok(ModelCallAuthorizationReread::Prepared) => {
-                            session = retained_session;
-                        }
-                        Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
-                            let non_consumption = authorized
-                                .observation_correlation()
-                                .bind_terminal_observation(
-                                    ModelCallTerminalObservation::KnownFailed,
-                                );
-                            return self
-                                .commit_terminal_observation(
-                                    retained_session,
-                                    non_consumption,
-                                    dangerous_tool_auto_approval,
-                                )
-                                .await;
-                        }
-                        Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
-                            let cancellation = stopped
-                                .observation_correlation()
-                                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
-                            return self
-                                .commit_terminal_observation(
-                                    retained_session,
-                                    cancellation,
-                                    dangerous_tool_auto_approval,
-                                )
-                                .await;
-                        }
-                        Ok(ModelCallAuthorizationReread::Cancelled) => {
-                            return Ok(ModelCallExecutionOutcome::NoWork);
-                        }
-                        Err(error) => {
-                            self.retained_state = Some(RetainedModelCallExecutionState {
+                } => match self
+                    .authorization
+                    .reread_after_ambiguous_commit(retained_session, &prepared)
+                    .await
+                {
+                    Ok(ModelCallAuthorizationReread::Prepared) => {
+                        session = retained_session;
+                    }
+                    Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
+                        let non_consumption = authorized
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+                        return self
+                            .commit_terminal_observation(
+                                retained_session,
+                                non_consumption,
+                                Box::new([]),
+                            )
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                        let cancellation = stopped
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                        return self
+                            .commit_terminal_observation(
+                                retained_session,
+                                cancellation,
+                                Box::new([]),
+                            )
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::Cancelled) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
+                    Err(error) => {
+                        self.retained_state = Some(RetainedModelCallExecutionState {
                             state:
                                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                                     session: retained_session,
                                     prepared,
                                 },
                         });
-                            return Err(ModelCallExecutionError::AuthorizationReconciliation(
-                                error,
-                            ));
-                        }
+                        return Err(ModelCallExecutionError::AuthorizationReconciliation(error));
                     }
-                }
+                },
                 RetainedModelCallExecutionStateKind::TerminalObservation {
                     session: retained_session,
-                    dangerous_tool_auto_approval,
                     observation: retained,
+                    tool_approvals,
                 } => match self
                     .observation
                     .reread_observation(retained_session, &retained)
@@ -1264,19 +1257,15 @@ where
                     }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
-                            .commit_terminal_observation(
-                                retained_session,
-                                retained,
-                                dangerous_tool_auto_approval,
-                            )
+                            .commit_terminal_observation(retained_session, retained, tool_approvals)
                             .await;
                     }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state: RetainedModelCallExecutionStateKind::TerminalObservation {
                                 session: retained_session,
-                                dangerous_tool_auto_approval,
                                 observation: retained.clone(),
+                                tool_approvals,
                             },
                         });
                         return Err(ModelCallExecutionError::ObservationCommit {
@@ -1337,10 +1326,11 @@ where
         let attempt = prepared.attempt();
         let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
+        let advertised_tools = self.catalog.definitions();
         let operation = PreparedModelOperation::render(
             *prepared,
             credential_reference,
-            self.catalog.definitions(),
+            advertised_tools.clone(),
             &tool_entries,
         )
         .map_err(ModelCallExecutionError::Render)?;
@@ -1398,11 +1388,7 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
                         return self
-                            .commit_terminal_observation(
-                                session,
-                                non_consumption,
-                                dangerous_tool_auto_approval,
-                            )
+                            .commit_terminal_observation(session, non_consumption, Box::new([]))
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
@@ -1412,11 +1398,7 @@ where
                             .observation_correlation()
                             .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
                         return self
-                            .commit_terminal_observation(
-                                session,
-                                cancellation,
-                                dangerous_tool_auto_approval,
-                            )
+                            .commit_terminal_observation(session, cancellation, Box::new([]))
                             .await;
                     }
                     Ok(ModelCallAuthorizationReread::Cancelled) => {
@@ -1456,7 +1438,12 @@ where
             .await;
         let observation = observation.map_err(ModelCallExecutionError::Provider)?;
 
-        self.commit_terminal_observation(session, observation, dangerous_tool_auto_approval)
+        let tool_approvals = self.tool_approvals(
+            observation.observation(),
+            dangerous_tool_auto_approval,
+            &advertised_tools,
+        );
+        self.commit_terminal_observation(session, observation, tool_approvals)
             .await
     }
 
@@ -1511,7 +1498,7 @@ where
         &mut self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
-        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        tool_approvals: Box<[InitialToolApproval]>,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1523,8 +1510,8 @@ where
         >,
     > {
         loop {
-            let identities = self
-                .next_terminal_identities(observation.observation(), dangerous_tool_auto_approval);
+            let identities =
+                self.next_terminal_identities(observation.observation(), &tool_approvals);
             let ids = &mut self.ids;
             let next_turn = move |_| ids.next_turn_id();
             match self
@@ -1547,8 +1534,8 @@ where
                     self.retained_state = Some(RetainedModelCallExecutionState {
                         state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
-                            dangerous_tool_auto_approval,
                             observation: observation.clone(),
+                            tool_approvals,
                         },
                     });
                     return Err(ModelCallExecutionError::ObservationCommit {
@@ -1570,16 +1557,9 @@ where
     fn next_terminal_identities(
         &mut self,
         observation: &ModelCallTerminalObservation,
-        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        tool_approvals: &[InitialToolApproval],
     ) -> ModelCallTerminalIdentityCandidates {
-        if let ModelCallTerminalObservation::CompletedWithTools { response } = observation {
-            return generate_tool_round_identity_candidates(
-                &mut self.ids,
-                response,
-                dangerous_tool_auto_approval,
-            );
-        }
-        ModelCallTerminalIdentityCandidates::Exact(match observation {
+        let exact = match observation {
             ModelCallTerminalObservation::Completed { assistant_text } => {
                 let assistant_entries = (0..assistant_text.len())
                     .map(|_| self.ids.next_semantic_entry_id())
@@ -1590,8 +1570,68 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::CompletedWithTools { .. } => {
-                unreachable!("tool rounds carry both lifecycle-dependent identity candidates")
+            ModelCallTerminalObservation::CompletedWithTools { response } => {
+                let mut approval_index = 0usize;
+                let mut continuing = Vec::with_capacity(response.parts().len());
+                let mut stopped = Vec::with_capacity(response.parts().len());
+                let mut every_request_approved = true;
+                for part in response.parts() {
+                    match part {
+                        AssistantResponsePart::Text(_) => {
+                            continuing.push(ToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ToolCall(_) => {
+                            // A retained-policy count mismatch is an internal
+                            // defect. Confirm is the conservative candidate:
+                            // it cannot grant unattended execution, and the
+                            // domain still rejects it under blanket posture.
+                            let approval = tool_approvals
+                                .get(approval_index)
+                                .copied()
+                                .unwrap_or(InitialToolApproval::Confirm);
+                            approval_index += 1;
+                            every_request_approved &= approval != InitialToolApproval::Confirm;
+                            continuing.push(ToolResponsePartIdentity::tool_call(
+                                self.ids.next_semantic_entry_id(),
+                                self.ids.next_tool_request_id(),
+                                approval,
+                            ));
+                        }
+                    }
+                }
+                debug_assert_eq!(approval_index, tool_approvals.len());
+                let continuation_attempt =
+                    every_request_approved.then(|| self.ids.next_turn_attempt_id());
+                for part in response.parts() {
+                    match part {
+                        AssistantResponsePart::Text(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ToolCall(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::tool_call(
+                                self.ids.next_semantic_entry_id(),
+                                self.ids.next_tool_request_id(),
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                    }
+                }
+                return ModelCallTerminalIdentityCandidates::ToolRound {
+                    continuing: ToolRoundModelCallIdentities::new(
+                        continuing,
+                        self.ids.next_context_frontier_id(),
+                        continuation_attempt,
+                    ),
+                    stopped: StoppedToolRoundModelCallIdentities::new(
+                        stopped,
+                        self.ids.next_semantic_entry_id(),
+                        self.ids.next_context_frontier_id(),
+                    ),
+                };
             }
             ModelCallTerminalObservation::KnownFailed => {
                 ModelCallTerminalIdentities::Failed(self.next_failed_identities())
@@ -1610,64 +1650,32 @@ where
             ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
                 AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
-        })
+        };
+        ModelCallTerminalIdentityCandidates::Exact(exact)
     }
-}
 
-fn generate_tool_round_identity_candidates(
-    ids: &mut impl ModelCallExecutionIdGenerator,
-    response: &ToolUsingAssistantResponse,
-    dangerous_tool_auto_approval: DangerousToolAutoApproval,
-) -> ModelCallTerminalIdentityCandidates {
-    let approval = match dangerous_tool_auto_approval {
-        DangerousToolAutoApproval::Disabled => InitialToolApproval::Confirm,
-        DangerousToolAutoApproval::ApproveAll => InitialToolApproval::SessionBlanket,
-    };
-    let continuing_parts = response
-        .parts()
-        .iter()
-        .map(|part| match part {
-            AssistantResponsePart::Text(_) => {
-                ToolResponsePartIdentity::text(ids.next_semantic_entry_id())
-            }
-            AssistantResponsePart::ToolCall(_) => ToolResponsePartIdentity::tool_call(
-                ids.next_semantic_entry_id(),
-                ids.next_tool_request_id(),
-                approval,
-            ),
-        })
-        .collect();
-    let continuation_attempt = match dangerous_tool_auto_approval {
-        DangerousToolAutoApproval::Disabled => None,
-        DangerousToolAutoApproval::ApproveAll => Some(ids.next_turn_attempt_id()),
-    };
-    let continuing = ToolRoundModelCallIdentities::new(
-        continuing_parts,
-        ids.next_context_frontier_id(),
-        continuation_attempt,
-    );
-    let stopped_parts = response
-        .parts()
-        .iter()
-        .map(|part| match part {
-            AssistantResponsePart::Text(_) => {
-                StoppedToolResponsePartIdentity::text(ids.next_semantic_entry_id())
-            }
-            AssistantResponsePart::ToolCall(_) => StoppedToolResponsePartIdentity::tool_call(
-                ids.next_semantic_entry_id(),
-                ids.next_tool_request_id(),
-                ids.next_semantic_entry_id(),
-            ),
-        })
-        .collect();
-    let stopped = StoppedToolRoundModelCallIdentities::new(
-        stopped_parts,
-        ids.next_semantic_entry_id(),
-        ids.next_context_frontier_id(),
-    );
-    ModelCallTerminalIdentityCandidates::ToolRound {
-        continuing,
-        stopped,
+    fn tool_approvals(
+        &self,
+        observation: &ModelCallTerminalObservation,
+        posture: DangerousToolAutoApproval,
+        advertised_tools: &[ToolDefinition],
+    ) -> Box<[InitialToolApproval]> {
+        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+            return Box::new([]);
+        };
+        response
+            .parts()
+            .iter()
+            .filter_map(|part| match part {
+                AssistantResponsePart::Text(_) => None,
+                AssistantResponsePart::ToolCall(proposal) => {
+                    let definition = advertised_tools
+                        .iter()
+                        .find(|definition| definition.name() == proposal.name());
+                    Some(initial_tool_approval(posture, definition))
+                }
+            })
+            .collect()
     }
 }
 
@@ -1941,6 +1949,36 @@ mod tests {
         }
     }
 
+    fn tool_response() -> ModelCallTerminalObservation {
+        let arguments =
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid");
+        let parts = vec![
+            AssistantResponsePart::Text(
+                AssistantText::try_new(String::from("checking"))
+                    .expect("fixture assistant text is valid"),
+            ),
+            AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+                signalbox_domain::ToolName::try_new(String::from("automatic"))
+                    .expect("fixture tool name is valid"),
+                arguments.clone(),
+            )),
+            AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+                signalbox_domain::ToolName::try_new(String::from("unknown"))
+                    .expect("fixture tool name is valid"),
+                arguments,
+            )),
+        ];
+        ModelCallTerminalObservation::CompletedWithTools {
+            response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
+                .expect("fixture response contains tools"),
+        }
+    }
+
+    /// One request in the canonical model-rendering session, turn, and call.
+    ///
+    /// The request identity derives from the ordinal and is deliberately in a
+    /// different UUID range so an implementation cannot confuse the two.
     fn model_tool_request(ordinal: u32) -> ToolRequest {
         ToolRequestReconstitutionInput::new(
             identity(100 + u128::from(ordinal), ToolRequestId::from_uuid),
@@ -2205,109 +2243,6 @@ mod tests {
         fn next_turn_id(&mut self) -> TurnId {
             self.turns.pop_front().expect("fixture turn identity")
         }
-    }
-
-    fn tool_response_fixture() -> ToolUsingAssistantResponse {
-        ToolUsingAssistantResponse::try_from_parts(vec![
-            AssistantResponsePart::Text(
-                AssistantText::try_new(String::from("before")).expect("fixture text is valid"),
-            ),
-            AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
-                ToolName::try_new(String::from("current_time")).expect("fixture name is valid"),
-                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
-                    .expect("fixture arguments are valid"),
-            )),
-            AssistantResponsePart::Text(
-                AssistantText::try_new(String::from("after")).expect("fixture text is valid"),
-            ),
-        ])
-        .expect("fixture response contains one tool proposal")
-    }
-
-    #[test]
-    fn tool_round_identity_candidates_cover_both_lifecycle_outcomes() {
-        let response = tool_response_fixture();
-        let expected_stopped = StoppedToolRoundModelCallIdentities::new(
-            vec![
-                StoppedToolResponsePartIdentity::text(identity(
-                    33,
-                    SemanticTranscriptEntryId::from_uuid,
-                )),
-                StoppedToolResponsePartIdentity::tool_call(
-                    identity(34, SemanticTranscriptEntryId::from_uuid),
-                    identity(61, ToolRequestId::from_uuid),
-                    identity(35, SemanticTranscriptEntryId::from_uuid),
-                ),
-                StoppedToolResponsePartIdentity::text(identity(
-                    36,
-                    SemanticTranscriptEntryId::from_uuid,
-                )),
-            ],
-            identity(37, SemanticTranscriptEntryId::from_uuid),
-            identity(41, ContextFrontierId::from_uuid),
-        );
-
-        let disabled = generate_tool_round_identity_candidates(
-            &mut FixedIds::baseline(),
-            &response,
-            DangerousToolAutoApproval::Disabled,
-        );
-        assert_eq!(
-            disabled,
-            ModelCallTerminalIdentityCandidates::ToolRound {
-                continuing: ToolRoundModelCallIdentities::new(
-                    vec![
-                        ToolResponsePartIdentity::text(identity(
-                            30,
-                            SemanticTranscriptEntryId::from_uuid,
-                        )),
-                        ToolResponsePartIdentity::tool_call(
-                            identity(31, SemanticTranscriptEntryId::from_uuid),
-                            identity(60, ToolRequestId::from_uuid),
-                            InitialToolApproval::Confirm,
-                        ),
-                        ToolResponsePartIdentity::text(identity(
-                            32,
-                            SemanticTranscriptEntryId::from_uuid,
-                        )),
-                    ],
-                    identity(40, ContextFrontierId::from_uuid),
-                    None,
-                ),
-                stopped: expected_stopped.clone(),
-            }
-        );
-
-        let blanket = generate_tool_round_identity_candidates(
-            &mut FixedIds::baseline(),
-            &response,
-            DangerousToolAutoApproval::ApproveAll,
-        );
-        assert_eq!(
-            blanket,
-            ModelCallTerminalIdentityCandidates::ToolRound {
-                continuing: ToolRoundModelCallIdentities::new(
-                    vec![
-                        ToolResponsePartIdentity::text(identity(
-                            30,
-                            SemanticTranscriptEntryId::from_uuid,
-                        )),
-                        ToolResponsePartIdentity::tool_call(
-                            identity(31, SemanticTranscriptEntryId::from_uuid),
-                            identity(60, ToolRequestId::from_uuid),
-                            InitialToolApproval::SessionBlanket,
-                        ),
-                        ToolResponsePartIdentity::text(identity(
-                            32,
-                            SemanticTranscriptEntryId::from_uuid,
-                        )),
-                    ],
-                    identity(40, ContextFrontierId::from_uuid),
-                    Some(identity(70, TurnAttemptId::from_uuid)),
-                ),
-                stopped: expected_stopped,
-            }
-        );
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2695,6 +2630,22 @@ mod tests {
         }
     }
 
+    fn current_turn_tool_rounds(round_count: u128) -> Vec<ModelConversationMessage> {
+        (0..round_count)
+            .map(|round| model_tool_use_message(1_000 + round, 2, 2_000 + round, 0))
+            .collect()
+    }
+
+    fn one_current_batch_with_inherited_tool_history() -> Vec<ModelConversationMessage> {
+        (0..32_u32)
+            .map(|ordinal| model_tool_use_message(3_000 + u128::from(ordinal), 2, 4_000, ordinal))
+            .chain(
+                (0..32_u128)
+                    .map(|round| model_tool_use_message(5_000 + round, 99, 6_000 + round, 0)),
+            )
+            .collect()
+    }
+
     /// The owner-selected rendering decision: origin input becomes a user
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
@@ -2723,32 +2674,128 @@ mod tests {
         assert_eq!(content.text().as_str(), "exact user request");
     }
 
-    /// The turn-wide availability bound counts validated producing calls, not
-    /// requests or inherited tool history.
+    /// The recorded turn-wide availability bound counts validated producing
+    /// calls, not requests or inherited tool history.
     #[test]
     fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
         let current_turn = identity(2, TurnId::from_uuid);
-        let mut messages = (0..31_u128)
-            .map(|round| model_tool_use_message(1_000 + round, 2, 2_000 + round, 0))
-            .collect::<Vec<_>>();
-        assert!(!automatic_tool_round_limit_reached(current_turn, &messages));
+        let below_limit = current_turn_tool_rounds(31);
+        assert!(!automatic_tool_round_limit_reached(
+            current_turn,
+            &below_limit
+        ));
 
-        messages.push(model_tool_use_message(1_031, 2, 2_031, 0));
-        assert!(automatic_tool_round_limit_reached(current_turn, &messages));
+        let at_limit = current_turn_tool_rounds(32);
+        assert!(automatic_tool_round_limit_reached(current_turn, &at_limit));
 
-        let one_multi_request_round = (0..32_u32)
-            .map(|ordinal| model_tool_use_message(3_000 + u128::from(ordinal), 2, 4_000, ordinal))
-            .chain(
-                (0..32_u128)
-                    .map(|round| model_tool_use_message(5_000 + round, 99, 6_000 + round, 0)),
-            )
-            .collect::<Vec<_>>();
+        let one_multi_request_round = one_current_batch_with_inherited_tool_history();
         assert!(
             !automatic_tool_round_limit_reached(current_turn, &one_multi_request_round),
             "one current-turn batch and inherited history consume one round"
         );
     }
 
+    /// S10 / INV-001 / INV-020: one identity is minted per ordered response
+    /// part/request, approval stays pinned to the advertised catalog snapshot,
+    /// mixed auto/confirm policy parks without a continuation attempt, and the
+    /// adapter still receives a stopped race closure.
+    #[test]
+    fn s10_inv001_inv020_tool_response_candidates_preserve_order_and_policy() {
+        let schema =
+            crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
+                .expect("fixture schema is valid");
+        let definition = crate::ToolDefinition::new(
+            signalbox_domain::ToolName::try_new(String::from("automatic"))
+                .expect("fixture name is valid"),
+            String::from("Runs automatically."),
+            schema,
+            signalbox_domain::ToolPermissionDefault::Auto,
+            signalbox_domain::ToolEffectClass::EffectFree,
+        );
+        let catalog = crate::CompiledToolCatalog::try_new([crate::CompiledTool::new(
+            definition,
+            |_: &signalbox_domain::NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one tool is unambiguous");
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_tool_catalog(catalog);
+        let observation = tool_response();
+        let advertised_tools = service.catalog.definitions();
+        service.catalog = Arc::new(NoToolCatalog);
+        let approvals = service.tool_approvals(
+            &observation,
+            DangerousToolAutoApproval::Disabled,
+            &advertised_tools,
+        );
+        assert_eq!(
+            approvals.as_ref(),
+            [
+                InitialToolApproval::PolicyAuto,
+                InitialToolApproval::Confirm
+            ]
+        );
+
+        let ModelCallTerminalIdentityCandidates::ToolRound {
+            continuing,
+            stopped,
+        } = service.next_terminal_identities(&observation, &approvals)
+        else {
+            panic!("tool response requires both race-safe closures");
+        };
+        assert_eq!(continuing.response_parts().len(), 3);
+        assert_eq!(continuing.continuation_attempt(), None);
+        let [
+            ToolResponsePartIdentity::Text { .. },
+            ToolResponsePartIdentity::ToolCall {
+                approval: first_approval,
+                ..
+            },
+            ToolResponsePartIdentity::ToolCall {
+                approval: second_approval,
+                ..
+            },
+        ] = continuing.response_parts()
+        else {
+            panic!("fixture response preserves one text part then two tool calls");
+        };
+        assert_eq!(*first_approval, InitialToolApproval::PolicyAuto);
+        assert_eq!(*second_approval, InitialToolApproval::Confirm);
+        assert_eq!(
+            stopped,
+            StoppedToolRoundModelCallIdentities::new(
+                vec![
+                    StoppedToolResponsePartIdentity::text(identity(
+                        33,
+                        SemanticTranscriptEntryId::from_uuid,
+                    )),
+                    StoppedToolResponsePartIdentity::tool_call(
+                        identity(34, SemanticTranscriptEntryId::from_uuid),
+                        identity(62, ToolRequestId::from_uuid),
+                        identity(35, SemanticTranscriptEntryId::from_uuid),
+                    ),
+                    StoppedToolResponsePartIdentity::tool_call(
+                        identity(36, SemanticTranscriptEntryId::from_uuid),
+                        identity(63, ToolRequestId::from_uuid),
+                        identity(37, SemanticTranscriptEntryId::from_uuid),
+                    ),
+                ],
+                identity(38, SemanticTranscriptEntryId::from_uuid),
+                identity(41, ContextFrontierId::from_uuid),
+            ),
+            "lifecycle-dependent candidates receive a disjoint identity inventory"
+        );
+    }
     /// S28 / INV-038 / INV-039: attested imported text keeps its exact
     /// source-attested role, semantic source, imported authority, and decoded
     /// text without acquiring a native input or call identity.
@@ -3232,8 +3279,9 @@ mod tests {
         );
     }
 
-    /// S02 / INV-015: reference-only tool entries render from exact durable
-    /// request, attempt, and owner-decision authority in frontier order.
+    /// S02 / INV-015: durable request, attempt, and denial authority renders
+    /// reference-only tool semantics into their exact provider-visible roles
+    /// without changing source order.
     #[test]
     fn s02_inv015_frontier_rendering_resolves_exact_tool_roles_in_source_order() {
         let completed_request = model_tool_request(0);
@@ -3417,8 +3465,8 @@ mod tests {
         );
     }
 
-    /// S02 / INV-015: result evidence from another turn cannot authorize a
-    /// reference-only tool-result semantic entry.
+    /// S02 / INV-015: a terminal attempt from another turn cannot supply
+    /// authority for a tool-result semantic entry.
     #[test]
     fn s02_inv015_frontier_rendering_rejects_cross_turn_tool_result_evidence() {
         let request = model_tool_request(0);

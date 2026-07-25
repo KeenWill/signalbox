@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 schemars = "1.0.4"
 serde = "1.0.219"
-serde_json = "1.0.140"
+serde_json = { version = "1.0.140", features = ["raw_value"] }
 
 [lints]
 workspace = true

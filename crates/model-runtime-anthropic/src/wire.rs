@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) fn raw_json_is_object(raw: &serde_json::value::RawValue) -> bool {
+    raw.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
+}
+
 // --- Request ---
 
 #[derive(Debug, Serialize)]
@@ -64,7 +68,7 @@ pub(crate) enum WireRequestBlock {
 pub(crate) struct WireTool {
     pub name: String,
     pub description: String,
-    pub input_schema: serde_json::Value,
+    pub input_schema: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Debug, Serialize)]

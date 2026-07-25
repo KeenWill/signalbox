@@ -218,6 +218,8 @@ pub enum RuntimeModelCallProviderError {
     InvalidAssistantText,
     /// A checked application schema could not form a runtime JSON value.
     InvalidToolSchema,
+    /// Runtime tool material could not form a bounded domain proposal.
+    InvalidToolProposal,
 }
 
 impl fmt::Display for RuntimeModelCallProviderError {
@@ -240,6 +242,7 @@ impl fmt::Display for RuntimeModelCallProviderError {
             }
             Self::InvalidAssistantText => "provider completion contains invalid assistant text",
             Self::InvalidToolSchema => "application tool schema is invalid at the runtime bridge",
+            Self::InvalidToolProposal => "provider completion contains an invalid tool proposal",
         })
     }
 }
@@ -349,7 +352,19 @@ where
             frontier: call.frontier().snapshot(),
         };
         let messages = render_runtime_messages(operation.messages());
-        let tools = render_runtime_tool_definitions(operation.tools())?;
+        let tools = operation
+            .tools()
+            .iter()
+            .map(|definition| {
+                let schema = decode_checked_raw_json(definition.input_schema().as_str())
+                    .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
+                Ok(ToolDefinition::with_raw_schema(
+                    definition.name().as_str(),
+                    definition.description(),
+                    schema,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
@@ -455,21 +470,16 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 content,
                 ..
             } => {
-                let part = MessagePart::Text(content.as_str().to_owned());
                 if assistant_call == Some(*producing_call) {
                     if let Some(message) = rendered.last_mut() {
-                        message.parts.push(part);
+                        message
+                            .parts
+                            .push(MessagePart::Text(content.as_str().to_owned()));
                     } else {
-                        rendered.push(ConversationMessage {
-                            role: ConversationRole::Assistant,
-                            parts: vec![part],
-                        });
+                        rendered.push(ConversationMessage::assistant_text(content.as_str()));
                     }
                 } else {
-                    rendered.push(ConversationMessage {
-                        role: ConversationRole::Assistant,
-                        parts: vec![part],
-                    });
+                    rendered.push(ConversationMessage::assistant_text(content.as_str()));
                     assistant_call = Some(*producing_call);
                 }
                 collecting_tool_results = false;
@@ -561,21 +571,26 @@ fn decode_checked_raw_json(
     serde_json::value::RawValue::from_string(value.to_owned())
 }
 
-fn render_runtime_tool_definitions(
-    definitions: &[signalbox_application::ToolDefinition],
-) -> Result<Vec<ToolDefinition>, RuntimeModelCallProviderError> {
-    definitions
-        .iter()
-        .map(|definition| {
-            let schema = serde_json::from_str(definition.input_schema().as_str())
-                .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
-            Ok(ToolDefinition::with_schema(
-                definition.name().as_str(),
-                definition.description(),
-                schema,
-            ))
-        })
-        .collect()
+fn require_correlation(
+    expected: ModelCallId,
+    returned: ModelCallId,
+) -> Result<(), RuntimeModelCallProviderError> {
+    if expected == returned {
+        Ok(())
+    } else {
+        Err(RuntimeModelCallProviderError::CorrelationMismatch)
+    }
+}
+
+fn render_requested_target(selection: FrozenModelSelection) -> String {
+    match selection {
+        FrozenModelSelection::Direct(direct) => format!("direct:{}", direct.into_uuid()),
+        FrozenModelSelection::FrozenAlias { alias, definition } => format!(
+            "alias:{}@direct:{}",
+            alias.into_uuid(),
+            definition.selected().into_uuid()
+        ),
+    }
 }
 
 fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
@@ -625,28 +640,6 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
     }
 }
 
-fn require_correlation(
-    expected: ModelCallId,
-    returned: ModelCallId,
-) -> Result<(), RuntimeModelCallProviderError> {
-    if expected == returned {
-        Ok(())
-    } else {
-        Err(RuntimeModelCallProviderError::CorrelationMismatch)
-    }
-}
-
-fn render_requested_target(selection: FrozenModelSelection) -> String {
-    match selection {
-        FrozenModelSelection::Direct(direct) => format!("direct:{}", direct.into_uuid()),
-        FrozenModelSelection::FrozenAlias { alias, definition } => format!(
-            "alias:{}@direct:{}",
-            alias.into_uuid(),
-            definition.selected().into_uuid()
-        ),
-    }
-}
-
 fn classify_terminal(
     evidence: TerminalEvidence,
     observations: &[Observation<ModelCallId>],
@@ -672,8 +665,8 @@ fn classify_terminal(
     match evidence {
         TerminalEvidence::Completed(completion) => {
             let finish = completion.finish;
-            let mut response_parts = Vec::with_capacity(completion.content.len());
-            let mut contains_tool_call = false;
+            let mut response_parts = Vec::new();
+            let mut tool_count = 0usize;
             for part in completion.content {
                 match part {
                     AssistantPart::Text(text) if text.is_empty() => {}
@@ -684,7 +677,7 @@ fn classify_terminal(
                         ));
                     }
                     AssistantPart::ToolCall(proposal) => {
-                        contains_tool_call = true;
+                        tool_count += 1;
                         let Ok(name) = DomainToolName::try_new(proposal.name.as_str().to_owned())
                         else {
                             return Ok(ModelCallTerminalObservation::KnownFailed);
@@ -703,9 +696,22 @@ fn classify_terminal(
                     }
                 }
             }
-            if contains_tool_call {
-                // docs/spec/model-call-execution.md: tool-call parts are
-                // accepted only with a matching `ToolUse` finish reason.
+            if tool_count == 0 {
+                if matches!(finish, CompletionFinish::ToolUse) {
+                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                }
+                Ok(ModelCallTerminalObservation::Completed {
+                    assistant_text: response_parts
+                        .into_iter()
+                        .map(|part| match part {
+                            AssistantResponsePart::Text(text) => text,
+                            AssistantResponsePart::ToolCall(_) => {
+                                unreachable!("zero tool count excludes tool parts")
+                            }
+                        })
+                        .collect(),
+                })
+            } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
                     return Ok(ModelCallTerminalObservation::KnownFailed);
                 }
@@ -714,20 +720,6 @@ fn classify_terminal(
                     return Ok(ModelCallTerminalObservation::KnownFailed);
                 };
                 Ok(ModelCallTerminalObservation::CompletedWithTools { response })
-            } else {
-                if matches!(finish, CompletionFinish::ToolUse) {
-                    return Ok(ModelCallTerminalObservation::KnownFailed);
-                }
-                let assistant_text = response_parts
-                    .into_iter()
-                    .map(|part| match part {
-                        AssistantResponsePart::Text(text) => text,
-                        AssistantResponsePart::ToolCall(_) => {
-                            unreachable!("the tool-call flag covers every tool proposal")
-                        }
-                    })
-                    .collect();
-                Ok(ModelCallTerminalObservation::Completed { assistant_text })
             }
         }
         TerminalEvidence::Refused(_) => Ok(ModelCallTerminalObservation::Refused),
@@ -761,31 +753,27 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use signalbox_application::{
-        ModelConversationMessage, ToolDefinition as ApplicationToolDefinition, ToolInputSchema,
-    };
+    use signalbox_application::ModelConversationMessage;
     use signalbox_domain::{
-        AssistantResponsePart, AssistantText, ImportedText, ImportedTranscriptEntryId, ModelCallId,
+        AssistantText, ImportedText, ImportedTranscriptEntryId, ModelCallId,
         ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelIdentity,
-        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolCallProposal,
-        ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName as DomainToolName,
-        ToolPermissionDefault, ToolRequest, ToolRequestId, ToolRequestOrdinal,
-        ToolRequestReconstitutionInput, ToolUsingAssistantResponse, TurnId,
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolExecutionError,
+        ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TurnId,
     };
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, ConversationMessage, ExchangeFacts, LossCause, NativeErrorFacts,
         Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence, ProviderErrorEvidence,
         ProviderErrorKind, ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
-        TransportFacts, UnsentCause,
+        ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal, render_conversation_message,
-        render_runtime_messages, render_runtime_tool_definitions,
+        RuntimeModelDefinition, classify_terminal, decode_checked_raw_json,
+        render_conversation_message, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -869,37 +857,35 @@ mod tests {
         })
     }
 
-    #[test]
-    fn configured_application_tools_are_advertised_to_the_runtime() {
-        let definition = ApplicationToolDefinition::new(
-            DomainToolName::try_new(String::from("current_time")).expect("fixture tool name"),
-            String::from("Returns the current UTC time."),
-            ToolInputSchema::try_new(String::from(
-                r#"{"additionalProperties":false,"properties":{},"type":"object"}"#,
-            ))
-            .expect("fixture schema"),
-            ToolPermissionDefault::Auto,
-            ToolEffectClass::EffectFree,
-        );
-
-        let rendered =
-            render_runtime_tool_definitions(&[definition]).expect("checked catalog maps");
-        assert_eq!(rendered.len(), 1);
-        assert_eq!(rendered[0].name.as_str(), "current_time");
-        assert_eq!(rendered[0].description, "Returns the current UTC time.");
+    #[track_caller]
+    fn assert_invalid_tool_proposal_closes(evidence: TerminalEvidence) {
         assert_eq!(
-            rendered[0].input_schema,
-            serde_json::json!({
-                "additionalProperties": false,
-                "properties": {},
-                "type": "object"
-            })
+            classify_terminal(evidence, &[], "model-exact")
+                .expect("invalid proposal has a durable terminal classification"),
+            ModelCallTerminalObservation::KnownFailed
         );
     }
 
+    fn tool_completion(model: &str) -> TerminalEvidence {
+        TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new(model)),
+            finish: CompletionFinish::ToolUse,
+            content: vec![
+                AssistantPart::Text(String::from("checking")),
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("provider-call-opaque"),
+                    name: ToolName::new("current_time"),
+                    arguments_json: String::from(r#"{ "timezone": "UTC" }"#),
+                }),
+            ],
+            usage: TokenUsage::unreported(),
+        })
+    }
     /// S10 / INV-002 / INV-005: one provider response and its ordered result
-    /// batch remain grouped, while invalid function-argument shapes use
-    /// replay-safe JSON without replacing their exact durable evidence.
+    /// batch remain grouped, while malformed arguments use replay-safe JSON
+    /// without replacing their exact durable request evidence.
     #[test]
     fn s10_inv002_inv005_tool_history_is_grouped_and_replay_safe() {
         let first = request(20, "{}");
@@ -923,8 +909,13 @@ mod tests {
                 producing_call: call(),
                 request: malformed.clone(),
             },
-            signalbox_application::ModelConversationMessage::AssistantToolUse {
+            signalbox_application::ModelConversationMessage::Assistant {
                 source: source(33),
+                producing_call: call(),
+                content: AssistantText::try_new(String::from("after")).expect("fixture text"),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(34),
                 producing_call: call(),
                 request: scalar.clone(),
             },
@@ -934,26 +925,26 @@ mod tests {
                 request: deep.clone(),
             },
             signalbox_application::ModelConversationMessage::Assistant {
-                source: source(34),
+                source: source(35),
                 producing_call: call(),
                 content: AssistantText::try_new(String::from("after")).expect("fixture text"),
             },
             signalbox_application::ModelConversationMessage::ToolResult {
-                source: source(35),
+                source: source(36),
                 request: first.id(),
                 content: signalbox_application::ModelToolResultContent::ExecutionError(
                     ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
                 ),
             },
             signalbox_application::ModelConversationMessage::ToolResult {
-                source: source(36),
+                source: source(37),
                 request: malformed.id(),
                 content: signalbox_application::ModelToolResultContent::ExecutionError(
                     ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
                 ),
             },
             signalbox_application::ModelConversationMessage::ToolResult {
-                source: source(37),
+                source: source(38),
                 request: scalar.id(),
                 content: signalbox_application::ModelToolResultContent::ExecutionError(
                     ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
@@ -967,19 +958,27 @@ mod tests {
             rendered[0].role,
             signalbox_model_runtime::ConversationRole::Assistant
         );
-        assert_eq!(rendered[0].parts.len(), 6);
-        for part in &rendered[0].parts[2..=3] {
-            let signalbox_model_runtime::MessagePart::ToolCall(replayed) = part else {
-                panic!("invalid proposal remains in the assistant group");
-            };
-            assert_eq!(
-                replayed.arguments_json,
-                r#"{"signalbox_invalid_arguments":true}"#
-            );
-        }
+        assert_eq!(rendered[0].parts.len(), 7);
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_malformed) =
+            &rendered[0].parts[2]
+        else {
+            panic!("malformed proposal remains in the assistant group");
+        };
+        assert_eq!(
+            replayed_malformed.arguments_json,
+            r#"{"signalbox_invalid_arguments":true}"#
+        );
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_scalar) = &rendered[0].parts[4]
+        else {
+            panic!("scalar proposal remains in the assistant group");
+        };
+        assert_eq!(
+            replayed_scalar.arguments_json,
+            r#"{"signalbox_invalid_arguments":true}"#
+        );
         assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
         assert_eq!(scalar.arguments().as_str(), "7");
-        let signalbox_model_runtime::MessagePart::ToolCall(replayed_deep) = &rendered[0].parts[4]
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_deep) = &rendered[0].parts[5]
         else {
             panic!("deep valid proposal remains in the assistant group");
         };
@@ -1170,51 +1169,27 @@ mod tests {
         );
     }
 
-    /// S10 / INV-002: advertised tool calls cross the runtime boundary as one
-    /// bounded domain response without losing their provider part order.
+    /// S10 / INV-002 / INV-005: runtime-native tool calls become ordered,
+    /// normalized domain proposals without retaining provider identifiers.
     #[test]
-    fn s10_inv002_matching_completion_preserves_ordered_tool_parts() {
-        let expected_arguments =
-            NormalizedToolArguments::try_from_provider_text(String::from(r#"{"zone":"UTC"}"#))
-                .expect("fixture arguments are admitted");
-        let expected_response = ToolUsingAssistantResponse::try_from_parts(vec![
-            AssistantResponsePart::Text(
-                AssistantText::try_new(String::from("before")).expect("fixture text is admitted"),
-            ),
-            AssistantResponsePart::ToolCall(ToolCallProposal::new(
-                DomainToolName::try_new(String::from("current_time"))
-                    .expect("fixture name is admitted"),
-                expected_arguments,
-            )),
-            AssistantResponsePart::Text(
-                AssistantText::try_new(String::from("after")).expect("fixture text is admitted"),
-            ),
-        ])
-        .expect("fixture response has one tool proposal");
-
-        assert_eq!(
-            classify_terminal(
-                completion_with_finish(
-                    "model-exact",
-                    CompletionFinish::ToolUse,
-                    vec![
-                        AssistantPart::Text(String::from("before")),
-                        AssistantPart::ToolCall(RuntimeToolCallProposal {
-                            id: ToolCallId::new("provider-call-1"),
-                            name: RuntimeToolName::new("current_time"),
-                            arguments_json: String::from(r#"{"zone":"UTC"}"#),
-                        }),
-                        AssistantPart::Text(String::from("after")),
-                    ],
-                ),
-                &[],
-                "model-exact",
-            )
-            .expect("bounded tool completion is supported"),
-            ModelCallTerminalObservation::CompletedWithTools {
-                response: expected_response,
-            }
-        );
+    fn s10_inv002_inv005_tool_completion_crosses_as_provider_neutral_proposals() {
+        let observation = classify_terminal(tool_completion("model-exact"), &[], "model-exact")
+            .expect("tool-use completion is supported");
+        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+            panic!("tool-use finish produces a same-turn tool round");
+        };
+        assert_eq!(response.parts().len(), 2);
+        assert!(matches!(
+            &response.parts()[0],
+            signalbox_domain::AssistantResponsePart::Text(text)
+                if text.as_str() == "checking"
+        ));
+        assert!(matches!(
+            &response.parts()[1],
+            signalbox_domain::AssistantResponsePart::ToolCall(proposal)
+                if proposal.name().as_str() == "current_time"
+                    && proposal.arguments().as_str() == r#"{"timezone":"UTC"}"#
+        ));
     }
 
     /// S10 / INV-002: tool-call content and the `ToolUse` finish reason must
@@ -1225,9 +1200,9 @@ mod tests {
             classify_terminal(
                 completion(
                     "model-exact",
-                    vec![AssistantPart::ToolCall(RuntimeToolCallProposal {
+                    vec![AssistantPart::ToolCall(ToolCallProposal {
                         id: ToolCallId::new("provider-call-1"),
-                        name: RuntimeToolName::new("current_time"),
+                        name: ToolName::new("current_time"),
                         arguments_json: String::from("{}"),
                     })],
                 ),
@@ -1255,23 +1230,75 @@ mod tests {
     }
 
     #[test]
-    fn inadmissible_provider_tool_payload_becomes_known_failed() {
-        assert_eq!(
-            classify_terminal(
-                completion(
-                    "model-exact",
-                    vec![AssistantPart::ToolCall(RuntimeToolCallProposal {
-                        id: ToolCallId::new("provider-call-1"),
-                        name: RuntimeToolName::new("current_time"),
-                        arguments_json: String::from("{\"zone\":\"UTC\\u0000\"}\0"),
-                    })],
-                ),
-                &[],
-                "model-exact",
-            )
-            .expect("bounded-vocabulary rejection is a typed terminal observation"),
-            ModelCallTerminalObservation::KnownFailed
+    fn checked_tool_json_decoding_is_stack_guarded_beyond_serde_default_depth() {
+        let depth = 512;
+        let json = format!(r#"{{"nested":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
+
+        assert!(
+            decode_checked_raw_json(&json)
+                .expect("checked bounded JSON remains decodable")
+                .get()
+                .starts_with('{')
         );
+    }
+
+    /// INV-014: malformed tool proposals are terminal known failures, so the
+    /// provider operation cannot remain durably in flight.
+    #[test]
+    fn inv014_invalid_tool_proposals_close_as_known_failure() {
+        let invalid_name = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("bad name"),
+                arguments_json: String::from("{}"),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+        let oversized_arguments = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("current_time"),
+                arguments_json: "x".repeat(1024 * 1024 + 1),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+        let nul_arguments = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("current_time"),
+                arguments_json: String::from("{\"zone\":\"UTC\\u0000\"}\0"),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+        let mismatched_finish = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("current_time"),
+                arguments_json: String::from("{}"),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+
+        assert_invalid_tool_proposal_closes(invalid_name);
+        assert_invalid_tool_proposal_closes(oversized_arguments);
+        assert_invalid_tool_proposal_closes(nul_arguments);
+        assert_invalid_tool_proposal_closes(mismatched_finish);
     }
 
     /// INV-014: either early or terminal provider-model mismatch prevents

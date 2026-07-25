@@ -347,13 +347,15 @@ impl PostgresToolLoopRepository {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> Result<CurrentToolAttempt, ToolLoopRepositoryError> {
+    ) -> Result<Option<CurrentToolAttempt>, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let Some(batch) =
+                load_active_batch_from_connection(&mut transaction, session, turn).await?
+            else {
+                return Ok(None);
+            };
             let prepared = batch
                 .prepare_next_attempt(attempt, effect_class)
                 .map_err(|_| {
@@ -363,7 +365,7 @@ impl PostgresToolLoopRepository {
                 })?
                 .into_attempt();
             insert_prepared_attempt(&mut transaction, &prepared).await?;
-            Ok(prepared)
+            Ok(Some(prepared))
         }
         .await;
         finish_commit(transaction, result).await
@@ -542,6 +544,7 @@ impl PostgresToolLoopRepository {
             if current.session() != session || current.turn() != turn {
                 return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
             }
+            mark_issuing_turn_attempt_running(&mut transaction, &current).await?;
             let ended = current.end_preflight_error(error).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("invalid tool preflight result")
             })?;
@@ -851,7 +854,7 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> Result<CurrentToolAttempt, Self::Error> {
+    ) -> Result<Option<CurrentToolAttempt>, Self::Error> {
         PostgresToolLoopRepository::prepare_next_attempt(self, session, turn, attempt, effect_class)
             .await
     }
