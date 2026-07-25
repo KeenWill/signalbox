@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Bind review claims to exact typed evidence
+
+**Context.** Same-target ancestry alone cannot prove that a finding event came
+from a pass capable of producing that event. A later session frontier can
+contain an earlier pass turn's terminal evidence without being that turn's
+terminal frontier. Leaving external object kind open also permits adapters and
+storage to choose incompatible discriminators.
+
+**Decision.** Finding event kinds admit only their recorded judgment,
+deduplication, publication, or repair pass kinds. A successful pass carries its
+turn's exact canonical terminal frontier. External review objects use the closed
+kind vocabulary change request, commit, review, review thread, inline review
+comment, and general change-request comment.
+
+**Rejected alternatives.** Target-only pass checks authenticate ancestry but not
+responsibility. A containing frontier includes unrelated later transcript
+evidence. An open object-kind string requires another bounded extension contract
+and cannot guarantee adapter agreement.
+
+**Affects.** The [review-workflows specification](spec/review-workflows.md),
+review-workflow domain reconstitution, and the `2026072602xx` persistence slice.
+
 ## 2026-07-25 — Freeze comparison revisions for diff-relative review
 
 **Context.** A change-request number and head revision do not identify one
