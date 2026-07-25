@@ -80,24 +80,36 @@ const AMBIENT_POSTGRES_VARIABLES: [&str; 13] = [
     "PGUSER",
 ];
 
+/// Reports whether the password file SQLx falls back to when `PGPASSFILE` is
+/// unset exists: `~/.pgpass` under the process home directory, mirroring
+/// libpq's default. SQLx consults it whenever the parsed URL carries no
+/// password, so its presence is a second credential channel exactly like
+/// `PGPASSFILE`. Presence alone decides; the file is never opened.
+fn default_passfile_is_present() -> bool {
+    std::env::home_dir().is_some_and(|home| home.join(".pgpass").exists())
+}
+
 /// Parses production connection options with certificate and hostname checks.
 ///
 /// The database URL is the only supported configuration channel for the
 /// production connection: when any ambient libpq-style `PG*` variable is
-/// present in the process environment (even with an empty value), parsing
-/// fails closed instead of letting the environment silently seed connection
-/// defaults or credentials. The error names the offending variables, never
-/// their values.
+/// present in the process environment (even with an empty value), or when the
+/// default `~/.pgpass` password file exists, parsing fails closed instead of
+/// letting the environment silently seed connection defaults or credentials.
+/// The error names the offending channel, never its contents.
 pub fn production_connection_options(database_url: &str) -> Result<PgConnectOptions, Error> {
-    production_connection_options_with_environment(database_url, |name| {
-        std::env::var_os(name).is_some()
-    })
+    production_connection_options_with_environment(
+        database_url,
+        |name| std::env::var_os(name).is_some(),
+        default_passfile_is_present,
+    )
 }
 
-/// Parses production options against an explicit variable-presence lookup.
+/// Parses production options against explicit ambient-channel lookups.
 fn production_connection_options_with_environment(
     database_url: &str,
     variable_is_present: impl Fn(&'static str) -> bool,
+    passfile_is_present: impl Fn() -> bool,
 ) -> Result<PgConnectOptions, Error> {
     let ambient: Vec<&'static str> = AMBIENT_POSTGRES_VARIABLES
         .into_iter()
@@ -111,6 +123,14 @@ fn production_connection_options_with_environment(
                 ambient.join(", ")
             )
             .into(),
+        ));
+    }
+    if passfile_is_present() {
+        return Err(Error::Configuration(
+            "the default PostgreSQL password file would supply the production credential: \
+             `~/.pgpass` is present; remove it and carry every connection parameter in the \
+             database URL"
+                .into(),
         ));
     }
     PgConnectOptions::from_str(database_url).map(|options| options.ssl_mode(PgSslMode::VerifyFull))
@@ -140,20 +160,30 @@ mod tests {
         false
     }
 
+    /// An environment carrying no default `~/.pgpass` password file.
+    fn no_default_passfile() -> bool {
+        false
+    }
+
     #[test]
     fn production_options_require_full_tls_verification() {
-        let options =
-            production_connection_options_with_environment(DATABASE_URL, no_ambient_variables)
-                .expect("valid database URL without ambient variables");
+        let options = production_connection_options_with_environment(
+            DATABASE_URL,
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect("valid database URL without ambient channels");
 
         assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
     }
 
     #[test]
     fn production_options_reject_an_ambient_credential_variable() {
-        let error = production_connection_options_with_environment(DATABASE_URL, |name| {
-            name == "PGPASSWORD"
-        })
+        let error = production_connection_options_with_environment(
+            DATABASE_URL,
+            |name| name == "PGPASSWORD",
+            no_default_passfile,
+        )
         .expect_err("an ambient credential channel must fail closed");
 
         expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGPASSWORD; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
@@ -161,10 +191,26 @@ mod tests {
 
     #[test]
     fn production_options_name_every_consulted_ambient_variable() {
-        let error = production_connection_options_with_environment(DATABASE_URL, |_| true)
-            .expect_err("a fully ambient environment must fail closed");
+        let error = production_connection_options_with_environment(
+            DATABASE_URL,
+            |_| true,
+            no_default_passfile,
+        )
+        .expect_err("a fully ambient environment must fail closed");
 
         expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGAPPNAME, PGDATABASE, PGHOST, PGHOSTADDR, PGOPTIONS, PGPASSFILE, PGPASSWORD, PGPORT, PGSSLCERT, PGSSLKEY, PGSSLMODE, PGSSLROOTCERT, PGUSER; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_reject_the_default_password_file() {
+        let error = production_connection_options_with_environment(
+            DATABASE_URL,
+            no_ambient_variables,
+            || true,
+        )
+        .expect_err("the default passfile is a second credential channel and must fail closed");
+
+        expect!["error with configuration: the default PostgreSQL password file would supply the production credential: `~/.pgpass` is present; remove it and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
     }
 
     #[test]

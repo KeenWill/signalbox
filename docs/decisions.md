@@ -19,14 +19,20 @@ the libpq-style `PG*` variables first and lets the URL override only what the
 URL states. Anything the URL omits — host, port, user, database, TLS material,
 application name, runtime options — silently comes from the environment, and
 `PGPASSWORD`/`PGPASSFILE` form an undocumented second database-credential
-channel. Only `sslmode` was already neutralized, by forcing `verify-full` after
-parsing.
+channel. URL parsing additionally ends in SQLx's `apply_pgpass`, which falls
+back to libpq's default `~/.pgpass` whenever the URL carries no password and
+`PGPASSFILE` is unset, so a deployment image holding that file supplies a
+credential without any variable being set. Only `sslmode` was already
+neutralized, by forcing `verify-full` after parsing.
 
 **Decision.** The production connection path fails closed when any of the
-thirteen consulted variables is present in the environment, whatever its value.
-The error names the offending variables and never their values, and the refusal
-precedes any database contact. The local test connection path keeps SQLx's
-behavior; it never reaches a production cluster.
+thirteen consulted variables is present in the environment, whatever its value,
+and likewise when the default `~/.pgpass` exists under the process home
+directory. The passfile refusal turns on presence alone; the file is never
+opened, so no credential is read to decide. The error names the offending
+channel and never its contents, and the refusal precedes any database contact.
+The local test connection path keeps SQLx's behavior; it never reaches a
+production cluster.
 
 **Rejected alternatives.** Documenting the fallback set would make the
 environment surface honest while leaving an unmanaged credential channel and a
@@ -34,6 +40,12 @@ connection whose target depends on ambient state. Rebuilding options field by
 field from a self-parsed URL would put a libpq connection-string parser in this
 repository to work around one driver default. Ignoring the variables silently
 would leave an operator who set them without any signal that they did nothing.
+Constructing options through a passfile-free path is not available: SQLx 0.9
+exposes `new_without_pgpass` only for the no-URL constructor, and its URL parser
+is private, so the passfile lookup cannot be skipped or the resulting field
+cleared. Refusing only URLs that omit a password would close the same hole at
+its trigger, but it also forbids certificate and peer authentication, which the
+still-open database-credential decision may want.
 
 **Affects.** `production_connection_options`, hubd's production startup, and the
 process-configuration section of
