@@ -5328,14 +5328,15 @@ pub enum ReviewRunState {
     Blocked { blocking_pass: ReviewPassRef },
     Cancelled { last_pass: Option<ReviewPassRef> },
 }
-pub struct ReviewPassEvidence { /* canonical pass reference + kind + state */ }
+pub struct ReviewPassEvidence { /* canonical pass reference + kind + policy + state */ }
 impl ReviewPassEvidence {
     pub const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
+        policy: ReviewPolicy,
         state: ReviewPassState,
     ) -> Self;
-    // accessors: reference(), kind(), state()
+    // accessors: reference(), kind(), policy(), state()
 }
 pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
 impl ReviewRunReconstitutionInput {
