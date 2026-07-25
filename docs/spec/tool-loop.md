@@ -212,11 +212,12 @@ response.
 
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
 physical-attempt checkpointing, prepared-attempt preflight, the authorize →
-executor → result-commit window, and in-flight crash classification. Before
-inserting the next attempt or acting on a loaded prepared attempt, tool
-execution acquires the gate and revalidates the loaded batch; an interrupt that
-already consumed the batch produces `NoWork`, while an interrupt that arrives
-later waits behind the checkpoint or preflight. Tool execution holds the gate
+executor → result-commit window, in-flight crash classification, and the
+all-resolved continuation checkpoint. Before inserting the next attempt, acting
+on a loaded prepared attempt, or preparing continuation, tool execution acquires
+the gate and revalidates the loaded batch; an interrupt that already consumed
+the batch produces `NoWork`, while an interrupt that arrives later waits behind
+the checkpoint, preflight, or continuation. Tool execution holds the gate
 through a preflight closure or from before authorization until the returned
 evidence commits; interrupt handling acquires the same gate before its atomic
 command transaction. A pass that sees an `InFlight` attempt also acquires the
@@ -226,6 +227,13 @@ wins before authorization closes the checkpointed attempt as crash-lost and
 terminalizes without entering the executor. An interrupt that waits behind
 executor work reloads the committed result before closing the batch, so it
 cannot strand an issued request or roll back its command.
+
+If the executor returns an operator failure without trustworthy evidence after
+authorization, the service retains the dispatch gate and applies the attempt's
+effect-class crash-loss transition before surfacing that failure. A failed
+classification retains the exact attempt identity and permit for another
+classification pass. The durable attempt therefore cannot remain `InFlight`
+after the gate becomes available to an interrupt.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
@@ -326,12 +334,15 @@ slot indefinitely.
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
 that did not complete ordinary execution as `ToolClosed` in proposal order, then
-appends the proof-bearing terminal marker. A prepared or effect-free crash loss
-that fails the turn uses that same proposal-ordered materialization before
-`TurnFailed`; the crash-lost `KnownFailed` attempt becomes
-`ToolExecutionResult`, while every other request without an ordinary result
-becomes `ToolClosed`. A request can therefore never remain an open logical
-dependency behind a terminal turn (INV-006).
+appends the proof-bearing terminal marker. The consumed result projection is
+bound to the interrupted turn: reusing this turn's current frontier identity is
+not sufficient, and a projection prepared for another turn cannot terminalize
+this turn with foreign request results even when the yielded source frontier
+matches. A prepared or effect-free crash loss that fails the turn uses that same
+proposal-ordered materialization before `TurnFailed`; the crash-lost
+`KnownFailed` attempt becomes `ToolExecutionResult`, while every other request
+without an ordinary result becomes `ToolClosed`. A request can therefore never
+remain an open logical dependency behind a terminal turn (INV-006).
 
 ## Approval waits and restart
 
