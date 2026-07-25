@@ -2790,6 +2790,40 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .await?
         .expect("publication reconciliation persists");
     assert_eq!(posted.status(), ReviewFindingStatus::Posted);
+
+    fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            ReviewFindingEvent::new(
+                finding_ref,
+                ReviewEventOrdinal::try_new(4).expect("positive ordinal"),
+                blocked_evidence,
+                ReviewFindingEventKind::BlockedWithReason {
+                    reason: text("publication state requires another reconciliation"),
+                },
+            ),
+        )
+        .await?
+        .expect("posted finding may become publication-blocked again");
+    let replayed_attachment = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, external_link_id,
+             external_link_association_kind)
+         VALUES ($1, 5, $2, $3, $4, $5, 'posted', NULL, NULL, $6, 'finding')",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(fixture.run.run().into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(attaching_pass.pass().into_uuid())
+    .bind(attaching_pass.run().run().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("reconciliation cannot replay the first posting's attachment");
+    assert_sqlstate(&replayed_attachment, "23514");
     Ok(())
 }
 

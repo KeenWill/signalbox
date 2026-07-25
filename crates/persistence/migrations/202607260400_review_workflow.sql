@@ -931,6 +931,8 @@ CREATE TABLE review_finding_event (
 
     CONSTRAINT review_finding_event_pk
         PRIMARY KEY (finding_id, event_ordinal),
+    CONSTRAINT review_finding_event_publication_link_once
+        UNIQUE (finding_id, external_link_id),
     CONSTRAINT review_finding_event_ordinal_positive_u32
         CHECK (event_ordinal BETWEEN 1 AND 4294967295),
     CONSTRAINT review_finding_event_kind_closed
@@ -1222,6 +1224,19 @@ BEGIN
             'invalid finding transition from % through %',
             previous_status,
             NEW.event_kind
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_kind = 'posted'
+       AND EXISTS (
+           SELECT 1
+             FROM review_finding_event
+            WHERE finding_id = NEW.finding_id
+              AND external_link_id = NEW.external_link_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'posted event reused consumed attachment evidence'
             USING ERRCODE = '23514';
     END IF;
 
