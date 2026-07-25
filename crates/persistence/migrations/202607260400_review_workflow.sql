@@ -60,42 +60,9 @@ CREATE TABLE review_target (
             stack_parent_target_id IS NULL
             OR base_revision IS NOT NULL
         ),
-    CONSTRAINT review_target_repository_identity_key
-        UNIQUE (target_id, provider_key, repository_key),
-    CONSTRAINT review_target_revision_identity_key
-        UNIQUE (
-            target_id,
-            provider_key,
-            repository_key,
-            head_revision
-        ),
     CONSTRAINT review_target_parent_fk
-        FOREIGN KEY (
-            stack_parent_target_id,
-            provider_key,
-            repository_key
-        )
-        REFERENCES review_target (
-            target_id,
-            provider_key,
-            repository_key
-        )
-        ON UPDATE RESTRICT
-        ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED,
-    CONSTRAINT review_target_parent_revision_fk
-        FOREIGN KEY (
-            stack_parent_target_id,
-            provider_key,
-            repository_key,
-            base_revision
-        )
-        REFERENCES review_target (
-            target_id,
-            provider_key,
-            repository_key,
-            head_revision
-        )
+        FOREIGN KEY (stack_parent_target_id)
+        REFERENCES review_target (target_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
@@ -103,6 +70,40 @@ CREATE TABLE review_target (
 
 CREATE INDEX review_target_repository_subject_index
     ON review_target (provider_key, repository_key, subject_kind);
+
+CREATE FUNCTION guard_review_target_parent()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    parent_provider text;
+    parent_repository text;
+    parent_head text;
+BEGIN
+    IF NEW.stack_parent_target_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT provider_key, repository_key, head_revision
+      INTO parent_provider, parent_repository, parent_head
+      FROM review_target
+     WHERE target_id = NEW.stack_parent_target_id;
+    IF NOT FOUND
+       OR parent_provider IS DISTINCT FROM NEW.provider_key
+       OR parent_repository IS DISTINCT FROM NEW.repository_key
+       OR parent_head IS DISTINCT FROM NEW.base_revision
+    THEN
+        RAISE EXCEPTION
+            'review target stack parent does not match repository and base'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER review_target_parent_is_guarded
+BEFORE INSERT ON review_target
+FOR EACH ROW
+EXECUTE FUNCTION guard_review_target_parent();
 
 CREATE TRIGGER review_target_is_append_only
 BEFORE UPDATE OR DELETE ON review_target
@@ -137,16 +138,9 @@ CREATE TABLE review_run (
         CHECK (policy_version BETWEEN 1 AND 4294967295),
     CONSTRAINT review_run_confidence_bounds
         CHECK (
-            minimum_judge_confidence BETWEEN 0 AND 10000
-            AND minimum_publication_confidence BETWEEN 0 AND 10000
-            AND minimum_publication_confidence >= minimum_judge_confidence
-            AND (
-                policy_version <> 1
-                OR (
-                    minimum_judge_confidence = 7000
-                    AND minimum_publication_confidence = 8000
-                )
-            )
+            policy_version = 1
+            AND minimum_judge_confidence = 7000
+            AND minimum_publication_confidence = 8000
         ),
     CONSTRAINT review_run_state_closed
         CHECK (
@@ -198,14 +192,24 @@ CREATE TABLE review_pass (
     pass_kind text NOT NULL,
     session_id uuid NOT NULL,
     accepted_input_id uuid NOT NULL,
+    origin_turn_id uuid NOT NULL,
     state_kind text NOT NULL,
     turn_id uuid,
     output_frontier_id uuid,
-    finding_event_finding_id uuid,
-    finding_event_finding_run_id uuid,
-    finding_event_finding_pass_id uuid,
-    finding_event_ordinal bigint,
-    finding_event_kind text,
+    result_kind text,
+    result_finding_id uuid,
+    result_finding_run_id uuid,
+    result_finding_pass_id uuid,
+    result_event_ordinal bigint,
+    result_event_kind text,
+    result_reason text,
+    result_referenced_finding_id uuid,
+    result_referenced_finding_run_id uuid,
+    result_referenced_finding_pass_id uuid,
+    result_referenced_finding_status text,
+    result_external_link_id uuid,
+    result_external_object_key text,
+    result_observation_state text,
 
     CONSTRAINT review_pass_ancestry_key
         UNIQUE (pass_id, run_id, target_id),
@@ -240,74 +244,47 @@ CREATE TABLE review_pass (
                 state_kind = 'queued'
                 AND turn_id IS NULL
                 AND output_frontier_id IS NULL
-                AND finding_event_finding_id IS NULL
-                AND finding_event_finding_run_id IS NULL
-                AND finding_event_finding_pass_id IS NULL
-                AND finding_event_ordinal IS NULL
-                AND finding_event_kind IS NULL
+                AND result_kind IS NULL
             )
             OR (
                 state_kind IN ('running', 'failed', 'blocked')
                 AND turn_id IS NOT NULL
                 AND output_frontier_id IS NULL
                 AND (
-                    (
-                        state_kind = 'blocked'
-                        AND finding_event_finding_id IS NOT NULL
-                        AND finding_event_finding_run_id IS NOT NULL
-                        AND finding_event_finding_pass_id IS NOT NULL
-                        AND finding_event_ordinal IS NOT NULL
-                        AND finding_event_kind IS NOT NULL
-                    )
-                    OR (
-                        finding_event_finding_id IS NULL
-                        AND finding_event_finding_run_id IS NULL
-                        AND finding_event_finding_pass_id IS NULL
-                        AND finding_event_ordinal IS NULL
-                        AND finding_event_kind IS NULL
-                    )
+                    state_kind = 'blocked'
+                    OR result_kind IS NULL
                 )
             )
             OR (
                 state_kind = 'succeeded'
                 AND turn_id IS NOT NULL
                 AND output_frontier_id IS NOT NULL
-                AND (
-                    (
-                        finding_event_finding_id IS NOT NULL
-                        AND finding_event_finding_run_id IS NOT NULL
-                        AND finding_event_finding_pass_id IS NOT NULL
-                        AND finding_event_ordinal IS NOT NULL
-                        AND finding_event_kind IS NOT NULL
-                    )
-                    OR (
-                        finding_event_finding_id IS NULL
-                        AND finding_event_finding_run_id IS NULL
-                        AND finding_event_finding_pass_id IS NULL
-                        AND finding_event_ordinal IS NULL
-                        AND finding_event_kind IS NULL
-                    )
-                )
             )
             OR (
                 state_kind = 'cancelled'
                 AND output_frontier_id IS NULL
-                AND finding_event_finding_id IS NULL
-                AND finding_event_finding_run_id IS NULL
-                AND finding_event_finding_pass_id IS NULL
-                AND finding_event_ordinal IS NULL
-                AND finding_event_kind IS NULL
+                AND result_kind IS NULL
             )
         ),
-    CONSTRAINT review_pass_finding_event_ordinal_positive_u32
+    CONSTRAINT review_pass_result_kind_closed
         CHECK (
-            finding_event_ordinal IS NULL
-            OR finding_event_ordinal BETWEEN 1 AND 4294967295
+            result_kind IS NULL
+            OR result_kind IN (
+                'produced_findings',
+                'finding_event',
+                'external_link_attachment',
+                'external_link_observation'
+            )
         ),
-    CONSTRAINT review_pass_finding_event_kind_closed
+    CONSTRAINT review_pass_result_event_ordinal_positive_u32
         CHECK (
-            finding_event_kind IS NULL
-            OR finding_event_kind IN (
+            result_event_ordinal IS NULL
+            OR result_event_ordinal BETWEEN 1 AND 4294967295
+        ),
+    CONSTRAINT review_pass_result_event_kind_closed
+        CHECK (
+            result_event_kind IS NULL
+            OR result_event_kind IN (
                 'accepted',
                 'rejected',
                 'duplicate',
@@ -316,6 +293,163 @@ CREATE TABLE review_pass (
                 'posted',
                 'fixed',
                 'blocked_with_reason'
+            )
+        ),
+    CONSTRAINT review_pass_result_reference_status_closed
+        CHECK (
+            result_referenced_finding_status IS NULL
+            OR result_referenced_finding_status IN ('open', 'accepted')
+        ),
+    CONSTRAINT review_pass_result_observation_state_closed
+        CHECK (
+            result_observation_state IS NULL
+            OR result_observation_state IN (
+                'current',
+                'outdated',
+                'resolved'
+            )
+        ),
+    CONSTRAINT review_pass_result_text_bounds
+        CHECK (
+            (
+                result_reason IS NULL
+                OR octet_length(result_reason) BETWEEN 1 AND 65536
+            )
+            AND (
+                result_external_object_key IS NULL
+                OR octet_length(result_external_object_key)
+                    BETWEEN 1 AND 1024
+            )
+        ),
+    CONSTRAINT review_pass_result_shape
+        CHECK (
+            (
+                result_kind IS NULL
+                AND result_finding_id IS NULL
+                AND result_finding_run_id IS NULL
+                AND result_finding_pass_id IS NULL
+                AND result_event_ordinal IS NULL
+                AND result_event_kind IS NULL
+                AND result_reason IS NULL
+                AND result_referenced_finding_id IS NULL
+                AND result_referenced_finding_run_id IS NULL
+                AND result_referenced_finding_pass_id IS NULL
+                AND result_referenced_finding_status IS NULL
+                AND result_external_link_id IS NULL
+                AND result_external_object_key IS NULL
+                AND result_observation_state IS NULL
+            )
+            OR (
+                result_kind = 'produced_findings'
+                AND result_finding_id IS NULL
+                AND result_finding_run_id IS NULL
+                AND result_finding_pass_id IS NULL
+                AND result_event_ordinal IS NULL
+                AND result_event_kind IS NULL
+                AND result_reason IS NULL
+                AND result_referenced_finding_id IS NULL
+                AND result_referenced_finding_run_id IS NULL
+                AND result_referenced_finding_pass_id IS NULL
+                AND result_referenced_finding_status IS NULL
+                AND result_external_link_id IS NULL
+                AND result_external_object_key IS NULL
+                AND result_observation_state IS NULL
+            )
+            OR (
+                result_kind = 'finding_event'
+                AND result_finding_id IS NOT NULL
+                AND result_finding_run_id IS NOT NULL
+                AND result_finding_pass_id IS NOT NULL
+                AND result_event_ordinal IS NOT NULL
+                AND result_event_kind <> 'posted'
+                AND result_external_link_id IS NULL
+                AND result_external_object_key IS NULL
+                AND result_observation_state IS NULL
+                AND (
+                    (
+                        result_event_kind IN (
+                            'accepted',
+                            'stale',
+                            'fixed'
+                        )
+                        AND result_reason IS NULL
+                        AND result_referenced_finding_id IS NULL
+                        AND result_referenced_finding_run_id IS NULL
+                        AND result_referenced_finding_pass_id IS NULL
+                        AND result_referenced_finding_status IS NULL
+                    )
+                    OR (
+                        result_event_kind IN (
+                            'rejected',
+                            'blocked_with_reason'
+                        )
+                        AND result_reason IS NOT NULL
+                        AND result_referenced_finding_id IS NULL
+                        AND result_referenced_finding_run_id IS NULL
+                        AND result_referenced_finding_pass_id IS NULL
+                        AND result_referenced_finding_status IS NULL
+                    )
+                    OR (
+                        result_event_kind IN (
+                            'duplicate',
+                            'superseded'
+                        )
+                        AND result_reason IS NULL
+                        AND result_referenced_finding_id IS NOT NULL
+                        AND result_referenced_finding_run_id IS NOT NULL
+                        AND result_referenced_finding_pass_id IS NOT NULL
+                        AND result_referenced_finding_status
+                            IN ('open', 'accepted')
+                    )
+                )
+            )
+            OR (
+                result_kind = 'external_link_attachment'
+                AND result_external_link_id IS NOT NULL
+                AND result_external_object_key IS NOT NULL
+                AND result_observation_state IS NULL
+                AND (
+                    (
+                        result_finding_id IS NULL
+                        AND result_finding_run_id IS NULL
+                        AND result_finding_pass_id IS NULL
+                        AND result_event_ordinal IS NULL
+                        AND result_event_kind IS NULL
+                        AND result_reason IS NULL
+                        AND result_referenced_finding_id IS NULL
+                        AND result_referenced_finding_run_id IS NULL
+                        AND result_referenced_finding_pass_id IS NULL
+                        AND result_referenced_finding_status IS NULL
+                    )
+                    OR (
+                        result_finding_id IS NOT NULL
+                        AND result_finding_run_id IS NOT NULL
+                        AND result_finding_pass_id IS NOT NULL
+                        AND result_event_ordinal IS NOT NULL
+                        AND result_event_kind = 'posted'
+                        AND result_reason IS NULL
+                        AND result_referenced_finding_id IS NULL
+                        AND result_referenced_finding_run_id IS NULL
+                        AND result_referenced_finding_pass_id IS NULL
+                        AND result_referenced_finding_status IS NULL
+                    )
+                )
+            )
+            OR (
+                result_kind = 'external_link_observation'
+                AND result_finding_id IS NULL
+                AND result_finding_run_id IS NULL
+                AND result_finding_pass_id IS NULL
+                AND result_event_ordinal IS NOT NULL
+                AND result_event_kind IS NULL
+                AND result_reason IS NULL
+                AND result_referenced_finding_id IS NULL
+                AND result_referenced_finding_run_id IS NULL
+                AND result_referenced_finding_pass_id IS NULL
+                AND result_referenced_finding_status IS NULL
+                AND result_external_link_id IS NOT NULL
+                AND result_external_object_key IS NULL
+                AND result_observation_state IS NOT NULL
             )
         ),
     CONSTRAINT review_pass_run_fk
@@ -327,6 +461,15 @@ CREATE TABLE review_pass (
     CONSTRAINT review_pass_accepted_input_fk
         FOREIGN KEY (accepted_input_id, session_id)
         REFERENCES accepted_input (accepted_input_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CONSTRAINT review_pass_origin_turn_fk
+        FOREIGN KEY (origin_turn_id, session_id, accepted_input_id)
+        REFERENCES turn_lifecycle (
+            turn_id,
+            session_id,
+            origin_accepted_input_id
+        )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
     CONSTRAINT review_pass_turn_fk
@@ -505,12 +648,49 @@ BEGIN
     END IF;
 
     IF (NEW.pass_id, NEW.run_id, NEW.target_id, NEW.pass_kind,
-        NEW.session_id, NEW.accepted_input_id)
+        NEW.session_id, NEW.accepted_input_id, NEW.origin_turn_id)
        IS DISTINCT FROM
        (OLD.pass_id, OLD.run_id, OLD.target_id, OLD.pass_kind,
-        OLD.session_id, OLD.accepted_input_id)
+        OLD.session_id, OLD.accepted_input_id, OLD.origin_turn_id)
     THEN
         RAISE EXCEPTION 'review pass immutable facts cannot change'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.result_kind IS NOT NULL
+       AND (
+           NEW.result_kind,
+           NEW.result_finding_id,
+           NEW.result_finding_run_id,
+           NEW.result_finding_pass_id,
+           NEW.result_event_ordinal,
+           NEW.result_event_kind,
+           NEW.result_reason,
+           NEW.result_referenced_finding_id,
+           NEW.result_referenced_finding_run_id,
+           NEW.result_referenced_finding_pass_id,
+           NEW.result_referenced_finding_status,
+           NEW.result_external_link_id,
+           NEW.result_external_object_key,
+           NEW.result_observation_state
+       ) IS DISTINCT FROM (
+           OLD.result_kind,
+           OLD.result_finding_id,
+           OLD.result_finding_run_id,
+           OLD.result_finding_pass_id,
+           OLD.result_event_ordinal,
+           OLD.result_event_kind,
+           OLD.result_reason,
+           OLD.result_referenced_finding_id,
+           OLD.result_referenced_finding_run_id,
+           OLD.result_referenced_finding_pass_id,
+           OLD.result_referenced_finding_status,
+           OLD.result_external_link_id,
+           OLD.result_external_object_key,
+           OLD.result_observation_state
+       )
+    THEN
+        RAISE EXCEPTION 'bound review pass result cannot change'
             USING ERRCODE = '23514';
     END IF;
 
@@ -518,7 +698,72 @@ BEGIN
        IS NOT DISTINCT FROM
        (OLD.state_kind, OLD.turn_id, OLD.output_frontier_id)
     THEN
+        IF OLD.result_kind IS NULL
+           AND NEW.result_kind IS NOT NULL
+           AND NOT (
+               (
+                   NEW.result_kind = 'produced_findings'
+                   AND NEW.state_kind = 'succeeded'
+                   AND NEW.pass_kind = 'read_only_review'
+               )
+               OR (
+                   NEW.result_kind = 'finding_event'
+                   AND (
+                       (
+                           NEW.result_event_kind IN (
+                               'accepted',
+                               'rejected',
+                               'stale'
+                           )
+                           AND NEW.state_kind = 'succeeded'
+                           AND NEW.pass_kind = 'judge'
+                       )
+                       OR (
+                           NEW.result_event_kind IN (
+                               'duplicate',
+                               'superseded'
+                           )
+                           AND NEW.state_kind = 'succeeded'
+                           AND NEW.pass_kind = 'dedupe'
+                       )
+                       OR (
+                           NEW.result_event_kind = 'fixed'
+                           AND NEW.state_kind = 'succeeded'
+                           AND NEW.pass_kind = 'fix'
+                       )
+                       OR (
+                           NEW.result_event_kind = 'blocked_with_reason'
+                           AND NEW.state_kind = 'blocked'
+                           AND NEW.pass_kind IN ('publish', 'fix')
+                       )
+                   )
+               )
+               OR (
+                   NEW.result_kind = 'external_link_attachment'
+                   AND NEW.state_kind = 'succeeded'
+                   AND NEW.pass_kind IN (
+                       'publish',
+                       'import_external_context'
+                   )
+               )
+               OR (
+                   NEW.result_kind = 'external_link_observation'
+                   AND NEW.state_kind = 'succeeded'
+                   AND NEW.pass_kind = 'import_external_context'
+               )
+           )
+        THEN
+            RAISE EXCEPTION
+                'review pass result is incompatible with pass outcome'
+                USING ERRCODE = '23514';
+        END IF;
         RETURN NEW;
+    END IF;
+
+    IF NEW.result_kind IS NOT NULL THEN
+        RAISE EXCEPTION
+            'review pass lifecycle transition cannot bind an effect result'
+            USING ERRCODE = '23514';
     END IF;
 
     IF OLD.state_kind = 'queued' THEN
@@ -781,12 +1026,12 @@ ALTER TABLE review_finding
     UNIQUE (finding_id, run_id, target_id, producing_pass_id);
 
 ALTER TABLE review_pass
-    ADD CONSTRAINT review_pass_finding_event_finding_fk
+    ADD CONSTRAINT review_pass_result_finding_fk
     FOREIGN KEY (
-        finding_event_finding_id,
-        finding_event_finding_run_id,
+        result_finding_id,
+        result_finding_run_id,
         target_id,
-        finding_event_finding_pass_id
+        result_finding_pass_id
     )
     REFERENCES review_finding (
         finding_id,
@@ -795,7 +1040,169 @@ ALTER TABLE review_pass
         producing_pass_id
     )
     ON UPDATE RESTRICT
-    ON DELETE RESTRICT;
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT review_pass_result_referenced_finding_fk
+    FOREIGN KEY (
+        result_referenced_finding_id,
+        result_referenced_finding_run_id,
+        target_id,
+        result_referenced_finding_pass_id
+    )
+    REFERENCES review_finding (
+        finding_id,
+        run_id,
+        target_id,
+        producing_pass_id
+    )
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE review_pass_produced_finding (
+    pass_id uuid NOT NULL,
+    result_ordinal bigint NOT NULL,
+    finding_id uuid NOT NULL,
+    finding_run_id uuid NOT NULL,
+    target_id uuid NOT NULL,
+    finding_pass_id uuid NOT NULL,
+
+    CONSTRAINT review_pass_produced_finding_pk
+        PRIMARY KEY (pass_id, result_ordinal),
+    CONSTRAINT review_pass_produced_finding_identity_unique
+        UNIQUE (finding_id),
+    CONSTRAINT review_pass_produced_finding_ordinal_bounds
+        CHECK (result_ordinal BETWEEN 1 AND 32),
+    CONSTRAINT review_pass_produced_finding_pass_fk
+        FOREIGN KEY (pass_id, finding_run_id, target_id)
+        REFERENCES review_pass (pass_id, run_id, target_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CONSTRAINT review_pass_produced_finding_finding_fk
+        FOREIGN KEY (
+            finding_id,
+            finding_run_id,
+            target_id,
+            finding_pass_id
+        )
+        REFERENCES review_finding (
+            finding_id,
+            run_id,
+            target_id,
+            producing_pass_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT review_pass_produced_finding_owner
+        CHECK (finding_pass_id = pass_id)
+);
+
+CREATE TRIGGER review_pass_produced_finding_is_append_only
+BEFORE UPDATE OR DELETE ON review_pass_produced_finding
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION require_review_pass_finding_inventory()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_pass uuid;
+    canonical_kind text;
+BEGIN
+    checked_pass := COALESCE(
+        (to_jsonb(NEW) ->> 'pass_id')::uuid,
+        (to_jsonb(NEW) ->> 'producing_pass_id')::uuid
+    );
+
+    SELECT result_kind
+      INTO canonical_kind
+      FROM review_pass
+     WHERE pass_id = checked_pass;
+
+    IF canonical_kind IS DISTINCT FROM 'produced_findings'
+       AND (
+           EXISTS (
+               SELECT 1
+                 FROM review_finding
+                WHERE producing_pass_id = checked_pass
+           )
+           OR EXISTS (
+               SELECT 1
+                 FROM review_pass_produced_finding
+                WHERE pass_id = checked_pass
+           )
+       )
+    THEN
+        RAISE EXCEPTION
+            'review finding producer has no produced-findings result'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF canonical_kind = 'produced_findings'
+       AND (
+           EXISTS (
+               SELECT finding_id, run_id, target_id, producing_pass_id
+                 FROM review_finding
+                WHERE producing_pass_id = checked_pass
+               EXCEPT
+               SELECT finding_id, finding_run_id, target_id, finding_pass_id
+                 FROM review_pass_produced_finding
+                WHERE pass_id = checked_pass
+           )
+           OR EXISTS (
+               SELECT finding_id, finding_run_id, target_id, finding_pass_id
+                 FROM review_pass_produced_finding
+                WHERE pass_id = checked_pass
+               EXCEPT
+               SELECT finding_id, run_id, target_id, producing_pass_id
+                 FROM review_finding
+                WHERE producing_pass_id = checked_pass
+           )
+           OR EXISTS (
+               SELECT 1
+                 FROM (
+                     SELECT result_ordinal,
+                            row_number() OVER (
+                                ORDER BY
+                                    target_id,
+                                    finding_run_id,
+                                    finding_pass_id,
+                                    finding_id
+                            ) AS canonical_ordinal
+                       FROM review_pass_produced_finding
+                      WHERE pass_id = checked_pass
+                 ) AS inventory
+                WHERE result_ordinal <> canonical_ordinal
+           )
+       )
+    THEN
+        RAISE EXCEPTION
+            'review pass finding inventory differs from canonical findings'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER review_pass_finding_inventory_from_pass
+AFTER UPDATE OF result_kind ON review_pass
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_pass_finding_inventory();
+
+CREATE CONSTRAINT TRIGGER review_pass_finding_inventory_from_finding
+AFTER INSERT ON review_finding
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_pass_finding_inventory();
+
+CREATE CONSTRAINT TRIGGER review_pass_finding_inventory_from_member
+AFTER INSERT ON review_pass_produced_finding
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_pass_finding_inventory();
 
 CREATE FUNCTION guard_review_finding_insert()
 RETURNS trigger
@@ -804,6 +1211,7 @@ AS $$
 DECLARE
     canonical_pass_kind text;
     canonical_pass_state text;
+    canonical_result_kind text;
 BEGIN
     IF NEW.diff_side IS NOT NULL
        AND NOT EXISTS (
@@ -816,14 +1224,16 @@ BEGIN
         RAISE EXCEPTION 'diff-relative finding requires a target base'
             USING ERRCODE = '23514';
     END IF;
-    SELECT pass_kind, state_kind
-      INTO canonical_pass_kind, canonical_pass_state
+    SELECT pass_kind, state_kind, result_kind
+      INTO canonical_pass_kind, canonical_pass_state,
+           canonical_result_kind
       FROM review_pass
      WHERE pass_id = NEW.producing_pass_id
        AND run_id = NEW.run_id
        AND target_id = NEW.target_id;
     IF canonical_pass_kind IS DISTINCT FROM 'read_only_review'
        OR canonical_pass_state IS DISTINCT FROM 'succeeded'
+       OR canonical_result_kind IS DISTINCT FROM 'produced_findings'
     THEN
         RAISE EXCEPTION
             'finding producer must be a succeeded read-only-review pass'
@@ -849,6 +1259,7 @@ CREATE TABLE review_external_link (
     association_kind text NOT NULL,
     run_id uuid,
     finding_id uuid,
+    finding_producing_pass_id uuid,
     provider_key text NOT NULL,
     object_kind text NOT NULL,
 
@@ -877,16 +1288,19 @@ CREATE TABLE review_external_link (
                 association_kind = 'target'
                 AND run_id IS NULL
                 AND finding_id IS NULL
+                AND finding_producing_pass_id IS NULL
             )
             OR (
                 association_kind = 'run'
                 AND run_id IS NOT NULL
                 AND finding_id IS NULL
+                AND finding_producing_pass_id IS NULL
             )
             OR (
                 association_kind = 'finding'
                 AND run_id IS NOT NULL
                 AND finding_id IS NOT NULL
+                AND finding_producing_pass_id IS NOT NULL
             )
         ),
     CONSTRAINT review_external_link_provider_bound
@@ -913,18 +1327,37 @@ CREATE TABLE review_external_link (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
     CONSTRAINT review_external_link_finding_fk
-        FOREIGN KEY (finding_id, run_id, target_id)
-        REFERENCES review_finding (finding_id, run_id, target_id)
+        FOREIGN KEY (
+            finding_id,
+            run_id,
+            target_id,
+            finding_producing_pass_id
+        )
+        REFERENCES review_finding (
+            finding_id,
+            run_id,
+            target_id,
+            producing_pass_id
+        )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
+
+ALTER TABLE review_pass
+    ADD CONSTRAINT review_pass_result_external_link_fk
+    FOREIGN KEY (result_external_link_id, target_id)
+    REFERENCES review_external_link (external_link_id, target_id)
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
 
 CREATE INDEX review_external_link_association_index
     ON review_external_link (
         target_id,
         association_kind,
         run_id,
-        finding_id
+        finding_id,
+        finding_producing_pass_id
     );
 
 CREATE TRIGGER review_external_link_is_append_only
@@ -976,15 +1409,27 @@ AS $$
 DECLARE
     canonical_pass_kind text;
     canonical_pass_state text;
+    canonical_result_kind text;
+    canonical_result_link uuid;
+    canonical_result_object text;
 BEGIN
-    SELECT pass_kind, state_kind
-      INTO canonical_pass_kind, canonical_pass_state
+    SELECT pass_kind, state_kind, result_kind,
+           result_external_link_id, result_external_object_key
+      INTO canonical_pass_kind, canonical_pass_state,
+           canonical_result_kind, canonical_result_link,
+           canonical_result_object
       FROM review_pass
      WHERE pass_id = NEW.pass_id
        AND run_id = NEW.pass_run_id
        AND target_id = NEW.target_id;
     IF canonical_pass_kind NOT IN ('publish', 'import_external_context')
        OR canonical_pass_state IS DISTINCT FROM 'succeeded'
+       OR canonical_result_kind
+            IS DISTINCT FROM 'external_link_attachment'
+       OR canonical_result_link
+            IS DISTINCT FROM NEW.external_link_id
+       OR canonical_result_object
+            IS DISTINCT FROM NEW.external_object_key
     THEN
         RAISE EXCEPTION
             'external attachment requires a succeeded attaching pass'
@@ -1136,9 +1581,18 @@ AS $$
 DECLARE
     event_pass_kind text;
     event_pass_state text;
-    event_pass_result_finding uuid;
-    event_pass_result_ordinal bigint;
     event_pass_result_kind text;
+    event_pass_result_finding uuid;
+    event_pass_result_run uuid;
+    event_pass_result_pass uuid;
+    event_pass_result_ordinal bigint;
+    event_pass_result_event_kind text;
+    event_pass_result_reason text;
+    event_pass_result_referenced_finding uuid;
+    event_pass_result_referenced_run uuid;
+    event_pass_result_referenced_pass uuid;
+    event_pass_result_referenced_status text;
+    event_pass_result_external_link uuid;
     event_policy_version bigint;
     event_judge_confidence integer;
     event_publication_confidence integer;
@@ -1151,6 +1605,15 @@ DECLARE
     referenced_status text;
     expected_ordinal bigint;
 BEGIN
+    PERFORM finding_id
+      FROM review_finding
+     WHERE finding_id IN (
+         NEW.finding_id,
+         NEW.referenced_finding_id
+     )
+     ORDER BY finding_id
+     FOR NO KEY UPDATE;
+
     SELECT producing_run.policy_version,
            producing_run.minimum_judge_confidence,
            producing_run.minimum_publication_confidence
@@ -1162,19 +1625,37 @@ BEGIN
         ON producing_run.run_id = finding.run_id
        AND producing_run.target_id = finding.target_id
      WHERE finding.finding_id = NEW.finding_id
-     FOR NO KEY UPDATE OF finding;
+    ;
 
     SELECT pass.pass_kind, pass.state_kind,
-           pass.finding_event_finding_id,
-           pass.finding_event_ordinal,
-           pass.finding_event_kind,
+           pass.result_kind,
+           pass.result_finding_id,
+           pass.result_finding_run_id,
+           pass.result_finding_pass_id,
+           pass.result_event_ordinal,
+           pass.result_event_kind,
+           pass.result_reason,
+           pass.result_referenced_finding_id,
+           pass.result_referenced_finding_run_id,
+           pass.result_referenced_finding_pass_id,
+           pass.result_referenced_finding_status,
+           pass.result_external_link_id,
            event_run.policy_version,
            event_run.minimum_judge_confidence,
            event_run.minimum_publication_confidence
       INTO event_pass_kind, event_pass_state,
-           event_pass_result_finding,
-           event_pass_result_ordinal,
            event_pass_result_kind,
+           event_pass_result_finding,
+           event_pass_result_run,
+           event_pass_result_pass,
+           event_pass_result_ordinal,
+           event_pass_result_event_kind,
+           event_pass_result_reason,
+           event_pass_result_referenced_finding,
+           event_pass_result_referenced_run,
+           event_pass_result_referenced_pass,
+           event_pass_result_referenced_status,
+           event_pass_result_external_link,
            event_policy_version,
            event_judge_confidence,
            event_publication_confidence
@@ -1245,9 +1726,41 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    IF event_pass_result_finding IS DISTINCT FROM NEW.finding_id
+    IF event_pass_result_kind IS DISTINCT FROM (
+           CASE NEW.event_kind
+               WHEN 'posted' THEN 'external_link_attachment'
+               ELSE 'finding_event'
+           END
+       )
+       OR event_pass_result_finding IS DISTINCT FROM NEW.finding_id
+       OR event_pass_result_run IS DISTINCT FROM NEW.finding_run_id
+       OR event_pass_result_pass IS DISTINCT FROM (
+           SELECT producing_pass_id
+             FROM review_finding
+            WHERE finding_id = NEW.finding_id
+       )
        OR event_pass_result_ordinal IS DISTINCT FROM NEW.event_ordinal
-       OR event_pass_result_kind IS DISTINCT FROM NEW.event_kind
+       OR event_pass_result_event_kind IS DISTINCT FROM NEW.event_kind
+       OR event_pass_result_reason IS DISTINCT FROM NEW.reason
+       OR event_pass_result_referenced_finding
+            IS DISTINCT FROM NEW.referenced_finding_id
+       OR event_pass_result_referenced_run IS DISTINCT FROM (
+           CASE
+               WHEN NEW.referenced_finding_id IS NULL THEN NULL
+               ELSE NEW.finding_run_id
+           END
+       )
+       OR event_pass_result_referenced_pass IS DISTINCT FROM (
+           SELECT producing_pass_id
+             FROM review_finding
+            WHERE finding_id = NEW.referenced_finding_id
+              AND run_id = NEW.finding_run_id
+              AND target_id = NEW.target_id
+       )
+       OR event_pass_result_referenced_status
+            IS DISTINCT FROM NEW.referenced_finding_status
+       OR event_pass_result_external_link
+            IS DISTINCT FROM NEW.external_link_id
     THEN
         RAISE EXCEPTION
             'finding event is not the exact result committed by its pass'
@@ -1301,8 +1814,7 @@ BEGIN
           ) AS latest ON true
          WHERE referenced.finding_id = NEW.referenced_finding_id
            AND referenced.run_id = NEW.finding_run_id
-           AND referenced.target_id = NEW.target_id
-         FOR NO KEY UPDATE OF referenced;
+           AND referenced.target_id = NEW.target_id;
 
         IF referenced_status NOT IN ('open', 'accepted')
            OR NEW.referenced_finding_status
@@ -1311,6 +1823,35 @@ BEGIN
             RAISE EXCEPTION
                 'referenced finding status % is not eligible or authenticated',
                 referenced_status
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF EXISTS (
+            WITH RECURSIVE referenced_ancestry(finding_id) AS (
+                SELECT NEW.referenced_finding_id
+                UNION
+                SELECT latest.referenced_finding_id
+                  FROM referenced_ancestry AS ancestry
+                  JOIN LATERAL (
+                      SELECT referenced_finding_id
+                        FROM review_finding_event
+                       WHERE finding_id = ancestry.finding_id
+                         AND event_kind IN (
+                             'duplicate',
+                             'superseded'
+                         )
+                       ORDER BY event_ordinal DESC
+                       LIMIT 1
+                  ) AS latest
+                    ON latest.referenced_finding_id IS NOT NULL
+            )
+            SELECT 1
+              FROM referenced_ancestry
+             WHERE finding_id = NEW.finding_id
+        )
+        THEN
+            RAISE EXCEPTION
+                'finding reference would create a cycle'
                 USING ERRCODE = '23514';
         END IF;
     END IF;
@@ -1464,20 +2005,36 @@ DECLARE
     expected_ordinal bigint;
     canonical_pass_kind text;
     canonical_pass_state text;
+    canonical_result_kind text;
+    canonical_result_link uuid;
+    canonical_result_ordinal bigint;
+    canonical_result_state text;
 BEGIN
     PERFORM 1
       FROM review_external_link
      WHERE external_link_id = NEW.external_link_id
      FOR NO KEY UPDATE;
 
-    SELECT pass_kind, state_kind
-      INTO canonical_pass_kind, canonical_pass_state
+    SELECT pass_kind, state_kind, result_kind,
+           result_external_link_id, result_event_ordinal,
+           result_observation_state
+      INTO canonical_pass_kind, canonical_pass_state,
+           canonical_result_kind, canonical_result_link,
+           canonical_result_ordinal, canonical_result_state
       FROM review_pass
      WHERE pass_id = NEW.pass_id
        AND run_id = NEW.pass_run_id
        AND target_id = NEW.target_id;
     IF canonical_pass_kind IS DISTINCT FROM 'import_external_context'
        OR canonical_pass_state IS DISTINCT FROM 'succeeded'
+       OR canonical_result_kind
+            IS DISTINCT FROM 'external_link_observation'
+       OR canonical_result_link
+            IS DISTINCT FROM NEW.external_link_id
+       OR canonical_result_ordinal
+            IS DISTINCT FROM NEW.observation_ordinal
+       OR canonical_result_state
+            IS DISTINCT FROM NEW.object_state
     THEN
         RAISE EXCEPTION
             'external observation requires a succeeded import pass'

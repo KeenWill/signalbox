@@ -72,16 +72,34 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
             canonical_pass.turn_id AS evidence_pass_turn_id,
             canonical_pass.output_frontier_id
                 AS evidence_pass_output_frontier_id,
-            canonical_pass.finding_event_finding_id
-                AS evidence_pass_finding_event_finding_id,
-            canonical_pass.finding_event_finding_run_id
-                AS evidence_pass_finding_event_finding_run_id,
-            canonical_pass.finding_event_finding_pass_id
-                AS evidence_pass_finding_event_finding_pass_id,
-            canonical_pass.finding_event_ordinal
-                AS evidence_pass_finding_event_ordinal,
-            canonical_pass.finding_event_kind
-                AS evidence_pass_finding_event_kind
+            canonical_pass.result_kind
+                AS evidence_pass_result_kind,
+            canonical_pass.result_finding_id
+                AS evidence_pass_result_finding_id,
+            canonical_pass.result_finding_run_id
+                AS evidence_pass_result_finding_run_id,
+            canonical_pass.result_finding_pass_id
+                AS evidence_pass_result_finding_pass_id,
+            canonical_pass.result_event_ordinal
+                AS evidence_pass_result_event_ordinal,
+            canonical_pass.result_event_kind
+                AS evidence_pass_result_event_kind,
+            canonical_pass.result_reason
+                AS evidence_pass_result_reason,
+            canonical_pass.result_referenced_finding_id
+                AS evidence_pass_result_referenced_finding_id,
+            canonical_pass.result_referenced_finding_run_id
+                AS evidence_pass_result_referenced_finding_run_id,
+            canonical_pass.result_referenced_finding_pass_id
+                AS evidence_pass_result_referenced_finding_pass_id,
+            canonical_pass.result_referenced_finding_status
+                AS evidence_pass_result_referenced_finding_status,
+            canonical_pass.result_external_link_id
+                AS evidence_pass_result_external_link_id,
+            canonical_pass.result_external_object_key
+                AS evidence_pass_result_external_object_key,
+            canonical_pass.result_observation_state
+                AS evidence_pass_result_observation_state
        FROM review_run AS workflow_run
        LEFT JOIN review_pass AS canonical_pass
          ON canonical_pass.run_id = workflow_run.run_id
@@ -94,13 +112,23 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             workflow_pass.target_id, workflow_pass.pass_kind,
             canonical_run.workflow_kind AS run_workflow_kind,
             workflow_pass.session_id AS pass_session_id,
-            workflow_pass.accepted_input_id, workflow_pass.state_kind,
+            workflow_pass.accepted_input_id, workflow_pass.origin_turn_id,
+            workflow_pass.state_kind,
             workflow_pass.turn_id, workflow_pass.output_frontier_id,
-            workflow_pass.finding_event_finding_id,
-            workflow_pass.finding_event_finding_run_id,
-            workflow_pass.finding_event_finding_pass_id,
-            workflow_pass.finding_event_ordinal,
-            workflow_pass.finding_event_kind,
+            workflow_pass.result_kind,
+            workflow_pass.result_finding_id,
+            workflow_pass.result_finding_run_id,
+            workflow_pass.result_finding_pass_id,
+            workflow_pass.result_event_ordinal,
+            workflow_pass.result_event_kind,
+            workflow_pass.result_reason,
+            workflow_pass.result_referenced_finding_id,
+            workflow_pass.result_referenced_finding_run_id,
+            workflow_pass.result_referenced_finding_pass_id,
+            workflow_pass.result_referenced_finding_status,
+            workflow_pass.result_external_link_id,
+            workflow_pass.result_external_object_key,
+            workflow_pass.result_observation_state,
             canonical_input.session_id AS accepted_input_session_id,
             canonical_turn.turn_id AS evidence_turn_id,
             canonical_turn.session_id AS turn_session_id,

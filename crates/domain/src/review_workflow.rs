@@ -886,6 +886,25 @@ impl ReviewReferencedFindingEvidence {
         }
     }
 
+    /// Reconstitutes independently authenticated eligible admission evidence.
+    pub const fn try_reconstitute(
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+    ) -> Option<Self> {
+        match status {
+            ReviewFindingStatus::Open | ReviewFindingStatus::Accepted => {
+                Some(Self { reference, status })
+            }
+            ReviewFindingStatus::Rejected
+            | ReviewFindingStatus::Duplicate
+            | ReviewFindingStatus::Superseded
+            | ReviewFindingStatus::Stale
+            | ReviewFindingStatus::Posted
+            | ReviewFindingStatus::Fixed
+            | ReviewFindingStatus::BlockedWithReason => None,
+        }
+    }
+
     /// Returns the complete referenced-finding identity.
     pub const fn reference(self) -> ReviewFindingRef {
         self.reference
