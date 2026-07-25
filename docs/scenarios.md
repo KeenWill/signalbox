@@ -611,7 +611,7 @@ those tests.
   propagation, detached-child support, result delivery after parent termination,
   and the parent/child disposition model; archival coupling remains with the
   open archive lifecycle decision
-  ([archival and retention](open-questions.md#archival-and-retention)).
+  ([archival and retention](open-questions.md#session-organization-visibility-and-retention)).
 
 ## S20 — Resolve a curated model alias
 
@@ -810,8 +810,8 @@ those tests.
   cancellation according to future policy; it never silently abandons work.
 - **Required invariants:** INV-010, INV-012, INV-013, INV-034.
 - **Remaining questions:** The open archive lifecycle decision
-  ([archival and retention](open-questions.md#archival-and-retention)) must
-  define archive eligibility, nonterminal-work handling, restored lifecycle
+  ([archival and retention](open-questions.md#session-organization-visibility-and-retention))
+  must define archive eligibility, nonterminal-work handling, restored lifecycle
   state, and effects on delegated children or related sessions. Destructive
   retention and purge are separate later scope, not ordinary archive behavior.
 

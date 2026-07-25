@@ -618,6 +618,3 @@ open edges of [model-call-execution](model-call-execution.md).
 - The 1 MiB content bound is a provisional owner floor; the resource-governance
   limit question stays open, and non-text content kinds remain unconstructible
   pending their owning decisions.
-- Session archive and retention lifecycle are absent from the aggregate and
-  remain open ([open-questions.md](../open-questions.md), archival and
-  retention).
