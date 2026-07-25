@@ -23,7 +23,6 @@ resolve_script_dir() {
 
 SCRIPT_DIR="$(resolve_script_dir)"
 SECRET_PLAN_SENTINEL="super-secret-for-plan-test"
-SERVER_URL_SENTINEL="http://192.0.2.10:8000"
 
 test_tart_secret_env_overrides_project_env() (
 	local temp_dir
@@ -74,37 +73,44 @@ test_real_server_api_key_resolution_stays_subshell_scoped() (
 	fi
 )
 
-test_xcode_shard_does_not_export_real_server_api_key() (
-	local temp_dir
-	temp_dir="$(mktemp -d)"
-	trap 'rm -rf "$temp_dir"' EXIT
-
-	mkdir -p "$temp_dir/signalbox"
-	{
-		printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=%s\n' "$SECRET_PLAN_SENTINEL"
-		printf 'SIGNALBOX_NATIVE_REAL_SERVER_URL=%s\n' "$SERVER_URL_SENTINEL"
-	} >"$temp_dir/signalbox/.env"
-
+test_xcode_shard_adds_real_server_smoke_to_existing_skips() (
+	local -a shard_commands=()
+	local caller_skip_identifier="SignalboxNativeScreenshotTests"
+	local expected_test_command
 	# shellcheck source=/dev/null
 	source "$SCRIPT_DIR/run-guest-shard.sh"
-	export SERVER_ENV_ROOT="$temp_dir/signalbox"
-	unset TART_SECRET_ENV_PATH
-	unset SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
-	unset SIGNALBOX_NATIVE_REAL_SERVER_URL
-	unset SIGNALBOX_API_KEY
+	export SIGNALBOX_NATIVE_SKIP_TESTING="$caller_skip_identifier"
+
+	require_tool() { :; }
+	run_step() {
+		shift
+		shard_commands+=("$*")
+	}
+
+	run_xcode_shard
+	expected_test_command="env SIGNALBOX_NATIVE_SKIP_TESTING=$caller_skip_identifier $REAL_SERVER_SMOKE_TEST_IDENTIFIER $PROJECT_ROOT/scripts/test-xcode.sh"
+	[[ "${shard_commands[1]}" == "$expected_test_command" ]]
+)
+
+test_xcode_shard_preserves_caller_skip_environment() (
+	local caller_skip_identifier="SignalboxNativeScreenshotTests"
+	# shellcheck source=/dev/null
+	source "$SCRIPT_DIR/run-guest-shard.sh"
+	export SIGNALBOX_NATIVE_SKIP_TESTING="$caller_skip_identifier"
 
 	require_tool() { :; }
 	run_step() { :; }
 
 	run_xcode_shard
-	if [[ -n "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" || -n "${SIGNALBOX_API_KEY:-}" ]]; then
-		echo "run_xcode_shard exported a real server API key into the shard environment." >&2
-		return 1
-	fi
-	if [[ "${SIGNALBOX_NATIVE_REAL_SERVER_URL:-}" != "$SERVER_URL_SENTINEL" ]]; then
-		echo "run_xcode_shard did not configure the real server URL." >&2
-		return 1
-	fi
+	[[ "$SIGNALBOX_NATIVE_SKIP_TESTING" == "$caller_skip_identifier" ]]
+)
+
+test_host_xcode_shard_forwards_skip_selection() (
+	local caller_skip_identifier="SignalboxNativeScreenshotTests"
+	local xcode_plan
+
+	xcode_plan="$(SIGNALBOX_NATIVE_SKIP_TESTING="$caller_skip_identifier" "$SCRIPT_DIR/run-shard.sh" --print-plan xcode)"
+	[[ "$xcode_plan" == *"SIGNALBOX_NATIVE_SKIP_TESTING=$caller_skip_identifier"* ]]
 )
 
 bash -n "$SCRIPT_DIR/run-guest-shard.sh"
@@ -124,7 +130,9 @@ if [[ "$secret_plan" != *"TART_SECRET_ENV_PATH="* ]]; then
 fi
 test_tart_secret_env_overrides_project_env
 test_real_server_api_key_resolution_stays_subshell_scoped
-test_xcode_shard_does_not_export_real_server_api_key
+test_xcode_shard_adds_real_server_smoke_to_existing_skips
+test_xcode_shard_preserves_caller_skip_environment
+test_host_xcode_shard_forwards_skip_selection
 "$SCRIPT_DIR/run-matrix.sh" --print-plan >/dev/null
 
 echo "Tart scripts passed dry-run validation."
