@@ -34,10 +34,15 @@ would otherwise seed anything the URL omits from the ambient libpq-style `PG*`
 variables — host, port, user, database, TLS material, application name, and
 runtime options, plus `PGPASSWORD` and `PGPASSFILE` as a second credential
 channel — so the production connection path refuses to parse when any of them is
-present in the environment, whatever its value. The driver also falls back to
-libpq's default password file when the URL carries no password and `PGPASSFILE`
-is unset, so the same path refuses when `~/.pgpass` exists under the process
-home directory; presence alone decides and the file is never opened. With both
+present in the environment, whatever its value. `SSL_CERT_FILE` and
+`SSL_CERT_DIR` are refused on the same terms: the driver's selected TLS backend
+takes its root certificates only from what those two name whenever either is
+set, and adds an `sslrootcert` the URL states to that set rather than replacing
+it, so a root named by the environment would verify the production server even
+under an explicit root certificate. The driver also falls back to libpq's
+default password file when the URL carries no password and `PGPASSFILE` is
+unset, so the same path refuses when `~/.pgpass` exists under the process home
+directory; presence alone decides and the file is never opened. With those
 closed the driver still completes an incomplete URL from outside it — an omitted
 user name from the process account, an omitted host by probing the local socket
 directories and then `localhost` — so the same path refuses a URL that states

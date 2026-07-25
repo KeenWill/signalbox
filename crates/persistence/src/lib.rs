@@ -81,6 +81,17 @@ const AMBIENT_POSTGRES_VARIABLES: [&str; 13] = [
     "PGUSER",
 ];
 
+/// Environment variables that decide which roots verify the production
+/// server's certificate, in alphabetical order. This crate selects SQLx's
+/// `tls-rustls-ring-native-roots` feature, so SQLx seeds its root store from
+/// `rustls-native-certs`, which loads roots only from the file and directories
+/// these variables name whenever either is set, in place of the platform store.
+/// SQLx then adds an `sslrootcert` the URL states to that store rather than
+/// replacing it, so a root named by the environment stays trusted even under an
+/// explicit root certificate: stating the root in the URL cannot neutralize
+/// these variables, only their absence can.
+const AMBIENT_TLS_TRUST_VARIABLES: [&str; 2] = ["SSL_CERT_DIR", "SSL_CERT_FILE"];
+
 /// Reports whether the password file SQLx falls back to when `PGPASSFILE` is
 /// unset exists: `~/.pgpass` under the process home directory, mirroring
 /// libpq's default. SQLx consults it whenever the parsed URL carries no
@@ -126,13 +137,13 @@ fn parameters_taken_from_outside_the_url(url: &Url) -> Vec<&'static str> {
 /// Parses production connection options with certificate and hostname checks.
 ///
 /// The database URL is the only supported configuration channel for the
-/// production connection: when any ambient libpq-style `PG*` variable is
-/// present in the process environment (even with an empty value), when the
-/// default `~/.pgpass` password file exists, or when the URL omits a parameter
-/// SQLx would then take from the process account or the host filesystem,
-/// parsing fails closed instead of letting the environment silently seed
-/// connection defaults or credentials. The error names the offending channel,
-/// never its contents.
+/// production connection: when any ambient libpq-style `PG*` variable or
+/// certificate-store variable is present in the process environment (even with
+/// an empty value), when the default `~/.pgpass` password file exists, or when
+/// the URL omits a parameter SQLx would then take from the process account or
+/// the host filesystem, parsing fails closed instead of letting the environment
+/// silently seed connection defaults, credentials, or trust anchors. The error
+/// names the offending channel, never its contents.
 pub fn production_connection_options(database_url: &str) -> Result<PgConnectOptions, Error> {
     production_connection_options_with_environment(
         database_url,
@@ -157,6 +168,21 @@ fn production_connection_options_with_environment(
                 "ambient PostgreSQL variables would shape the production connection: {}; \
                  unset them and carry every connection parameter in the database URL",
                 ambient.join(", ")
+            )
+            .into(),
+        ));
+    }
+    let trust: Vec<&'static str> = AMBIENT_TLS_TRUST_VARIABLES
+        .into_iter()
+        .filter(|&name| variable_is_present(name))
+        .collect();
+    if !trust.is_empty() {
+        return Err(Error::Configuration(
+            format!(
+                "ambient certificate variables would choose the roots that verify the production \
+                 server: {}; unset them and leave the platform trust store to the host, which an \
+                 `sslrootcert` in the database URL adds to rather than replaces",
+                trust.join(", ")
             )
             .into(),
         ));
@@ -249,6 +275,30 @@ mod tests {
         .expect_err("a fully ambient environment must fail closed");
 
         expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGAPPNAME, PGDATABASE, PGHOST, PGHOSTADDR, PGOPTIONS, PGPASSFILE, PGPASSWORD, PGPORT, PGSSLCERT, PGSSLKEY, PGSSLMODE, PGSSLROOTCERT, PGUSER; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_reject_an_ambient_trust_store_variable() {
+        let error = production_connection_options_with_environment(
+            DATABASE_URL,
+            |name| name == "SSL_CERT_FILE",
+            no_default_passfile,
+        )
+        .expect_err("an ambient trust-anchor channel must fail closed");
+
+        expect!["error with configuration: ambient certificate variables would choose the roots that verify the production server: SSL_CERT_FILE; unset them and leave the platform trust store to the host, which an `sslrootcert` in the database URL adds to rather than replaces"].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn production_options_name_every_consulted_trust_store_variable() {
+        let error = production_connection_options_with_environment(
+            DATABASE_URL,
+            |name| name.starts_with("SSL_CERT_"),
+            no_default_passfile,
+        )
+        .expect_err("a fully ambient trust store must fail closed");
+
+        expect!["error with configuration: ambient certificate variables would choose the roots that verify the production server: SSL_CERT_DIR, SSL_CERT_FILE; unset them and leave the platform trust store to the host, which an `sslrootcert` in the database URL adds to rather than replaces"].assert_eq(&error.to_string());
     }
 
     #[test]
