@@ -377,6 +377,42 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(viewModel.unhandledFrameKinds, ["turn_started": 1])
         withExtendedLifetime(observation) {}
     }
+
+    func testReconnectRejectsProcessedStaleStreamCompletion() async throws {
+        let fixtureService = MockSignalboxService()
+        let sessions = try await fixtureService.listSessions(archived: false)
+        let session = try XCTUnwrap(sessions.first)
+        let service = ControlledReconnectSignalboxService()
+        let viewModel = SessionDetailViewModel(session: session) { service }
+
+        viewModel.connectStream()
+        await service.waitForStreamInvocationCount(1)
+        let staleCompletionRejected = expectation(description: "stale completion rejected")
+        let staleCompletionObservation = viewModel.$ignoredStaleStreamCompletionCount
+            .filter { $0 == 1 }
+            .first()
+            .sink { _ in staleCompletionRejected.fulfill() }
+        viewModel.disconnectStream()
+        viewModel.connectStream()
+        await service.waitForStreamInvocationCount(2)
+
+        await fulfillment(of: [staleCompletionRejected], timeout: 1)
+
+        XCTAssertTrue(viewModel.isStreaming)
+        XCTAssertEqual(viewModel.ignoredStaleStreamCompletionCount, 1)
+
+        let currentStreamStopped = expectation(description: "current stream stopped")
+        let currentStreamObservation = viewModel.$isStreaming
+            .filter { !$0 }
+            .first()
+            .sink { _ in currentStreamStopped.fulfill() }
+        service.finishStream(at: 1)
+        await fulfillment(of: [currentStreamStopped], timeout: 1)
+
+        XCTAssertFalse(viewModel.isStreaming)
+        withExtendedLifetime(staleCompletionObservation) {}
+        withExtendedLifetime(currentStreamObservation) {}
+    }
 }
 
 private actor StubSignalboxWebSocketTransport: SignalboxWebSocketTransport {
@@ -450,6 +486,82 @@ private final class UnknownFrameSignalboxService: SignalboxClientProtocol, @unch
                 )
             )
             continuation.finish()
+        }
+    }
+}
+
+private final class ControlledReconnectSignalboxService: SignalboxClientProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var streamContinuations: [AsyncThrowingStream<SignalboxServerMessage, Error>.Continuation] = []
+    private var invocationWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    func waitForStreamInvocationCount(_ expectedCount: Int) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if streamContinuations.count >= expectedCount {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                invocationWaiters[expectedCount, default: []].append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func finishStream(at index: Int) {
+        lock.lock()
+        let continuation = streamContinuations[index]
+        lock.unlock()
+        continuation.finish()
+    }
+
+    func testConnection() async throws {}
+    func listTemplates() async throws -> [SignalboxTemplate] { [] }
+    func listRunners() async throws -> [SignalboxRunner] { [] }
+    func listSessions(archived: Bool) async throws -> [SignalboxSessionMetadata] { [] }
+    func createSession(request: SignalboxCreateSessionRequest) async throws -> SignalboxSessionView {
+        throw SignalboxClientError.requestFailed("not implemented")
+    }
+    func patchSessionArchive(
+        sessionID: SignalboxSessionID,
+        isArchived: Bool
+    ) async throws -> SignalboxSessionMetadata {
+        throw SignalboxClientError.requestFailed("not implemented")
+    }
+    func listEvents(sessionID: SignalboxSessionID) async throws -> [SignalboxStoredEvent] { [] }
+    func appendUserMessage(
+        sessionID: SignalboxSessionID,
+        text: String
+    ) async throws -> SignalboxAppendUserMessageResponse {
+        throw SignalboxClientError.requestFailed("not implemented")
+    }
+    func confirmInvocation(
+        sessionID: SignalboxSessionID,
+        invocationID: SignalboxToolInvocationID
+    ) async throws {}
+    func denyInvocation(
+        sessionID: SignalboxSessionID,
+        invocationID: SignalboxToolInvocationID,
+        reason: String?
+    ) async throws {}
+    func listArtifacts(sessionID: SignalboxSessionID) async throws -> [SignalboxArtifact] { [] }
+    func listMonitorSessions() async throws -> [SignalboxMonitorSessionSummary] { [] }
+
+    func streamMessages(
+        sessionID: SignalboxSessionID
+    ) -> AsyncThrowingStream<SignalboxServerMessage, Error> {
+        AsyncThrowingStream { continuation in
+            lock.lock()
+            streamContinuations.append(continuation)
+            let invocationCount = streamContinuations.count
+            let readyWaiters = invocationWaiters
+                .filter { expectedCount, _ in expectedCount <= invocationCount }
+                .flatMap(\.value)
+            invocationWaiters = invocationWaiters.filter { expectedCount, _ in
+                expectedCount > invocationCount
+            }
+            lock.unlock()
+            readyWaiters.forEach { $0.resume() }
         }
     }
 }

@@ -329,6 +329,7 @@ final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var artifacts: [SignalboxArtifact] = []
     @Published private(set) var unhandledFrameKinds: [String: Int] = [:]
     @Published private(set) var latestStreamDiagnostic: String?
+    @Published private(set) var ignoredStaleStreamCompletionCount = 0
     @Published var composerText: String = ""
     @Published var errorMessage: String?
     @Published var isStreaming = false
@@ -519,6 +520,7 @@ final class SessionDetailViewModel: ObservableObject {
 
     private func finishStream(streamID: UUID, error: Error?) {
         guard activeStreamID == streamID else {
+            ignoredStaleStreamCompletionCount += 1
             return
         }
         activeStreamID = nil
