@@ -763,6 +763,123 @@ impl ReviewPassState {
     }
 }
 
+/// Canonical turn facts independently loaded for one review pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewPassTurnEvidence {
+    turn: TurnId,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    terminal_frontier: Option<ContextFrontierId>,
+}
+
+impl ReviewPassTurnEvidence {
+    /// Supplies the turn's independently stored ownership and terminal facts.
+    pub const fn new(
+        turn: TurnId,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        terminal_frontier: Option<ContextFrontierId>,
+    ) -> Self {
+        Self {
+            turn,
+            session,
+            accepted_input,
+            terminal_frontier,
+        }
+    }
+
+    /// Returns the canonical turn identity.
+    pub const fn turn(self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the canonical turn session.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the canonical turn-origin input.
+    pub const fn accepted_input(self) -> AcceptedInputId {
+        self.accepted_input
+    }
+
+    /// Returns the canonical terminal frontier, when the turn is terminal.
+    pub const fn terminal_frontier(self) -> Option<ContextFrontierId> {
+        self.terminal_frontier
+    }
+}
+
+/// Complete independently stored facts for review-pass reconstitution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewPassReconstitutionInput {
+    reference: ReviewPassRef,
+    kind: ReviewPassKind,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    accepted_input_session: SessionId,
+    state: ReviewPassState,
+    turn_evidence: Option<ReviewPassTurnEvidence>,
+}
+
+impl ReviewPassReconstitutionInput {
+    /// Supplies the pass row plus canonical accepted-input and turn evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        accepted_input_session: SessionId,
+        state: ReviewPassState,
+        turn_evidence: Option<ReviewPassTurnEvidence>,
+    ) -> Self {
+        Self {
+            reference,
+            kind,
+            session,
+            accepted_input,
+            accepted_input_session,
+            state,
+            turn_evidence,
+        }
+    }
+
+    /// Returns the complete pass reference.
+    pub const fn reference(self) -> ReviewPassRef {
+        self.reference
+    }
+
+    /// Returns the pass kind.
+    pub const fn kind(self) -> ReviewPassKind {
+        self.kind
+    }
+
+    /// Returns the session stored on the pass.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the accepted input stored on the pass.
+    pub const fn accepted_input(self) -> AcceptedInputId {
+        self.accepted_input
+    }
+
+    /// Returns the accepted input's canonical session.
+    pub const fn accepted_input_session(self) -> SessionId {
+        self.accepted_input_session
+    }
+
+    /// Returns the stored pass state.
+    pub const fn state(self) -> ReviewPassState {
+        self.state
+    }
+
+    /// Returns the canonical turn evidence, when the pass names a turn.
+    pub const fn turn_evidence(self) -> Option<ReviewPassTurnEvidence> {
+        self.turn_evidence
+    }
+}
+
 /// One session-backed pass inside a review run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewPass {
@@ -775,36 +892,49 @@ pub struct ReviewPass {
 
 impl ReviewPass {
     /// Constructs a queued pass after its orchestration input is accepted.
-    pub const fn new(
+    pub fn try_new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
         session: SessionId,
         accepted_input: AcceptedInputId,
-    ) -> Self {
-        Self {
+        accepted_input_session: SessionId,
+    ) -> Result<Self, ReviewPassConstructionError> {
+        if session != accepted_input_session {
+            return Err(ReviewPassConstructionError {
+                reference,
+                kind,
+                session,
+                accepted_input,
+                accepted_input_session,
+            });
+        }
+        Ok(Self {
             reference,
             kind,
             session,
             accepted_input,
             state: ReviewPassState::Queued,
-        }
+        })
     }
 
-    /// Reconstitutes a pass from a store-validated session projection.
-    pub const fn reconstitute(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        session: SessionId,
-        accepted_input: AcceptedInputId,
-        state: ReviewPassState,
-    ) -> Self {
-        Self {
-            reference,
-            kind,
-            session,
-            accepted_input,
-            state,
+    /// Reconstitutes a pass after validating independently stored evidence.
+    pub fn try_reconstitute(
+        input: ReviewPassReconstitutionInput,
+    ) -> Result<Self, ReviewPassReconstitutionError> {
+        let failure = validate_pass_reconstitution(input);
+        if let Some(failure) = failure {
+            return Err(ReviewPassReconstitutionError {
+                input: Box::new(input),
+                failure,
+            });
         }
+        Ok(Self {
+            reference: input.reference,
+            kind: input.kind,
+            session: input.session,
+            accepted_input: input.accepted_input,
+            state: input.state,
+        })
     }
 
     /// Applies one permitted transition without changing the pass turn.
@@ -863,6 +993,115 @@ impl ReviewPass {
     /// Returns the current pass state.
     pub const fn state(&self) -> ReviewPassState {
         self.state
+    }
+}
+
+fn validate_pass_reconstitution(
+    input: ReviewPassReconstitutionInput,
+) -> Option<ReviewPassReconstitutionFailure> {
+    if input.session != input.accepted_input_session {
+        return Some(ReviewPassReconstitutionFailure::AcceptedInputSessionMismatch);
+    }
+    let Some(turn) = input.state.turn() else {
+        return input
+            .turn_evidence
+            .is_some()
+            .then_some(ReviewPassReconstitutionFailure::UnexpectedTurnEvidence);
+    };
+    let Some(evidence) = input.turn_evidence else {
+        return Some(ReviewPassReconstitutionFailure::MissingTurnEvidence);
+    };
+    if evidence.turn != turn {
+        return Some(ReviewPassReconstitutionFailure::TurnMismatch);
+    }
+    if evidence.session != input.session {
+        return Some(ReviewPassReconstitutionFailure::TurnSessionMismatch);
+    }
+    if evidence.accepted_input != input.accepted_input {
+        return Some(ReviewPassReconstitutionFailure::TurnAcceptedInputMismatch);
+    }
+    if let ReviewPassState::Succeeded {
+        output_frontier, ..
+    } = input.state
+        && evidence.terminal_frontier != Some(output_frontier)
+    {
+        return Some(ReviewPassReconstitutionFailure::OutputFrontierMismatch);
+    }
+    None
+}
+
+/// Rejected queued-pass construction retaining both session facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewPassConstructionError {
+    reference: ReviewPassRef,
+    kind: ReviewPassKind,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    accepted_input_session: SessionId,
+}
+
+impl ReviewPassConstructionError {
+    /// Returns the rejected pass reference.
+    pub const fn reference(self) -> ReviewPassRef {
+        self.reference
+    }
+
+    /// Returns the rejected pass kind.
+    pub const fn kind(self) -> ReviewPassKind {
+        self.kind
+    }
+
+    /// Returns the pass and canonical accepted-input sessions.
+    pub const fn sessions(self) -> (SessionId, SessionId) {
+        (self.session, self.accepted_input_session)
+    }
+
+    /// Returns the accepted input whose association did not match.
+    pub const fn accepted_input(self) -> AcceptedInputId {
+        self.accepted_input
+    }
+}
+
+/// Why stored pass facts cannot reconstruct one canonical pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewPassReconstitutionFailure {
+    /// The accepted input belongs to another session.
+    AcceptedInputSessionMismatch,
+    /// The pass names a turn but no canonical turn row was supplied.
+    MissingTurnEvidence,
+    /// A turn row was supplied for a pass state with no turn.
+    UnexpectedTurnEvidence,
+    /// The canonical turn identity differs from the pass state.
+    TurnMismatch,
+    /// The canonical turn belongs to another session.
+    TurnSessionMismatch,
+    /// The canonical turn was originated by another accepted input.
+    TurnAcceptedInputMismatch,
+    /// The successful output is not the canonical terminal frontier.
+    OutputFrontierMismatch,
+}
+
+/// Rejected pass reconstitution retaining every independently stored fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewPassReconstitutionError {
+    input: Box<ReviewPassReconstitutionInput>,
+    failure: ReviewPassReconstitutionFailure,
+}
+
+impl ReviewPassReconstitutionError {
+    /// Returns why the stored facts were rejected.
+    pub const fn failure(&self) -> ReviewPassReconstitutionFailure {
+        self.failure
+    }
+
+    /// Borrows the unchanged stored facts.
+    pub const fn input(&self) -> &ReviewPassReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the unchanged stored facts.
+    pub fn into_input(self) -> ReviewPassReconstitutionInput {
+        *self.input
     }
 }
 
@@ -1120,9 +1359,30 @@ pub struct ReviewFindingExternalLinkRef {
 }
 
 impl ReviewFindingExternalLinkRef {
-    /// Binds one external link to one exact finding.
-    pub const fn new(finding: ReviewFindingRef, link: ReviewExternalLinkId) -> Self {
-        Self { finding, link }
+    /// Derives a finding-bound reference from one attached canonical link.
+    pub fn try_new(
+        finding: ReviewFindingRef,
+        link: &ReviewExternalLink,
+    ) -> Result<Self, ReviewFindingExternalLinkError> {
+        let failure = if link.association() != ReviewExternalLinkAssociation::Finding(finding) {
+            Some(ReviewFindingExternalLinkFailure::ForeignAssociation)
+        } else if link.attachment().is_none() {
+            Some(ReviewFindingExternalLinkFailure::NotAttached)
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            return Err(ReviewFindingExternalLinkError {
+                finding,
+                link: link.id(),
+                association: link.association(),
+                failure,
+            });
+        }
+        Ok(Self {
+            finding,
+            link: link.id(),
+        })
     }
 
     /// Returns the finding reference.
@@ -1133,6 +1393,46 @@ impl ReviewFindingExternalLinkRef {
     /// Returns the external-link identity.
     pub const fn link(self) -> ReviewExternalLinkId {
         self.link
+    }
+}
+
+/// Why a canonical external link cannot support a posted finding event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewFindingExternalLinkFailure {
+    /// The link is not canonically associated with the finding.
+    ForeignAssociation,
+    /// The link remains a pending reservation without an external identity.
+    NotAttached,
+}
+
+/// Rejected finding-link binding retaining the canonical association evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewFindingExternalLinkError {
+    finding: ReviewFindingRef,
+    link: ReviewExternalLinkId,
+    association: ReviewExternalLinkAssociation,
+    failure: ReviewFindingExternalLinkFailure,
+}
+
+impl ReviewFindingExternalLinkError {
+    /// Returns the finding that required publication evidence.
+    pub const fn finding(self) -> ReviewFindingRef {
+        self.finding
+    }
+
+    /// Returns the canonical link identity.
+    pub const fn link(self) -> ReviewExternalLinkId {
+        self.link
+    }
+
+    /// Returns the canonical link association.
+    pub const fn association(self) -> ReviewExternalLinkAssociation {
+        self.association
+    }
+
+    /// Returns why the canonical link was rejected.
+    pub const fn failure(self) -> ReviewFindingExternalLinkFailure {
+        self.failure
     }
 }
 
@@ -1779,6 +2079,31 @@ mod tests {
         .expect("producing pass belongs to the finding run")
     }
 
+    fn attached_finding_link(
+        finding: ReviewFindingRef,
+        link: ReviewExternalLinkId,
+    ) -> ReviewExternalLink {
+        ReviewExternalLink::reserve(
+            link,
+            ReviewExternalLinkAssociation::Finding(finding),
+            key("code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            pass_ref(20),
+            key("external-comment-42"),
+        ))
+        .expect("fixture attachment belongs to the finding target")
+    }
+
+    fn finding_link_ref(
+        finding: ReviewFindingRef,
+        link: ReviewExternalLinkId,
+    ) -> ReviewFindingExternalLinkRef {
+        ReviewFindingExternalLinkRef::try_new(finding, &attached_finding_link(finding, link))
+            .expect("fixture link is attached to the exact finding")
+    }
+
     #[derive(Debug)]
     #[allow(
         dead_code,
@@ -1812,12 +2137,27 @@ mod tests {
         );
         assert_eq!(cross_wired.states(), (ReviewRunState::Queued, requested));
 
-        let running = ReviewPass::new(
+        let cross_wired_input = ReviewPass::try_new(
             active,
             ReviewPassKind::ReadOnlyReview,
             session_id(4),
             accepted_input_id(5),
+            session_id(99),
         )
+        .expect_err("accepted input must belong to the pass session");
+        assert_eq!(
+            cross_wired_input.sessions(),
+            (session_id(4), session_id(99))
+        );
+
+        let running = ReviewPass::try_new(
+            active,
+            ReviewPassKind::ReadOnlyReview,
+            session_id(4),
+            accepted_input_id(5),
+            session_id(4),
+        )
+        .expect("accepted input belongs to the pass session")
         .transition(ReviewPassState::Running { turn: turn_id(6) })
         .expect("queued pass may activate");
         let changed_turn = running
@@ -1829,6 +2169,189 @@ mod tests {
         assert_eq!(
             changed_turn.failure(),
             ReviewPassTransitionFailure::TurnChanged
+        );
+    }
+
+    /// INV-040: reconstitution checks accepted-input, turn, and frontier
+    /// evidence loaded independently from the pass row.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_cross_wired_canonical_evidence() {
+        let state = ReviewPassState::Succeeded {
+            turn: turn_id(6),
+            output_frontier: frontier_id(8),
+        };
+        let exact_turn = ReviewPassTurnEvidence::new(
+            turn_id(6),
+            session_id(4),
+            accepted_input_id(5),
+            Some(frontier_id(8)),
+        );
+        let exact = ReviewPassReconstitutionInput::new(
+            pass_ref(3),
+            ReviewPassKind::ReadOnlyReview,
+            session_id(4),
+            accepted_input_id(5),
+            session_id(4),
+            state,
+            Some(exact_turn),
+        );
+        assert_eq!(
+            ReviewPass::try_reconstitute(exact)
+                .expect("all canonical evidence matches")
+                .state(),
+            state
+        );
+
+        let cases = [
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(9),
+                    state,
+                    Some(exact_turn),
+                ),
+                ReviewPassReconstitutionFailure::AcceptedInputSessionMismatch,
+            ),
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(4),
+                    state,
+                    None,
+                ),
+                ReviewPassReconstitutionFailure::MissingTurnEvidence,
+            ),
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(4),
+                    state,
+                    Some(ReviewPassTurnEvidence::new(
+                        turn_id(7),
+                        session_id(4),
+                        accepted_input_id(5),
+                        Some(frontier_id(8)),
+                    )),
+                ),
+                ReviewPassReconstitutionFailure::TurnMismatch,
+            ),
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(4),
+                    state,
+                    Some(ReviewPassTurnEvidence::new(
+                        turn_id(6),
+                        session_id(9),
+                        accepted_input_id(5),
+                        Some(frontier_id(8)),
+                    )),
+                ),
+                ReviewPassReconstitutionFailure::TurnSessionMismatch,
+            ),
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(4),
+                    state,
+                    Some(ReviewPassTurnEvidence::new(
+                        turn_id(6),
+                        session_id(4),
+                        accepted_input_id(9),
+                        Some(frontier_id(8)),
+                    )),
+                ),
+                ReviewPassReconstitutionFailure::TurnAcceptedInputMismatch,
+            ),
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(4),
+                    state,
+                    Some(ReviewPassTurnEvidence::new(
+                        turn_id(6),
+                        session_id(4),
+                        accepted_input_id(5),
+                        Some(frontier_id(9)),
+                    )),
+                ),
+                ReviewPassReconstitutionFailure::OutputFrontierMismatch,
+            ),
+            (
+                ReviewPassReconstitutionInput::new(
+                    pass_ref(3),
+                    ReviewPassKind::ReadOnlyReview,
+                    session_id(4),
+                    accepted_input_id(5),
+                    session_id(4),
+                    ReviewPassState::Queued,
+                    Some(exact_turn),
+                ),
+                ReviewPassReconstitutionFailure::UnexpectedTurnEvidence,
+            ),
+        ];
+        for (input, expected) in cases {
+            let error =
+                ReviewPass::try_reconstitute(input).expect_err("cross-wiring must fail closed");
+            assert_eq!(error.failure(), expected);
+            assert_eq!(*error.input(), input);
+        }
+    }
+
+    /// INV-040 / INV-041: a posted finding consumes an attached canonical link
+    /// associated with that exact finding.
+    #[test]
+    fn inv040_posted_link_rejects_pending_and_foreign_canonical_associations() {
+        let finding = finding_ref(10);
+        let pending = ReviewExternalLink::reserve(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding),
+            key("code-host"),
+            ReviewExternalObjectKind::ReviewComment,
+        );
+        let pending_error = ReviewFindingExternalLinkRef::try_new(finding, &pending)
+            .expect_err("pending reservation is not posting evidence");
+        assert_eq!(
+            pending_error.failure(),
+            ReviewFindingExternalLinkFailure::NotAttached
+        );
+
+        let foreign = attached_finding_link(finding_ref(11), link_id(31));
+        let foreign_error = ReviewFindingExternalLinkRef::try_new(finding, &foreign)
+            .expect_err("canonical association belongs to another finding");
+        assert_eq!(
+            foreign_error.failure(),
+            ReviewFindingExternalLinkFailure::ForeignAssociation
+        );
+        assert_eq!(
+            foreign_error.association(),
+            ReviewExternalLinkAssociation::Finding(finding_ref(11))
+        );
+
+        let exact = attached_finding_link(finding, link_id(32));
+        assert_eq!(
+            ReviewFindingExternalLinkRef::try_new(finding, &exact)
+                .expect("attached canonical association supports posting")
+                .link(),
+            link_id(32)
         );
     }
 
@@ -1846,7 +2369,7 @@ mod tests {
                 ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
                 pass_ref(21),
                 ReviewFindingEventKind::Posted {
-                    link: ReviewFindingExternalLinkRef::new(finding_ref(10), link_id(30)),
+                    link: finding_link_ref(finding_ref(10), link_id(30)),
                 },
             ))
             .expect("accepted finding may be posted")
@@ -1937,7 +2460,7 @@ mod tests {
             (
                 "Posted",
                 ReviewFindingEventKind::Posted {
-                    link: ReviewFindingExternalLinkRef::new(finding_ref(10), link_id(30)),
+                    link: finding_link_ref(finding_ref(10), link_id(30)),
                 },
                 ReviewFindingStatus::Posted,
             ),
