@@ -5,9 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/scripts/lib/simulator.sh"
 
-BUNDLE_ID="co.rdwd.LLMHubNative"
-DERIVED_DATA_PATH="${LLM_HUB_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
-APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug-iphonesimulator/LLMHubNative.app"
+BUNDLE_ID="co.rdwd.SignalboxNative"
+DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
+APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug-iphonesimulator/SignalboxNative.app"
 MIN_IOS_VERSION="$SIMULATOR_DEFAULT_MIN_IOS_VERSION"
 BOOT_TIMEOUT_SECONDS="${SIMULATOR_BOOT_TIMEOUT_SECONDS:-300}"
 TERMINATE_TIMEOUT_SECONDS="${SIMULATOR_TERMINATE_TIMEOUT_SECONDS:-10}"
@@ -61,8 +61,8 @@ fi
 CMD_BUILD=(
 	xcodebuild
 	-quiet
-	-project "$ROOT/LLMHubNative.xcodeproj"
-	-scheme "LLMHubNative"
+	-project "$ROOT/SignalboxNative.xcodeproj"
+	-scheme "SignalboxNative"
 	-configuration "Debug"
 	-destination "generic/platform=iOS Simulator"
 	-derivedDataPath "$DERIVED_DATA_PATH"
@@ -354,18 +354,18 @@ capture_ipad_device() {
 	for ((batch_start = 0; batch_start < ${#selected_names[@]}; batch_start += IPAD_SCREENSHOT_BATCH_SIZE)); do
 		batch_names="$(printf '%s\n' "${selected_names[@]:batch_start:IPAD_SCREENSHOT_BATCH_SIZE}" | paste -sd, -)"
 		printf '%s\n' "$batch_names" >"$capture_names_file"
-		result_bundle_path="$DERIVED_DATA_PATH/Logs/Test/LLMHubNative-iPadOS-${device_slug}-batch-${batch_index}.xcresult"
+		result_bundle_path="$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-iPadOS-${device_slug}-batch-${batch_index}.xcresult"
 
 		CMD_IPAD_SCREENSHOTS=(
 			xcodebuild
 			-quiet
-			-project "$ROOT/LLMHubNative.xcodeproj"
-			-scheme "LLMHubNative"
+			-project "$ROOT/SignalboxNative.xcodeproj"
+			-scheme "SignalboxNative"
 			-configuration "Debug"
 			-destination "platform=iOS Simulator,id=$device_id"
 			-derivedDataPath "$DERIVED_DATA_PATH"
 			-resultBundlePath "$result_bundle_path"
-			-only-testing:LLMHubNativeUITests/ScreenshotCaptureUITests/testCaptureScreenshotMatrix
+			-only-testing:SignalboxNativeUITests/ScreenshotCaptureUITests/testCaptureScreenshotMatrix
 			-parallel-testing-enabled NO
 			-test-timeouts-enabled YES
 			-maximum-test-execution-time-allowance 900
@@ -373,11 +373,11 @@ capture_ipad_device() {
 			CODE_SIGN_IDENTITY=-
 			test
 		)
-		printf '+ LLM_HUB_NATIVE_SCREENSHOT_OUTPUT_DIR=%q LLM_HUB_NATIVE_SCREENSHOT_NAMES=%q ' "$device_output_dir" "$batch_names"
+		printf '+ SIGNALBOX_NATIVE_SCREENSHOT_OUTPUT_DIR=%q SIGNALBOX_NATIVE_SCREENSHOT_NAMES=%q ' "$device_output_dir" "$batch_names"
 		printf '%q ' "${CMD_IPAD_SCREENSHOTS[@]}"
 		printf '\n'
 		rm -rf "$result_bundle_path"
-		if ! LLM_HUB_NATIVE_SCREENSHOT_OUTPUT_DIR="$device_output_dir" LLM_HUB_NATIVE_SCREENSHOT_NAMES="$batch_names" "${CMD_IPAD_SCREENSHOTS[@]}"; then
+		if ! SIGNALBOX_NATIVE_SCREENSHOT_OUTPUT_DIR="$device_output_dir" SIGNALBOX_NATIVE_SCREENSHOT_NAMES="$batch_names" "${CMD_IPAD_SCREENSHOTS[@]}"; then
 			rm -f "$capture_output_file" "$capture_names_file"
 			return 1
 		fi

@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/scripts/lib/simulator.sh"
 
-BUNDLE_ID="co.rdwd.LLMHubNative"
-APP_PATH="$ROOT/.derivedData/Build/Products/Debug-iphonesimulator/LLMHubNative.app"
+BUNDLE_ID="co.rdwd.SignalboxNative"
+APP_PATH="$ROOT/.derivedData/Build/Products/Debug-iphonesimulator/SignalboxNative.app"
 MIN_IOS_VERSION="$SIMULATOR_DEFAULT_MIN_IOS_VERSION"
 BOOT_TIMEOUT_SECONDS="${SIMULATOR_BOOT_TIMEOUT_SECONDS:-300}"
 DEVICE_ID="${XCODE_SIMULATOR_ID:-}"
@@ -24,8 +24,8 @@ DESTINATION="$(simulator_xcode_destination_for_id "$DEVICE_ID")"
 
 CMD_BUILD=(
 	xcodebuild
-	-project "$ROOT/LLMHubNative.xcodeproj"
-	-scheme "LLMHubNative"
+	-project "$ROOT/SignalboxNative.xcodeproj"
+	-scheme "SignalboxNative"
 	-configuration "Debug"
 	-destination "$DESTINATION"
 	-derivedDataPath "$ROOT/.derivedData"
@@ -75,7 +75,7 @@ CMD_LAUNCH=(
 	"--stderr=$ROOT/.derivedData/launch.err"
 	"$DEVICE_ID"
 	"$BUNDLE_ID"
-	--mock-hub
+	--mock-server
 )
 printf '+ %q ' "${CMD_LAUNCH[@]}"
 printf '\n'
