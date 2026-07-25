@@ -25,8 +25,12 @@ class DocsConsistencyTests(unittest.TestCase):
             "[Docs directory](docs/)\n"
             "`[Ignored code](missing.md)`\n"
             "[Reference][spec]\n\n"
+            "    [Indented code](missing-indented.md)\n\n"
+            "<!-- [Commented link](missing-commented.md) -->\n\n"
+            "[Self][self]\n\n"
             "[spec]:\n"
             "  docs/spec/example.md#repeat\n\n"
+            "[self]: <>\n\n"
             "[^note]: explanatory text, not a link destination\n",
             encoding="utf-8",
         )
@@ -97,6 +101,25 @@ class DocsConsistencyTests(unittest.TestCase):
             "| INV-001 | Law. | Domain | Accepted | "
             "tests `module::missing_test` in "
             "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["invariant-test"],
+        )
+        self.assertIn("`missing_test`", failures[0].message)
+
+    def test_named_test_behind_reference_link_must_appear(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "tests `missing_test` in [tests][tests-file]. |\n\n"
+            "[tests-file]: ../src/tests.rs\n",
             encoding="utf-8",
         )
 
@@ -195,6 +218,22 @@ class DocsConsistencyTests(unittest.TestCase):
             ["relative-link"],
         )
         self.assertIn("escapes the repository", failures[0].message)
+
+    def test_reference_style_heading_uses_its_visible_label(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "[Heading](docs/spec/example.md#reference-heading)\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "## [Reference heading][heading-label]\n\n"
+            "[heading-label]: https://example.com/heading\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_newer_decision_after_older_entry_is_reported(self) -> None:
         (self.root / "docs/decisions.md").write_text(
@@ -356,6 +395,35 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_verification_clause_allows_prose_abbreviation(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Behavior was verified, e.g. by inspection, through PR #12 "
+            "(`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_commented_verification_reference_is_ignored(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "<!-- Verified through PR #12 (`agent/example`). -->\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            [failure.category for failure in failures],
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
 
     def test_github_slug_preserves_expected_house_shapes(self) -> None:
         self.assertEqual(

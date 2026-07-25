@@ -41,7 +41,11 @@ SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 REFERENCE_DEFINITION = re.compile(
     r"(?m)^ {0,3}\[([^\]\n]+)\]:[ \t]*(?:\r?\n[ \t]+)?"
-    r"(?:<([^>\n]+)>|(\S+))"
+    r"(?:<([^>\n]*)>|(\S+))"
+)
+REFERENCE_LINK = re.compile(r"\[([^\]\n]+)\]\[([^\]\n]*)\]")
+LIST_ITEM = re.compile(
+    r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])(?P<spacing>[ \t]+)"
 )
 DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
 PR_TOKEN = re.compile(
@@ -51,7 +55,7 @@ PR_TOKEN = re.compile(
 )
 VERIFICATION_LEAD = re.compile(
     r"\bverified\b"
-    r"(?:(?![.!?](?:[ \t\r\n]|$)).)*?"
+    r"(?:(?!\n[ \t]*\n|[.!?][ \t\r\n]+(?-i:[A-Z])).)*?"
     r"\b(?:through|rooted[ \t]+at)[ \t\r\n]+"
     r"(?P<pr>\bPR[ \t]*#)",
     re.IGNORECASE | re.DOTALL,
@@ -64,7 +68,7 @@ TEST_GROUP = re.compile(
     r"`[A-Za-z_][A-Za-z0-9_:]*`)*"
     r")"
     r"[ \t]+in[ \t]+"
-    r"(?P<link>\[[^\]\n]+\]\([^)]+\))",
+    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\]))",
     re.IGNORECASE,
 )
 TEST_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_:]*$")
@@ -76,7 +80,7 @@ NATURAL_TEST_BINDING = re.compile(
     r"`(?P<after>[A-Za-z_][A-Za-z0-9_:]*)`"
     r")"
     r"[ \t]+in[ \t]+"
-    r"(?P<link>\[[^\]\n]+\]\([^)]+\))",
+    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\]))",
     re.IGNORECASE,
 )
 
@@ -179,6 +183,101 @@ def mask_inline_code(text: str) -> str:
     for start, end in inline_code_ranges(text):
         mask_range(buffer, start, end)
     return "".join(buffer)
+
+
+def mask_html_comments(text: str) -> str:
+    """Replace HTML comments outside inline code, preserving offsets."""
+    buffer = list(text)
+    code_ranges = inline_code_ranges(text)
+    index = 0
+    while True:
+        opening = text.find("<!--", index)
+        if opening == -1:
+            break
+        containing = next(
+            (
+                (start, end)
+                for start, end in code_ranges
+                if start <= opening < end
+            ),
+            None,
+        )
+        if containing is not None:
+            index = containing[1]
+            continue
+        closing = text.find("-->", opening + 4)
+        end = len(text) if closing == -1 else closing + 3
+        mask_range(buffer, opening, end)
+        index = end
+    return "".join(buffer)
+
+
+def indentation_columns(prefix: str) -> int:
+    columns = 0
+    for character in prefix:
+        columns = columns + 4 - (columns % 4) if character == "\t" else columns + 1
+    return columns
+
+
+def mask_indented_code(text: str) -> str:
+    """Replace CommonMark-style indented code blocks, preserving offsets."""
+    buffer = list(text)
+    offset = 0
+    previous_blank = True
+    in_code = False
+    list_content_column: int | None = None
+
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if not content.strip():
+            if in_code:
+                mask_range(buffer, offset, offset + len(line))
+            previous_blank = True
+            offset += len(line)
+            continue
+
+        prefix = re.match(r"^[ \t]*", content).group(0)
+        leading = indentation_columns(prefix)
+        relative = (
+            leading
+            if list_content_column is None
+            else leading - list_content_column
+        )
+        marker = LIST_ITEM.match(content)
+        if marker is not None and (
+            (list_content_column is None and leading <= 3)
+            or (list_content_column is not None and 0 <= relative <= 3)
+        ):
+            list_content_column = indentation_columns(
+                marker.group("indent") + marker.group(0)[len(marker.group("indent")) :]
+            )
+            in_code = False
+            previous_blank = False
+            offset += len(line)
+            continue
+
+        if list_content_column is not None and relative < 0:
+            list_content_column = None
+            relative = leading
+            in_code = False
+
+        indented = relative >= 4
+        if in_code and indented:
+            mask_range(buffer, offset, offset + len(line))
+        elif previous_blank and indented:
+            in_code = True
+            mask_range(buffer, offset, offset + len(line))
+        else:
+            in_code = False
+
+        previous_blank = False
+        offset += len(line)
+    return "".join(buffer)
+
+
+def mask_block_content(text: str) -> str:
+    """Mask fenced/indented code and HTML comments in Markdown source."""
+    return mask_indented_code(mask_html_comments(mask_fenced_code(text)))
 
 
 def find_closing_bracket(text: str, start: int) -> int | None:
@@ -294,16 +393,73 @@ def extract_inline_links(text: str) -> list[MarkdownLink]:
     return links
 
 
+def normalize_reference_label(label: str) -> str:
+    return " ".join(label.split()).casefold()
+
+
+def reference_definitions(text: str) -> dict[str, MarkdownLink]:
+    """Return the first non-footnote definition for each reference label."""
+    definitions: dict[str, MarkdownLink] = {}
+    for match in REFERENCE_DEFINITION.finditer(text):
+        label = match.group(1)
+        if label.lstrip().startswith("^"):
+            continue
+        destination = (
+            match.group(2) if match.group(2) is not None else match.group(3)
+        )
+        normalized = normalize_reference_label(label)
+        definitions.setdefault(
+            normalized,
+            MarkdownLink(
+                label=label,
+                destination=destination,
+                offset=match.start(),
+            ),
+        )
+    return definitions
+
+
+def extract_reference_links(
+    text: str, definitions: dict[str, MarkdownLink]
+) -> list[MarkdownLink]:
+    """Resolve full/collapsed reference links through known definitions."""
+    links: list[MarkdownLink] = []
+    for match in REFERENCE_LINK.finditer(text):
+        reference_label = match.group(2) or match.group(1)
+        definition = definitions.get(normalize_reference_label(reference_label))
+        if definition is None:
+            continue
+        links.append(
+            MarkdownLink(
+                label=match.group(1),
+                destination=definition.destination,
+                offset=definition.offset,
+            )
+        )
+    return links
+
+
+def extract_resolved_links(
+    text: str, definitions: dict[str, MarkdownLink]
+) -> list[MarkdownLink]:
+    links = extract_inline_links(text)
+    links.extend(extract_reference_links(text, definitions))
+    return links
+
+
 def extract_markdown_links(text: str) -> list[MarkdownLink]:
     """Return inline links and reference-definition destinations."""
     links = extract_inline_links(text)
     for match in REFERENCE_DEFINITION.finditer(text):
         if match.group(1).lstrip().startswith("^"):
             continue
+        destination = (
+            match.group(2) if match.group(2) is not None else match.group(3)
+        )
         links.append(
             MarkdownLink(
                 label=match.group(1),
-                destination=match.group(2) or match.group(3),
+                destination=destination,
                 offset=match.start(),
             )
         )
@@ -346,6 +502,7 @@ def is_inside(root: Path, path: Path) -> bool:
 def render_heading_text(text: str) -> str:
     text = html.unescape(text)
     text = re.sub(r"`+([^`]*)`+", r"\1", text)
+    text = re.sub(r"!?\[([^\]]*)\]\[[^\]]*\]", r"\1", text)
     text = re.sub(r"!?\[([^\]]*)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"<[^>]*>", "", text)
     text = re.sub(r"\\(.)", r"\1", text)
@@ -369,7 +526,7 @@ def github_slug(text: str) -> str:
 
 @lru_cache(maxsize=None)
 def heading_anchors(path: Path) -> frozenset[str]:
-    text = mask_fenced_code(path.read_text(encoding="utf-8"))
+    text = mask_block_content(path.read_text(encoding="utf-8"))
     lines = text.splitlines()
     headings: list[str] = []
     for index, line in enumerate(lines):
@@ -433,12 +590,14 @@ def split_table_row(line: str) -> list[str]:
     return cells
 
 
-def named_tests(enforcement: str) -> list[tuple[str, MarkdownLink]]:
+def named_tests(
+    enforcement: str, definitions: dict[str, MarkdownLink]
+) -> list[tuple[str, MarkdownLink]]:
     """Extract explicitly file-bound test names from an Enforcement cell."""
     found: set[tuple[str, str]] = set()
     bindings: list[tuple[str, MarkdownLink]] = []
 
-    for link in extract_inline_links(enforcement):
+    for link in extract_resolved_links(enforcement, definitions):
         raw_label = link.label.strip()
         label = raw_label[1:-1] if re.fullmatch(r"`[^`]+`", raw_label) else ""
         if TEST_IDENTIFIER.fullmatch(label) and "/" not in label:
@@ -448,7 +607,7 @@ def named_tests(enforcement: str) -> list[tuple[str, MarkdownLink]]:
                 bindings.append((label, link))
 
     for match in TEST_GROUP.finditer(enforcement):
-        links = extract_inline_links(match.group("link"))
+        links = extract_resolved_links(match.group("link"), definitions)
         if len(links) != 1:
             continue
         linked = links[0]
@@ -464,7 +623,7 @@ def named_tests(enforcement: str) -> list[tuple[str, MarkdownLink]]:
                 bindings.append((name, adjusted))
 
     for match in NATURAL_TEST_BINDING.finditer(enforcement):
-        links = extract_inline_links(match.group("link"))
+        links = extract_resolved_links(match.group("link"), definitions)
         if len(links) != 1:
             continue
         linked = links[0]
@@ -485,7 +644,8 @@ def check_invariant_citations(
     root: Path,
 ) -> tuple[list[Violation], set[tuple[int, str]]]:
     source = root / INVARIANTS
-    text = source.read_text(encoding="utf-8")
+    text = mask_block_content(source.read_text(encoding="utf-8"))
+    definitions = reference_definitions(text)
     violations: list[Violation] = []
     enforcement_links: set[tuple[int, str]] = set()
 
@@ -505,12 +665,15 @@ def check_invariant_citations(
             continue
         invariant = cells[0]
         enforcement = cells[4]
-        for link in extract_inline_links(enforcement):
+        for link in extract_resolved_links(enforcement, definitions):
             resolved = resolve_relative_target(root, source, link.destination)
             if resolved is None:
                 continue
             target, _ = resolved
             enforcement_links.add((number, link.destination))
+            enforcement_links.add(
+                (line_number(text, link.offset), link.destination)
+            )
             if not is_inside(root, target):
                 violations.append(
                     Violation(
@@ -532,7 +695,7 @@ def check_invariant_citations(
                     )
                 )
 
-        for test_name, link in named_tests(enforcement):
+        for test_name, link in named_tests(enforcement, definitions):
             resolved = resolve_relative_target(root, source, link.destination)
             if resolved is None:
                 continue
@@ -564,7 +727,7 @@ def check_relative_links(
 
     for source in markdown_sources(root):
         original = source.read_text(encoding="utf-8")
-        parsed_text = mask_inline_code(mask_fenced_code(original))
+        parsed_text = mask_inline_code(mask_block_content(original))
         for link in extract_markdown_links(parsed_text):
             line = line_number(original, link.offset)
             resolved = resolve_relative_target(root, source, link.destination)
@@ -635,7 +798,7 @@ def check_relative_links(
 
 def check_decision_order(root: Path) -> list[Violation]:
     source = root / DECISIONS
-    text = mask_fenced_code(source.read_text(encoding="utf-8"))
+    text = mask_block_content(source.read_text(encoding="utf-8"))
     violations: list[Violation] = []
     previous: tuple[date, int] | None = None
     entries = 0
@@ -698,7 +861,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
     for source in sorted((root / SPEC_DIR).rglob("*.md")):
         if source.name == "README.md":
             continue
-        text = mask_fenced_code(source.read_text(encoding="utf-8"))
+        text = mask_block_content(source.read_text(encoding="utf-8"))
         source_label = repository_path(root, source)
         code_ranges = inline_code_ranges(text)
         valid_reference = False

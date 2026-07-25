@@ -30,8 +30,9 @@ dependency without covering the repository-specific invariant and decision
 formats. Discover every INV-tagged test or judge whether a verification PR is
 fresh, which would exceed the mechanically decidable scope.
 
-**Affects.** `scripts/check_docs_consistency.py`, its regression tests, the Rust
-workflow's validate job, and future edits to the living-spec surface.
+**Affects.** `scripts/check_docs_consistency.py`, its regression tests,
+`AGENTS.md`, the Rust workflow's validate job, and future edits to the
+living-spec surface.
 
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 

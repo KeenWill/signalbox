@@ -150,6 +150,8 @@ Run the repository-wide validation sequence:
 
 ```bash
 python3 scripts/check_domain_spine.py
+python3 scripts/check_docs_consistency.py
+python3 scripts/test_check_docs_consistency.py
 cargo fmt --all -- --check
 mdformat --check *.md docs/
 cargo check --workspace --all-targets --all-features
