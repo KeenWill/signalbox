@@ -3607,7 +3607,6 @@ impl ReplaceSessionMetadata {
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        actor: Actor,
         replacement: SessionMetadataContent,
     ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedReplaceSessionMetadata;
@@ -3652,12 +3651,14 @@ pub struct ReplaceSessionMetadataReconstitutionInput { /* private */ }
 impl ReplaceSessionMetadataReconstitutionInput {
     pub const fn applied(
         command: ReplaceSessionMetadata,
+        command_actor: Actor,
         result_session: SessionId,
         result_updated_at: SessionMetadataUpdatedAt,
         result_actor: Actor,
     ) -> Self;
     pub const fn rejected_session_not_found(
         command: ReplaceSessionMetadata,
+        command_actor: Actor,
         result_session: SessionId,
     ) -> Self;
     pub fn reconstitute(self)
@@ -3666,6 +3667,7 @@ impl ReplaceSessionMetadataReconstitutionInput {
 }
 
 pub enum ReplaceSessionMetadataReconstitutionFailure {
+    CommandActorMismatch,
     ResultSessionMismatch,
     ResultActorMismatch,
 }

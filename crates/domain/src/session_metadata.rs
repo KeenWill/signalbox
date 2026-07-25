@@ -307,12 +307,12 @@ impl SessionMetadataSnapshot {
 /// The canonical durable command replacing one complete metadata snapshot.
 ///
 /// Structural equality and hashing exclude `command_id` and cover every other
-/// caller-supplied semantic field.
+/// caller-supplied semantic field. Metadata replacement is owner-only, so the
+/// actor is fixed by construction rather than supplied by callers.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionMetadata {
     command_id: DurableCommandId,
     session: SessionId,
-    actor: Actor,
     replacement: SessionMetadataContent,
 }
 
@@ -321,13 +321,11 @@ impl ReplaceSessionMetadata {
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        actor: Actor,
         replacement: SessionMetadataContent,
     ) -> Self {
         Self {
             command_id,
             session,
-            actor,
             replacement,
         }
     }
@@ -342,9 +340,9 @@ impl ReplaceSessionMetadata {
         self.session
     }
 
-    /// Returns the attributed writer.
+    /// Returns the canonical owner writer.
     pub const fn actor(&self) -> Actor {
-        self.actor
+        Actor::Owner
     }
 
     /// Borrows the complete replacement content.
@@ -378,7 +376,7 @@ impl ReplaceSessionMetadata {
         let snapshot = SessionMetadataSnapshot::from_recorded_write(
             self.session,
             self.replacement.clone(),
-            SessionMetadataLastWriter::new(updated_at, self.actor),
+            SessionMetadataLastWriter::new(updated_at, self.actor()),
         );
         PreparedReplaceSessionMetadata {
             command: self,
@@ -391,9 +389,7 @@ impl ReplaceSessionMetadata {
 
 impl PartialEq for ReplaceSessionMetadata {
     fn eq(&self, other: &Self) -> bool {
-        self.session == other.session
-            && self.actor == other.actor
-            && self.replacement == other.replacement
+        self.session == other.session && self.replacement == other.replacement
     }
 }
 
@@ -402,7 +398,6 @@ impl Eq for ReplaceSessionMetadata {}
 impl std::hash::Hash for ReplaceSessionMetadata {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.session.hash(state);
-        self.actor.hash(state);
         self.replacement.hash(state);
     }
 }
@@ -489,6 +484,7 @@ enum ReplaceSessionMetadataReconstitutionFacts {
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionMetadataReconstitutionInput {
     command: ReplaceSessionMetadata,
+    command_actor: Actor,
     facts: ReplaceSessionMetadataReconstitutionFacts,
 }
 
@@ -496,12 +492,14 @@ impl ReplaceSessionMetadataReconstitutionInput {
     /// Supplies the complete applied-result facts.
     pub const fn applied(
         command: ReplaceSessionMetadata,
+        command_actor: Actor,
         result_session: SessionId,
         result_updated_at: SessionMetadataUpdatedAt,
         result_actor: Actor,
     ) -> Self {
         Self {
             command,
+            command_actor,
             facts: ReplaceSessionMetadataReconstitutionFacts::Applied {
                 result_session,
                 result_updated_at,
@@ -513,10 +511,12 @@ impl ReplaceSessionMetadataReconstitutionInput {
     /// Supplies the recorded target for a missing-session rejection.
     pub const fn rejected_session_not_found(
         command: ReplaceSessionMetadata,
+        command_actor: Actor,
         result_session: SessionId,
     ) -> Self {
         Self {
             command,
+            command_actor,
             facts: ReplaceSessionMetadataReconstitutionFacts::RejectedSessionNotFound {
                 result_session,
             },
@@ -533,23 +533,27 @@ impl ReplaceSessionMetadataReconstitutionInput {
         self,
     ) -> Result<ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadataReconstitutionError>
     {
-        let failure = match self.facts {
-            ReplaceSessionMetadataReconstitutionFacts::Applied { result_session, .. }
-                if result_session != self.command.session =>
-            {
-                Some(ReplaceSessionMetadataReconstitutionFailure::ResultSessionMismatch)
+        let failure = if self.command_actor != self.command.actor() {
+            Some(ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch)
+        } else {
+            match self.facts {
+                ReplaceSessionMetadataReconstitutionFacts::Applied { result_session, .. }
+                    if result_session != self.command.session =>
+                {
+                    Some(ReplaceSessionMetadataReconstitutionFailure::ResultSessionMismatch)
+                }
+                ReplaceSessionMetadataReconstitutionFacts::Applied { result_actor, .. }
+                    if result_actor != self.command.actor() =>
+                {
+                    Some(ReplaceSessionMetadataReconstitutionFailure::ResultActorMismatch)
+                }
+                ReplaceSessionMetadataReconstitutionFacts::RejectedSessionNotFound {
+                    result_session,
+                } if result_session != self.command.session => {
+                    Some(ReplaceSessionMetadataReconstitutionFailure::ResultSessionMismatch)
+                }
+                _ => None,
             }
-            ReplaceSessionMetadataReconstitutionFacts::Applied { result_actor, .. }
-                if result_actor != self.command.actor =>
-            {
-                Some(ReplaceSessionMetadataReconstitutionFailure::ResultActorMismatch)
-            }
-            ReplaceSessionMetadataReconstitutionFacts::RejectedSessionNotFound {
-                result_session,
-            } if result_session != self.command.session => {
-                Some(ReplaceSessionMetadataReconstitutionFailure::ResultSessionMismatch)
-            }
-            _ => None,
         };
         if let Some(failure) = failure {
             return Err(ReplaceSessionMetadataReconstitutionError {
@@ -591,6 +595,8 @@ impl ReplaceSessionMetadataReconstitutionInput {
 /// Why typed durable facts cannot reconstruct a recorded replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplaceSessionMetadataReconstitutionFailure {
+    /// The recorded command names an actor other than the canonical owner.
+    CommandActorMismatch,
     /// The terminal result names a different target session.
     ResultSessionMismatch,
     /// The applied stamp names a different actor from the command.
@@ -962,7 +968,7 @@ mod tests {
         assert_eq!(snapshot.last_writer(), None);
     }
 
-    /// INV-013: archive is metadata on the same durable session identity.
+    /// S25 / INV-013: archive is metadata on the same durable session identity.
     #[test]
     fn inv013_recorded_snapshot_preserves_identity_and_archive_state() {
         let session = session_id(1);
@@ -984,34 +990,14 @@ mod tests {
     /// treats set/map input order canonically.
     #[test]
     fn inv012_command_equality_covers_canonical_payload_not_identity() {
-        let first = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(2),
-            Actor::Owner,
-            metadata(false),
-        );
-        let another_identity = ReplaceSessionMetadata::new(
-            command_id(3),
-            session_id(2),
-            Actor::Owner,
-            metadata(false),
-        );
-        let another_session = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(4),
-            Actor::Owner,
-            metadata(false),
-        );
-        let another_actor = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(2),
-            Actor::Recovery,
-            metadata(false),
-        );
+        let first = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
+        let another_identity =
+            ReplaceSessionMetadata::new(command_id(3), session_id(2), metadata(false));
+        let another_session =
+            ReplaceSessionMetadata::new(command_id(1), session_id(4), metadata(false));
         let another_title = ReplaceSessionMetadata::new(
             command_id(1),
             session_id(2),
-            Actor::Owner,
             SessionMetadataContent::try_new(
                 Some(String::from("Other")),
                 vec![String::from("daily"), String::from("work")],
@@ -1026,7 +1012,6 @@ mod tests {
         let another_tags = ReplaceSessionMetadata::new(
             command_id(1),
             session_id(2),
-            Actor::Owner,
             SessionMetadataContent::try_new(
                 Some(String::from("Planning")),
                 vec![String::from("daily"), String::from("other")],
@@ -1041,7 +1026,6 @@ mod tests {
         let another_attributes = ReplaceSessionMetadata::new(
             command_id(1),
             session_id(2),
-            Actor::Owner,
             SessionMetadataContent::try_new(
                 Some(String::from("Planning")),
                 vec![String::from("daily"), String::from("work")],
@@ -1054,12 +1038,11 @@ mod tests {
             .expect("comparison fixture is valid"),
         );
         let another_archive_state =
-            ReplaceSessionMetadata::new(command_id(1), session_id(2), Actor::Owner, metadata(true));
+            ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(true));
 
         assert_eq!(first, another_identity);
         assert_eq!(command_hash(&first), command_hash(&another_identity));
         assert_ne!(first, another_session);
-        assert_ne!(first, another_actor);
         assert_ne!(first, another_title);
         assert_ne!(first, another_tags);
         assert_ne!(first, another_attributes);
@@ -1067,9 +1050,15 @@ mod tests {
     }
 
     #[test]
+    fn metadata_command_construction_fixes_owner_actor() {
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
+
+        assert_eq!(command.actor(), Actor::Owner);
+    }
+
+    #[test]
     fn prepared_applied_result_carries_command_actor_and_clock_evidence() {
-        let command =
-            ReplaceSessionMetadata::new(command_id(1), session_id(2), Actor::Owner, metadata(true));
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(true));
         let updated_at = SessionMetadataUpdatedAt::from_unix_micros(17);
         let prepared = command.clone().prepare_applied(updated_at);
         let ReplaceSessionMetadataResult::Applied(applied) = prepared.result() else {
@@ -1087,12 +1076,7 @@ mod tests {
 
     #[test]
     fn prepared_missing_session_rejection_retains_target() {
-        let command = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(2),
-            Actor::Owner,
-            metadata(false),
-        );
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let prepared = command.clone().prepare_session_not_found();
         let ReplaceSessionMetadataResult::Rejected(
             ReplaceSessionMetadataRejectedResult::SessionNotFound(rejected),
@@ -1109,11 +1093,11 @@ mod tests {
     /// and its recorded applied receipt without consulting current metadata.
     #[test]
     fn inv012_matching_applied_facts_reconstitute() {
-        let command =
-            ReplaceSessionMetadata::new(command_id(1), session_id(2), Actor::Owner, metadata(true));
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(true));
         let updated_at = SessionMetadataUpdatedAt::from_unix_micros(17);
         let reconstructed = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
+            command.actor(),
             command.session(),
             updated_at,
             command.actor(),
@@ -1132,18 +1116,58 @@ mod tests {
         );
     }
 
+    /// INV-012: a recorded applied command cannot attribute a non-owner writer.
+    #[test]
+    fn inv012_applied_reconstitution_rejects_non_owner_command_actor() {
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
+        let input = ReplaceSessionMetadataReconstitutionInput::applied(
+            command.clone(),
+            Actor::Recovery,
+            command.session(),
+            SessionMetadataUpdatedAt::from_unix_micros(17),
+            command.actor(),
+        );
+        let error = input
+            .clone()
+            .reconstitute()
+            .expect_err("a non-owner stored command actor fails closed");
+
+        assert_eq!(
+            error.failure(),
+            ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
+        );
+        assert_eq!(error.input().command(), &command);
+        assert_eq!(error.into_parts().0.command(), &command);
+    }
+
+    /// INV-012: a recorded rejected command cannot attribute a non-owner
+    /// writer.
+    #[test]
+    fn inv012_rejected_reconstitution_rejects_non_owner_command_actor() {
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
+        let error = ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
+            command.clone(),
+            Actor::Recovery,
+            command.session(),
+        )
+        .reconstitute()
+        .expect_err("a non-owner rejected command actor fails closed");
+
+        assert_eq!(
+            error.failure(),
+            ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
+        );
+        assert_eq!(error.input().command(), &command);
+    }
+
     /// INV-012: an applied result cannot attribute a different writer from the
     /// canonical command.
     #[test]
     fn inv012_reconstitution_rejects_cross_wired_actor() {
-        let command = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(2),
-            Actor::Owner,
-            metadata(false),
-        );
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let input = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
+            command.actor(),
             command.session(),
             SessionMetadataUpdatedAt::from_unix_micros(17),
             Actor::Recovery,
@@ -1164,14 +1188,10 @@ mod tests {
     /// INV-012: an applied result cannot name another session.
     #[test]
     fn inv012_applied_reconstitution_rejects_cross_wired_session() {
-        let command = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(2),
-            Actor::Owner,
-            metadata(false),
-        );
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
+            command.actor(),
             session_id(3),
             SessionMetadataUpdatedAt::from_unix_micros(17),
             command.actor(),
@@ -1189,14 +1209,10 @@ mod tests {
     /// INV-012: a terminal result cannot name another session.
     #[test]
     fn inv012_rejected_reconstitution_rejects_cross_wired_session() {
-        let command = ReplaceSessionMetadata::new(
-            command_id(1),
-            session_id(2),
-            Actor::Owner,
-            metadata(false),
-        );
+        let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
             command.clone(),
+            command.actor(),
             session_id(3),
         )
         .reconstitute()

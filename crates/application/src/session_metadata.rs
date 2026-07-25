@@ -8,7 +8,7 @@
 use std::{collections::BTreeSet, future::Future};
 
 use signalbox_domain::{
-    Actor, DurableCommandId, ReplaceSessionMetadata as DomainReplaceSessionMetadata,
+    DurableCommandId, ReplaceSessionMetadata as DomainReplaceSessionMetadata,
     ReplaceSessionMetadataResult, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot,
@@ -117,7 +117,6 @@ where
         let command = DomainReplaceSessionMetadata::new(
             request.command_id,
             request.session,
-            Actor::Owner,
             request.replacement,
         );
         self.transaction.handle(command).await
@@ -438,13 +437,13 @@ mod tests {
     };
 
     use signalbox_domain::{
-        DirectModelSelection, ModelSelectionRequest, ReplaceSessionMetadataRejectedResult,
+        Actor, DirectModelSelection, ModelSelectionRequest, ReplaceSessionMetadataRejectedResult,
         SessionMetadataUpdatedAt,
     };
     use uuid::Uuid;
 
     use super::{
-        Actor, DomainReplaceSessionMetadata, DurableCommandId, InvalidDurableCommandId,
+        DomainReplaceSessionMetadata, DurableCommandId, InvalidDurableCommandId,
         ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
         ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
         ReplaceSessionMetadataTransaction, SessionConfigurationDefaults, SessionId,
@@ -543,7 +542,6 @@ mod tests {
         let recorded = DomainReplaceSessionMetadata::new(
             request.command_id(),
             request.session(),
-            Actor::Owner,
             request.replacement().clone(),
         )
         .prepare_session_not_found()
@@ -871,7 +869,6 @@ mod tests {
         let command = DomainReplaceSessionMetadata::new(
             request.command_id(),
             request.session(),
-            Actor::Owner,
             request.replacement().clone(),
         );
         let recorded = command.prepare_session_not_found().into_parts().1;
