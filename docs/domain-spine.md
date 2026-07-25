@@ -5623,6 +5623,7 @@ pub enum ReviewFindingTransitionFailure {
     SelfReference,
     ForeignExternalLink,
     PublicationPassMismatch,
+    ReusedPublicationLink,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
     InvalidTransition { current: ReviewFindingStatus },
 }

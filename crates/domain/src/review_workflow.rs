@@ -2177,6 +2177,21 @@ impl ReviewFinding {
             });
         }
         validate_finding_reference(&self.proposal, &event)?;
+        if let ReviewFindingEventKind::Posted { link } = &event.kind
+            && self.events.iter().any(|previous| {
+                matches!(
+                    previous.kind(),
+                    ReviewFindingEventKind::Posted {
+                        link: previous_link
+                    } if previous_link.link() == link.link()
+                )
+            })
+        {
+            return Err(ReviewFindingTransitionError {
+                event: Some(Box::new(event)),
+                failure: ReviewFindingTransitionFailure::ReusedPublicationLink,
+            });
+        }
         let Some(next_status) = finding_transition(self.status, &event.kind, self.events.last())
         else {
             return Err(ReviewFindingTransitionError {
@@ -2345,6 +2360,8 @@ pub enum ReviewFindingTransitionFailure {
     ForeignExternalLink,
     /// A posted event names a pass other than the attachment producer.
     PublicationPassMismatch,
+    /// A posted event reuses attachment evidence consumed by an earlier post.
+    ReusedPublicationLink,
     /// Event ordinals are not a contiguous one-based sequence.
     NoncontiguousOrdinal {
         /// Expected next ordinal, or `None` after ordinal exhaustion.
@@ -4325,6 +4342,53 @@ mod tests {
             ))
             .expect("confirmed attachment reconciles the publication");
         assert_eq!(finding.status(), ReviewFindingStatus::Posted);
+    }
+
+    /// INV-040 / INV-041: reconciliation cannot replay attachment evidence
+    /// consumed by an earlier posted event.
+    #[test]
+    fn inv040_reposting_rejects_consumed_publication_link() {
+        let finding = ReviewFinding::new(proposal())
+            .apply(ReviewFindingEvent::new(
+                finding_ref(10),
+                ReviewEventOrdinal::one(),
+                succeeded_pass(19, ReviewPassKind::Judge),
+                ReviewFindingEventKind::Accepted,
+            ))
+            .expect("finding may be accepted")
+            .apply(ReviewFindingEvent::new(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(20, ReviewPassKind::Publish),
+                ReviewFindingEventKind::Posted {
+                    link: finding_link_ref(finding_ref(10), link_id(30)),
+                },
+            ))
+            .expect("accepted finding may be posted")
+            .apply(ReviewFindingEvent::new(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
+                blocked_pass(21, ReviewPassKind::Publish),
+                ReviewFindingEventKind::BlockedWithReason {
+                    reason: text("publication state requires reconciliation"),
+                },
+            ))
+            .expect("posted finding may become publication-blocked");
+        let error = finding
+            .apply(ReviewFindingEvent::new(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(4).expect("positive ordinal"),
+                succeeded_pass(20, ReviewPassKind::Publish),
+                ReviewFindingEventKind::Posted {
+                    link: finding_link_ref(finding_ref(10), link_id(30)),
+                },
+            ))
+            .expect_err("the first posting's attachment was already consumed");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::ReusedPublicationLink
+        );
     }
 
     /// INV-040: the complete nine-state finding transition surface stays
