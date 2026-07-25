@@ -584,10 +584,9 @@ closed `event` object. Every version admits these unchanged event shapes:
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 
 Version three additionally admits
-`tool_batch_transition { turn_id, producing_model_call_id, state }`, where
-`state` is exactly `proposed { frontier_id }`,
-`results_projected { frontier_id }`, or `recovery_required { tool_attempt_id }`,
-and
+`tool_batch_transition { turn_id, model_call_id, state }`, where `state` is
+exactly `proposed { frontier_id }`, `results_projected { frontier_id }`, or
+`recovery_required { tool_attempt_id }`, and
 `turn_tool_reconciliation_required { turn_id, tool_attempt_id, terminal_frontier_id }`.
 
 The model-call `state` object is exactly `prepared`, `in_flight`,

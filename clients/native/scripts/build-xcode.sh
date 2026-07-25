@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DERIVED_DATA_PATH="${LLM_HUB_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
+DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
 
 CMD=(
 	xcodebuild
 	-quiet
-	-project "$ROOT/LLMHubNative.xcodeproj"
-	-scheme "LLMHubNative"
+	-project "$ROOT/SignalboxNative.xcodeproj"
+	-scheme "SignalboxNative"
 	-configuration "Debug"
 	-destination "generic/platform=iOS Simulator"
 	-derivedDataPath "$DERIVED_DATA_PATH"

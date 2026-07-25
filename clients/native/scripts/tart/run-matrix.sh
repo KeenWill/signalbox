@@ -22,7 +22,7 @@ usage() {
 	cat <<'EOF'
 Usage: run-matrix.sh [options] [shard ...]
 
-Run LLM Hub Native Tart validation shards, optionally in parallel.
+Run Signalbox Native Tart validation shards, optionally in parallel.
 
 Options:
   --print-plan  Print the shard plan without running Tart.

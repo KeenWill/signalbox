@@ -44,6 +44,10 @@ finishing a milestone.
   unconsumed machinery are not substitutes for blocked work.
 - Maintain compact progress checkpoints naming the current track, what has been
   verified, what remains, and any semantic or external blocker.
+- On a pull request touching `crates/domain` or `crates/persistence`, pause the
+  review-fix loop after wave three and wait for the owner's next check-in rather
+  than running it unattended; report the wave history so far at the pause.
+  Non-core pull requests keep the adaptive wave rule in `AGENTS.md` unchanged.
 
 ## Finishing
 

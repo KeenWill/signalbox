@@ -12,14 +12,14 @@ resolve_root() {
 	fi
 
 	if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
-		local runfiles_project_root="$TEST_SRCDIR/$TEST_WORKSPACE/projects/llm_hub_native"
+		local runfiles_project_root="$TEST_SRCDIR/$TEST_WORKSPACE/clients/native"
 		if [[ -d "$runfiles_project_root/Screenshots" ]]; then
 			printf '%s\n' "$runfiles_project_root"
 			return 0
 		fi
 	fi
 
-	echo "Could not resolve projects/llm_hub_native from script or Bazel runfiles." >&2
+	echo "Could not resolve clients/native from script or Bazel runfiles." >&2
 	return 1
 }
 
