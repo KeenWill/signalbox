@@ -142,6 +142,9 @@ Representation rules, all enforced in the schema:
   become immutable at `terminal`; `turn_attempt` rows are inserted `prepared`
   and an `ended` attempt is immutable. Why: restart trusts durable rows as
   evidence, so the schema itself must forbid rewriting them (INV-006, INV-007).
+- The current `session_metadata` root remains mutable by complete replacement
+  but rejects deletion. Once a session has a recorded metadata write, root
+  absence can therefore never be reinterpreted as the initial unwritten state.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -244,13 +247,19 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. One explicit lock lives in the
-schema instead of the inventory: the deferred pending-steering source-turn
-trigger (migration `202607180005`) takes `FOR UPDATE` on the named
-`turn_lifecycle` row when a pending-steering `accepted_input` insert reaches
-commit. Why: a single reviewed inventory makes lock ordering auditable instead
-of scattered through query strings; the trigger-resident lock is recorded here
-because it fires outside the inventory's view.
+`crates/persistence/src/lock_inventory.rs`. Two explicit lock sites live in the
+schema instead:
+
+- the deferred pending-steering source-turn trigger (migration `202607180005`)
+  takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
+  `accepted_input` insert reaches commit; and
+- the metadata receipt-satellite insert trigger (migration `202607260101`) takes
+  `FOR UPDATE` on the already-claimed `durable_command` row before it checks
+  whether the typed receipt parent has sealed the command.
+
+Why: a single reviewed inventory makes lock ordering auditable instead of
+scattered through query strings; trigger-resident locks are recorded here
+because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
 
@@ -293,9 +302,12 @@ Locks per transaction, in acquisition order:
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
   serializes metadata writers without conflicting with the `KEY SHARE` lock
-  taken by foreign-key checks. A point read and each opened streaming list page
-  use one read-only repeatable-read transaction, so their root and satellite
-  values come from one database snapshot.
+  taken by foreign-key checks. The unseen handler already owns its
+  `durable_command` claim from insertion before this session lock; each nonempty
+  receipt satellite later reacquires that same row through its trigger before
+  the typed parent seals the receipt. A point read and each opened streaming
+  list page use one read-only repeatable-read transaction, so their root and
+  satellite values come from one database snapshot.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the

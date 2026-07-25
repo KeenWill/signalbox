@@ -78,6 +78,11 @@ CREATE TABLE session_metadata (
         )
 );
 
+CREATE TRIGGER session_metadata_delete_is_rejected
+BEFORE DELETE ON session_metadata
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TABLE session_metadata_tag (
     session_id uuid NOT NULL,
     tag text NOT NULL,

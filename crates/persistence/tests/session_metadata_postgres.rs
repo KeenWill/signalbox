@@ -338,6 +338,28 @@ async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
         Some("23514")
     );
 
+    let deleted_root = sqlx::query("DELETE FROM session_metadata WHERE session_id = $1")
+        .bind(Uuid::from_u128(0x701))
+        .execute(&pool)
+        .await
+        .expect_err("written current metadata cannot return to absent state");
+    assert_eq!(
+        deleted_root
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x701))
+            .await?
+            .expect("guarded metadata remains readable")
+            .content()
+            .title(),
+        Some(final_title.as_str())
+    );
+
     let late_tag = sqlx::query(
         "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
          VALUES ($1, 'late')",
