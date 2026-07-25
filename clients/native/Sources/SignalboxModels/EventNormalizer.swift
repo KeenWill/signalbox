@@ -330,22 +330,50 @@ public enum SignalboxEventNormalizer {
     }
 }
 
-public struct SignalboxIncrementalEventNormalizer: Sendable {
+/// Stable reference-backed timeline storage for SwiftUI collection consumers.
+///
+/// The collection keeps the normalized array single-owned while a view retains
+/// the collection across renders, so appending does not trigger an array
+/// copy-on-write clone of the preceding timeline.
+public final class SignalboxTimelineCollection: RandomAccessCollection {
+    public typealias Index = Int
+    public typealias Element = SignalboxTimelineItem
+
+    fileprivate var items: [SignalboxTimelineItem] = []
+
+    public var startIndex: Int {
+        items.startIndex
+    }
+
+    public var endIndex: Int {
+        items.endIndex
+    }
+
+    public subscript(position: Int) -> SignalboxTimelineItem {
+        items[position]
+    }
+}
+
+public final class SignalboxIncrementalEventNormalizer {
     public private(set) var records: [SignalboxStoredEvent] = []
-    public private(set) var timelineItems: [SignalboxTimelineItem] = []
+    public let timeline = SignalboxTimelineCollection()
     private(set) var metrics = SignalboxEventNormalizationMetrics()
 
     private var recordsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
     private var invocationEventIDsByFunctionCallEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
     private var invocationEventIDsByFunctionResponseEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
 
+    public var timelineItems: [SignalboxTimelineItem] {
+        Array(timeline)
+    }
+
     public init(records: [SignalboxStoredEvent] = []) {
         replaceAll(with: records)
     }
 
-    public mutating func replaceAll(with records: [SignalboxStoredEvent]) {
+    public func replaceAll(with records: [SignalboxStoredEvent]) {
         self.records = records.sorted { $0.eventID < $1.eventID }
-        timelineItems = []
+        timeline.items = []
         metrics = SignalboxEventNormalizationMetrics()
         recordsByID = Dictionary(
             self.records.map { ($0.eventID, $0.event) },
@@ -362,7 +390,7 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         }
     }
 
-    public mutating func upsert(_ record: SignalboxStoredEvent) {
+    public func upsert(_ record: SignalboxStoredEvent) {
         let eventID = record.eventID
         let oldEvent = recordsByID[eventID]
         var affectedEventIDs: Set<SignalboxEventID> = [eventID]
@@ -387,13 +415,13 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         }
     }
 
-    public mutating func upsert(contentsOf records: [SignalboxStoredEvent]) {
+    public func upsert(contentsOf records: [SignalboxStoredEvent]) {
         for record in records {
             upsert(record)
         }
     }
 
-    public mutating func remove(eventID: SignalboxEventID) {
+    public func remove(eventID: SignalboxEventID) {
         guard let removedEvent = recordsByID.removeValue(forKey: eventID) else {
             return
         }
@@ -412,7 +440,7 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         }
     }
 
-    private mutating func reevaluate(_ eventID: SignalboxEventID) {
+    private func reevaluate(_ eventID: SignalboxEventID) {
         guard let event = recordsByID[eventID] else {
             setTimelineItem(nil, for: eventID)
             return
@@ -432,7 +460,7 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         setTimelineItem(item, for: eventID)
     }
 
-    private mutating func addInvocationLinks(
+    private func addInvocationLinks(
         for event: SignalboxConversationEvent,
         invocationEventID: SignalboxEventID
     ) {
@@ -447,7 +475,7 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         }
     }
 
-    private mutating func removeInvocationLinks(
+    private func removeInvocationLinks(
         for event: SignalboxConversationEvent?,
         invocationEventID: SignalboxEventID
     ) {
@@ -510,11 +538,11 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
     }
 
     private func timelineInsertionIndex(for eventID: SignalboxEventID) -> Int {
-        if let lastItem = timelineItems.last, timelineEventID(lastItem) < eventID {
-            return timelineItems.count
+        if let lastItem = timeline.last, timelineEventID(lastItem) < eventID {
+            return timeline.count
         }
-        return insertionIndex(count: timelineItems.count) { index in
-            timelineEventID(timelineItems[index]) < eventID
+        return insertionIndex(count: timeline.count) { index in
+            timelineEventID(timeline[index]) < eventID
         }
     }
 
@@ -535,20 +563,20 @@ public struct SignalboxIncrementalEventNormalizer: Sendable {
         return lowerBound
     }
 
-    private mutating func setTimelineItem(
+    private func setTimelineItem(
         _ item: SignalboxTimelineItem?,
         for eventID: SignalboxEventID
     ) {
         let index = timelineInsertionIndex(for: eventID)
-        let itemExists = index < timelineItems.count && timelineEventID(timelineItems[index]) == eventID
+        let itemExists = index < timeline.count && timelineEventID(timeline[index]) == eventID
         if let item {
             if itemExists {
-                timelineItems[index] = item
+                timeline.items[index] = item
             } else {
-                timelineItems.insert(item, at: index)
+                timeline.items.insert(item, at: index)
             }
         } else if itemExists {
-            timelineItems.remove(at: index)
+            timeline.items.remove(at: index)
         }
     }
 

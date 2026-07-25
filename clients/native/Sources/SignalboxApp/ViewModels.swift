@@ -375,6 +375,10 @@ final class SessionDetailViewModel: ObservableObject {
         eventNormalizer.timelineItems
     }
 
+    var timeline: SignalboxTimelineCollection {
+        eventNormalizer.timeline
+    }
+
     var latestPromptContextArtifact: SignalboxArtifact? {
         artifacts.filter(\.isPromptContextArtifact).max { lhs, rhs in
             if lhs.createdAt != rhs.createdAt {

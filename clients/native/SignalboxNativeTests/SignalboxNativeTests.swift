@@ -169,7 +169,7 @@ final class SignalboxNativeTests: XCTestCase {
             )
         )
 
-        var incremental = SignalboxIncrementalEventNormalizer()
+        let incremental = SignalboxIncrementalEventNormalizer()
         incremental.upsert(callEvent)
         XCTAssertEqual(
             incremental.timelineItems,
@@ -229,6 +229,32 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertLessThan(
             comparison.incrementalMetrics.recordEvaluationCount,
             comparison.naiveMetrics.recordEvaluationCount
+        )
+    }
+
+    func testIncrementalNormalizerKeepsStableTimelineCollectionAcrossAppends() throws {
+        let timestamp = try SignalboxJSONCoding.decoder().decode(
+            Date.self,
+            from: Data(LongSequenceFixture.timestampJSON.utf8)
+        )
+        let firstRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.firstEventID,
+            timestamp: timestamp
+        )
+        let secondRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.secondEventID,
+            timestamp: timestamp
+        )
+        let incremental = SignalboxIncrementalEventNormalizer()
+        let timeline = incremental.timeline
+
+        incremental.upsert(firstRecord)
+        incremental.upsert(secondRecord)
+
+        XCTAssertTrue(timeline === incremental.timeline)
+        XCTAssertEqual(
+            Array(timeline),
+            SignalboxEventNormalizer.normalize([firstRecord, secondRecord])
         )
     }
 
@@ -715,7 +741,7 @@ final class SignalboxNativeTests: XCTestCase {
         var naiveRecords: [SignalboxStoredEvent] = []
         var naiveTimeline: [SignalboxTimelineItem] = []
         var naiveMetrics = SignalboxEventNormalizationMetrics()
-        var incremental = SignalboxIncrementalEventNormalizer()
+        let incremental = SignalboxIncrementalEventNormalizer()
 
         for eventID in LongSequenceFixture.eventIDRange {
             let record = longSequenceRecord(eventID: eventID, timestamp: timestamp)
@@ -889,6 +915,8 @@ private enum LongSequenceFixture {
     /// quadratic while keeping the test fixture compact.
     static let eventIDRange = 1...400
     static let eventCount = eventIDRange.count
+    static let firstEventID = eventIDRange.lowerBound
+    static let secondEventID = firstEventID + 1
 
     /// One naive normalization after each append evaluates the triangular
     /// record total through `eventCount`.
