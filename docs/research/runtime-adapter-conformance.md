@@ -161,13 +161,17 @@ unless noted.
     [Structured output and tool decode](../spec/runtime-substrate.md#structured-output-and-tool-decode).
     Exemplar: `src/translate.rs` (`tools_and_choice`); the OpenAI `translate.rs`
     shows the forced-function divergence.
-04. **`status.rs`: two exhaustive single-`match` classifiers** — HTTP status →
-    `ProviderErrorKind` and native error token → `ProviderErrorKind`, each with
-    an `Unrecognized` arm. The per-provider classification precedence (401
-    first, then recognized native material, then status) is owned by
+04. **`status.rs`: exhaustive single-`match` classifiers** — one for HTTP status
+    → `ProviderErrorKind` and one per native error discriminator the provider
+    exposes, each with an `Unrecognized` arm; the count is provider-specific,
+    not fixed at two. The per-provider classification precedence (401 first,
+    then recognized native material across every native field, then status) is
+    owned by
     [Provider adapters](../spec/runtime-substrate.md#provider-adapters).
     Exemplar: `src/status.rs` (`classify_error_status`, `classify_error_token`,
-    `classify_error`).
+    `classify_error`); the OpenAI `status.rs` (`classify_error_envelope`) shows
+    the multi-field shape — an unrecognized `error.code` falls through to a
+    recognized `error.type` before the status table.
 05. **`response.rs`: `decode_buffered_response(...)`** — a pure map of a
     buffered success body to `TerminalEvidence`. Which status is success and
     what an unintelligible success body becomes:
@@ -288,7 +292,10 @@ and needs no change. What the wiring PR must touch:
 3. **`apps/hubd/src/configuration.rs`** — the provider allow-list gate,
    currently a literal `!= "anthropic"` check →
    `HubModelConfigurationError::UnsupportedProvider`. Must admit the new
-   provider string.
+   provider string — and retain it: today the gate validates `provider` and then
+   drops it (`RuntimeModelDefinition` keeps only target, model spelling, and
+   token limit), while the dispatch mechanism below needs the provider identity
+   per target.
 4. **`config/hubd.example.toml`** — add an example `[[models]]` stanza with the
    new `provider` value.
 5. **`apps/hubd/src/bin/signalbox-debug.rs`** — the debug harness's

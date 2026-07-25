@@ -235,8 +235,7 @@ typed by a `"type"` discriminator; strings parsed in `process_responses_event`:
 
 There is no `[DONE]` sentinel — the terminal marker is the `response.completed`
 event, and a stream that closes without one is treated as an error. A mid-stream
-`codex.rate_limits` event also exists, handled outside `process_responses_event`
-(see §8).
+`codex.rate_limits` event also exists on the WebSocket transport only (see §8).
 
 ## 8. Rate-limit signals and error shapes
 
@@ -244,11 +243,12 @@ event, and a stream that closes without one is treated as an error. A mid-stream
   response-header family — `x-codex-primary-used-percent`,
   `x-codex-primary-window-minutes`, `x-codex-primary-reset-at` (plus
   `secondary-*` and `-limit-name` variants) and credits headers — parsed into a
-  `RateLimitSnapshot`; plus a mid-stream SSE event whose wire `"type"`
-  discriminator is exactly `codex.rate_limits` (`parse_rate_limit_event` in
-  `codex-api/src/rate_limits.rs` rejects any other spelling; the match site is
-  the WebSocket transport, `endpoint/responses_websocket.rs`), carrying
-  primary/secondary windows, `credits`, and `plan_type`.
+  `RateLimitSnapshot`; plus a mid-stream event on the **WebSocket transport
+  only** whose wire `"type"` discriminator is exactly `codex.rate_limits`
+  (`parse_rate_limit_event` in `codex-api/src/rate_limits.rs` rejects any other
+  spelling; its sole match site is `endpoint/responses_websocket.rs` — the
+  HTTP/SSE path receives rate-limit data through the response headers alone),
+  carrying primary/secondary windows, `credits`, and `plan_type`.
 - **Error shapes** (`codex-api/src/error.rs`, `sse/responses.rs`): errors
   surface as `response.failed` with `response.error { code, message }`:
   - `rate_limit_exceeded` → `ApiError::Retryable { delay }`, where the delay is
@@ -360,6 +360,16 @@ header** rather than a static API key. Against
   an encoded byte credential it parses internally, or widens the credential API,
   a foundation-weight change to the owning specification made through the
   decision process in [AGENTS.md](../../AGENTS.md).
+- **Turn semantics are wider than one call.** The sticky `x-codex-turn-state`
+  token (§6) must be replayed across the several requests of one backend turn
+  yet never leak across turns, but the substrate's boundary is per-call: the
+  bridge hands the adapter only a `ModelCallId` correlation
+  (`crates/model-provider-runtime/src/lib.rs:291`), and no operation or result
+  field carries a routing token between calls. A future adapter's specification
+  diff therefore either adds an explicit cross-call turn-state boundary or
+  deliberately treats each Signalbox call as an independent backend turn — a
+  choice made through the decision process in [AGENTS.md](../../AGENTS.md), not
+  by this page.
 - Because the license is Apache-2.0, the cheapest de-risking move is to study or
   selectively vendor `codex-login` (OAuth/PKCE/refresh/token storage) and the
   `codex-api` Responses SSE decoder as reference, keeping only the constants and
