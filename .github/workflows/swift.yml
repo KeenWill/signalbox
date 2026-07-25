@@ -15,7 +15,10 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  # Not `validate`: rust.yml already publishes a job by that name, and a status
+  # check is identified by its job name alone, so two `validate` jobs would be
+  # one ambiguous check that branch protection cannot require independently.
+  swift-validate:
     # macos-latest is the macOS 26 arm64 image. The project was created with
     # Xcode 26.4.1 and targets iOS 26.4, so it needs an Xcode 26.4+ toolchain
     # with a matching simulator runtime; the image ships Xcode 26.6 with the
