@@ -271,6 +271,19 @@ and needs no change. What the wiring PR must touch:
    provider string.
 4. **`config/hubd.example.toml`** — add an example `[[models]]` stanza with the
    new `provider` value.
+5. **`apps/hubd/src/bin/signalbox-debug.rs`** — the debug harness's
+   `--anthropic` mode validates a selection only via `contains_selection` before
+   constructing `AnthropicRuntime`, so once the allow-list admits a second
+   provider it would send that provider's model spelling and prompt to
+   Anthropic. The wiring PR makes it dispatch on the retained provider identity
+   or reject non-Anthropic selections.
+6. **The owning-spec update:**
+   [configuration-and-credentials](../spec/configuration-and-credentials.md)
+   states that `provider` must be `"anthropic"`, that `anthropic-primary` is the
+   only credential reference, and that multi-provider support is an open
+   question — the wiring PR updates those sections (or the bottom specification
+   diff of its stack supplies the update), per the living-specification rule in
+   [AGENTS.md](../../AGENTS.md).
 
 **Important caveat for the first second-provider wiring PR:** there is currently
 **no provider enum / factory / registry**. Selection is two hardcoded points

@@ -276,14 +276,18 @@ the substrate's `ProviderErrorKind` vocabulary demands.
   (`x-oai-attestation`) are all internal client-gating mechanisms that change
   frequently. The WebSocket transport in particular looks new and
   version-pinned.
-- **Client fingerprinting.** `originator: codex_cli_rs` and the
-  `codex_cli_rs/<version>` User-Agent are first-party markers the backend checks
-  (`is_first_party_originator` enumerates `codex_cli_rs`, `codex-tui`,
-  `codex_vscode`, `Codex …`). The backend can gate features or access on these.
-  A reimplementation spending a subscription would need to present a first-party
-  originator/UA to be accepted — the pragmatic path, and also the main
-  ToS/stability risk, since it means tracking the real client's UA/version
-  cadence.
+- **Client fingerprinting (unverified compatibility risk).**
+  `originator: codex_cli_rs` and the `codex_cli_rs/<version>` User-Agent are
+  first-party markers the client always sends, and the client's own
+  `is_first_party_originator` allowlist enumerates the strings it treats as
+  first-party (`codex_cli_rs`, `codex-tui`, `codex_vscode`, `Codex …`). Whether
+  the backend gates access on these is **not established by this audit** — the
+  evidence here is client source only (no API was called; see the audited
+  snapshot above) — so it is unknown whether a reimplementation must present a
+  first-party originator/UA. If the backend does gate on them, matching them
+  becomes the main ToS/stability risk, since it means tracking the real client's
+  UA/version cadence; settling this needs backend evidence, not further client
+  reading.
 - **Attestation.** `generate_attestation_header_for` (referenced from
   `core/src/client.rs`) suggests device/client attestation may become mandatory
   on some routes; if enforced, a third-party reimplementation could be locked
@@ -336,13 +340,18 @@ header** rather than a static API key. Against
 - The two-stage `prepare`/`execute`, single-POST, SSE-framing,
   typed-terminal-evidence model aligns well; Codex's own error taxonomy already
   honors the rate-limited-vs-quota distinction the spec demands.
-- The **credential boundary is richer than the current file-key model.**
-  `CredentialAccess::resolve` would need to yield a (possibly just-refreshed)
-  bearer JWT plus the account id and FedRAMP flag, and something outside the
-  runtime must own the 5-minute/8-day proactive OAuth refresh (Codex does this
-  in its `AuthManager`, out of band from the request path). The substrate's
-  per-request resolve semantics accommodate a rotating token, but the credential
-  value becomes a small struct, not raw bytes.
+- The **credential boundary is richer than the current file-key model.** Per
+  request the adapter needs a (possibly just-refreshed) bearer JWT plus the
+  account id and FedRAMP flag, and something outside the runtime must own the
+  5-minute/8-day proactive OAuth refresh (Codex does this in its `AuthManager`,
+  out of band from the request path). The substrate's per-request resolve
+  semantics accommodate a rotating token, but its
+  [credential-access boundary](../spec/runtime-substrate.md#credential-access-boundary)
+  value is opaque bytes (`CredentialValue`, read only via `expose_bytes`) — it
+  cannot directly carry that struct. A future adapter therefore either defines
+  an encoded byte credential it parses internally, or widens the credential API,
+  a foundation-weight change to the owning specification made through the
+  decision process in [AGENTS.md](../../AGENTS.md).
 - Because the license is Apache-2.0, the cheapest de-risking move is to study or
   selectively vendor `codex-login` (OAuth/PKCE/refresh/token storage) and the
   `codex-api` Responses SSE decoder as reference, keeping only the constants and
