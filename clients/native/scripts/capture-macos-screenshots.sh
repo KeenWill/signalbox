@@ -2,15 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DERIVED_DATA_PATH="${LLM_HUB_NATIVE_MACOS_DERIVED_DATA_PATH:-$ROOT/.derivedData-macos}"
-APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug/LLMHubNative.app"
+DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_MACOS_DERIVED_DATA_PATH:-$ROOT/.derivedData-macos}"
+APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug/SignalboxNative.app"
 OUTPUT_DIR="$ROOT/Screenshots/macOS"
 
 CMD_BUILD=(
 	xcodebuild
 	-quiet
-	-project "$ROOT/LLMHubNative.xcodeproj"
-	-scheme "LLMHubNative"
+	-project "$ROOT/SignalboxNative.xcodeproj"
+	-scheme "SignalboxNative"
 	-configuration "Debug"
 	-destination "platform=macOS,arch=arm64"
 	-derivedDataPath "$DERIVED_DATA_PATH"
@@ -25,7 +25,7 @@ printf '\n'
 mkdir -p "$OUTPUT_DIR"
 
 CMD_EXPORT=(
-	"$APP_PATH/Contents/MacOS/LLMHubNative"
+	"$APP_PATH/Contents/MacOS/SignalboxNative"
 	--export-macos-screenshots "$OUTPUT_DIR"
 )
 

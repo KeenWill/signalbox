@@ -6,8 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/simulator.sh"
 
 MIN_IOS_VERSION="$SIMULATOR_DEFAULT_MIN_IOS_VERSION"
-DERIVED_DATA_PATH="${LLM_HUB_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
-RESULT_BUNDLE_PATH="${LLM_HUB_NATIVE_TEST_RESULT_BUNDLE_PATH:-$DERIVED_DATA_PATH/Logs/Test/LLMHubNative-Test.xcresult}"
+DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
+RESULT_BUNDLE_PATH="${SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH:-$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-Test.xcresult}"
 
 if [[ -n "${XCODE_DESTINATION:-}" ]]; then
 	DESTINATION="$XCODE_DESTINATION"
@@ -26,8 +26,8 @@ fi
 CMD=(
 	xcodebuild
 	-quiet
-	-project "$ROOT/LLMHubNative.xcodeproj"
-	-scheme "LLMHubNative"
+	-project "$ROOT/SignalboxNative.xcodeproj"
+	-scheme "SignalboxNative"
 	-configuration "Debug"
 	-destination "$DESTINATION"
 	-derivedDataPath "$DERIVED_DATA_PATH"
