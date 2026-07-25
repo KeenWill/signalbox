@@ -5266,20 +5266,17 @@ pub enum ReviewTargetSubject {
     ChangeRequest(ReviewChangeRequestNumber),
     Commit,
 }
-pub struct ReviewTargetParentRef { /* target + canonical repository scope */ }
+pub struct ReviewTargetParentRef { /* target + canonical scope and head */ }
 impl ReviewTargetParentRef {
-    pub const fn new(
-        target: ReviewTargetId,
-        provider: ReviewKey,
-        repository: ReviewKey,
-    ) -> Self;
-    // accessors: target(), provider(), repository()
+    // accessors: target(), provider(), repository(), head_revision()
 }
 pub struct ReviewTarget { /* immutable snapshot */ }
 pub enum ReviewTargetError {
     MissingChangeRequestBase { target: ReviewTargetId },
     SelfParent { target: ReviewTargetId },
     ForeignParent { target: ReviewTargetId },
+    MissingParentBase { target: ReviewTargetId },
+    DisconnectedParent { target: ReviewTargetId },
 }
 impl ReviewTarget {
     pub fn try_new(
@@ -5289,7 +5286,7 @@ impl ReviewTarget {
         subject: ReviewTargetSubject,
         head_revision: ReviewKey,
         base_revision: Option<ReviewKey>,
-        stack_parent: Option<ReviewTargetParentRef>,
+        stack_parent: Option<&ReviewTarget>,
     ) -> Result<Self, ReviewTargetError>;
     // accessors: id(), provider(), repository(), subject(), head_revision(),
     // base_revision(), stack_parent()
@@ -5458,6 +5455,7 @@ pub enum ReviewPassReconstitutionFailure {
     TurnSessionMismatch,
     TurnAcceptedInputMismatch,
     TurnOutcomeMismatch,
+    TurnFrontierShapeMismatch,
     OutputFrontierMismatch,
 }
 pub struct ReviewPassReconstitutionError { /* input + failure */ }
@@ -5468,6 +5466,7 @@ pub enum ReviewPassTransitionFailure {
     Evidence(ReviewPassReconstitutionFailure),
     InvalidTransition,
     TurnChanged,
+    TurnNotActive,
 }
 pub struct ReviewPassTransitionError { /* states + canonical turn + failure */ }
 impl ReviewPass {
@@ -5551,6 +5550,7 @@ impl ReviewFindingProposal {
 pub struct ReviewFindingExternalLinkRef { /* finding + link + attachment pass */ }
 pub enum ReviewFindingExternalLinkFailure {
     ForeignAssociation,
+    IncompatibleObjectKind,
     NotAttached,
 }
 pub struct ReviewFindingExternalLinkError { /* canonical association + failure */ }

@@ -10,6 +10,87 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Defer executable review-pass admission coordination
+
+**Context.** The existing session scheduler may activate an accepted input
+independently. A queued review pass records that input but neither holds it nor
+atomically participates in the session command that admitted it, so aggregate
+construction alone cannot guarantee that run/pass projection precedes execution.
+
+**Decision.** This foundation does not schedule or authorize executable review
+work. Application orchestration must later choose and implement a durable hold
+or atomic accepted-input admission and run/pass projection before review inputs
+become executable. That coordination remains an open foundation edge.
+
+**Rejected alternatives.** Claiming the current aggregates prevent execution
+would describe behavior they do not implement. Moving session scheduling into
+the review domain would collapse the evidence and coordination boundaries.
+
+**Affects.** Review-pass admission, the
+[review-workflows specification](spec/review-workflows.md), and the
+[review-workflow orchestration question](open-questions.md#destination-features-target-model).
+
+## 2026-07-25 — Limit posted findings to external review content
+
+**Context.** An attached external change request or commit proves an object
+correlation but does not prove that one finding's content was published.
+Treating every external object kind as posting evidence would let unrelated
+repository objects derive `Posted`.
+
+**Decision.** A posted finding must reference an attached review, review thread,
+inline review comment, or general change-request comment associated with that
+finding. Change-request and commit links remain valid correlations but cannot
+prove posting.
+
+**Rejected alternatives.** Accepting every attached object confuses repository
+identity with published review content. Restricting posting to inline comments
+alone excludes whole-review and general-comment publication forms already in the
+closed vocabulary.
+
+**Affects.** Finding-event admission and reconstitution, external-link
+validation, the [review-workflows specification](spec/review-workflows.md), and
+the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Treat review-pass state as the operation outcome
+
+**Context.** A completed session turn proves execution reached a terminal
+frontier, but review output can still be malformed and a workflow operation can
+receive a definitive rejection. Equating turn completion with workflow success
+would authenticate failed work as successful evidence.
+
+**Decision.** The pass terminal state is the durable operation outcome, while
+canonical turn evidence authenticates its execution boundary. `Succeeded`
+requires a completed turn. `Failed` admits a completed, failed, or refused turn;
+`Blocked` remains reserved for reconciliation-required execution.
+
+**Rejected alternatives.** Mapping every completed turn to success loses
+operation validation. Copying parsed output or adapter errors into the pass
+aggregate creates competing content authorities. Adding another outcome record
+duplicates the existing pass state without adding evidence.
+
+**Affects.** Review-pass validation and persistence, effect authentication, and
+the [review-workflows specification](spec/review-workflows.md).
+
+## 2026-07-25 — Authenticate review stack parents by exact revisions
+
+**Context.** Same-provider and same-repository scope prevents cross-repository
+edges but still admits an unrelated target from the repository as an immediate
+parent. The child already freezes its exact comparison revision.
+
+**Decision.** A parented target requires an exact child base revision, and the
+canonical parent target's head revision must equal that base. Construction,
+reconstitution, and persistence validate identity, scope, and revision
+continuity from the canonical parent snapshot.
+
+**Rejected alternatives.** Scope-only validation admits false stack topology.
+Copying unverified parent scope or revision strings into a detached reference
+does not authenticate the named target. Resolving a moving host branch while
+loading would make old topology time-dependent.
+
+**Affects.** `ReviewTarget`, stack propagation prerequisites, target
+persistence, and the
+[review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy).
+
 ## 2026-07-25 — Bind finding event passes to one frozen policy
 
 **Context.** A run admits one pass of the matching workflow kind, so judgment

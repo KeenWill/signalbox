@@ -927,15 +927,11 @@ those tests.
   proposed finding's own contiguous event history. Publication, when requested
   by later orchestration, reserves its link before the external call and
   attaches the canonical provider-wide object identity afterward.
-- **State transitions:** Queued run/pass → running run/pass commits as one
-  workflow transaction while the canonical turn is active. A running pass may
-  monotonically lag its turn's terminal outcome until reconciliation. A
-  succeeded pass names a completed turn, a failed pass names a failed or refused
-  turn, a blocked pass names a turn requiring reconciliation, and a cancelled
-  pass with a turn names a cancelled turn. The run concludes atomically with the
-  same canonical pass outcome. Findings follow their closed event machine; every
-  event names that exact finding and an operation-compatible canonical pass
-  outcome.
+- **State transitions:** Follow the closed target, run, pass, finding, and
+  external-link machines in the
+  [review-workflows specification](spec/review-workflows.md). The S29 fixture
+  exercises one queued → running → terminal run/pass path and one finding's
+  contiguous event history.
 - **Transient updates:** Prompt progress, model drafts, and code-host request
   progress are not workflow evidence.
 - **Owning component:** The review-workflow domain validates its projections;
