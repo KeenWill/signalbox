@@ -64,8 +64,23 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
       FOR UPDATE";
 
 pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
-            pass_id, run_id, target_id, pass_kind, session_id,
-            accepted_input_id, state_kind, turn_id, output_frontier_id
-       FROM review_pass
-      WHERE pass_id = $1
-      FOR UPDATE";
+            workflow_pass.pass_id, workflow_pass.run_id,
+            workflow_pass.target_id, workflow_pass.pass_kind,
+            workflow_pass.session_id AS pass_session_id,
+            workflow_pass.accepted_input_id, workflow_pass.state_kind,
+            workflow_pass.turn_id, workflow_pass.output_frontier_id,
+            canonical_input.session_id AS accepted_input_session_id,
+            canonical_turn.turn_id AS evidence_turn_id,
+            canonical_turn.session_id AS turn_session_id,
+            canonical_turn.origin_accepted_input_id
+                AS turn_accepted_input_id,
+            canonical_turn.terminal_frontier_id
+                AS turn_terminal_frontier_id
+       FROM review_pass AS workflow_pass
+       LEFT JOIN accepted_input AS canonical_input
+         ON canonical_input.accepted_input_id =
+            workflow_pass.accepted_input_id
+       LEFT JOIN turn_lifecycle AS canonical_turn
+         ON canonical_turn.turn_id = workflow_pass.turn_id
+      WHERE workflow_pass.pass_id = $1
+      FOR UPDATE OF workflow_pass";

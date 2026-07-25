@@ -87,14 +87,24 @@ async fn insert_queued_turn(
     accepted_input: AcceptedInputId,
     turn: TurnId,
 ) {
+    insert_queued_turn_with_offset(pool, session, accepted_input, turn, 0).await;
+}
+
+async fn insert_queued_turn_with_offset(
+    pool: &PgPool,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+    offset: u128,
+) {
     let create = CreateSession::new(
-        DurableCommandId::from_uuid(uuid(0x101)),
+        DurableCommandId::from_uuid(uuid(0x101 + offset)),
         SessionCreationProvenance::new(
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-            DirectModelSelection::from_uuid(uuid(0x102)),
+            DirectModelSelection::from_uuid(uuid(0x102 + offset)),
         )),
     )
     .prepare(session)
@@ -105,7 +115,7 @@ async fn insert_queued_turn(
         .expect("fixture session persists");
 
     let submit = SubmitInput::new(
-        DurableCommandId::from_uuid(uuid(0x103)),
+        DurableCommandId::from_uuid(uuid(0x103 + offset)),
         session,
         UserContent::try_text(String::from("Perform the bounded review pass"))
             .expect("fixture content is admitted"),
@@ -122,10 +132,10 @@ async fn insert_queued_turn(
             accepted_input,
             Some(turn),
             CancelledModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(uuid(0x104)),
-                ContextFrontierId::from_uuid(uuid(0x105)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0x104 + offset)),
+                ContextFrontierId::from_uuid(uuid(0x105 + offset)),
             ),
-            |_| TurnId::from_uuid(uuid(0x106)),
+            |_| TurnId::from_uuid(uuid(0x106 + offset)),
             |requests| {
                 (
                     requests
@@ -133,11 +143,11 @@ async fn insert_queued_turn(
                         .enumerate()
                         .map(|(index, _)| {
                             SemanticTranscriptEntryId::from_uuid(uuid(
-                                0x110 + u128::try_from(index).expect("small fixture"),
+                                0x110 + offset + u128::try_from(index).expect("small fixture"),
                             ))
                         })
                         .collect(),
-                    ContextFrontierId::from_uuid(uuid(0x120)),
+                    ContextFrontierId::from_uuid(uuid(0x120 + offset)),
                 )
             },
         )
@@ -210,12 +220,16 @@ async fn insert_review_pass_fixture(pool: &PgPool) -> PersistedReviewPassFixture
         .await
         .expect("queued run persists");
     store
-        .insert_pass(&ReviewPass::new(
-            pass,
-            ReviewPassKind::ReadOnlyReview,
-            session,
-            accepted_input,
-        ))
+        .insert_pass(
+            &ReviewPass::try_new(
+                pass,
+                ReviewPassKind::ReadOnlyReview,
+                session,
+                accepted_input,
+                session,
+            )
+            .expect("accepted input belongs to the fixture session"),
+        )
         .await
         .expect("queued pass persists");
 
@@ -276,12 +290,14 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewWorkflowKind::ReadOnlyReview,
         ReviewPolicy::version_one(),
     );
-    let pass = ReviewPass::new(
+    let pass = ReviewPass::try_new(
         pass_ref,
         ReviewPassKind::ReadOnlyReview,
         session,
         accepted_input,
-    );
+        session,
+    )
+    .expect("accepted input belongs to the fixture session");
     store.insert_run(&run).await.expect("queued run persists");
     store
         .insert_pass(&pass)
@@ -384,7 +400,8 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
         pass_ref,
         ReviewFindingEventKind::Posted {
-            link: signalbox_domain::ReviewFindingExternalLinkRef::new(finding_ref, link_id),
+            link: signalbox_domain::ReviewFindingExternalLinkRef::try_new(finding_ref, &attached)
+                .expect("attached canonical link belongs to the finding"),
         },
     );
     let posted_finding = accepted_finding
@@ -418,6 +435,99 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .await
             .expect("complete link loads"),
         Some(observed)
+    );
+
+    Ok(())
+}
+
+/// INV-040: the adapter supplies canonical accepted-input and turn rows to
+/// domain reconstitution instead of trusting repeated pass-row identifiers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_pass_loader_rejects_cross_wired_canonical_evidence() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let pass = fixture.pass.pass();
+    let original_session = SessionId::from_uuid(uuid(0x201));
+    let other_session = SessionId::from_uuid(uuid(0x211));
+    let other_input = AcceptedInputId::from_uuid(uuid(0x212));
+    let other_turn = TurnId::from_uuid(uuid(0x213));
+    insert_queued_turn_with_offset(&pool, other_session, other_input, other_turn, 0x1_000).await;
+
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_update_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DROP CONSTRAINT review_pass_accepted_input_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET session_id = $2
+          WHERE pass_id = $1",
+    )
+    .bind(pass.into_uuid())
+    .bind(other_session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let session_error = fixture
+        .store
+        .load_pass(pass)
+        .await
+        .expect_err("canonical accepted-input session must reject cross-wiring");
+    let ReviewWorkflowStoreError::Corruption(session_error) = session_error else {
+        panic!("expected typed review-pass corruption");
+    };
+    assert_eq!(session_error.aggregate(), "review_pass");
+    assert!(
+        session_error
+            .detail()
+            .contains("AcceptedInputSessionMismatch")
+    );
+
+    sqlx::query(
+        "UPDATE review_pass
+            SET session_id = $2
+          WHERE pass_id = $1",
+    )
+    .bind(pass.into_uuid())
+    .bind(original_session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DROP CONSTRAINT review_pass_turn_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET state_kind = 'running',
+                turn_id = $2
+          WHERE pass_id = $1",
+    )
+    .bind(pass.into_uuid())
+    .bind(other_turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    let turn_error = fixture
+        .store
+        .load_pass(pass)
+        .await
+        .expect_err("canonical turn ownership must reject cross-wiring");
+    let ReviewWorkflowStoreError::Corruption(turn_error) = turn_error else {
+        panic!("expected typed review-pass corruption");
+    };
+    assert_eq!(turn_error.aggregate(), "review_pass");
+    assert!(
+        turn_error.detail().contains("TurnSessionMismatch"),
+        "unexpected corruption detail: {}",
+        turn_error.detail()
     );
 
     Ok(())

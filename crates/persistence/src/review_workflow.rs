@@ -14,9 +14,10 @@ use signalbox_domain::{
     ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind,
     ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
     ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
-    ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPolicy,
-    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget,
-    ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SessionId, TurnId,
+    ReviewPass, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput, ReviewPassRef,
+    ReviewPassState, ReviewPassTurnEvidence, ReviewPolicy, ReviewPolicyVersion, ReviewRun,
+    ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject,
+    ReviewText, ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -201,10 +202,25 @@ impl ReviewWorkflowStore {
         pass: ReviewPassId,
     ) -> Result<Option<ReviewPass>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
-            "SELECT pass_id, run_id, target_id, pass_kind, session_id,
-                    accepted_input_id, state_kind, turn_id, output_frontier_id
-               FROM review_pass
-              WHERE pass_id = $1",
+            "SELECT workflow_pass.pass_id, workflow_pass.run_id,
+                    workflow_pass.target_id, workflow_pass.pass_kind,
+                    workflow_pass.session_id AS pass_session_id,
+                    workflow_pass.accepted_input_id, workflow_pass.state_kind,
+                    workflow_pass.turn_id, workflow_pass.output_frontier_id,
+                    canonical_input.session_id AS accepted_input_session_id,
+                    canonical_turn.turn_id AS evidence_turn_id,
+                    canonical_turn.session_id AS turn_session_id,
+                    canonical_turn.origin_accepted_input_id
+                        AS turn_accepted_input_id,
+                    canonical_turn.terminal_frontier_id
+                        AS turn_terminal_frontier_id
+               FROM review_pass AS workflow_pass
+               LEFT JOIN accepted_input AS canonical_input
+                 ON canonical_input.accepted_input_id =
+                    workflow_pass.accepted_input_id
+               LEFT JOIN turn_lifecycle AS canonical_turn
+                 ON canonical_turn.turn_id = workflow_pass.turn_id
+              WHERE workflow_pass.pass_id = $1",
         )
         .bind(pass.into_uuid())
         .fetch_optional(&self.pool)
@@ -343,12 +359,31 @@ impl ReviewWorkflowStore {
         };
         let proposal = decode_finding_proposal(&row)?;
         let event_rows = sqlx::query(
-            "SELECT finding_id, event_ordinal, finding_run_id, target_id,
-                    event_pass_id, event_pass_run_id, event_kind, reason,
-                    referenced_finding_id, external_link_id
-               FROM review_finding_event
-              WHERE finding_id = $1
-              ORDER BY event_ordinal",
+            "SELECT event.finding_id, event.event_ordinal,
+                    event.finding_run_id, event.target_id,
+                    event.event_pass_id, event.event_pass_run_id,
+                    event.event_kind, event.reason,
+                    event.referenced_finding_id, event.external_link_id,
+                    canonical_link.external_link_id AS canonical_link_id,
+                    canonical_link.target_id AS link_target_id,
+                    canonical_link.association_kind AS link_association_kind,
+                    canonical_link.run_id AS link_run_id,
+                    canonical_link.finding_id AS link_finding_id,
+                    canonical_link.provider_key AS link_provider_key,
+                    canonical_link.object_kind AS link_object_kind,
+                    attachment.target_id AS attachment_target_id,
+                    attachment.pass_run_id AS attachment_pass_run_id,
+                    attachment.pass_id AS attachment_pass_id,
+                    attachment.external_object_key
+                        AS attachment_external_object_key
+               FROM review_finding_event AS event
+               LEFT JOIN review_external_link AS canonical_link
+                 ON canonical_link.external_link_id = event.external_link_id
+               LEFT JOIN review_external_link_attachment AS attachment
+                 ON attachment.external_link_id =
+                    canonical_link.external_link_id
+              WHERE event.finding_id = $1
+              ORDER BY event.event_ordinal",
         )
         .bind(finding.into_uuid())
         .fetch_all(&mut *transaction)
@@ -644,13 +679,43 @@ fn decode_pass(row: PgRow) -> Result<ReviewPass, ReviewWorkflowStoreError> {
     let state_kind: String = row.try_get("state_kind")?;
     let turn: Option<Uuid> = row.try_get("turn_id")?;
     let frontier: Option<Uuid> = row.try_get("output_frontier_id")?;
-    Ok(ReviewPass::reconstitute(
+    let accepted_input_session = row
+        .try_get::<Option<Uuid>, _>("accepted_input_session_id")?
+        .ok_or_else(|| corruption("review_pass", String::from("accepted input row is missing")))?;
+    let evidence_turn: Option<Uuid> = row.try_get("evidence_turn_id")?;
+    let evidence_session: Option<Uuid> = row.try_get("turn_session_id")?;
+    let evidence_input: Option<Uuid> = row.try_get("turn_accepted_input_id")?;
+    let evidence_frontier: Option<Uuid> = row.try_get("turn_terminal_frontier_id")?;
+    let turn_evidence = match (evidence_turn, evidence_session, evidence_input) {
+        (None, None, None) => None,
+        (Some(turn), Some(session), Some(accepted_input)) => Some(ReviewPassTurnEvidence::new(
+            turn_id(turn),
+            session_id(session),
+            accepted_input_id(accepted_input),
+            evidence_frontier.map(context_frontier_id),
+        )),
+        _ => {
+            return Err(corruption(
+                "review_pass",
+                String::from("torn canonical turn evidence"),
+            ));
+        }
+    };
+    ReviewPass::try_reconstitute(ReviewPassReconstitutionInput::new(
         reference,
         decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
-        session_id(row.try_get("session_id")?),
+        session_id(row.try_get("pass_session_id")?),
         accepted_input_id(row.try_get("accepted_input_id")?),
+        session_id(accepted_input_session),
         decode_pass_state(&state_kind, turn, frontier)?,
+        turn_evidence,
     ))
+    .map_err(|error| {
+        corruption(
+            "review_pass",
+            format!("domain reconstitution failed: {:?}", error.failure()),
+        )
+    })
 }
 
 fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewWorkflowStoreError> {
@@ -734,7 +799,7 @@ fn decode_finding_event(
         },
         ("stale", None, None, None) => ReviewFindingEventKind::Stale,
         ("posted", None, None, Some(link)) => ReviewFindingEventKind::Posted {
-            link: ReviewFindingExternalLinkRef::new(finding, external_link_id(link)),
+            link: decode_finding_external_link(row, finding, external_link_id(link))?,
         },
         ("fixed", None, None, None) => ReviewFindingEventKind::Fixed,
         ("blocked_with_reason", Some(reason), None, None) => {
@@ -758,6 +823,123 @@ fn decode_finding_event(
         pass,
         kind,
     ))
+}
+
+fn decode_finding_external_link(
+    row: &PgRow,
+    finding: ReviewFindingRef,
+    event_link: ReviewExternalLinkId,
+) -> Result<ReviewFindingExternalLinkRef, ReviewWorkflowStoreError> {
+    let id = row
+        .try_get::<Option<Uuid>, _>("canonical_link_id")?
+        .map(external_link_id)
+        .ok_or_else(|| {
+            corruption(
+                "review_finding_event",
+                String::from("posted event canonical link is missing"),
+            )
+        })?;
+    if id != event_link {
+        return Err(corruption(
+            "review_finding_event",
+            String::from("posted event link identity mismatch"),
+        ));
+    }
+    let target = row
+        .try_get::<Option<Uuid>, _>("link_target_id")?
+        .map(target_id)
+        .ok_or_else(|| {
+            corruption(
+                "review_finding_event",
+                String::from("posted event link target is missing"),
+            )
+        })?;
+    let association_kind = row
+        .try_get::<Option<String>, _>("link_association_kind")?
+        .ok_or_else(|| {
+            corruption(
+                "review_finding_event",
+                String::from("posted event link association is missing"),
+            )
+        })?;
+    let run = row.try_get::<Option<Uuid>, _>("link_run_id")?;
+    let canonical_finding = row.try_get::<Option<Uuid>, _>("link_finding_id")?;
+    let association = match (association_kind.as_str(), run, canonical_finding) {
+        ("target", None, None) => ReviewExternalLinkAssociation::Target(target),
+        ("run", Some(run), None) => {
+            ReviewExternalLinkAssociation::Run(ReviewRunRef::new(target, run_id(run)))
+        }
+        ("finding", Some(run), Some(canonical_finding)) => {
+            ReviewExternalLinkAssociation::Finding(ReviewFindingRef::new(
+                ReviewRunRef::new(target, run_id(run)),
+                finding_id(canonical_finding),
+            ))
+        }
+        _ => {
+            return Err(corruption(
+                "review_finding_event",
+                format!("invalid posted link association shape {association_kind}"),
+            ));
+        }
+    };
+    let provider = row
+        .try_get::<Option<String>, _>("link_provider_key")?
+        .ok_or_else(|| {
+            corruption(
+                "review_finding_event",
+                String::from("posted event link provider is missing"),
+            )
+        })?;
+    let object_kind = row
+        .try_get::<Option<String>, _>("link_object_kind")?
+        .ok_or_else(|| {
+            corruption(
+                "review_finding_event",
+                String::from("posted event link object kind is missing"),
+            )
+        })?;
+    let attachment_target = row.try_get::<Option<Uuid>, _>("attachment_target_id")?;
+    let attachment_run = row.try_get::<Option<Uuid>, _>("attachment_pass_run_id")?;
+    let attachment_pass = row.try_get::<Option<Uuid>, _>("attachment_pass_id")?;
+    let attachment_object = row.try_get::<Option<String>, _>("attachment_external_object_key")?;
+    let attachment = match (
+        attachment_target,
+        attachment_run,
+        attachment_pass,
+        attachment_object,
+    ) {
+        (None, None, None, None) => None,
+        (Some(target), Some(run), Some(pass), Some(object)) => {
+            Some(ReviewExternalLinkAttachment::new(
+                ReviewPassRef::new(
+                    ReviewRunRef::new(target_id(target), run_id(run)),
+                    pass_id(pass),
+                ),
+                review_key(object, "review_external_link_attachment")?,
+            ))
+        }
+        _ => {
+            return Err(corruption(
+                "review_finding_event",
+                String::from("torn posted link attachment"),
+            ));
+        }
+    };
+    let canonical = ReviewExternalLink::try_reconstitute(
+        id,
+        association,
+        review_key(provider, "review_external_link")?,
+        decode_external_object_kind(&object_kind)?,
+        attachment,
+        Vec::new(),
+    )
+    .map_err(|error| corruption("review_finding_event", format!("{error:?}")))?;
+    ReviewFindingExternalLinkRef::try_new(finding, &canonical).map_err(|error| {
+        corruption(
+            "review_finding_event",
+            format!("invalid canonical posted link: {:?}", error.failure()),
+        )
+    })
 }
 
 fn decode_external_link_root(
