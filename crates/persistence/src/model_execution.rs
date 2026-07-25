@@ -2500,15 +2500,9 @@ async fn load_tool_denial_correlations(
     if rows.len() != requests.len() {
         return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
     }
-    let mut approvals = Vec::with_capacity(rows.len());
-    for row in rows {
-        approvals.push(
-            crate::tool_loop::decode_approval(connection, row)
-                .await
-                .map_err(map_tool_evidence_error)?,
-        );
-    }
-    Ok(approvals)
+    crate::tool_loop::decode_approvals(connection, rows)
+        .await
+        .map_err(map_tool_evidence_error)
 }
 
 async fn load_tool_result_correlations(

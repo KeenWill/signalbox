@@ -789,17 +789,17 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_requires_version_two(version, pool, session).await {
-        Ok(true) => {
+    match selected_session_required_protocol_version(version, pool, session).await {
+        Ok(Some(required_version)) => {
             return write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::requires_version_two(),
+                ProtocolError::unsupported_version(required_version),
             )
             .await;
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             return write_process_read_error(writer, version, request_id, error).await;
         }
@@ -956,20 +956,42 @@ fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {
     UserContent::try_text(content).map_err(|_| ())
 }
 
-async fn selected_session_requires_version_two(
+async fn selected_session_required_protocol_version(
     version: ProtocolVersion,
     pool: &PgPool,
     session: SessionId,
-) -> Result<bool, ProcessReadError> {
-    if version.as_u64() >= IMPORTED_TRANSCRIPT_PROTOCOL_VERSION {
-        return Ok(false);
+) -> Result<Option<u64>, ProcessReadError> {
+    if version == ProtocolVersion::Three {
+        return Ok(None);
     }
-    Ok(matches!(
-        ProcessReadRepository::new(pool.clone())
-            .session_ancestry(session)
-            .await?,
-        Some(ProcessSessionAncestry::ImportedConversation)
+    let repository = ProcessReadRepository::new(pool.clone());
+    let has_tool_history = repository.session_has_tool_history(session).await?;
+    let ancestry = if version.as_u64() < IMPORTED_TRANSCRIPT_PROTOCOL_VERSION {
+        repository.session_ancestry(session).await?
+    } else {
+        None
+    };
+    Ok(required_protocol_version_for_selected_session(
+        version,
+        has_tool_history,
+        ancestry,
     ))
+}
+
+fn required_protocol_version_for_selected_session(
+    version: ProtocolVersion,
+    has_tool_history: bool,
+    ancestry: Option<ProcessSessionAncestry>,
+) -> Option<u64> {
+    if has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
+        Some(ProtocolVersion::Three.as_u64())
+    } else if version == ProtocolVersion::One
+        && matches!(ancestry, Some(ProcessSessionAncestry::ImportedConversation))
+    {
+        Some(IMPORTED_TRANSCRIPT_PROTOCOL_VERSION)
+    } else {
+        None
+    }
 }
 
 async fn handle_read_transcript<Writer>(
@@ -984,17 +1006,17 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_requires_version_two(version, pool, selected_session).await {
-        Ok(true) => {
+    match selected_session_required_protocol_version(version, pool, selected_session).await {
+        Ok(Some(required_version)) => {
             return write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::requires_version_two(),
+                ProtocolError::unsupported_version(required_version),
             )
             .await;
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             return write_process_read_error(writer, version, request_id, error).await;
         }
@@ -1046,17 +1068,17 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_requires_version_two(version, pool, selected_session).await {
-        Ok(true) => {
+    match selected_session_required_protocol_version(version, pool, selected_session).await {
+        Ok(Some(required_version)) => {
             return write_error(
                 writer,
                 version,
                 request_id,
-                ProtocolError::requires_version_two(),
+                ProtocolError::unsupported_version(required_version),
             )
             .await;
         }
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             return write_process_read_error(writer, version, request_id, error).await;
         }
@@ -2066,14 +2088,6 @@ impl ProtocolError {
         }
     }
 
-    const fn requires_version_two() -> Self {
-        Self {
-            code: ErrorCode::UnsupportedVersion,
-            message: "the selected session requires protocol version 2",
-            detail: ErrorDetail::none(),
-        }
-    }
-
     const fn rejected(detail: RejectionDetail) -> Self {
         Self {
             code: ErrorCode::Rejected,
@@ -2523,8 +2537,9 @@ mod tests {
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SnapshotSpoolError,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_snapshot_reader_permit, admitted_user_content, inspect_connection_completion,
-        read_frame_line, run_until_shutdown, snapshot_reader_capacity, wire_model_call_state,
-        wire_turn_state, write_content, write_snapshot_spool_error, write_transcript_entry,
+        read_frame_line, required_protocol_version_for_selected_session, run_until_shutdown,
+        snapshot_reader_capacity, wire_model_call_state, wire_turn_state, write_content,
+        write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -2533,7 +2548,8 @@ mod tests {
         },
         process_read::{
             ProcessImportedContentKind, ProcessImportedSourceSpeaker,
-            ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
+            ProcessReconciliationOperation, ProcessSessionAncestry, ProcessTranscriptEntry,
+            ProcessTurnState,
         },
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
@@ -2557,6 +2573,45 @@ mod tests {
             ProtocolError::unsupported_version(3)
                 .message
                 .contains("version 3")
+        );
+    }
+
+    #[test]
+    fn legacy_session_compatibility_requires_the_first_representable_version() {
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::One,
+                false,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            Some(2)
+        );
+        for version in [ProtocolVersion::One, ProtocolVersion::Two] {
+            assert_eq!(
+                required_protocol_version_for_selected_session(
+                    version,
+                    true,
+                    Some(ProcessSessionAncestry::OwnerInitiated),
+                ),
+                Some(3),
+                "tool history takes precedence over retained-version ancestry"
+            );
+        }
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Three,
+                true,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Two,
+                false,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
         );
     }
 

@@ -864,6 +864,28 @@ impl ProcessReadRepository {
             .transpose()
     }
 
+    /// Returns whether the selected session has durable tool-only history.
+    ///
+    /// This narrow read lets a process adapter reject a retained protocol
+    /// version before mutating a session whose transcript that version cannot
+    /// represent.
+    pub async fn session_has_tool_history(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<bool, ProcessReadError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM tool_request
+                  WHERE session_id = $1
+             )",
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     /// Reads one complete transcript snapshot, or `None` only when the session
     /// is absent from the shared transaction snapshot.
     pub async fn read_transcript(

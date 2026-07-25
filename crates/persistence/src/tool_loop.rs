@@ -16,7 +16,7 @@ use signalbox_application::{
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
     CurrentToolAttemptState, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, EndedToolAttempt,
+    DecideToolRequestRejectedResult, DecideToolRequestResult, DurableCommandId, EndedToolAttempt,
     NormalizedToolArguments, PreparedDecideToolRequest, PreparedToolBatchDecision,
     PreparedToolResultProjection, ReconstitutedToolAttempt,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
@@ -1322,16 +1322,37 @@ async fn load_approvals(
     .bind(producing_call.into_uuid())
     .fetch_all(&mut *connection)
     .await?;
+    decode_approvals(connection, rows).await
+}
+
+pub(crate) async fn decode_approvals(
+    connection: &mut PgConnection,
+    rows: Vec<PgRow>,
+) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
+    let owner_commands = rows
+        .iter()
+        .map(|row| row.try_get::<Option<Uuid>, _>("owner_command_id"))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .map(|command| {
+            durable_command_id_from_uuid(command).map_err(|_| {
+                ToolLoopCorruption::Inconsistent("approval owner command identity").into()
+            })
+        })
+        .collect::<Result<Vec<_>, ToolLoopRepositoryError>>()?;
+    let receipts = load_owner_decision_receipts(connection, &owner_commands).await?;
     let mut approvals = Vec::with_capacity(rows.len());
     for row in rows {
-        approvals.push(decode_approval(connection, row).await?);
+        approvals.push(decode_approval(connection, row, &receipts).await?);
     }
     Ok(approvals)
 }
 
-pub(crate) async fn decode_approval(
+async fn decode_approval(
     connection: &mut PgConnection,
     row: PgRow,
+    owner_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
     let reason: Option<String> = row.try_get("denial_reason")?;
@@ -1363,9 +1384,13 @@ pub(crate) async fn decode_approval(
                 owner_command.ok_or(ToolLoopCorruption::Missing("approval owner command"))?,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("approval owner command identity"))?;
-            let command = load_decision_receipt(connection, command_id).await?.ok_or(
-                ToolLoopCorruption::Missing("approval owner command receipt"),
-            )?;
+            let command =
+                owner_receipts
+                    .get(&command_id)
+                    .cloned()
+                    .ok_or(ToolLoopCorruption::Missing(
+                        "approval owner command receipt",
+                    ))?;
             if command.command().request() != request
                 || command.command().decision() != &decision
                 || !matches!(command.result(), DecideToolRequestResult::Applied(_))
@@ -1401,6 +1426,68 @@ pub(crate) async fn decode_approval(
     input
         .reconstitute()
         .map_err(|_| ToolLoopCorruption::Inconsistent("approval resolution").into())
+}
+
+async fn load_owner_decision_receipts(
+    connection: &mut PgConnection,
+    commands: &[DurableCommandId],
+) -> Result<BTreeMap<DurableCommandId, PreparedDecideToolRequest>, ToolLoopRepositoryError> {
+    if commands.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let command_uuids = commands
+        .iter()
+        .map(|command| durable_command_id_to_uuid(*command))
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT command.command_id, command.request_id,
+                command.decision_kind, command.denial_reason,
+                command.result_kind, command.rejection_kind,
+                command.result_earliest_undecided_request_id,
+                request.request_ordinal, request.tool_name,
+                request.arguments_kind, request.arguments_text,
+                request.producing_model_call_id, request.session_id,
+                request.turn_id
+           FROM decide_tool_request_command AS command
+           JOIN tool_request AS request
+             ON request.request_id = command.request_id
+          WHERE command.command_id = ANY($1)
+            AND command.command_kind = 'decide_tool_request'
+            AND command.storage_version = 1",
+    )
+    .bind(&command_uuids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut receipts = BTreeMap::new();
+    for row in rows {
+        let command_id = durable_command_id_from_uuid(required(&row, "command_id")?)
+            .map_err(|_| ToolLoopCorruption::Inconsistent("decision command identity"))?;
+        let request = tool_request_id_from_uuid(required(&row, "request_id")?);
+        let decision = decode_command_decision(&row)?;
+        let command = DecideToolRequest::try_new(command_id, request, decision)
+            .map_err(|_| ToolLoopCorruption::Inconsistent("decision command identity"))?;
+        let result_kind: String = required(&row, "result_kind")?;
+        let rejection: Option<String> = row.try_get("rejection_kind")?;
+        let earliest: Option<Uuid> = row.try_get("result_earliest_undecided_request_id")?;
+        if result_kind != "applied" || rejection.is_some() || earliest.is_some() {
+            return Err(ToolLoopCorruption::Inconsistent("approval owner command receipt").into());
+        }
+        let producing_call =
+            signalbox_domain::ModelCallId::from_uuid(required(&row, "producing_model_call_id")?);
+        let session = session_id_from_uuid(required(&row, "session_id")?);
+        let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+        let request_record = decode_request(row, producing_call, session, turn)?;
+        let prepared = command
+            .prepare_applied(&request_record)
+            .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
+        if receipts.insert(command_id, prepared).is_some() {
+            return Err(ToolLoopCorruption::Inconsistent(
+                "duplicate approval owner command receipt",
+            )
+            .into());
+        }
+    }
+    Ok(receipts)
 }
 
 async fn load_frozen_dangerous_tool_auto_approval(
@@ -1536,10 +1623,8 @@ pub(crate) async fn load_approvals_by_request(
     .fetch_all(&mut *connection)
     .await?;
     let mut approvals = BTreeMap::new();
-    for row in rows {
-        let request = tool_request_id_from_uuid(required(&row, "request_id")?);
-        let approval = decode_approval(connection, row).await?;
-        if approvals.insert(request, approval).is_some() {
+    for approval in decode_approvals(connection, rows).await? {
+        if approvals.insert(approval.request(), approval).is_some() {
             return Err(ToolLoopCorruption::Inconsistent("duplicate tool approval").into());
         }
     }
