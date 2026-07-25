@@ -223,6 +223,29 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertNil(secondDiagnostic)
     }
 
+    func testWebSocketStreamFailsWhenHeartbeatsStop() async throws {
+        let heartbeat = """
+        {"kind":"heartbeat","sent_at":"2026-05-10T12:00:00Z"}
+        """
+        let transport = QuietSignalboxWebSocketTransport(heartbeat: .string(heartbeat))
+        let stream = SignalboxWebSocketStream(
+            transport: transport,
+            heartbeatTimeout: .milliseconds(25)
+        )
+
+        var iterator = stream.messages().makeAsyncIterator()
+
+        do {
+            _ = try await iterator.next()
+            XCTFail("Expected a quiet-connection failure")
+        } catch let error as SignalboxWebSocketStreamError {
+            XCTAssertEqual(error, .connectionWentQuiet)
+            XCTAssertEqual(error.errorDescription, "The server connection stopped receiving heartbeats.")
+        }
+        let sentMessages = await transport.sentMessages
+        XCTAssertEqual(sentMessages.count, 1)
+    }
+
     func testListEventsPreservesPageWhenKnownEventFieldsEvolve() async throws {
         let transport = MockSignalboxHTTPTransport()
         await transport.setJSONResponse(
@@ -307,6 +330,30 @@ private actor StubSignalboxWebSocketTransport: SignalboxWebSocketTransport {
 
 private enum StubSignalboxWebSocketTransportError: Error {
     case endOfStream
+}
+
+private actor QuietSignalboxWebSocketTransport: SignalboxWebSocketTransport {
+    private var heartbeat: SignalboxWebSocketMessage?
+    private(set) var sentMessages: [SignalboxWebSocketMessage] = []
+
+    init(heartbeat: SignalboxWebSocketMessage) {
+        self.heartbeat = heartbeat
+    }
+
+    func receive() async throws -> SignalboxWebSocketMessage {
+        if let heartbeat {
+            self.heartbeat = nil
+            return heartbeat
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        throw StubSignalboxWebSocketTransportError.endOfStream
+    }
+
+    func send(_ message: SignalboxWebSocketMessage) async throws {
+        sentMessages.append(message)
+    }
+
+    func cancel() async {}
 }
 
 private struct TestHeartbeatAcknowledgment: Decodable {

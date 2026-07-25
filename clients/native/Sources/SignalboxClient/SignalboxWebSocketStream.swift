@@ -47,11 +47,14 @@ public struct URLSessionSignalboxWebSocketTransport: SignalboxWebSocketTransport
     }
 }
 
-public enum SignalboxWebSocketStreamError: LocalizedError {
+public enum SignalboxWebSocketStreamError: LocalizedError, Equatable {
+    case connectionWentQuiet
     case unsupportedMessage
 
     public var errorDescription: String? {
         switch self {
+        case .connectionWentQuiet:
+            return "The server connection stopped receiving heartbeats."
         case .unsupportedMessage:
             return "The server sent an unsupported WebSocket message."
         }
@@ -59,19 +62,38 @@ public enum SignalboxWebSocketStreamError: LocalizedError {
 }
 
 public final class SignalboxWebSocketStream: Sendable {
-    private let transport: any SignalboxWebSocketTransport
+    public static let defaultHeartbeatTimeout: Duration = .seconds(45)
 
-    public convenience init(url: URL) {
-        self.init(transport: URLSessionSignalboxWebSocketTransport(url: url))
+    private let transport: any SignalboxWebSocketTransport
+    private let heartbeatTimeout: Duration
+
+    public convenience init(
+        url: URL,
+        heartbeatTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout
+    ) {
+        self.init(
+            transport: URLSessionSignalboxWebSocketTransport(url: url),
+            heartbeatTimeout: heartbeatTimeout
+        )
     }
 
-    public init(transport: any SignalboxWebSocketTransport) {
+    public init(
+        transport: any SignalboxWebSocketTransport,
+        heartbeatTimeout: Duration = SignalboxWebSocketStream.defaultHeartbeatTimeout
+    ) {
         self.transport = transport
+        self.heartbeatTimeout = heartbeatTimeout
     }
 
     public func messages() -> AsyncThrowingStream<SignalboxServerMessage, Error> {
         AsyncThrowingStream { continuation in
+            let watchdog = SignalboxHeartbeatWatchdog(timeout: heartbeatTimeout)
+            let timeoutAction: @Sendable () async -> Void = {
+                continuation.finish(throwing: SignalboxWebSocketStreamError.connectionWentQuiet)
+                await self.transport.cancel()
+            }
             let receiveTask = Task {
+                await watchdog.arm(onTimeout: timeoutAction)
                 do {
                     while !Task.isCancelled {
                         let message = try await transport.receive()
@@ -91,11 +113,13 @@ public final class SignalboxWebSocketStream: Sendable {
                         }
                         if case .heartbeat(let sentAt) = decoded {
                             try await sendHeartbeatAck(sentAt: sentAt)
+                            await watchdog.arm(onTimeout: timeoutAction)
                             continue
                         }
                         continuation.yield(decoded)
                     }
                 } catch {
+                    await watchdog.cancel()
                     continuation.finish(throwing: error)
                 }
             }
@@ -103,6 +127,7 @@ public final class SignalboxWebSocketStream: Sendable {
             continuation.onTermination = { _ in
                 receiveTask.cancel()
                 Task {
+                    await watchdog.cancel()
                     await self.transport.cancel()
                 }
             }
@@ -116,6 +141,32 @@ public final class SignalboxWebSocketStream: Sendable {
             return
         }
         try await transport.send(.string(string))
+    }
+}
+
+private actor SignalboxHeartbeatWatchdog {
+    private let timeout: Duration
+    private var timeoutTask: Task<Void, Never>?
+
+    init(timeout: Duration) {
+        self.timeout = timeout
+    }
+
+    func arm(onTimeout: @escaping @Sendable () async -> Void) {
+        timeoutTask?.cancel()
+        timeoutTask = Task {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            await onTimeout()
+        }
+    }
+
+    func cancel() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
     }
 }
 
