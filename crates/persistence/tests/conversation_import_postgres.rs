@@ -47,13 +47,33 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_import_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const ARBITRARY_LINEAGE_ENTRY_ID_START: u128 = 1;
+
+enum EntryIdentitySupply {
+    Fixed(VecDeque<ImportedTranscriptEntryId>),
+    Generated { next: u128 },
+}
 
 struct FixedIds {
     conversations: VecDeque<ImportedConversationId>,
-    entries: VecDeque<ImportedTranscriptEntryId>,
+    entries: EntryIdentitySupply,
 }
 
 impl FixedIds {
+    /// Supplies conversation identities the test has already named, so an
+    /// expectation states the fixture's own identity instead of restating the
+    /// seed behind it. Entry identities are arbitrary-by-construction because
+    /// lineage tests do not observe them.
+    fn for_conversations(conversations: impl IntoIterator<Item = ImportedConversationId>) -> Self {
+        Self {
+            conversations: conversations.into_iter().collect(),
+            entries: EntryIdentitySupply::Generated {
+                next: ARBITRARY_LINEAGE_ENTRY_ID_START,
+            },
+        }
+    }
+
+    /// Mints conversation identities from seeds for tests that never name them.
     fn new(conversations: &[u128], entries: impl IntoIterator<Item = u128>) -> Self {
         Self {
             conversations: conversations
@@ -61,10 +81,12 @@ impl FixedIds {
                 .copied()
                 .map(|value| ImportedConversationId::from_uuid(Uuid::from_u128(value)))
                 .collect(),
-            entries: entries
-                .into_iter()
-                .map(|value| ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(value)))
-                .collect(),
+            entries: EntryIdentitySupply::Fixed(
+                entries
+                    .into_iter()
+                    .map(|value| ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(value)))
+                    .collect(),
+            ),
         }
     }
 }
@@ -77,9 +99,18 @@ impl ImportedConversationIdGenerator for FixedIds {
     }
 
     fn next_entry_id(&mut self) -> ImportedTranscriptEntryId {
-        self.entries
-            .pop_front()
-            .expect("fixture supplies every imported-entry identity")
+        match &mut self.entries {
+            EntryIdentitySupply::Fixed(entries) => entries
+                .pop_front()
+                .expect("fixture supplies every imported-entry identity"),
+            EntryIdentitySupply::Generated { next } => {
+                let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(*next));
+                *next = next
+                    .checked_add(1)
+                    .expect("generated imported-entry identity range is not exhausted");
+                identity
+            }
+        }
     }
 }
 
@@ -1061,7 +1092,7 @@ async fn s28_inv038_grown_claude_source_is_new_snapshot_with_shared_lineage()
     let first_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x1100));
     let grown_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x1200));
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x1100, 0x1200], [0x1110, 0x1210, 0x1211]),
+        FixedIds::for_conversations([first_snapshot, grown_snapshot]),
         ClaudeCodeJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -1148,7 +1179,7 @@ async fn s28_inv038_grown_codex_source_is_new_snapshot_with_shared_lineage()
     let first_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x2100));
     let grown_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x2200));
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x2100, 0x2200], [0x2110, 0x2210, 0x2211]),
+        FixedIds::for_conversations([first_snapshot, grown_snapshot]),
         CodexRolloutJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -1228,7 +1259,7 @@ async fn s28_source_session_lineage_is_null_without_one_consistent_attestation()
     let missing_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x3100));
     let conflicting_snapshot = ImportedConversationId::from_uuid(Uuid::from_u128(0x3200));
     let mut service = ImportConversationService::new(
-        FixedIds::new(&[0x3100, 0x3200], [0x3110, 0x3210, 0x3211]),
+        FixedIds::for_conversations([missing_snapshot, conflicting_snapshot]),
         ClaudeCodeJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -1279,7 +1310,7 @@ async fn s28_inv002_inv038_corrupt_source_session_lineage_fails_closed()
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x3300));
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut initial_import = ImportConversationService::new(
-        FixedIds::new(&[0x3300], [0x3310]),
+        FixedIds::for_conversations([winner]),
         ClaudeCodeJsonlConverter,
         repository.clone(),
     );
