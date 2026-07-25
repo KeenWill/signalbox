@@ -109,9 +109,7 @@ REFERENCE_DEFINITION = re.compile(
     r"))?"
     r"[ \t]*(?=\r?$)"
 )
-LIST_ITEM = re.compile(
-    r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])(?P<spacing>[ \t]+)"
-)
+LIST_ITEM = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
 FENCE_LIST_CONTAINER = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
 DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
 PR_TOKEN = re.compile(
@@ -120,8 +118,10 @@ PR_TOKEN = re.compile(
     r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
+LIST_ITEM_BOUNDARY = r"\n[ \t]*(?:[-+*]|\d+[.)])[ \t]"
 CLAUSE_BOUNDARY = (
     r"\n[ \t]*\n"
+    rf"|{LIST_ITEM_BOUNDARY}"
     rf"|[.!?][ \t\r\n]+{INLINE_MARKUP_OPENERS}(?-i:[A-Z])"
     r"|;"
 )
@@ -145,6 +145,9 @@ THEMATIC_BREAK = re.compile(
     r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
 )
 DECISION_ENTRY_HEADING = re.compile(r"^ {0,3}##(?!#)(?:[ \t]+|$)(?P<title>.*)$")
+LIST_WRAPPED_ENTRY_HEADING = re.compile(
+    r"^ {0,3}(?:(?:[-+*]|\d+[.)])[ \t]+)+##(?!#)(?:[ \t]|$)"
+)
 TEST_GROUP = re.compile(
     r"\btests?[ \t]+"
     r"(?P<names>"
@@ -387,6 +390,12 @@ def mask_fenced_code(text: str) -> str:
     return "".join(buffer)
 
 
+def opens_list_item(content: str) -> bool:
+    """Return whether a non-blank line starts a new, non-empty list item."""
+    marker = LIST_ITEM.match(content)
+    return marker is not None and bool(content[marker.end() :].strip())
+
+
 @lru_cache(maxsize=8)
 def block_boundaries(text: str) -> tuple[int, ...]:
     """Return offsets at which inline parsing cannot continue.
@@ -394,6 +403,11 @@ def block_boundaries(text: str) -> tuple[int, ...]:
     A code span is inline content of one leaf block, so it can never span a
     blank line or reach across an ATX heading, which always interrupts a
     paragraph. Both edges of such a line are boundaries.
+
+    A list-item marker likewise opens a new block: sibling items are separate
+    leaf blocks, so their inline content cannot pair across the marker. Only
+    the leading edge of such a line is a boundary, because the item's own
+    inline content continues on the same line after the marker.
     """
     boundaries: list[int] = []
     offset = 0
@@ -402,6 +416,8 @@ def block_boundaries(text: str) -> tuple[int, ...]:
         if not content.strip() or ATX_HEADING.match(content):
             boundaries.append(offset)
             boundaries.append(offset + len(line))
+        elif opens_list_item(content):
+            boundaries.append(offset)
         offset += len(line)
     return tuple(boundaries)
 
@@ -586,12 +602,19 @@ def opens_paragraph(content: str) -> bool:
 
 
 def mask_indented_code(text: str) -> str:
-    """Replace CommonMark-style indented code blocks, preserving offsets."""
+    """Replace CommonMark-style indented code blocks, preserving offsets.
+
+    Enclosing list items are tracked as a stack of content columns, the same
+    shape ``fence_opening_context`` keeps. Dedenting leaves only the items the
+    line escaped, so a sibling marker re-establishes its own content column
+    instead of dropping the reader back to the document margin and reading the
+    item's continuation paragraphs as indented code.
+    """
     buffer = list(text)
     offset = 0
     paragraph_open = False
     in_code = False
-    list_content_column: int | None = None
+    list_content_columns: list[int] = []
 
     for line in text.splitlines(keepends=True):
         content = strip_block_quote_containers(line.rstrip("\r\n"))
@@ -604,28 +627,19 @@ def mask_indented_code(text: str) -> str:
 
         prefix = re.match(r"^[ \t]*", content).group(0)
         leading = indentation_columns(prefix)
+        while list_content_columns and leading < list_content_columns[-1]:
+            list_content_columns.pop()
+            in_code = False
         relative = (
-            leading
-            if list_content_column is None
-            else leading - list_content_column
+            leading - list_content_columns[-1] if list_content_columns else leading
         )
         marker = LIST_ITEM.match(content)
-        if marker is not None and (
-            (list_content_column is None and leading <= 3)
-            or (list_content_column is not None and 0 <= relative <= 3)
-        ):
-            list_content_column = indentation_columns(
-                marker.group("indent") + marker.group(0)[len(marker.group("indent")) :]
-            )
+        if marker is not None and relative <= 3:
+            list_content_columns.append(indentation_columns(marker.group(0)))
             in_code = False
             paragraph_open = True
             offset += len(line)
             continue
-
-        if list_content_column is not None and relative < 0:
-            list_content_column = None
-            relative = leading
-            in_code = False
 
         indented = relative >= 4
         if indented and (in_code or not paragraph_open):
@@ -1429,6 +1443,18 @@ def check_decision_order(root: Path) -> list[Violation]:
                     "decision-order",
                     "entry heading must be `## YYYY-MM-DD — <title>`; "
                     "Setext H2 headings are not permitted",
+                )
+            )
+            continue
+        if LIST_WRAPPED_ENTRY_HEADING.match(line):
+            entries += 1
+            violations.append(
+                Violation(
+                    DECISIONS.as_posix(),
+                    number,
+                    "decision-order",
+                    "entry heading must be `## YYYY-MM-DD — <title>`; H2 "
+                    "headings nested inside a list are not permitted",
                 )
             )
             continue

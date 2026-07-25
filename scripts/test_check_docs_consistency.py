@@ -636,6 +636,35 @@ class DocsConsistencyTests(unittest.TestCase):
             ],
         )
 
+    def test_code_span_does_not_pair_across_a_list_item_boundary(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "- stray \\`\n"
+            "- [Listed sample](missing-listed.md) \\`\n"
+            "- a span `[Masked](missing-masked.md)` closes inside its item\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["relative-link"])
+        self.assertIn("missing-listed.md", failures[0].message)
+
+    def test_sibling_list_dedent_keeps_its_continuation_paragraph(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "- outer item\n\n"
+            "  - first inner\n\n"
+            "  - second inner\n\n"
+            "    [Listed sample](missing-listed.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["relative-link"])
+        self.assertIn("missing-listed.md", failures[0].message)
+
     def test_code_span_still_spans_lines_inside_one_paragraph(self) -> None:
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n"
@@ -990,6 +1019,25 @@ class DocsConsistencyTests(unittest.TestCase):
             failures[0].message,
         )
 
+    def test_list_wrapped_h2_decision_entry_is_rejected(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-24 — Old\n\n"
+            "- ## 2026-07-25 — Hidden newer\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["decision-order"],
+        )
+        self.assertIn(
+            "H2 headings nested inside a list are not permitted",
+            failures[0].message,
+        )
+
     def test_thematic_break_after_list_item_is_not_a_decision_entry(self) -> None:
         (self.root / "docs/decisions.md").write_text(
             "# Decisions\n\n"
@@ -1167,6 +1215,24 @@ class DocsConsistencyTests(unittest.TestCase):
             "# Example\n\n"
             "The certificate is verified locally; historical discussion: "
             "PR #42 (`agent/history`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_verification_clause_stops_at_a_list_item_boundary(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "- The checksum is verified\n"
+            "- Historical context through PR #12 (`agent/example`)\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
             encoding="utf-8",
