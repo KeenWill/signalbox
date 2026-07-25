@@ -10,6 +10,55 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Put review workflows above evidence-bearing sessions
+
+**Context.** Standing review workflows need durable target, run, pass, finding,
+and external-link state. An earlier unmerged prototype of the owner's proved the
+basic aggregate vocabulary, but optional session links, freely mutable status
+rows, copied execution artifacts, and direct external posting left workflow
+progress weaker than Signalbox's evidence and recovery contracts.
+
+**Decision.** Add a bounded context above sessions. Targets freeze exact
+revisions; runs freeze a complete versioned confidence policy; every pass binds
+one exact session and accepted input; finding status is derived from a typed
+append-only event history; and external publication reserves a durable link
+identity before the API call and attaches the external identity afterward.
+Composite ownership references and domain-owned complete-projection
+reconstitution reject cross-wired history.
+
+**Rejected alternatives.** Embedding workflow state in `Session` confuses
+execution with coordination. Optional session ids permit unsupported workflow
+claims. Mutable finding status loses the evidence for judgment, deduplication,
+posting, and repair. Treating an API response as the first durable posting fact
+reopens duplicate effects after a lost acknowledgement. Copying transcripts or
+general artifacts into workflow rows creates competing content authorities.
+
+**Affects.** The new [review-workflows specification](spec/review-workflows.md),
+review-workflow domain aggregates, the `2026072602xx` persistence slice, INV-040
+and INV-041, and the later application/protocol stack.
+
+## 2026-07-25 — Store review confidence as versioned basis-point policy
+
+**Context.** Judgment and unattended publication need reproducible confidence
+gates. Binary-local floating-point defaults would neither reconstruct the policy
+used by an old run nor provide one exact relational representation.
+
+**Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
+integer basis-point thresholds from zero through 10,000. Version one requires at
+least 7,000 basis points for judgment and 8,000 for unattended publication; the
+publication threshold may not be lower than the judgment threshold. Dedupe and
+judge passes consume the same frozen run policy.
+
+**Rejected alternatives.** Process-wide defaults make old decisions depend on
+current configuration. Binary floating point admits storage/JSON comparison
+drift. A per-finding threshold copies policy and permits one run to judge its
+findings under inconsistent gates. Hard-coding policy without storing its
+version prevents intentional later evolution.
+
+**Affects.** `ReviewPolicy`, `ReviewConfidence`, run persistence, the
+[review-workflows specification](spec/review-workflows.md), and later judgment,
+deduplication, and publication orchestration.
+
 ## 2026-07-24 — Preserve accepted IANA time-zone identifiers
 
 **Context.** Jiff's IANA lookup accepts aliases, but the lookup result does not
