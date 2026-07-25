@@ -72,8 +72,10 @@ Runs use the closed state machine
 `ReviewPassRef`; cancellation records an optional last pass. A run admits at
 most one pass. The pass belongs to the run, its kind is the one-to-one pass-kind
 counterpart of the run workflow, and its canonical state matches the projected
-run state. Queued cancellation names no pass; running cancellation names its
-canonically cancelled pass. Terminal states do not return to running.
+run state. Queued cancellation names no pass only when no pass was recorded; if
+a queued pass exists, the run retains that canonically pre-start-cancelled pass.
+Running cancellation retains its canonically cancelled pass. Terminal states do
+not return to running.
 
 ## Passes use session evidence
 
@@ -147,14 +149,18 @@ made stale. Blocked findings may later be fixed, superseded, or made stale; a
 finding blocked by publication may also become posted after reconciliation
 attaches the external object. Rejected, duplicate, superseded, stale, and fixed
 are terminal. Every event carries its owning finding reference, a contiguous
-one-based ordinal, and a same-target pass reference. Event and pass kinds are
-compatible only as follows: accepted, rejected, and stale events name a judgment
-pass; duplicate and superseded events name a deduplication pass; posted names an
-external-publication pass; fixed names a finding-repair pass; and
-blocked-with-reason names either an external-publication or finding-repair pass.
-Every event except blocked-with-reason names a canonically succeeded pass;
-blocked-with-reason names a canonically blocked pass. Reconstitution validates
-the complete history and fails closed on a foreign owner, gaps, illegal edges,
+one-based ordinal, and a same-target pass reference. The event pass's run stores
+the exact `ReviewPolicy` frozen by the finding's producing run, so judgment,
+deduplication, and every later classification remain under one policy even
+though their one-pass workflows use separate run identities. Event and pass
+kinds are compatible only as follows: accepted, rejected, and stale events name
+a judgment pass; duplicate and superseded events name a deduplication pass;
+posted names an external-publication or external-context-import pass; fixed
+names a finding-repair pass; and blocked-with-reason names either an
+external-publication or finding-repair pass. Every event except
+blocked-with-reason names a canonically succeeded pass; blocked-with-reason
+names a canonically blocked pass. Reconstitution validates the complete history
+and fails closed on a foreign owner, policy mismatch, gaps, illegal edges,
 incompatible pass kind or outcome, self-reference, foreign-run finding
 references, or a publication event whose external link is not an attached link
 associated with that finding. A posted event's pass is the attachment's exact
