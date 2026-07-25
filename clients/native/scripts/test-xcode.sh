@@ -35,8 +35,18 @@ CMD=(
 	CODE_SIGNING_ALLOWED=YES
 	CODE_SIGN_IDENTITY=-
 	-parallel-testing-enabled NO
-	test
 )
+
+# CI sets SIGNALBOX_NATIVE_SKIP_TESTING to exclude suites that need an
+# interactive simulator session (UI and screenshot tests). Space-separated
+# xcodebuild test identifiers, e.g. "SignalboxNativeUITests".
+if [[ -n "${SIGNALBOX_NATIVE_SKIP_TESTING:-}" ]]; then
+	for skip_identifier in $SIGNALBOX_NATIVE_SKIP_TESTING; do
+		CMD+=("-skip-testing:$skip_identifier")
+	done
+fi
+
+CMD+=(test)
 
 mkdir -p "$(dirname "$RESULT_BUNDLE_PATH")"
 rm -rf "$RESULT_BUNDLE_PATH"
