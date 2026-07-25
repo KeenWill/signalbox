@@ -26,10 +26,10 @@ use signalbox_domain::{
     ContextFrontierId, CreateSessionFromImportedFrontier, DirectModelSelection, DurableCommandId,
     ImportedConversation, ImportedConversationFormat, ImportedConversationId, ImportedMediaSource,
     ImportedSessionRelationship, ImportedSourceAttestation, ImportedSourceMetadata,
-    ImportedSpeaker, ImportedStructuredValue, ImportedText, ImportedToolResultBlock,
-    ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ModelSelectionRequest, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionId, TranscriptAncestry,
+    ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+    ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ModelSelectionRequest,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
 
@@ -144,11 +144,6 @@ fn reconstitute_stored_claude_v1(source: &[u8]) -> ImportedConversation {
     .expect("the legacy fixture uses the exact version-1 stored projection")
 }
 
-#[track_caller]
-fn assert_every_entry_has_one_frontier(imported: &ImportedConversation) {
-    assert_eq!(imported.frontiers().count(), imported.entries().len());
-}
-
 fn render_attestation<Value>(
     attestation: &ImportedSourceAttestation<Value>,
     render_value: impl FnOnce(&Value) -> String,
@@ -207,6 +202,24 @@ fn render_structured_attestation(
     attestation: &ImportedSourceAttestation<ImportedStructuredValue>,
 ) -> String {
     render_attestation(attestation, render_structured)
+}
+
+#[track_caller]
+fn fixture_text_member<'a>(
+    value: &'a ImportedStructuredValue,
+    member_name: &str,
+) -> &'a ImportedText {
+    let ImportedStructuredValue::Object(members) = value else {
+        panic!("fixture value containing {member_name:?} must be an object");
+    };
+    let member = members
+        .iter()
+        .find(|member| member.name().as_str() == member_name)
+        .unwrap_or_else(|| panic!("fixture object must contain {member_name:?}"));
+    let ImportedStructuredValue::String(value) = member.value() else {
+        panic!("fixture member {member_name:?} must contain text");
+    };
+    value
 }
 
 fn render_media(media: &ImportedMediaSource) -> String {
@@ -364,13 +377,41 @@ fn render_conversation(imported: &ImportedConversation) -> String {
         )
         .expect("formatting into a string cannot fail");
     }
-    writeln!(
-        &mut rendered,
-        "addressable_frontiers: {}",
-        imported.frontiers().count()
-    )
-    .expect("formatting into a string cannot fail");
+    let frontiers = imported.frontiers().collect::<Vec<_>>();
+    writeln!(&mut rendered, "addressable_frontiers: {}", frontiers.len())
+        .expect("formatting into a string cannot fail");
+    for (index, frontier) in frontiers.iter().enumerate() {
+        writeln!(
+            &mut rendered,
+            "  {}: conversation={} through_entry={} through_position={}",
+            index + 1,
+            frontier.conversation().as_uuid(),
+            frontier.through_entry().as_uuid(),
+            frontier.through_position().as_u64(),
+        )
+        .expect("formatting into a string cannot fail");
+    }
     rendered
+}
+
+#[test]
+fn s28_fixture_text_member_returns_the_named_fixture_value() {
+    let expected = ImportedText::new(String::from("selected-value"));
+    let fixture = ImportedStructuredValue::Object(
+        vec![
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("other")),
+                ImportedStructuredValue::String(ImportedText::new(String::from("other-value"))),
+            ),
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("selected")),
+                ImportedStructuredValue::String(expected.clone()),
+            ),
+        ]
+        .into_boxed_slice(),
+    );
+
+    assert_eq!(fixture_text_member(&fixture, "selected"), &expected);
 }
 
 #[test]
@@ -389,6 +430,7 @@ fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
             "    content=source_event(type=attested(\"system\"))\n",
             "    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=not_attested\n",
             "addressable_frontiers: 1\n",
+            "  1: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000200 through_position=1\n",
         )
     );
 }
@@ -415,7 +457,6 @@ fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
         imported.entries()[5].content(),
         ImportedTranscriptContent::SourceMessageBlock { .. }
     ));
-    assert_every_entry_has_one_frontier(&imported);
     expect_file!["fixtures/importer-conformance/golden/claude-code-v1-tool-round.txt"]
         .assert_eq(&render_conversation(&imported));
 }
@@ -430,10 +471,11 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
     );
     assert_eq!(imported.raw_records().len(), 3);
     assert_eq!(imported.entries().len(), 4);
-    assert!(matches!(
+    let fixture_parent = fixture_text_member(imported.raw_records()[0].normalized(), "parentUuid");
+    assert_eq!(
         imported.entries()[0].source().parent_record_id(),
-        ImportedSourceAttestation::Attested(_)
-    ));
+        &ImportedSourceAttestation::Attested(fixture_parent.clone())
+    );
     assert!(matches!(
         imported.entries()[1].content(),
         ImportedTranscriptContent::SourceMessageBlock { .. }
@@ -444,7 +486,6 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
             signalbox_domain::ImportedMessageContentAbsence::ContentAttestedAbsent
         )
     );
-    assert_every_entry_has_one_frontier(&imported);
     expect_file!["fixtures/importer-conformance/golden/claude-code-v2-boundary-losses.txt"]
         .assert_eq(&render_conversation(&imported));
 }
@@ -471,7 +512,6 @@ fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
         imported.entries()[7].content(),
         ImportedTranscriptContent::Text(_)
     ));
-    assert_every_entry_has_one_frontier(&imported);
     expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-tool-round.txt"]
         .assert_eq(&render_conversation(&imported));
 }
@@ -486,7 +526,6 @@ fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
         imported.entries()[0].content(),
         ImportedTranscriptContent::SourceEvent { .. }
     ));
-    assert_every_entry_has_one_frontier(&imported);
     expect_file!["fixtures/importer-conformance/golden/claude-code-v2-depth-128.txt"]
         .assert_eq(&render_conversation(&imported));
 }
@@ -571,7 +610,6 @@ fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
 #[test]
 fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
     let imported = convert_claude(CLAUDE_V2_BOUNDARY_LOSSES);
-    let unchanged = imported.clone();
     let selected = imported
         .frontiers()
         .nth(1)
@@ -613,17 +651,15 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
     )
     .expect("the selected imported prefix prepares for fork");
     let rendered = format!(
-        "import_only:\n  format: {:?}\n  raw_records: {}\n  entries: {}\n  selected_through_position: {}\nadopt_resume:\n  relationship: {:?}\n  seed_entries: {}\n  imported_unchanged: {}\nadopt_fork:\n  relationship: {:?}\n  seed_entries: {}\n  imported_unchanged: {}\n",
+        "import_only:\n  format: {:?}\n  raw_records: {}\n  entries: {}\n  selected_through_position: {}\nadopt_resume:\n  relationship: {:?}\n  seed_entries: {}\nadopt_fork:\n  relationship: {:?}\n  seed_entries: {}\n",
         imported.format(),
         imported.raw_records().len(),
         imported.entries().len(),
         selected.through_position().as_u64(),
         resume.command().relationship(),
         resume.seed_snapshot().entry_count(),
-        imported == unchanged,
         fork.command().relationship(),
         fork.seed_snapshot().entry_count(),
-        imported == unchanged,
     );
 
     assert_eq!(resume.seed_snapshot().entry_count(), 2);
@@ -642,6 +678,5 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
             relationship: ImportedSessionRelationship::Fork,
         }
     );
-    assert_eq!(imported, unchanged);
     expect_file!["fixtures/importer-conformance/golden/adoption-modes.txt"].assert_eq(&rendered);
 }

@@ -35,3 +35,10 @@ entries: 7
     content=text(attested("Done."))
     source=record_id=attested("legacy-5") parent_record_id=attested("legacy-4") source_session_id=attested("legacy-session") timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=attested(Assistant)
 addressable_frontiers: 7
+  1: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000200 through_position=1
+  2: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000201 through_position=2
+  3: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000202 through_position=3
+  4: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000203 through_position=4
+  5: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000204 through_position=5
+  6: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000205 through_position=6
+  7: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000206 through_position=7

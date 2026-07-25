@@ -7,3 +7,4 @@ entries: 1
     content=source_event(type=attested("system"))
     source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=not_attested
 addressable_frontiers: 1
+  1: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000200 through_position=1

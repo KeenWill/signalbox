@@ -20,3 +20,7 @@ entries: 4
     content=message_content_absent(ContentAttestedAbsent)
     source=record_id=attested_absent parent_record_id=attested("observed-after-gap") source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=attested(User)
 addressable_frontiers: 4
+  1: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000200 through_position=1
+  2: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000201 through_position=2
+  3: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000202 through_position=3
+  4: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000203 through_position=4

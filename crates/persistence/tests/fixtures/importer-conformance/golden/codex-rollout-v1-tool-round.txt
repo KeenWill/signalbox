@@ -43,3 +43,12 @@ entries: 9
     content=source_event(type=attested("event_msg"))
     source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-02-01T00:00:06Z") sidechain=not_attested metadata=not_attested message_role=not_attested
 addressable_frontiers: 9
+  1: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000400 through_position=1
+  2: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000401 through_position=2
+  3: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000402 through_position=3
+  4: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000403 through_position=4
+  5: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000404 through_position=5
+  6: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000405 through_position=6
+  7: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000406 through_position=7
+  8: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000407 through_position=8
+  9: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000408 through_position=9

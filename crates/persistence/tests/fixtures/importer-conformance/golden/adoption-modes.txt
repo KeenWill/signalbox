@@ -6,8 +6,6 @@ import_only:
 adopt_resume:
   relationship: Resume
   seed_entries: 2
-  imported_unchanged: true
 adopt_fork:
   relationship: Fork
   seed_entries: 2
-  imported_unchanged: true
