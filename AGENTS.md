@@ -132,8 +132,9 @@ connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
 a doc comment naming the invariant). When a test becomes the enforcement of an
 accepted invariant, link it from the invariant catalog's enforcement column in
 the same change. Test style rules live in `docs/agents/testing-style.md`; the
-process documents that govern how agents work on the repository are collected
-under `docs/agents/`.
+literal-provenance and label discipline binding production and test code alike
+lives in `docs/style.md`; the process documents that govern how agents work on
+the repository are collected under `docs/agents/`.
 
 Dependencies are allowed when they provide clearer types or interfaces, replace
 code Signalbox would otherwise need to own, or supply another focused capability
