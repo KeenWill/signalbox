@@ -359,10 +359,11 @@ and ordering.
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. Exact application commands,
-  pass scheduling, code-host/model/workspace adapter seams, workflow-facing
-  protocol, prompts, automatic publication, repair, conflict escalation, and
-  merge-based stack propagation remain to be designed and implemented above that
-  foundation. Blocks only executable review workflows.
+  durable hold or atomic accepted-input admission and run/pass projection, pass
+  scheduling, code-host/model/workspace adapter seams, workflow-facing protocol,
+  prompts, automatic publication, repair, conflict escalation, and merge-based
+  stack propagation remain to be designed and implemented above that foundation.
+  Blocks only executable review workflows.
 - **Independent session-link relationship.** Links between sessions that
   delegation did not create require their own foundation decision. Blocks
   session linking and visibility authority. (S18, S19)
