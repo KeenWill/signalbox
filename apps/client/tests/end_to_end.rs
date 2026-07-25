@@ -17,8 +17,9 @@ use std::{
 };
 
 use signalbox_application::{
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, ModelCallCredentialReference,
-    SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService, UuidV7StartEligibleTurnIdGenerator,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity,
@@ -210,6 +211,7 @@ max_output_tokens = 64
         listener,
         pool.clone(),
         eligibility_nudge,
+        InProcessToolDispatchGate::default(),
         model_configuration,
     );
     let (execution, fatal_execution) =
@@ -360,6 +362,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
         listener,
         pool.clone(),
         eligibility_nudge,
+        InProcessToolDispatchGate::default(),
         model_configuration,
     );
     let (execution, fatal_execution) =

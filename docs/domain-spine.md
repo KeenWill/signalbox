@@ -3797,7 +3797,7 @@ pub enum ModelToolResultContent {
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
-    // accessors: request(), credential_reference(), messages()
+    // accessors: request(), credential_reference(), messages(), tools()
 }
 
 pub enum ModelFrontierRenderingError {
@@ -4030,7 +4030,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
     >
 {
-    pub const fn new(
+    pub fn new(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -4039,7 +4039,8 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         provider: Provider,
         gate: Gate,
     ) -> Self;
-    pub const fn from_parts(
+    pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
+    pub fn from_parts(
         ids: Ids,
         prepare: Prepare,
         failure: Failure,
@@ -4047,6 +4048,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
     ) -> Self;
     pub fn into_parts(
@@ -4059,6 +4061,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
+        Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
@@ -4087,7 +4090,7 @@ pub struct ScriptedModelCallProvider { /* private */ }
 impl ScriptedModelCallProvider {
     pub fn new(steps: impl IntoIterator<Item = ScriptedModelCallStep>) -> Self;
     // accessors: capability_preparation_count(), interaction_count(), remaining_step_count(),
-    // last_prepared_messages()
+    // last_prepared_messages(), last_prepared_tools()
 }
 // impl ModelCallProvider
 ```
@@ -4477,6 +4480,87 @@ pub struct InProcessToolDispatchPermit { /* private */ }
 ## application: tool_loop_ports
 
 ```rust
+pub struct ToolInputSchema { /* private */ }
+impl ToolInputSchema {
+    pub fn try_new(value: String) -> Result<Self, ToolInputSchemaError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum ToolInputSchemaFailure {
+    NotJson,
+    NotObject,
+    OutsideArgumentBound(ToolArgumentsFailure),
+}
+
+pub struct ToolInputSchemaError { /* private */ }
+impl ToolInputSchemaError {
+    pub fn value(&self) -> &str;
+    pub const fn failure(&self) -> ToolInputSchemaFailure;
+    pub fn into_parts(self) -> (String, ToolInputSchemaFailure);
+}
+
+pub struct ToolDefinition { /* private */ }
+impl ToolDefinition {
+    pub const fn new(
+        name: ToolName,
+        description: String,
+        input_schema: ToolInputSchema,
+        permission_default: ToolPermissionDefault,
+        effect_class: ToolEffectClass,
+    ) -> Self;
+    // accessors: name(), description(), input_schema(), permission_default(), effect_class()
+}
+
+pub trait ToolArgumentValidator: Send + Sync {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail>;
+}
+// implemented for matching Fn(&NormalizedToolArguments) -> Result<(), ToolExecutionErrorDetail>
+
+pub struct CompiledTool { /* private */ }
+impl CompiledTool {
+    pub fn new(
+        definition: ToolDefinition,
+        validator: impl ToolArgumentValidator + 'static,
+    ) -> Self;
+    pub const fn definition(&self) -> &ToolDefinition;
+}
+
+pub struct DuplicateToolDefinition { /* private */ }
+impl DuplicateToolDefinition {
+    pub const fn name(&self) -> &ToolName;
+}
+
+pub struct CompiledToolCatalog { /* private */ }
+impl CompiledToolCatalog {
+    pub fn try_new(
+        tools: impl IntoIterator<Item = CompiledTool>,
+    ) -> Result<Self, DuplicateToolDefinition>;
+}
+// Default; impl ToolCatalog
+
+pub trait ToolCatalog: Send + Sync {
+    fn definitions(&self) -> Box<[ToolDefinition]>;
+    fn definition(&self, name: &ToolName) -> Option<ToolDefinition>;
+    fn validate_arguments(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolCatalogValidationFailure>;
+}
+
+pub struct NoToolCatalog;
+// Copy + Default; impl ToolCatalog
+
+pub enum ToolCatalogValidationFailure {
+    UnknownTool,
+    InvalidArguments {
+        detail: Option<ToolExecutionErrorDetail>,
+    },
+}
+
 pub enum ResolvedToolConversationEntry {
     AssistantToolUse {
         source: SemanticTranscriptEntryRef,
@@ -4657,5 +4741,5 @@ pub trait ToolExecutionTransaction {
 | application: startup_scan                          | 7 (incl. 2 traits)   |
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
-| application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **101**              |
+| application: tool_loop_ports                       | 19 (incl. 4 traits)  |
+| **signalbox-application total**                    | **112**              |

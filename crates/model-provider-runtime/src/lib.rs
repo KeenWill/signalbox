@@ -23,8 +23,8 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, ConversationMessage, ConversationRole, CredentialReference,
     MessagePart, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
     ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, ToolCallId, ToolCallProposal, ToolName as RuntimeToolName, ToolResultRecord,
-    UnsentCause,
+    TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName,
+    ToolResultRecord, UnsentCause,
 };
 
 fn render_conversation_message(message: &ModelConversationMessage) -> ConversationMessage {
@@ -214,6 +214,8 @@ pub enum RuntimeModelCallProviderError {
     UnsupportedCompletionMaterial,
     /// A runtime text part cannot construct exact domain assistant text.
     InvalidAssistantText,
+    /// A checked application schema could not form a runtime JSON value.
+    InvalidToolSchema,
 }
 
 impl fmt::Display for RuntimeModelCallProviderError {
@@ -235,6 +237,7 @@ impl fmt::Display for RuntimeModelCallProviderError {
                 "provider completion contains unsupported assistant material"
             }
             Self::InvalidAssistantText => "provider completion contains invalid assistant text",
+            Self::InvalidToolSchema => "application tool schema is invalid at the runtime bridge",
         })
     }
 }
@@ -344,7 +347,8 @@ where
             frontier: call.frontier().snapshot(),
         };
         let messages = render_runtime_messages(operation.messages());
-        let runtime_operation = ModelOperation::new(
+        let tools = render_runtime_tool_definitions(operation.tools())?;
+        let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
@@ -352,6 +356,7 @@ where
             messages,
             ModelSettings::new(definition.max_output_tokens()),
         );
+        runtime_operation.tools = tools;
         let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
@@ -535,10 +540,9 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
     if request.arguments().kind() == ToolArgumentsKind::Json
-        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
-            request.arguments().as_str(),
-        )
-        .is_ok()
+        && decode_checked_raw_json(request.arguments().as_str()).is_ok_and(|value| {
+            value.get().bytes().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{')
+        })
     {
         request.arguments().as_str().to_owned()
     } else {
@@ -547,6 +551,29 @@ fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
         // scalar, array, or undecodable value.
         String::from(r#"{"signalbox_invalid_arguments":true}"#)
     }
+}
+
+fn decode_checked_raw_json(
+    value: &str,
+) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
+    serde_json::value::RawValue::from_string(value.to_owned())
+}
+
+fn render_runtime_tool_definitions(
+    definitions: &[signalbox_application::ToolDefinition],
+) -> Result<Vec<ToolDefinition>, RuntimeModelCallProviderError> {
+    definitions
+        .iter()
+        .map(|definition| {
+            let schema = serde_json::from_str(definition.input_schema().as_str())
+                .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
+            Ok(ToolDefinition::with_schema(
+                definition.name().as_str(),
+                definition.description(),
+                schema,
+            ))
+        })
+        .collect()
 }
 
 fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
@@ -690,12 +717,15 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use signalbox_application::ModelConversationMessage;
+    use signalbox_application::{
+        ModelConversationMessage, ToolDefinition as ApplicationToolDefinition, ToolInputSchema,
+    };
     use signalbox_domain::{
         AssistantText, ImportedText, ImportedTranscriptEntryId, ModelCallId,
         ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelIdentity,
-        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolExecutionError,
-        ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolEffectClass,
+        ToolExecutionError, ToolExecutionErrorKind, ToolName as DomainToolName,
+        ToolPermissionDefault, ToolRequest, ToolRequestId, ToolRequestOrdinal,
         ToolRequestReconstitutionInput, TurnId,
     };
     use signalbox_model_runtime::{
@@ -710,7 +740,7 @@ mod tests {
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
         RuntimeModelDefinition, classify_terminal, render_conversation_message,
-        render_runtime_messages,
+        render_runtime_messages, render_runtime_tool_definitions,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -786,6 +816,34 @@ mod tests {
         })
     }
 
+    #[test]
+    fn configured_application_tools_are_advertised_to_the_runtime() {
+        let definition = ApplicationToolDefinition::new(
+            DomainToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            String::from("Returns the current UTC time."),
+            ToolInputSchema::try_new(String::from(
+                r#"{"additionalProperties":false,"properties":{},"type":"object"}"#,
+            ))
+            .expect("fixture schema"),
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        );
+
+        let rendered =
+            render_runtime_tool_definitions(&[definition]).expect("checked catalog maps");
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].name.as_str(), "current_time");
+        assert_eq!(rendered[0].description, "Returns the current UTC time.");
+        assert_eq!(
+            rendered[0].input_schema,
+            serde_json::json!({
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+            })
+        );
+    }
+
     /// S10 / INV-002 / INV-005: one provider response and its ordered result
     /// batch remain grouped, while invalid function-argument shapes use
     /// replay-safe JSON without replacing their exact durable evidence.
@@ -794,6 +852,8 @@ mod tests {
         let first = request(20, "{}");
         let malformed = request(21, "{\"timezone\":");
         let scalar = request(22, "7");
+        let deep_arguments = format!("{}0{}", r#"{"nested":"#.repeat(512), "}".repeat(512));
+        let deep = request(23, &deep_arguments);
         let messages = [
             signalbox_application::ModelConversationMessage::Assistant {
                 source: source(30),
@@ -814,6 +874,11 @@ mod tests {
                 source: source(33),
                 producing_call: call(),
                 request: scalar.clone(),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(38),
+                producing_call: call(),
+                request: deep.clone(),
             },
             signalbox_application::ModelConversationMessage::Assistant {
                 source: source(34),
@@ -849,7 +914,7 @@ mod tests {
             rendered[0].role,
             signalbox_model_runtime::ConversationRole::Assistant
         );
-        assert_eq!(rendered[0].parts.len(), 5);
+        assert_eq!(rendered[0].parts.len(), 6);
         for part in &rendered[0].parts[2..=3] {
             let signalbox_model_runtime::MessagePart::ToolCall(replayed) = part else {
                 panic!("invalid proposal remains in the assistant group");
@@ -861,6 +926,11 @@ mod tests {
         }
         assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
         assert_eq!(scalar.arguments().as_str(), "7");
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_deep) = &rendered[0].parts[4]
+        else {
+            panic!("deep valid proposal remains in the assistant group");
+        };
+        assert_eq!(replayed_deep.arguments_json, deep_arguments);
         assert_eq!(
             rendered[1].role,
             signalbox_model_runtime::ConversationRole::User

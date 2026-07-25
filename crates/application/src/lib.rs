@@ -72,7 +72,10 @@ pub use submit_input::{
 };
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
 pub use tool_loop_ports::{
-    DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    CompiledTool, CompiledToolCatalog, DecideToolRequestTransaction, DuplicateToolDefinition,
+    NoToolCatalog, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedToolAttemptObservationStatus, ToolArgumentValidator, ToolAttemptAuthorizationStatus,
+    ToolCatalog, ToolCatalogValidationFailure, ToolContinuationIdentities,
+    ToolCrashClosureIdentities, ToolDefinition, ToolExecutionTransaction, ToolInputSchema,
+    ToolInputSchemaError, ToolInputSchemaFailure,
 };

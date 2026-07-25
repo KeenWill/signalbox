@@ -15,18 +15,18 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
-    CurrentToolAttemptState, DecideToolRequest, DecideToolRequestRejectedResult,
-    DecideToolRequestResult, EndedToolAttempt, NormalizedToolArguments, PreparedDecideToolRequest,
-    PreparedToolBatchDecision, PreparedToolResultProjection, ReconstitutedToolAttempt,
+    CurrentToolAttemptState, DangerousToolAutoApproval, DecideToolRequest,
+    DecideToolRequestRejectedResult, DecideToolRequestResult, EndedToolAttempt,
+    NormalizedToolArguments, PreparedDecideToolRequest, PreparedToolBatchDecision,
+    PreparedToolResultProjection, ReconstitutedToolAttempt,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
     ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptEnd, ToolAttemptId,
     ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
     ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDecisionSource, ToolDenialReason, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    ToolResultText, TurnId,
+    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchGeneration, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId,
+    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -35,6 +35,7 @@ use crate::{
         self, CommandKind, DECIDE_TOOL_REQUEST_KIND, RegistryCorruption, RegistryInspectionError,
     },
     mapping::{
+        dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -134,18 +135,21 @@ impl Error for ToolLoopRepositoryError {
 
 impl From<sqlx::Error> for ToolLoopRepositoryError {
     fn from(error: sqlx::Error) -> Self {
-        if error
-            .as_database_error()
-            .and_then(sqlx::error::DatabaseError::code)
-            .as_deref()
-            == Some("23505")
+        if let Some(database) = error.as_database_error()
+            && database.code().as_deref() == Some("23505")
         {
-            Self::IdentityCollision
-        } else {
-            Self::Database {
-                source: error,
-                commit_ambiguous: false,
-            }
+            return match database.constraint() {
+                Some(
+                    "semantic_transcript_entry_pkey" | "tool_attempt_pkey" | "turn_attempt_pkey",
+                ) => Self::IdentityCollision,
+                _ => Self::Corruption(ToolLoopCorruption::Inconsistent(
+                    "logical uniqueness constraint",
+                )),
+            };
+        }
+        Self::Database {
+            source: error,
+            commit_ambiguous: false,
         }
     }
 }
@@ -1216,7 +1220,8 @@ async fn load_approvals(
 ) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
-                approval.decision_source, approval.denial_reason
+                approval.decision_source, approval.denial_reason,
+                approval.owner_command_id
            FROM tool_approval_decision AS approval
            JOIN tool_request AS request
              ON request.request_id = approval.request_id
@@ -1226,10 +1231,15 @@ async fn load_approvals(
     .bind(producing_call.into_uuid())
     .fetch_all(&mut *connection)
     .await?;
-    rows.into_iter().map(decode_approval).collect()
+    let mut approvals = Vec::with_capacity(rows.len());
+    for row in rows {
+        approvals.push(decode_approval(connection, row).await?);
+    }
+    Ok(approvals)
 }
 
-pub(crate) fn decode_approval(
+pub(crate) async fn decode_approval(
+    connection: &mut PgConnection,
     row: PgRow,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
@@ -1255,10 +1265,40 @@ pub(crate) fn decode_approval(
             .into());
         }
     };
-    let source = match required::<String>(&row, "decision_source")?.as_str() {
-        "owner_command" => ToolDecisionSource::OwnerCommand,
-        "policy_auto" => ToolDecisionSource::PolicyAuto,
-        "session_blanket" => ToolDecisionSource::SessionBlanket,
+    let owner_command: Option<Uuid> = row.try_get("owner_command_id")?;
+    let input = match required::<String>(&row, "decision_source")?.as_str() {
+        "owner_command" => {
+            let command_id = durable_command_id_from_uuid(
+                owner_command.ok_or(ToolLoopCorruption::Missing("approval owner command"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("approval owner command identity"))?;
+            let command = load_decision_receipt(connection, command_id).await?.ok_or(
+                ToolLoopCorruption::Missing("approval owner command receipt"),
+            )?;
+            if command.command().request() != request
+                || command.command().decision() != &decision
+                || !matches!(command.result(), DecideToolRequestResult::Applied(_))
+            {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("approval owner command receipt").into(),
+                );
+            }
+            ToolApprovalResolutionReconstitutionInput::owner_command(command)
+        }
+        "policy_auto" if owner_command.is_none() && decision == ToolApprovalDecision::Approve => {
+            ToolApprovalResolutionReconstitutionInput::policy_auto(request)
+        }
+        "session_blanket"
+            if owner_command.is_none() && decision == ToolApprovalDecision::Approve =>
+        {
+            ToolApprovalResolutionReconstitutionInput::session_blanket(
+                request,
+                load_frozen_dangerous_tool_auto_approval(connection, request).await?,
+            )
+        }
+        "policy_auto" | "session_blanket" => {
+            return Err(ToolLoopCorruption::Inconsistent("automatic approval evidence").into());
+        }
         value => {
             return Err(ToolLoopCorruption::Unsupported {
                 field: "decision_source",
@@ -1267,9 +1307,48 @@ pub(crate) fn decode_approval(
             .into());
         }
     };
-    ToolApprovalResolutionReconstitutionInput::new(request, decision, source)
+    input
         .reconstitute()
         .map_err(|_| ToolLoopCorruption::Inconsistent("approval resolution").into())
+}
+
+async fn load_frozen_dangerous_tool_auto_approval(
+    connection: &mut PgConnection,
+    request: ToolRequestId,
+) -> Result<DangerousToolAutoApproval, ToolLoopRepositoryError> {
+    let rows = sqlx::query(
+        "WITH RECURSIVE configuration_origin AS (
+             SELECT stored.*
+               FROM tool_request AS requested
+               JOIN queued_input_origin AS stored
+                 ON stored.turn_id = requested.turn_id
+                AND stored.session_id = requested.session_id
+              WHERE requested.request_id = $1
+             UNION
+             SELECT source.*
+               FROM configuration_origin AS current
+               JOIN queued_input_origin AS source
+                 ON source.turn_id = current.source_configuration_turn_id
+                AND source.session_id = current.session_id
+         )
+         SELECT dangerous_tool_auto_approval
+           FROM configuration_origin
+          WHERE source_configuration_turn_id IS NULL",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .fetch_all(&mut *connection)
+    .await?;
+    let [row] = rows.as_slice() else {
+        return Err(ToolLoopCorruption::Inconsistent("frozen session blanket authority").into());
+    };
+    let value: String = required(row, "dangerous_tool_auto_approval")?;
+    dangerous_tool_auto_approval_from_str(&value).ok_or_else(|| {
+        ToolLoopCorruption::Unsupported {
+            field: "dangerous_tool_auto_approval",
+            value,
+        }
+        .into()
+    })
 }
 
 async fn load_attempts(
@@ -1328,7 +1407,7 @@ pub(crate) fn decode_attempt(
             .into());
         }
     };
-    Ok(ToolAttemptReconstitutionInput::new(
+    ToolAttemptReconstitutionInput::new(
         tool_attempt_id_from_uuid(required(&row, "attempt_id")?),
         tool_request_id_from_uuid(required(&row, "request_id")?),
         session_id_from_uuid(required(&row, "session_id")?),
@@ -1338,7 +1417,8 @@ pub(crate) fn decode_attempt(
         generation,
         state,
     )
-    .reconstitute())
+    .reconstitute()
+    .map_err(|_| ToolLoopCorruption::Inconsistent("dispatch generation").into())
 }
 
 pub(crate) async fn load_approvals_by_request(
@@ -1356,7 +1436,8 @@ pub(crate) async fn load_approvals_by_request(
         .map(|request| tool_request_id_to_uuid(*request))
         .collect::<Vec<_>>();
     let rows = sqlx::query(
-        "SELECT request_id, decision_kind, decision_source, denial_reason
+        "SELECT request_id, decision_kind, decision_source, denial_reason,
+                owner_command_id
            FROM tool_approval_decision
           WHERE request_id = ANY($1)",
     )
@@ -1366,7 +1447,7 @@ pub(crate) async fn load_approvals_by_request(
     let mut approvals = BTreeMap::new();
     for row in rows {
         let request = tool_request_id_from_uuid(required(&row, "request_id")?);
-        let approval = decode_approval(row)?;
+        let approval = decode_approval(connection, row).await?;
         if approvals.insert(request, approval).is_some() {
             return Err(ToolLoopCorruption::Inconsistent("duplicate tool approval").into());
         }
@@ -1887,7 +1968,8 @@ async fn load_decision_receipt(
     };
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
     let decision = decode_command_decision(&row)?;
-    let command = DecideToolRequest::new(command_id, request, decision);
+    let command = DecideToolRequest::try_new(command_id, request, decision)
+        .map_err(|_| ToolLoopCorruption::Inconsistent("decision command identity"))?;
     let result_kind: String = required(&row, "result_kind")?;
     let rejection: Option<String> = row.try_get("rejection_kind")?;
     let prepared = match (result_kind.as_str(), rejection.as_deref()) {

@@ -460,8 +460,8 @@ DECLARE
     character_count integer := char_length(value_text);
     current_character text;
     string_start integer;
-    string_literal text;
     string_escape boolean := false;
+    escape_code text;
     malformed_node boolean;
 BEGIN
     checked_value := value_text::json;
@@ -479,20 +479,26 @@ BEGIN
                 string_escape := false;
             END IF;
         ELSIF string_escape THEN
+            IF current_character = 'u' THEN
+                escape_code := substr(value_text, character_index + 1, 4);
+                IF escape_code !~ '^00(0[0-9a-f]|1[0-9a-f])$'
+                   OR escape_code IN (
+                        '0008',
+                        '0009',
+                        '000a',
+                        '000c',
+                        '000d'
+                   )
+                THEN
+                    RETURN NULL;
+                END IF;
+            ELSIF current_character NOT IN ('"', chr(92), 'b', 'f', 'n', 'r', 't') THEN
+                RETURN NULL;
+            END IF;
             string_escape := false;
         ELSIF current_character = chr(92) THEN
             string_escape := true;
         ELSIF current_character = '"' THEN
-            string_literal := substr(
-                value_text,
-                string_start,
-                character_index - string_start + 1
-            );
-            IF to_json(string_literal::json #>> '{}')::text
-               IS DISTINCT FROM string_literal
-            THEN
-                RETURN NULL;
-            END IF;
             string_start := NULL;
         END IF;
         character_index := character_index + 1;
@@ -559,6 +565,27 @@ BEGIN
 EXCEPTION
     WHEN invalid_text_representation THEN
         RETURN NULL;
+    WHEN untranslatable_character THEN
+        -- PostgreSQL text cannot materialize an escaped U+0000 while walking
+        -- JSON string values. The lexical scan above has already established
+        -- serde_json's canonical escape spelling, so retain that valid JSON
+        -- instead of misclassifying it as undecodable.
+        RETURN value_text;
+END;
+$$;
+
+CREATE FUNCTION valid_tool_json(value_text text)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+BEGIN
+    PERFORM value_text::json;
+    RETURN true;
+EXCEPTION
+    WHEN invalid_text_representation THEN
+        RETURN false;
 END;
 $$;
 
@@ -592,7 +619,7 @@ CREATE TABLE tool_request (
             )
             OR (
                 arguments_kind = 'undecodable'
-                AND canonical_tool_json(arguments_text) IS NULL
+                AND NOT valid_tool_json(arguments_text)
             )
         ),
     CONSTRAINT tool_request_call_ordinal_once

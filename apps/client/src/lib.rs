@@ -13,8 +13,8 @@ use error::ClientError;
 use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
-    ModelCallDisposition, ModelCallState, ModelSelection, ReconciliationOperation, ServerFrame,
-    ServerMessage, SessionEvent, ToolBatchState, TurnState, decode_server_line, encode_server_line,
+    ModelCallDisposition, ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent,
+    ToolBatchState, TurnState, decode_server_line, encode_server_line,
 };
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
@@ -411,9 +411,9 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
         Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
-        Some(TurnState::ReconciliationRequired { .. }) => {
-            Ok(Some(TurnTerminal::ReconciliationRequired))
-        }
+        Some(
+            TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. },
+        ) => Ok(Some(TurnTerminal::ReconciliationRequired)),
         Some(
             TurnState::Queued { .. }
             | TurnState::ActiveRunning { .. }
@@ -449,6 +449,11 @@ fn terminal_event_state(
         SessionEvent::TurnReconciliationRequired { turn_id, .. } if *turn_id == selected_turn => {
             Some(TurnTerminal::ReconciliationRequired)
         }
+        SessionEvent::TurnToolReconciliationRequired { turn_id, .. }
+            if *turn_id == selected_turn =>
+        {
+            Some(TurnTerminal::ReconciliationRequired)
+        }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
@@ -458,7 +463,8 @@ fn terminal_event_state(
         | SessionEvent::TurnFailed { .. }
         | SessionEvent::TurnRefused { .. }
         | SessionEvent::TurnCancelled { .. }
-        | SessionEvent::TurnReconciliationRequired { .. } => None,
+        | SessionEvent::TurnReconciliationRequired { .. }
+        | SessionEvent::TurnToolReconciliationRequired { .. } => None,
     }
 }
 
@@ -573,19 +579,16 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
             state: ToolBatchState::RecoveryRequired { .. },
             ..
         } => None,
-        SessionEvent::TurnReconciliationRequired {
+        SessionEvent::TurnToolReconciliationRequired {
             turn_id,
-            operation: ReconciliationOperation::ToolAttempt { tool_attempt_id },
-            ..
+            tool_attempt_id,
+            terminal_frontier_id,
         } => Some(SnapshotSelection::ToolReconciliation {
             turn_id: *turn_id,
             tool_attempt_id: *tool_attempt_id,
+            terminal_frontier_id: *terminal_frontier_id,
         }),
-        SessionEvent::TurnRefused { .. }
-        | SessionEvent::TurnReconciliationRequired {
-            operation: ReconciliationOperation::ModelCall { .. },
-            ..
-        } => None,
+        SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
@@ -728,8 +731,8 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ModelSelection, ReconciliationOperation, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, TurnState, decode_client_line, encode_server_line,
+        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+        TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -805,9 +808,7 @@ mod tests {
         let state = TurnState::ReconciliationRequired {
             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-            operation: ReconciliationOperation::ModelCall {
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            },
+            terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
         };
 
         assert_eq!(
@@ -837,9 +838,7 @@ mod tests {
         let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let event = SessionEvent::TurnReconciliationRequired {
             turn_id: selected_turn,
-            operation: ReconciliationOperation::ModelCall {
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-            },
+            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
         };
 
@@ -974,9 +973,7 @@ mod tests {
         assert!(
             terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
                 turn_id,
-                operation: ReconciliationOperation::ModelCall {
-                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                },
+                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
             })
             .is_none()
@@ -987,16 +984,18 @@ mod tests {
     fn tool_reconciliation_event_selects_terminal_tool_results() {
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let tool_attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let terminal_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
 
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
+            terminal_snapshot_selection(&SessionEvent::TurnToolReconciliationRequired {
                 turn_id,
-                operation: ReconciliationOperation::ToolAttempt { tool_attempt_id },
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                tool_attempt_id,
+                terminal_frontier_id,
             }),
             Some(SnapshotSelection::ToolReconciliation {
                 turn_id,
                 tool_attempt_id,
+                terminal_frontier_id,
             })
         );
     }

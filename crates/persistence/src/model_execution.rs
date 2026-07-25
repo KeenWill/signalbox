@@ -2489,7 +2489,8 @@ async fn load_tool_denial_correlations(
     }
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
-                approval.decision_source, approval.denial_reason
+                approval.decision_source, approval.denial_reason,
+                approval.owner_command_id
            FROM tool_approval_decision AS approval
           WHERE approval.request_id = ANY($1)",
     )
@@ -2499,10 +2500,15 @@ async fn load_tool_denial_correlations(
     if rows.len() != requests.len() {
         return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
     }
-    rows.into_iter()
-        .map(crate::tool_loop::decode_approval)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(map_tool_evidence_error)
+    let mut approvals = Vec::with_capacity(rows.len());
+    for row in rows {
+        approvals.push(
+            crate::tool_loop::decode_approval(connection, row)
+                .await
+                .map_err(map_tool_evidence_error)?,
+        );
+    }
+    Ok(approvals)
 }
 
 async fn load_tool_result_correlations(

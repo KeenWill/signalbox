@@ -1636,7 +1636,7 @@ pub(crate) async fn load_scheduling_projection(
                         .await
                         .map_err(map_tool_loop_error)?
                         .ok_or(SubmitInputCorruption::Missing("active tool batch"))?;
-                        let wait = batch
+                        batch
                             .awaiting_approval()
                             .filter(|wait| wait.request().into_uuid() == request)
                             .ok_or(SubmitInputCorruption::Inconsistent(
@@ -1645,8 +1645,11 @@ pub(crate) async fn load_scheduling_projection(
                         required_model_calls.insert(round_call);
                         ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
                             lifecycle_turn,
-                            wait,
+                            &batch,
                         )
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "tool approval batch evidence",
+                        ))?
                     }
                     Some("awaiting_tool_recovery")
                         if recovery_model_call.is_none() && approval_tool_request.is_none() =>
@@ -2090,7 +2093,7 @@ pub(crate) async fn load_scheduling_projection(
                                     starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
                                     reconciling_attempt: stored_attempt_id,
                                     reconciling_attempt_end,
-                                    ambiguous_tool,
+                                    tool_batch: batch,
                                     interrupt,
                                     terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                                 }

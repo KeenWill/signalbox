@@ -114,6 +114,15 @@ fn model_credential_reference() -> ModelCallCredentialReference {
     ModelCallCredentialReference::new("fixture-provider-primary")
 }
 
+fn decide_tool_request(
+    command_id: DurableCommandId,
+    request: signalbox_domain::ToolRequestId,
+    decision: ToolApprovalDecision,
+) -> DecideToolRequest {
+    DecideToolRequest::try_new(command_id, request, decision)
+        .expect("fixture command identities are admitted")
+}
+
 static TEST_SUBMIT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_test_submit_uuid() -> Uuid {
@@ -1284,10 +1293,27 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
     .await?;
     assert_eq!(stored_deep, (String::from("json"), deep));
 
+    let escaped_nul = r#"{"x":"\u0000"}"#;
+    let (_, _, _, escaped_nul_request) =
+        checkpoint_confirmed_tool_round(&pool, seed + 0x2000, "current_time", escaped_nul).await?;
+    let stored_escaped_nul: (String, String) = sqlx::query_as(
+        "SELECT arguments_kind, arguments_text
+           FROM tool_request
+          WHERE request_id = $1",
+    )
+    .bind(escaped_nul_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_escaped_nul,
+        (String::from("json"), String::from(escaped_nul))
+    );
+
     for (offset, kind, text) in [
         (0_u128, "json", "{broken"),
         (1, "json", r#"{"b":2,"a":1}"#),
         (2, "undecodable", "{}"),
+        (3, "undecodable", r#"{ "a": 1 }"#),
     ] {
         let error = sqlx::query(
             "INSERT INTO tool_request
@@ -1418,7 +1444,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
 
     let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 24));
-    let approve = DecideToolRequest::new(command_id, request, ToolApprovalDecision::Approve);
+    let approve = decide_tool_request(command_id, request, ToolApprovalDecision::Approve);
     let decision = tool_repository
         .decide(approve.clone(), || continuation_attempt)
         .await?;
@@ -1447,7 +1473,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     assert!(matches!(
         tool_repository
             .decide(
-                DecideToolRequest::new(
+                decide_tool_request(
                     command_id,
                     request,
                     ToolApprovalDecision::Deny { reason: None },
@@ -1687,6 +1713,10 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             .and_then(|error| error.code()),
         Some("23505".into())
     );
+    assert!(matches!(
+        ToolLoopRepositoryError::from(duplicate_result_error),
+        ToolLoopRepositoryError::Corruption(_)
+    ));
 
     let mut missing_current_result = pool.begin().await?;
     sqlx::query(
@@ -1774,7 +1804,7 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     let tool_repository = PostgresToolLoopRepository::new(pool.clone());
     tool_repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 23)),
                 request,
                 ToolApprovalDecision::Approve,
@@ -1889,7 +1919,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
                 request,
                 ToolApprovalDecision::Approve,
@@ -2145,7 +2175,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let denied_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(deny_seed + 23));
     let denial = repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(deny_seed + 24)),
                 denied_request,
                 ToolApprovalDecision::Deny { reason: None },
@@ -2164,7 +2194,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     assert!(matches!(
         repository
             .decide(
-                DecideToolRequest::new(
+                decide_tool_request(
                     DurableCommandId::from_uuid(Uuid::from_u128(deny_seed + 25)),
                     denied_request,
                     ToolApprovalDecision::Approve,
@@ -2209,7 +2239,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let schema_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(schema_seed + 23));
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(schema_seed + 24)),
                 schema_request,
                 ToolApprovalDecision::Approve,
@@ -2274,6 +2304,19 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         StartupScanSessionOutcome::ResumableToolBatch { turn }
             if turn == schema_fixture.turn
     ));
+    let mut recovery_sweep = PostgresEligibilitySweep::new(pool.clone());
+    let mut recovery_sessions = Vec::new();
+    loop {
+        let (page, continuation) = recovery_sweep.find_sessions().await?.into_parts();
+        recovery_sessions.extend(page);
+        if !continuation {
+            break;
+        }
+    }
+    assert!(
+        recovery_sessions.contains(&schema_fixture.session),
+        "the durable sweep must reschedule a resumable active tool batch"
+    );
     let schema_batch = repository
         .load_active_batch(schema_fixture.session, schema_fixture.turn)
         .await?
@@ -2293,7 +2336,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let crash_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(crash_seed + 23));
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(crash_seed + 24)),
                 crash_request,
                 ToolApprovalDecision::Approve,
@@ -2409,7 +2452,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         checkpoint_confirmed_tool_round(&pool, effect_free_seed, "current_time", "{}").await?;
     repository
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(effect_free_seed + 24)),
                 effect_free_request,
                 ToolApprovalDecision::Approve,
@@ -2608,11 +2651,11 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x7b00));
     let repository = PostgresToolLoopRepository::new(pool.clone());
     let first_decision = repository.decide(
-        DecideToolRequest::new(command_id, first_request, ToolApprovalDecision::Approve),
+        decide_tool_request(command_id, first_request, ToolApprovalDecision::Approve),
         || TurnAttemptId::from_uuid(Uuid::from_u128(first_seed + 23)),
     );
     let second_decision = repository.decide(
-        DecideToolRequest::new(command_id, second_request, ToolApprovalDecision::Approve),
+        decide_tool_request(command_id, second_request, ToolApprovalDecision::Approve),
         || TurnAttemptId::from_uuid(Uuid::from_u128(second_seed + 23)),
     );
     let (first_result, second_result) = tokio::join!(first_decision, second_decision);
@@ -2735,7 +2778,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
 
     let rejection = PostgresToolLoopRepository::new(pool.clone())
         .decide(
-            DecideToolRequest::new(
+            decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 31)),
                 first_request,
                 ToolApprovalDecision::Approve,
@@ -5202,7 +5245,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             value: assistant_text,
         }
     );
-    let (_, _, _, _, _, provider, _, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
     assert_eq!(provider.capability_preparation_count(), 1);
     assert_eq!(provider.interaction_count(), 1);
     let messages = provider

@@ -1265,12 +1265,26 @@ async fn load_event(
                             AND terminal_attempt.turn_id = turn.turn_id
                             AND terminal_attempt.session_id = turn.session_id
                             AND terminal_attempt.state_kind = 'ended'
-                            AND terminal_attempt.end_variant = 'without_stop'
                             AND terminal_attempt.end_disposition
                                 IN ('ambiguous', 'lost')
-                            AND terminal_attempt.interrupt_command_id IS NULL
-                            AND terminal_attempt.interrupt_predecessor_turn_id
-                                IS NULL
+                            AND (
+                                (
+                                    terminal_attempt.end_variant =
+                                        'after_cancellation'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NOT NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id =
+                                        turn.turn_id
+                                )
+                                OR (
+                                    terminal_attempt.end_variant =
+                                        'without_stop'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id
+                                        IS NULL
+                                )
+                            )
                           WHERE turn.turn_id = $1
                             AND turn.session_id = $2
                             AND turn.terminal_tool_attempt_id = $3",
