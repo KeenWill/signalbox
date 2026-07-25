@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
+
+**Context.** The native client holds an API credential, and an error-path test
+can prove that today's surfaced errors omit one synthetic credential but cannot
+prevent a future shipping source from logging credentials or surrounding request
+state. The existing privacy scan is the native client's automated gate for
+prohibited data-collection and disclosure mechanisms.
+
+**Decision.** Make the native privacy scan reject direct Swift logging
+primitives and standard instance logging methods anywhere under shipping
+`Sources`. Exercise the instance-method detector with a synthetic fixture every
+time the scan runs so changes to the expression cannot silently reopen that
+path. Keep credentials out of diagnostic output instead of attempting to redact
+them after logging.
+
+**Rejected alternatives.** Manual review alone does not continuously enforce the
+rule. Searching for current credential variable names misses aliases and future
+names. An allow-list makes the protection depend on reviewers proving that every
+permitted call can never receive credential-bearing data.
+
+**Affects.** `clients/native/scripts/check-privacy.sh` and future additions to
+the native client's shipping Swift sources.
+
 ## 2026-07-25 — Bound native-client heartbeat silence to 45 seconds
 
 **Context.** The native client acknowledges server heartbeat frames, but an open
