@@ -48,8 +48,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-three files, `202607180001` through
-`202607250001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-four files, `202607180001` through
+`202607260101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -80,10 +80,12 @@ Implemented table families (across the forward-only migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
-  `replace_session_defaults_command`, `submit_input_command`,
-  `decide_tool_request_command`);
+  `replace_session_defaults_command`, `replace_session_metadata_command`,
+  `submit_input_command`, `decide_tool_request_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
+- `session_metadata` plus its current tag and attribute satellites, and the
+  complete tag and attribute satellites of `replace_session_metadata_command`;
 - `imported_raw_source_record`, `imported_conversation`,
   `imported_conversation_raw_record`, and `imported_transcript_entry`, whose
   exact append-only representation, idempotency, and completeness rules are
@@ -130,13 +132,16 @@ Representation rules, all enforced in the schema:
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
   imported-conversation headers and members, imported-frontier command records,
-  session seed projections, and every existing historical fact. Mutable
-  lifecycle tables carry guard triggers instead: `turn_lifecycle` rows must be
-  inserted `queued`, transition only monotonically, keep identity/origin/order
-  and written starts write-once, and become immutable at `terminal`;
-  `turn_attempt` rows are inserted `prepared` and an `ended` attempt is
-  immutable. Why: restart trusts durable rows as evidence, so the schema itself
-  must forbid rewriting them (INV-006, INV-007).
+  session seed projections, metadata replacement receipts, and every existing
+  historical fact. Metadata receipt satellites must be inserted before their
+  deferrable parent record; their `BEFORE INSERT` triggers lock the existing
+  owner-global command claim, require that claim, and reject insertion once the
+  parent seals the receipt. Mutable lifecycle tables carry guard triggers
+  instead: `turn_lifecycle` rows must be inserted `queued`, transition only
+  monotonically, keep identity/origin/order and written starts write-once, and
+  become immutable at `terminal`; `turn_attempt` rows are inserted `prepared`
+  and an `ended` attempt is immutable. Why: restart trusts durable rows as
+  evidence, so the schema itself must forbid rewriting them (INV-006, INV-007).
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -179,6 +184,9 @@ Representation rules, all enforced in the schema:
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
+- Current and receipt metadata tag and attribute-key columns are bounded to
+  1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
+  admission boundary.
 
 Some rules are deliberately enforced twice — typed domain transitions and
 database constraints — for the database-level invariants; a passing SQL row set
@@ -198,17 +206,18 @@ One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`submit_input`, `decide_tool_request`) and a kind-scoped `storage_version`.
-Defaults-bearing create/imported-create/replace records write version 2 and
-reconstitute version 1 with the disabled dangerous-tool posture, while submit
-and decision records use version 1. Each kind has one typed subordinate record
-keyed by `command_id` that stores every caller-supplied semantic field in typed,
-`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
-its typed result fields; result-shape `CHECK` constraints tie each rejection
-kind to exactly its fields, and deferred reverse constraints require exactly one
-typed record per claimed registry row at commit. Why: typed per-kind records
-keep replay semantics reviewable and constraint-checked, where a universal
-serialized payload would make the serializer a second semantic authority.
+`replace_session_metadata`, `submit_input`, `decide_tool_request`) and a
+kind-scoped `storage_version`. Defaults-bearing create, imported-create, and
+replace-defaults records write version 2 and reconstitute version 1 with the
+disabled dangerous-tool posture, while metadata, submit, and decision records
+use version 1. Each kind has one typed subordinate record keyed by `command_id`
+that stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns, plus the terminal `applied`/`rejected` result and its typed result
+fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
+fields, and deferred reverse constraints require exactly one typed record per
+claimed registry row at commit. Why: typed per-kind records keep replay
+semantics reviewable and constraint-checked, where a universal serialized
+payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -284,7 +293,9 @@ Locks per transaction, in acquisition order:
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
   serializes metadata writers without conflicting with the `KEY SHARE` lock
-  taken by foreign-key checks.
+  taken by foreign-key checks. A point read and each opened streaming list page
+  use one read-only repeatable-read transaction, so their root and satellite
+  values come from one database snapshot.
 - **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the

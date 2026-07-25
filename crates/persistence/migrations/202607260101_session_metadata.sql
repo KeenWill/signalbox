@@ -88,7 +88,9 @@ CREATE TABLE session_metadata_tag (
         REFERENCES session_metadata (session_id)
         ON UPDATE RESTRICT
         ON DELETE CASCADE,
-    CONSTRAINT session_metadata_tag_nonempty CHECK (octet_length(tag) > 0)
+    CONSTRAINT session_metadata_tag_nonempty CHECK (octet_length(tag) > 0),
+    CONSTRAINT session_metadata_tag_indexed_bound
+        CHECK (octet_length(convert_to(tag, 'UTF8')) <= 1024)
 );
 
 CREATE TABLE session_metadata_attribute (
@@ -104,7 +106,9 @@ CREATE TABLE session_metadata_attribute (
         ON UPDATE RESTRICT
         ON DELETE CASCADE,
     CONSTRAINT session_metadata_attribute_key_nonempty
-        CHECK (octet_length(attribute_key) > 0)
+        CHECK (octet_length(attribute_key) > 0),
+    CONSTRAINT session_metadata_attribute_key_indexed_bound
+        CHECK (octet_length(convert_to(attribute_key, 'UTF8')) <= 1024)
 );
 
 CREATE INDEX session_metadata_tag_lookup
@@ -200,6 +204,7 @@ CREATE TABLE replace_session_metadata_command (
                 result_kind = 'applied'
                 AND rejection_kind IS NULL
                 AND result_updated_at IS NOT NULL
+                AND result_actor_kind IS NOT NULL
                 AND result_actor_kind = actor_kind
                 AND result_actor_turn_id IS NOT DISTINCT FROM actor_turn_id
                 AND result_actor_tool_request_id
@@ -236,9 +241,12 @@ CREATE TABLE replace_session_metadata_command_tag (
         FOREIGN KEY (command_id)
         REFERENCES replace_session_metadata_command (command_id)
         ON UPDATE RESTRICT
-        ON DELETE RESTRICT,
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT replace_session_metadata_command_tag_nonempty
-        CHECK (octet_length(tag) > 0)
+        CHECK (octet_length(tag) > 0),
+    CONSTRAINT replace_session_metadata_command_tag_indexed_bound
+        CHECK (octet_length(convert_to(tag, 'UTF8')) <= 1024)
 );
 
 CREATE TABLE replace_session_metadata_command_attribute (
@@ -252,20 +260,65 @@ CREATE TABLE replace_session_metadata_command_attribute (
         FOREIGN KEY (command_id)
         REFERENCES replace_session_metadata_command (command_id)
         ON UPDATE RESTRICT
-        ON DELETE RESTRICT,
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT replace_session_metadata_command_attribute_key_nonempty
-        CHECK (octet_length(attribute_key) > 0)
+        CHECK (octet_length(attribute_key) > 0),
+    CONSTRAINT replace_session_metadata_command_attribute_key_indexed_bound
+        CHECK (octet_length(convert_to(attribute_key, 'UTF8')) <= 1024)
 );
+
+CREATE FUNCTION reject_sealed_session_metadata_receipt_satellite_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM command_id
+      FROM durable_command
+     WHERE command_id = NEW.command_id
+       FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'session metadata receipt satellite % has no command claim',
+            NEW.command_id
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM replace_session_metadata_command
+         WHERE command_id = NEW.command_id
+    ) THEN
+        RAISE EXCEPTION
+            'session metadata receipt % is already sealed',
+            NEW.command_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
 
 CREATE TRIGGER replace_session_metadata_command_is_append_only
 BEFORE UPDATE OR DELETE ON replace_session_metadata_command
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER replace_session_metadata_command_tag_insert_before_seal
+BEFORE INSERT ON replace_session_metadata_command_tag
+FOR EACH ROW
+EXECUTE FUNCTION reject_sealed_session_metadata_receipt_satellite_insert();
+
 CREATE TRIGGER replace_session_metadata_command_tag_is_append_only
 BEFORE UPDATE OR DELETE ON replace_session_metadata_command_tag
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER replace_session_metadata_command_attribute_insert_before_seal
+BEFORE INSERT ON replace_session_metadata_command_attribute
+FOR EACH ROW
+EXECUTE FUNCTION reject_sealed_session_metadata_receipt_satellite_insert();
 
 CREATE TRIGGER replace_session_metadata_command_attribute_is_append_only
 BEFORE UPDATE OR DELETE ON replace_session_metadata_command_attribute

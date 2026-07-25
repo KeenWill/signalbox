@@ -274,6 +274,10 @@ impl SessionMetadataRepository {
         &self,
         session: SessionId,
     ) -> Result<Option<SessionMetadataSnapshot>, SessionMetadataRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(REPEATABLE_READ_ONLY)
+            .execute(&mut *transaction)
+            .await?;
         let row = sqlx::query(
             "SELECT
                 session_row.session_id,
@@ -319,11 +323,13 @@ impl SessionMetadataRepository {
               WHERE session_row.session_id = $1",
         )
         .bind(session_id_to_uuid(session))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-
-        row.map(|row| decode_current_snapshot(&row, session))
-            .transpose()
+        let snapshot = row
+            .map(|row| decode_current_snapshot(&row, session))
+            .transpose()?;
+        transaction.commit().await?;
+        Ok(snapshot)
     }
 
     /// Opens one bounded repeatable-read metadata list page.
@@ -682,6 +688,31 @@ async fn insert_typed_record(
     } else {
         (REJECTED, Some(SESSION_NOT_FOUND))
     };
+    // Deferred child foreign keys allow the satellites to precede the parent;
+    // inserting the immutable parent last seals the complete receipt.
+    for tag in command.replacement().tags() {
+        sqlx::query(
+            "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
+             VALUES ($1, $2)",
+        )
+        .bind(durable_command_id_to_uuid(command.command_id()))
+        .bind(tag)
+        .execute(&mut *connection)
+        .await?;
+    }
+    for (key, value) in command.replacement().attributes() {
+        sqlx::query(
+            "INSERT INTO replace_session_metadata_command_attribute
+                (command_id, attribute_key, attribute_value)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(durable_command_id_to_uuid(command.command_id()))
+        .bind(key)
+        .bind(value)
+        .execute(&mut *connection)
+        .await?;
+    }
+
     sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
@@ -713,28 +744,6 @@ async fn insert_typed_record(
     .execute(&mut *connection)
     .await?;
 
-    for tag in command.replacement().tags() {
-        sqlx::query(
-            "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
-             VALUES ($1, $2)",
-        )
-        .bind(durable_command_id_to_uuid(command.command_id()))
-        .bind(tag)
-        .execute(&mut *connection)
-        .await?;
-    }
-    for (key, value) in command.replacement().attributes() {
-        sqlx::query(
-            "INSERT INTO replace_session_metadata_command_attribute
-                (command_id, attribute_key, attribute_value)
-             VALUES ($1, $2, $3)",
-        )
-        .bind(durable_command_id_to_uuid(command.command_id()))
-        .bind(key)
-        .bind(value)
-        .execute(&mut *connection)
-        .await?;
-    }
     Ok(())
 }
 

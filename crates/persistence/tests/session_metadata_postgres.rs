@@ -125,13 +125,14 @@ async fn collect_page(
     Ok((items, page.next_after_session()))
 }
 
-/// INV-002 / INV-005 / INV-012: metadata remains a normalized satellite,
-/// durable replay is exact and owner-global, concurrent replacements serialize,
-/// and list filters/page cursors observe one bounded snapshot.
+/// INV-002 / INV-005 / INV-012 / INV-013: metadata remains a normalized
+/// satellite, durable replay is exact and owner-global, archiving affects only
+/// discoverability, concurrent replacements serialize, and list filters/page
+/// cursors observe one bounded snapshot.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv005_inv012_metadata_replay_listing_and_last_writer() -> Result<(), Box<dyn Error>>
-{
+async fn inv002_inv005_inv012_inv013_metadata_replay_listing_and_last_writer()
+-> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
     for value in 0x701..=0x704 {
@@ -337,6 +338,61 @@ async fn inv002_inv005_inv012_metadata_replay_listing_and_last_writer() -> Resul
         Some("23514")
     );
 
+    let late_tag = sqlx::query(
+        "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
+         VALUES ($1, 'late')",
+    )
+    .bind(Uuid::from_u128(0x902))
+    .execute(&pool)
+    .await
+    .expect_err("a committed receipt cannot gain a later tag");
+    assert_eq!(
+        late_tag
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let late_attribute = sqlx::query(
+        "INSERT INTO replace_session_metadata_command_attribute
+            (command_id, attribute_key, attribute_value)
+         VALUES ($1, 'late', 'value')",
+    )
+    .bind(Uuid::from_u128(0x902))
+    .execute(&pool)
+    .await
+    .expect_err("a committed receipt cannot gain a later attribute");
+    assert_eq!(
+        late_attribute
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let missing_applied_actor = sqlx::query(
+        "INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, replacement_archived, result_kind,
+             result_session_id, result_updated_at, result_actor_kind)
+         VALUES
+            ($1, 'replace_session_metadata', 1, $2,
+             'owner', false, 'applied', $2, transaction_timestamp(), NULL)",
+    )
+    .bind(Uuid::from_u128(0x907))
+    .bind(Uuid::from_u128(0x701))
+    .execute(&pool)
+    .await
+    .expect_err("an applied receipt must name its result actor");
+    assert_eq!(
+        missing_applied_actor
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
     let cross_kind = replacement(0x801, 0x701, SessionMetadataContent::empty());
     assert_eq!(
         repository.handle(cross_kind).await?,
@@ -348,6 +404,117 @@ async fn inv002_inv005_inv012_metadata_replay_listing_and_last_writer() -> Resul
         repository.load_command(command(0x801)).await,
         Err(SessionMetadataRepositoryError::DifferentCommandKind { .. })
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn metadata_schema_bounds_every_indexed_string() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    create_repository.handle(creation(0xa01, 0x801)).await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0xa02,
+            0x801,
+            metadata(Some("bounded"), &["tag"], &[("key", "value")], false),
+        ))
+        .await?;
+    let oversized = "x".repeat(SessionMetadataContent::MAX_INDEXED_UTF8_BYTES + 1);
+
+    let current_tag = sqlx::query(
+        "INSERT INTO session_metadata_tag (session_id, tag)
+         VALUES ($1, $2)",
+    )
+    .bind(Uuid::from_u128(0x801))
+    .bind(&oversized)
+    .execute(&pool)
+    .await
+    .expect_err("the current tag index rejects an oversized key");
+    assert_eq!(
+        current_tag
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let current_attribute = sqlx::query(
+        "INSERT INTO session_metadata_attribute
+            (session_id, attribute_key, attribute_value)
+         VALUES ($1, $2, '')",
+    )
+    .bind(Uuid::from_u128(0x801))
+    .bind(&oversized)
+    .execute(&pool)
+    .await
+    .expect_err("the current attribute index rejects an oversized key");
+    assert_eq!(
+        current_attribute
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let mut receipt_tag_transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_session_metadata', 1, transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0xa03))
+    .execute(&mut *receipt_tag_transaction)
+    .await?;
+    let receipt_tag = sqlx::query(
+        "INSERT INTO replace_session_metadata_command_tag (command_id, tag)
+         VALUES ($1, $2)",
+    )
+    .bind(Uuid::from_u128(0xa03))
+    .bind(&oversized)
+    .execute(&mut *receipt_tag_transaction)
+    .await
+    .expect_err("the receipt tag index rejects an oversized key");
+    assert_eq!(
+        receipt_tag
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    receipt_tag_transaction.rollback().await?;
+
+    let mut receipt_attribute_transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_session_metadata', 1, transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0xa04))
+    .execute(&mut *receipt_attribute_transaction)
+    .await?;
+    let receipt_attribute = sqlx::query(
+        "INSERT INTO replace_session_metadata_command_attribute
+            (command_id, attribute_key, attribute_value)
+         VALUES ($1, $2, '')",
+    )
+    .bind(Uuid::from_u128(0xa04))
+    .bind(&oversized)
+    .execute(&mut *receipt_attribute_transaction)
+    .await
+    .expect_err("the receipt attribute index rejects an oversized key");
+    assert_eq!(
+        receipt_attribute
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    receipt_attribute_transaction.rollback().await?;
 
     pool.close().await;
     drop(container);
