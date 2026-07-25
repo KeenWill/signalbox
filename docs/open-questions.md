@@ -337,13 +337,11 @@ questions below remain open.
 ## General-purpose artifacts
 
 Artifact identity, ownership, lifecycle, content addressing, and retention have
-no accepted aggregate boundary. Review workflows therefore retain typed
-references to their session, turn, frontier, findings, and external objects;
-they do not copy model output, tool results, workspace snapshots, or a
-general-purpose artifact record into workflow state. A future foundation
-decision must define the artifact aggregate and its authority before a workflow
-can attach one. This blocks general-purpose workflow artifacts, not the
-implemented session and external-link evidence.
+no accepted aggregate boundary. The reference-not-copy posture review workflows
+take today is owned by [review-workflows](spec/review-workflows.md). A future
+foundation decision must define the artifact aggregate and its authority before
+a workflow can attach one. This blocks general-purpose workflow artifacts, not
+the implemented session and external-link evidence.
 
 ## Destination features (target model)
 

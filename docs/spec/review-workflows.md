@@ -292,12 +292,13 @@ external-context import; the pass belongs to the target carried by the
 reservation's target, run, or finding association. If attachment publishes a
 finding, the same result and transaction commit its exact posted event; the
 reservation association names that finding and the object kind carries review
-content. Construction and reconstitution reject another same-target reservation.
-The identifier is an opaque canonical provider-wide key. An adapter qualifies a
-repository-scoped host identifier with the canonical repository key before
-constructing it. The store uniquely admits one attachment per reservation and
-one attached provider/kind/object identity per exact target snapshot. The first
-attachment also establishes that object's logical target identity in an
+content. Construction and reconstitution reject an attachment attributed to
+another same-target reservation: an attachment is valid only through its own
+reservation. The identifier is an opaque canonical provider-wide key. An adapter
+qualifies a repository-scoped host identifier with the canonical repository key
+before constructing it. The store uniquely admits one attachment per reservation
+and one attached provider/kind/object identity per exact target snapshot. The
+first attachment also establishes that object's logical target identity in an
 immutable provider/kind/object registry. Attachment admission serializes on that
 canonical object identity before reading or establishing its logical target.
 Another snapshot may attach the same canonical object only when both snapshots
