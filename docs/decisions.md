@@ -32,6 +32,10 @@ provider adapters, and their deep-lifetime tests.
 
 ## 2026-07-24 — Guard provider tool-schema decoding against stack depth
 
+**Status.** Superseded by
+[Retain checked provider JSON as raw text](#2026-07-24--retain-checked-provider-json-as-raw-text),
+which removes the owned runtime-value decode from this bridge.
+
 **Context.** Application tool schemas are valid, object-shaped, and bounded, but
 their contract imposes no nesting limit. The provider bridge must decode them
 into runtime values without reintroducing Serde JSON's default depth cutoff or
