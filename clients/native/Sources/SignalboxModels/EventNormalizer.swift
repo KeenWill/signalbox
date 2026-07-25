@@ -144,6 +144,9 @@ public enum SignalboxEventNormalizer {
                     )
                 )
             case .unknown(let event):
+                guard event.payload["visible_to_user"] != .bool(false) else {
+                    return nil
+                }
                 return .unknown(
                     SignalboxUnknownEventCard(
                         eventID: record.eventID,

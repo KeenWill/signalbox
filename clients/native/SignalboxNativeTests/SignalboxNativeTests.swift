@@ -357,6 +357,41 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
+    func testNormalizerSuppressesHiddenKnownEventThatDegradesToUnknown() throws {
+        let record = try SignalboxJSONCoding.decoder().decode(
+            SignalboxStoredEvent.self,
+            from: Data(
+                """
+                {
+                  "event_id": 1,
+                  "event": {
+                    "kind": "message",
+                    "message": {
+                      "role": "assistant",
+                      "parts": [{"kind": "text", "text": "internal detail"}]
+                    },
+                    "visible_to_llm": true,
+                    "visible_to_user": false,
+                    "is_streaming": false,
+                    "parent_tool_invocation": null,
+                    "created_at": "2026-05-10T12:00:00Z",
+                    "last_modified_at": "2026-05-10T12:00:00Z"
+                  }
+                }
+                """.utf8
+            )
+        )
+
+        guard case .unknown(let degradedEvent) = record.event else {
+            return XCTFail("Expected the evolved known event to degrade")
+        }
+        XCTAssertEqual(
+            degradedEvent.decodingDiagnostic?.message,
+            "Missing required field at event.created_from."
+        )
+        XCTAssertTrue(SignalboxEventNormalizer.normalize([record]).isEmpty)
+    }
+
     func testUnknownStreamFramesDoNotCreateSyntheticEventIDs() async throws {
         let fixtureService = MockSignalboxService()
         let sessions = try await fixtureService.listSessions(archived: false)
