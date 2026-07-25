@@ -62,10 +62,12 @@ confidence values. Confidence is an exact integer count of basis points from
 zero through 10,000. Version one's exact thresholds and ordering are fixed by
 the
 [basis-point policy decision](../decisions.md#2026-07-25--store-review-confidence-as-versioned-basis-point-policy);
-construction enforces both exact version-one thresholds and their ordering. A
-later policy version changes only later runs. Why: stored exact policy data
-makes the reason for unattended judgment and publication reconstructible without
-depending on the executing binary's defaults.
+construction and reconstitution admit only version one and enforce its exact
+thresholds and ordering. An unknown version fails closed until a later recorded
+decision adds its exact tuple; support for that later version changes only later
+runs. Why: stored exact policy data makes the reason for unattended judgment and
+publication reconstructible without depending on the executing binary's
+defaults.
 
 Runs use the closed state machine
 `Queued → Running → {Succeeded, Failed, Blocked, Cancelled}`, with
@@ -89,19 +91,23 @@ is therefore recorded only after its orchestration input has been durably
 accepted; an optional session identifier is not a substitute for execution
 evidence. The accepted input must belong to the pass session; construction,
 persistence, and reconstitution reject a cross-wired pair even when no turn has
-started. A pass may enter `Running` or a post-start terminal state only in the
-same relational transaction that projects its run through the corresponding
-state. A queued pass may be cancelled before start. These aggregates neither
-schedule nor hold the already accepted input; executable admission coordination
-remains part of the deferred application orchestration design.
+started. Its canonical scheduling projection must already classify it as the
+origin of its own queued turn. Pending or consumed steering cannot back a pass;
+a next-safe-point input becomes eligible only after canonical reclassification
+creates its successor origin turn. The turn later named by the pass must be that
+exact origin turn. One accepted input is owned by at most one review pass. A
+pass may enter `Running` or a post-start terminal state only in the same
+relational transaction that projects its run through the corresponding state. A
+queued pass may be cancelled before start. Executable orchestration is not
+implemented; see [Open edges](#open-edges).
 
 Pass state is:
 
 - `Queued`;
 - `Running { turn }`;
-- `Succeeded { turn, output_frontier }`;
+- `Succeeded { turn, output_frontier, result? }`;
 - `Failed { turn }`;
-- `Blocked { turn }`; or
+- `Blocked { turn, result? }`; or
 - `Cancelled { turn? }`.
 
 `Queued` is initial. It may become `Running` or cancel without a turn. `Running`
@@ -125,6 +131,38 @@ never copy model output, tool results, or transcript content into workflow
 state. The session transcript is the execution evidence of record; the pass
 state is the operation outcome of record.
 
+The optional `result` is one closed `ReviewPassResult`:
+
+- `ProducedFindings` carries a canonical identity-ordered inventory of zero
+  through 32 exact finding references. Each names this read-only-review pass as
+  producer; its immutable canonical finding row supplies the content, so the
+  inventory commits the exact identities and content without copying a second
+  content authority.
+- `FindingEvent` names one exact finding, event ordinal, and projected event
+  payload. The payload commits the discriminator and every meaning-bearing
+  value: rejection or blocking reason, referenced finding identity plus its
+  authenticated admission status for duplicate or superseded, or external-link
+  identity for posted.
+- `ExternalLinkAttachment` names the exact reservation and canonical external
+  object key.
+- `ExternalLinkObservation` names the exact reservation, observation ordinal,
+  and observed state.
+
+The result variant must match the pass kind, terminal outcome, and admitted
+effect. `ProducedFindings` belongs only to succeeded read-only review;
+`FindingEvent` follows the finding machine's pass-kind and outcome table;
+`ExternalLinkAttachment` belongs only to succeeded external publication or
+external-context import; and `ExternalLinkObservation` belongs only to succeeded
+external-context import. An effect-producing terminal pass may bind an absent
+result exactly once in the same transaction that admits the complete finding
+inventory, appends the event, attaches the external object, or appends the
+observation. That monotonic binding does not change the pass lifecycle state; a
+bound result is immutable. Equal replay observes the existing effect; no
+distinct later effect may cite that pass. A terminal pass that produced no typed
+effect may retain an absent result; a read-only-review pass that completed its
+output admission binds `ProducedFindings`, including an empty inventory when it
+produced none.
+
 ## Finding machine
 
 A `ReviewFinding` is immutable proposed content owned by one canonically
@@ -137,6 +175,12 @@ head or added side. A file-relative line range needs no base. Its current status
 is derived from an append-only ordered event history rather than a freely
 writable status field. Severity is the closed vocabulary `Info`, `Low`,
 `Medium`, `High`, or `Critical`.
+
+The producing pass's immutable `ProducedFindings` result must contain the
+finding's exact reference, and no other result inventory may contain it.
+Reconstitution validates the complete inventory against all canonical findings
+owned by that pass, so a pass cannot acquire another finding after its result is
+bound.
 
 The initial state is `Open`. The nine-state machine is:
 
@@ -151,43 +195,50 @@ The initial state is `Open`. The nine-state machine is:
 9. `BlockedWithReason`
 
 An open finding may be judged accepted, rejected, duplicate, superseded, or
-stale. Each judgment event names the pass that made it; duplicate and superseded
-additionally name the canonical or successor finding in the same run. Accepted
-findings may be posted, fixed, blocked with a nonempty reason, deduplicated,
-superseded, or made stale. Posted findings may be fixed, blocked, superseded, or
-made stale. Blocked findings may later be fixed, superseded, or made stale; a
-finding blocked by publication may also become posted after reconciliation
-supplies an attached external link not consumed by any earlier posted event for
-that finding. Each posted event consumes its link as publication evidence.
-Rejected, duplicate, superseded, stale, and fixed are terminal. Every event
-carries its owning finding reference, a contiguous one-based ordinal, and a
-same-target pass reference. The event pass's canonical run supplies its workflow
-and the exact `ReviewPolicy` frozen by the finding's producing run, so judgment,
-deduplication, and every later classification remain under one policy even
-though their one-pass workflows use separate run identities. The pass's terminal
-result commits to the event's exact finding, ordinal, and event kind. Event and
-pass kinds are compatible only as follows: accepted, rejected, and stale events
-name a judgment pass; duplicate and superseded events name a deduplication pass;
-posted names an external-publication or external-context-import pass; fixed
-names a finding-repair pass; and blocked-with-reason names either an
+stale. `Accepted` requires the finding's confidence to meet the frozen policy's
+minimum judgment confidence. Each judgment event names the pass that made it;
+duplicate and superseded additionally name the canonical or successor finding in
+the same run. Accepted findings may be posted, fixed, blocked with a nonempty
+reason, deduplicated, superseded, or made stale. Every `Posted` transition
+requires the finding's confidence to meet the frozen policy's minimum
+publication confidence; this foundation defines no override. Posted findings may
+be fixed, blocked, superseded, or made stale. Blocked findings may later be
+fixed, superseded, or made stale; a finding blocked by publication may also
+become posted after reconciliation supplies an attached external link not
+consumed by any earlier posted event for that finding. Each posted event
+consumes its link as publication evidence. Rejected, duplicate, superseded,
+stale, and fixed are terminal. Every event carries its owning finding reference,
+a contiguous one-based ordinal, and a same-target pass reference. The event
+pass's canonical run supplies its workflow and the exact `ReviewPolicy` frozen
+by the finding's producing run, so judgment, deduplication, and every later
+classification remain under one policy even though their one-pass workflows use
+separate run identities. The pass's terminal result commits to the event's exact
+finding, ordinal, and projected payload. Event and pass kinds are compatible
+only as follows: accepted, rejected, and stale events name a judgment pass;
+duplicate and superseded events name a deduplication pass; posted names an
+external-publication or external-context-import pass; fixed names a
+finding-repair pass; and blocked-with-reason names either an
 external-publication or finding-repair pass. Every event except
 blocked-with-reason names a canonically succeeded pass; blocked-with-reason
 names a canonically blocked pass.
 
 Duplicate and superseded events freeze the referenced finding's canonically
 authenticated current status at admission. That status must be `Open` or
-`Accepted`, and the store locks the referenced finding while admitting the
-event. A finding becomes terminal when it acquires either reference, so no later
-reference may point back to it; direct and transitive reference cycles therefore
-fail closed. Reconstitution validates the complete history and fails closed on a
-foreign owner, run-workflow or policy mismatch, gaps, illegal edges,
-incompatible or contradictory pass evidence, an event not named by its pass
-result, self-reference, foreign-run or ineligible finding references, reuse of a
-link consumed by an earlier posted event, or a publication event whose external
-link is not an attached link associated with that finding or whose external
-object kind is not review, review-thread, inline-review-comment, or general
-change-request-comment. A posted event's pass is the attachment's exact
-producing pass (INV-040).
+`Accepted`. The append-only event stores that authenticated status as a durable
+admission fact. The store locks both finding roots in identity order, verifies
+the referenced finding's current history under those locks, and appends the
+fact; later reconstitution validates the frozen fact rather than comparing it
+with a status that may since have advanced. A finding becomes terminal when it
+acquires either reference, so no later reference may point back to it; direct
+and transitive reference cycles therefore fail closed. Reconstitution validates
+the complete history and fails closed on a foreign owner, run-workflow or policy
+mismatch, gaps, illegal edges, incompatible or contradictory pass evidence, an
+event not exactly named by its pass result, self-reference, foreign-run or
+ineligible finding references, reuse of a link consumed by an earlier posted
+event, or a publication event whose external link is not an attached link
+associated with that finding or whose external object kind is not review,
+review-thread, inline-review-comment, or general change-request-comment. A
+posted event's pass is the attachment's exact producing pass (INV-040).
 
 ## External links and posting reservations
 
@@ -197,7 +248,8 @@ commit, review, review thread, inline review comment, and general change-request
 comment. Its immutable reservation row is the aggregate root. The
 caller-selected link identity is also the idempotency key: equal replay returns
 the same reservation, while reusing it for a different association, provider, or
-object kind conflicts.
+object kind conflicts. The reservation provider must equal the canonical
+provider of the target carried by its target, run, or finding association.
 
 External publication uses two durable steps. The reservation commits before the
 external API call. A successful or reconciled call then appends one immutable
@@ -211,9 +263,13 @@ reconstitution reject another same-target reservation. The identifier is an
 opaque canonical provider-wide key. An adapter qualifies a repository-scoped
 host identifier with the canonical repository key before constructing it. The
 store uniquely admits one attachment per reservation and one attached
-provider/kind/object identity per exact target snapshot. A refreshed target may
-attach the same canonical object through its own succeeded import or publication
-pass; it never reuses the old target's reservation. A reservation without an
+provider/kind/object identity per exact target snapshot. The first attachment
+also establishes that object's logical target identity. Another snapshot may
+attach the same canonical object only when both snapshots are change requests
+with the same canonical provider, repository, and positive change-request
+number; their exact revisions may differ. A commit or an unrelated change
+request cannot reassociate the object. Every refreshed snapshot uses its own
+reservation and succeeded import or publication pass. A reservation without an
 attachment is explicitly pending; it is never interpreted as proof that the
 external effect did not occur and is not automatically retried (INV-025,
 INV-026). Read-only import may reserve and attach in one local transaction
@@ -230,12 +286,17 @@ finding status.
 
 ## Store and reconstitution
 
-The PostgreSQL store uses append-only target, run, pass, finding, finding-event,
-external-link reservation, attachment, and observation records. The only mutable
-workflow columns are the current run and pass state projections; their
-evidence-bearing fields change atomically under row lock, and database checks
-close every nullable shape. Immutable content and history tables reject update
-and delete.
+The PostgreSQL store uses append-only target, run, pass, finding,
+pass-result-inventory, finding-event, external-link reservation, attachment, and
+observation records. The pass projection carries a nullable closed result
+discriminator and the exact scalar result payload; produced-finding result
+members are normalized references to the immutable canonical finding rows.
+Deferred relational validation compares their complete canonical
+identity-ordered inventory with every finding owned by that producing pass. The
+only mutable workflow columns are the current run and pass state projections;
+their evidence-bearing fields, including the one-time absent-to-bound result,
+change atomically under row lock, and database checks close every nullable
+shape. Immutable content and history tables reject update and delete.
 
 Store loaders read a complete aggregate projection. The adapter decodes closed
 discriminators and assembles domain reconstitution inputs; the domain validates
@@ -246,20 +307,11 @@ reported as corruption rather than normalized into a plausible aggregate
 
 The first store surface creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, and appends external
-observations. Workflow-facing process protocol, code-host and workspace
-adapters, pass scheduling, model prompts, automated publication, repair, and
-merge-based propagation remain blocked on the
-[review-workflow orchestration design](../open-questions.md#destination-features-target-model).
-That design must choose durable hold or atomic admission/projection semantics
-before an accepted pass input is executable; this foundation does not claim that
-the ordinary session scheduler supplies that coordination.
+observations. Executable orchestration is not implemented.
 
 ## Open edges
 
-- [Review-workflow orchestration](../open-questions.md#destination-features-target-model)
-  owns application commands, executable input admission, scheduling, adapter
-  seams, workflow-facing protocol, prompt contracts, conflict escalation, and
-  stack propagation.
+- [Review-workflow orchestration](../open-questions.md#destination-features-target-model).
 - [Artifacts](../open-questions.md#general-purpose-artifacts) remain a separate
   future aggregate; review workflow rows contain references and evidence, not
   copied general-purpose artifacts.
