@@ -570,6 +570,14 @@ struct SerialProbeExecutor {
     release_first: Arc<tokio::sync::Notify>,
 }
 
+struct FirstExecutionRelease<'a>(&'a SerialProbeExecutor);
+
+impl Drop for FirstExecutionRelease<'_> {
+    fn drop(&mut self) {
+        self.0.release_first();
+    }
+}
+
 impl SerialProbeExecutor {
     fn new() -> Self {
         Self {
@@ -600,6 +608,25 @@ impl SerialProbeExecutor {
             self.first_entered.notified(),
         )
         .await
+    }
+
+    async fn assert_first_only_then_release(
+        &self,
+        expected: &str,
+    ) -> Result<(), tokio::time::error::Elapsed> {
+        let _release = FirstExecutionRelease(self);
+        self.wait_for_first().await?;
+        self.assert_only_event(expected);
+        Ok(())
+    }
+
+    #[track_caller]
+    fn assert_only_event(&self, expected: &str) {
+        assert_eq!(
+            self.events(),
+            vec![expected.to_owned()],
+            "the second executor must not enter while the first remains pending"
+        );
     }
 
     fn release_first(&self) {
@@ -1190,20 +1217,10 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
     fixture
         .decide(requests[1], ToolApprovalDecision::Approve)
         .await?;
-    let (resumed, observed_first) = tokio::join!(execution.resume_active(fixture.session), async {
-        let observed = executor.wait_for_first().await;
-        if observed.is_err() {
-            executor.release_first();
-        }
-        observed?;
-        assert_eq!(
-            executor.events(),
-            vec![String::from("automatic")],
-            "the second executor must not enter while the first remains pending"
-        );
-        executor.release_first();
-        Ok::<(), tokio::time::error::Elapsed>(())
-    });
+    let (resumed, observed_first) = tokio::join!(
+        execution.resume_active(fixture.session),
+        executor.assert_first_only_then_release("automatic")
+    );
     observed_first?;
     resumed?;
 
@@ -1414,12 +1431,13 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
     Ok(())
 }
 
-/// S06 / INV-005 / INV-024: losing a dispatched external-effect
-/// attempt never retries it; startup idempotently classifies exact ambiguity
-/// without projecting a result or close, and parks the turn for owner recovery.
+/// S06 / INV-005 / INV-024 / INV-025 / INV-026 / INV-034: losing a dispatched
+/// external-effect attempt never retries it; startup idempotently classifies
+/// exact ambiguity without projecting a result or close, and parks the turn for
+/// owner recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
+async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
@@ -1427,20 +1445,45 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
         ToolPermissionDefault::Auto,
         ToolEffectClass::ExternalEffect,
     )]);
-    let crashing = RecordingExecutor::losing_process();
+    let crashing = SerialProbeExecutor::new();
     let (first_execution, _runtime) = fixture.execution(
         [tool_use_script(&[("external_effect", "{}")])],
         tool_catalog.clone(),
         crashing.clone(),
     );
-    let first = first_execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await;
-    assert!(
-        first.is_err(),
-        "fixture process loss must escape orchestration"
-    );
+    let activated = fixture.activated.clone();
+    let abandoned_execution = tokio::spawn(async move {
+        let _result = first_execution.execute(Box::new(activated)).await;
+    });
+    crashing.wait_for_first().await?;
     assert_eq!(crashing.events(), vec![String::from("external_effect")]);
+    abandoned_execution.abort();
+    let process_loss = abandoned_execution
+        .await
+        .expect_err("the fixture process is terminated during executor work");
+    assert!(
+        process_loss.is_cancelled(),
+        "aborting the orchestration task models loss of same-process authority"
+    );
+    let abandoned: (String, Option<String>, String) = sqlx::query_as(
+        "SELECT attempt.state_kind, attempt.terminal_disposition_kind,
+                lifecycle.active_phase_kind
+           FROM tool_attempt AS attempt
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = attempt.session_id
+            AND lifecycle.turn_id = attempt.turn_id
+          WHERE attempt.session_id = $1
+            AND attempt.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        abandoned,
+        (String::from("in_flight"), None, String::from("running")),
+        "startup receives the genuinely abandoned physical attempt"
+    );
 
     let mut startup = StartupScanService::new(
         UuidV7StartupScanIdGenerator,
