@@ -10,7 +10,17 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from check_docs_consistency import github_slug, run_checks
+from check_docs_consistency import Violation, github_slug, run_checks
+
+
+def failure_categories(failures: list[Violation]) -> list[str]:
+    """Project deterministic failure categories outside test bodies."""
+    return [failure.category for failure in failures]
+
+
+def failure_messages(failures: list[Violation]) -> list[str]:
+    """Project deterministic failure messages outside test bodies."""
+    return [failure.message for failure in failures]
 
 
 class DocsConsistencyTests(unittest.TestCase):
@@ -72,6 +82,21 @@ class DocsConsistencyTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_failure_projection_helpers(self) -> None:
+        failures = [
+            Violation("a.md", 1, "first-category", "first message"),
+            Violation("b.md", 2, "second-category", "second message"),
+        ]
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["first-category", "second-category"],
+        )
+        self.assertEqual(
+            failure_messages(failures),
+            ["first message", "second message"],
+        )
+
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
@@ -88,7 +113,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["invariant-citation"],
         )
         self.assertIn("cited file does not exist", failures[0].message)
@@ -107,7 +132,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["invariant-test"],
         )
         self.assertIn("`missing_test`", failures[0].message)
@@ -126,7 +151,26 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
+            ["invariant-test"],
+        )
+        self.assertIn("`missing_test`", failures[0].message)
+
+    def test_named_test_behind_shortcut_reference_must_appear(self) -> None:
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "tests `missing_test` in [tests]. |\n\n"
+            "[tests]: ../src/tests.rs\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
             ["invariant-test"],
         )
         self.assertIn("`missing_test`", failures[0].message)
@@ -145,7 +189,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["invariant-test"],
         )
         self.assertIn("`missing_test`", failures[0].message)
@@ -164,7 +208,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["invariant-test"],
         )
         self.assertIn("`missing_test`", failures[0].message)
@@ -187,7 +231,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["invariant-test", "invariant-test"],
         )
         self.assertIn("`missing_one`", failures[0].message)
@@ -219,7 +263,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("anchor `#not-a-heading`", failures[0].message)
@@ -233,7 +277,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("escapes the repository", failures[0].message)
@@ -249,7 +293,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("`missing.md`", failures[0].message)
@@ -263,7 +307,24 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
+
+    def test_block_quote_reference_definition_target_is_checked(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "> [Missing][ref]\n"
+            ">\n"
+            "> [ref]: missing.md\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("`missing.md`", failures[0].message)
@@ -285,7 +346,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("`missing.md`", failures[0].message)
@@ -301,7 +362,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("`missing.png`", failures[0].message)
@@ -319,6 +380,22 @@ class DocsConsistencyTests(unittest.TestCase):
         )
 
         self.assertEqual(run_checks(self.root), [])
+
+    def test_invalid_backtick_fence_does_not_hide_link(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "``` bad`info\n"
+            "[Missing](missing.md)\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["relative-link"],
+        )
+        self.assertIn("`missing.md`", failures[0].message)
 
     def test_block_quote_indented_code_does_not_expose_links(self) -> None:
         (self.root / "AGENTS.md").write_text(
@@ -341,10 +418,34 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(run_checks(self.root), [])
 
+    def test_all_literal_raw_html_block_forms_hide_links(self) -> None:
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n"
+            "<textarea>\n[Textarea](missing-textarea.md)\n</textarea>\n\n"
+            "<!--\n[Comment](missing-comment.md)\n-->\n\n"
+            "<?instruction\n[Processing](missing-processing.md)\n?>\n\n"
+            "<!DECLARATION\n[Declaration](missing-declaration.md)\n>\n\n"
+            "<![CDATA[\n[Cdata](missing-cdata.md)\n]]>\n\n"
+            "<table>\n[Table](missing-table.md)\n</table>\n\n"
+            "<x-widget>\n[Custom](missing-custom.md)\n\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_destination_unescapes_all_ascii_punctuation(self) -> None:
         (self.root / "foo~bar.md").write_text("# Target\n", encoding="utf-8")
         (self.root / "AGENTS.md").write_text(
             "# Agent guidance\n\n[Target](foo\\~bar.md)\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_destination_decodes_html_character_references(self) -> None:
+        (self.root / "foo&bar.md").write_text("# Target\n", encoding="utf-8")
+        (self.root / "AGENTS.md").write_text(
+            "# Agent guidance\n\n[Target](foo&amp;bar.md)\n",
             encoding="utf-8",
         )
 
@@ -360,7 +461,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["relative-link"],
         )
         self.assertIn("`missing.md`", failures[0].message)
@@ -437,7 +538,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["decision-order"],
         )
         self.assertIn("newer than the preceding", failures[0].message)
@@ -451,10 +552,30 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["decision-order"],
         )
         self.assertIn("invalid ISO date", failures[0].message)
+
+    def test_setext_h2_decision_entry_is_rejected(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-24 — Old\n\n"
+            "2026-07-26 — New\n"
+            "----------------\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["decision-order"],
+        )
+        self.assertIn(
+            "Setext H2 headings are not permitted",
+            failures[0].message,
+        )
 
     def test_missing_and_malformed_verification_refs_are_reported(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
@@ -468,13 +589,12 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification", "spec-verification"],
         )
-        self.assertTrue(
-            any("positive decimal" in failure.message for failure in failures)
-        )
-        self.assertTrue(any("missing" in failure.message for failure in failures))
+        messages = "\n".join(failure_messages(failures))
+        self.assertIn("positive decimal", messages)
+        self.assertIn("missing", messages)
 
     def test_verification_ref_requires_closed_branch_token(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
@@ -488,7 +608,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification", "spec-verification"],
         )
 
@@ -504,7 +624,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification", "spec-verification"],
         )
 
@@ -520,7 +640,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification", "spec-verification"],
         )
 
@@ -536,7 +656,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification", "spec-verification"],
         )
 
@@ -552,7 +672,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
@@ -570,7 +690,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
@@ -623,7 +743,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
@@ -640,7 +760,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
@@ -655,7 +775,7 @@ class DocsConsistencyTests(unittest.TestCase):
         failures = run_checks(self.root)
 
         self.assertEqual(
-            [failure.category for failure in failures],
+            failure_categories(failures),
             ["spec-verification"],
         )
         self.assertEqual(

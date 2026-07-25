@@ -38,7 +38,7 @@ SPEC_DIR = Path("docs/spec")
 
 ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$")
 SETEXT_HEADING = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+FENCE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 AUTOLINK = re.compile(
     r"<((?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*|"
     r"[^<>\s@]+@[^<>\s@]+))>"
@@ -47,17 +47,41 @@ HEADING_CONTAINER = re.compile(
     r"^ {0,3}(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+)"
 )
 BLOCK_QUOTE_CONTAINER = re.compile(r"^ {0,3}>[ \t]?")
-RAW_HTML_BLOCK_OPEN = re.compile(
-    r"^ {0,3}<(?P<tag>pre|script|style)(?:[ \t\r\n>]|$)",
+RAW_HTML_LITERAL_OPEN = re.compile(
+    r"^ {0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t\r\n>]|$)",
     re.IGNORECASE,
+)
+RAW_HTML_BLOCK_TAG = re.compile(
+    r"^ {0,3}</?(?:"
+    r"address|article|aside|base|basefont|blockquote|body|caption|center|col|"
+    r"colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+    r"footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|"
+    r"link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|"
+    r"section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+    r")(?:[ \t\r\n/>]|$)",
+    re.IGNORECASE,
+)
+RAW_HTML_COMPLETE_TAG = re.compile(
+    r"""^[ ]{0,3}(?:
+        </[A-Za-z][A-Za-z0-9-]*[ \t]*>
+        |
+        <[A-Za-z][A-Za-z0-9-]*
+        (?:
+            [ \t\r\n]+[A-Za-z_:][A-Za-z0-9_.:-]*
+            (?:
+                [ \t\r\n]*=[ \t\r\n]*
+                (?:[^ "'=<>`]+|'[^']*'|"[^"]*")
+            )?
+        )*
+        [ \t\r\n]*/?>
+    )[ \t]*(?:\r?\n)?$""",
+    re.VERBOSE,
 )
 REFERENCE_LABEL = r"(?:\\[^\r\n]|[^\]\\\r\n])+"
 REFERENCE_DEFINITION = re.compile(
-    rf"(?m)^ {{0,3}}\[({REFERENCE_LABEL})\]:[ \t]*"
-    r"(?:\r?\n[ \t]+)?(?:<([^>\n]*)>|(\S+))"
-)
-REFERENCE_LINK = re.compile(
-    rf"\[({REFERENCE_LABEL})\]\[((?:\\[^\r\n]|[^\]\\\r\n])*)\]"
+    rf"(?m)^[ \t]*\[(?P<label>{REFERENCE_LABEL})\]:[ \t]*"
+    r"(?:\r?\n[ \t]+)?"
+    r"(?:<(?P<angled_destination>[^>\n]*)>|(?P<destination>\S+))"
 )
 LIST_ITEM = re.compile(
     r"^(?P<indent>[ \t]*)(?:[-+*]|\d+[.)])(?P<spacing>[ \t]+)"
@@ -87,7 +111,7 @@ TEST_GROUP = re.compile(
     r"`[A-Za-z_][A-Za-z0-9_:]*`)*"
     r")"
     r"[ \t]+in[ \t]+"
-    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\]))",
+    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\])?)",
     re.IGNORECASE,
 )
 TEST_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_:]*$")
@@ -99,7 +123,7 @@ NATURAL_TEST_BINDING = re.compile(
     r"`(?P<after>[A-Za-z_][A-Za-z0-9_:]*)`"
     r")"
     r"[ \t]+in[ \t]+"
-    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\]))",
+    r"(?P<link>\[[^\]\n]+\](?:\([^)]+\)|\[[^\]\n]*\])?)",
     re.IGNORECASE,
 )
 
@@ -153,6 +177,23 @@ def strip_block_quote_containers(line: str) -> str:
         line = line[match.end() :]
 
 
+def mask_block_quote_prefixes(text: str) -> str:
+    """Replace repeated block-quote prefixes while preserving source offsets."""
+    buffer = list(text)
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        consumed = 0
+        while True:
+            match = BLOCK_QUOTE_CONTAINER.match(line[consumed:])
+            if match is None:
+                break
+            end = consumed + match.end()
+            mask_range(buffer, offset + consumed, offset + end)
+            consumed = end
+        offset += len(line)
+    return "".join(buffer)
+
+
 def mask_fenced_code(text: str) -> str:
     """Replace fenced code with spaces while preserving offsets and lines."""
     buffer = list(text)
@@ -163,8 +204,12 @@ def mask_fenced_code(text: str) -> str:
         container_content = strip_heading_containers(line)
         match = FENCE.match(container_content)
         if fence_char is None and match:
-            fence_char = match.group(1)[0]
-            fence_length = len(match.group(1))
+            fence = match.group("fence")
+            if fence[0] == "`" and "`" in container_content[match.end() :]:
+                offset += len(line)
+                continue
+            fence_char = fence[0]
+            fence_length = len(fence)
             mask_range(buffer, offset, offset + len(line))
         elif fence_char is not None:
             mask_range(buffer, offset, offset + len(line))
@@ -254,27 +299,53 @@ def mask_html_comments(text: str) -> str:
 
 
 def mask_raw_html_blocks(text: str) -> str:
-    """Replace literal pre/script/style blocks while preserving source lines."""
+    """Replace CommonMark literal HTML blocks while preserving source lines."""
     buffer = list(text)
     offset = 0
-    raw_tag: str | None = None
+    terminator: re.Pattern[str] | None = None
+    blank_terminated = False
+    previous_blank = True
     for line in text.splitlines(keepends=True):
         container_content = strip_heading_containers(line)
-        opening = (
-            RAW_HTML_BLOCK_OPEN.match(container_content)
-            if raw_tag is None
-            else None
-        )
-        if opening is not None:
-            raw_tag = opening.group("tag")
-        if raw_tag is not None:
+        blank = not container_content.strip()
+
+        if blank_terminated and blank:
+            blank_terminated = False
+        elif blank_terminated:
             mask_range(buffer, offset, offset + len(line))
-            if re.search(
-                rf"</{re.escape(raw_tag)}[ \t\r\n]*>",
-                container_content,
-                re.IGNORECASE,
+        elif terminator is not None:
+            mask_range(buffer, offset, offset + len(line))
+            if terminator.search(container_content):
+                terminator = None
+        else:
+            opening = RAW_HTML_LITERAL_OPEN.match(container_content)
+            if opening is not None:
+                tag = opening.group("tag")
+                terminator = re.compile(
+                    rf"</{re.escape(tag)}[ \t\r\n]*>",
+                    re.IGNORECASE,
+                )
+            elif re.match(r"^ {0,3}<\?", container_content):
+                terminator = re.compile(r"\?>")
+            elif re.match(r"^ {0,3}<![A-Z]", container_content):
+                terminator = re.compile(r">")
+            elif re.match(r"^ {0,3}<!\[CDATA\[", container_content):
+                terminator = re.compile(r"\]\]>")
+            elif RAW_HTML_BLOCK_TAG.match(container_content):
+                blank_terminated = True
+            elif previous_blank and RAW_HTML_COMPLETE_TAG.match(
+                container_content
             ):
-                raw_tag = None
+                blank_terminated = True
+
+            if terminator is not None or blank_terminated:
+                mask_range(buffer, offset, offset + len(line))
+                if terminator is not None and terminator.search(
+                    container_content
+                ):
+                    terminator = None
+
+        previous_blank = blank
         offset += len(line)
     return "".join(buffer)
 
@@ -531,12 +602,15 @@ def normalize_reference_label(label: str) -> str:
 def reference_definitions(text: str) -> dict[str, MarkdownLink]:
     """Return the first non-footnote definition for each reference label."""
     definitions: dict[str, MarkdownLink] = {}
-    for match in REFERENCE_DEFINITION.finditer(text):
-        label = match.group(1)
+    reference_text = mask_block_quote_prefixes(text)
+    for match in REFERENCE_DEFINITION.finditer(reference_text):
+        label = match.group("label")
         if label.lstrip().startswith("^"):
             continue
         destination = (
-            match.group(2) if match.group(2) is not None else match.group(3)
+            match.group("angled_destination")
+            if match.group("angled_destination") is not None
+            else match.group("destination")
         )
         normalized = normalize_reference_label(label)
         definitions.setdefault(
@@ -553,22 +627,48 @@ def reference_definitions(text: str) -> dict[str, MarkdownLink]:
 def extract_reference_links(
     text: str, definitions: dict[str, MarkdownLink]
 ) -> list[MarkdownLink]:
-    """Resolve full/collapsed reference links through known definitions."""
+    """Resolve full, collapsed, and shortcut links through known definitions."""
     links: list[MarkdownLink] = []
-    for match in REFERENCE_LINK.finditer(text):
-        if is_escaped(text, match.start()):
+    index = 0
+    while index < len(text):
+        if text[index] != "[" or is_escaped(text, index):
+            index += 1
             continue
-        reference_label = match.group(2) or match.group(1)
+        if index and text[index - 1] == "!" and not is_escaped(text, index - 1):
+            index += 1
+            continue
+
+        label_end = find_closing_bracket(text, index)
+        if label_end is None:
+            index += 1
+            continue
+        label = text[index + 1 : label_end]
+        reference_label = label
+        end = label_end + 1
+        if end < len(text) and text[end] == "(":
+            index = end + 1
+            continue
+        if end < len(text) and text[end] == "[":
+            reference_end = find_closing_bracket(text, end)
+            if reference_end is None:
+                index = end + 1
+                continue
+            reference_label = text[end + 1 : reference_end] or label
+            end = reference_end + 1
+        elif end < len(text) and text[end] == ":":
+            index = end + 1
+            continue
+
         definition = definitions.get(normalize_reference_label(reference_label))
-        if definition is None:
-            continue
-        links.append(
-            MarkdownLink(
-                label=match.group(1),
-                destination=definition.destination,
-                offset=definition.offset,
+        if definition is not None:
+            links.append(
+                MarkdownLink(
+                    label=label,
+                    destination=definition.destination,
+                    offset=definition.offset,
+                )
             )
-        )
+        index = end
     return links
 
 
@@ -583,15 +683,18 @@ def extract_resolved_links(
 def extract_markdown_links(text: str) -> list[MarkdownLink]:
     """Return inline links and reference-definition destinations."""
     links = extract_inline_links(text)
-    for match in REFERENCE_DEFINITION.finditer(text):
-        if match.group(1).lstrip().startswith("^"):
+    reference_text = mask_block_quote_prefixes(text)
+    for match in REFERENCE_DEFINITION.finditer(reference_text):
+        if match.group("label").lstrip().startswith("^"):
             continue
         destination = (
-            match.group(2) if match.group(2) is not None else match.group(3)
+            match.group("angled_destination")
+            if match.group("angled_destination") is not None
+            else match.group("destination")
         )
         links.append(
             MarkdownLink(
-                label=match.group(1),
+                label=match.group("label"),
                 destination=destination,
                 offset=match.start(),
             )
@@ -609,7 +712,7 @@ def markdown_sources(root: Path) -> list[Path]:
 
 def split_destination(destination: str) -> tuple[str, str] | None:
     """Return decoded path/fragment for a relative destination, else None."""
-    destination = unescape_markdown_punctuation(destination)
+    destination = html.unescape(unescape_markdown_punctuation(destination))
     parsed = urlsplit(destination)
     if parsed.scheme or parsed.netloc or destination.startswith(("/", "//")):
         return None
@@ -948,11 +1051,29 @@ def check_relative_links(
 def check_decision_order(root: Path) -> list[Violation]:
     source = root / DECISIONS
     text = mask_block_content(source.read_text(encoding="utf-8"))
+    lines = text.splitlines()
     violations: list[Violation] = []
     previous: tuple[date, int] | None = None
     entries = 0
 
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(lines, start=1):
+        if (
+            number < len(lines)
+            and line.strip()
+            and ATX_HEADING.match(line) is None
+            and re.match(r"^ {0,3}-+[ \t]*$", lines[number])
+        ):
+            entries += 1
+            violations.append(
+                Violation(
+                    DECISIONS.as_posix(),
+                    number,
+                    "decision-order",
+                    "entry heading must be `## YYYY-MM-DD — <title>`; "
+                    "Setext H2 headings are not permitted",
+                )
+            )
+            continue
         if not re.match(r"^##(?!#)(?:[ \t]|$)", line):
             continue
         entries += 1
