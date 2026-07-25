@@ -875,7 +875,6 @@ mod tests {
             usage: TokenUsage::unreported(),
         })
     }
-
     /// S10 / INV-002 / INV-005: one provider response and its ordered result
     /// batch remain grouped, while malformed arguments use replay-safe JSON
     /// without replacing their exact durable request evidence.
@@ -884,6 +883,8 @@ mod tests {
         let first = request(20, "{}");
         let malformed = request(21, "{\"timezone\":");
         let scalar = request(22, "7");
+        let deep_arguments = format!("{}0{}", r#"{"nested":"#.repeat(512), "}".repeat(512));
+        let deep = request(23, &deep_arguments);
         let messages = [
             signalbox_application::ModelConversationMessage::Assistant {
                 source: source(30),
@@ -909,6 +910,11 @@ mod tests {
                 source: source(34),
                 producing_call: call(),
                 request: scalar.clone(),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(38),
+                producing_call: call(),
+                request: deep.clone(),
             },
             signalbox_application::ModelConversationMessage::Assistant {
                 source: source(35),
@@ -944,7 +950,7 @@ mod tests {
             rendered[0].role,
             signalbox_model_runtime::ConversationRole::Assistant
         );
-        assert_eq!(rendered[0].parts.len(), 6);
+        assert_eq!(rendered[0].parts.len(), 7);
         for part in [&rendered[0].parts[2], &rendered[0].parts[4]] {
             let signalbox_model_runtime::MessagePart::ToolCall(replayed) = part else {
                 panic!("invalid proposal remains in the assistant group");
@@ -956,6 +962,11 @@ mod tests {
         }
         assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
         assert_eq!(scalar.arguments().as_str(), "7");
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed_deep) = &rendered[0].parts[5]
+        else {
+            panic!("deep valid proposal remains in the assistant group");
+        };
+        assert_eq!(replayed_deep.arguments_json, deep_arguments);
         assert_eq!(
             rendered[1].role,
             signalbox_model_runtime::ConversationRole::User
@@ -1206,6 +1217,18 @@ mod tests {
             })],
             usage: TokenUsage::unreported(),
         });
+        let nul_arguments = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("current_time"),
+                arguments_json: String::from("{\"zone\":\"UTC\\u0000\"}\0"),
+            })],
+            usage: TokenUsage::unreported(),
+        });
         let mismatched_finish = TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
@@ -1221,6 +1244,7 @@ mod tests {
 
         assert_invalid_tool_proposal_closes(invalid_name);
         assert_invalid_tool_proposal_closes(oversized_arguments);
+        assert_invalid_tool_proposal_closes(nul_arguments);
         assert_invalid_tool_proposal_closes(mismatched_finish);
     }
 

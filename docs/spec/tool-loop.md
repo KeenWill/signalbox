@@ -34,10 +34,12 @@ hyphen. `NormalizedToolArguments` has two closed arms. `Json` stores a decoded
 JSON value as compact text with object keys in lexical order; `Undecodable`
 stores the exact bounded UTF-8 text emitted by the provider adapter after that
 adapter applies its preparation-time credential scrub when JSON decoding fails.
-Both arms must fit within 1 MiB before and after normalization. This preserves
-malformed arguments as bounded, identity-safe evidence without pretending they
-are JSON. An undecodable value, or valid JSON that does not decode against the
-selected tool's argument type, becomes a typed execution error later.
+Undecodable text must also exclude U+0000, mirroring the result-content
+admission. Both arms must fit within 1 MiB before and after normalization. This
+preserves malformed arguments as bounded, identity-safe evidence without
+pretending they are JSON. An undecodable value, or valid JSON that does not
+decode against the selected tool's argument type, becomes a typed execution
+error later.
 
 The same transaction that classifies the producing call `Completed` appends one
 `AssistantText` or `AssistantToolUse { producing_call, request }` semantic entry
@@ -144,14 +146,15 @@ provider call is in flight therefore cannot upgrade a proposal from `Confirm` to
 unattended execution.
 
 The registry is advisory input to policy and execution, never request-content
-authority. A model may propose an unknown name; fail-closed policy requires
-confirmation, and an approved unknown request produces a typed `UnknownTool`
-error without invoking an executor. Because the attempt schema requires a closed
-effect class, preparation records `EffectFree` as a non-dispatching sentinel
-when no declaration exists. The preflight transaction closes that attempt before
-authorization and before the executor boundary; the sentinel is not a claim that
-an unknown tool is safe to run. A declaration added or removed after the request
-was recorded does not rewrite its name or arguments.
+authority. A model may propose an unknown name; absent a frozen `ApproveAll`
+blanket, fail-closed policy requires confirmation, and an approved unknown
+request produces a typed `UnknownTool` error without invoking an executor.
+Because the attempt schema requires a closed effect class, preparation records
+`EffectFree` as a non-dispatching sentinel when no declaration exists. The
+preflight transaction closes that attempt before authorization and before the
+executor boundary; the sentinel is not a claim that an unknown tool is safe to
+run. A declaration added or removed after the request was recorded does not
+rewrite its name or arguments.
 
 Effect class controls crash classification, not permission identity. A
 crash-lost prepared attempt, or an in-flight attempt declared `EffectFree`,
@@ -193,8 +196,10 @@ execution and continuation. For each next approved request:
    attempt. A stale or duplicate result cannot advance logical state (INV-011,
    INV-021). The row moves monotonically to `Completed`, `KnownFailed`, or
    `Ambiguous` and never reopens. An `Ambiguous` result atomically ends the
-   issuing turn attempt as yielded-to-durable-wait and moves the lifecycle to
-   `awaiting_tool_recovery` correlated with that exact attempt.
+   issuing turn attempt as `WithoutStop(Ambiguous)` and moves the lifecycle to
+   `awaiting_tool_recovery` correlated with that exact attempt. The logical
+   orchestration has yielded to a durable wait; the stored attempt disposition
+   remains the exact physical ambiguity classification.
 
 If the authorization commit acknowledgement is ambiguous, execution does not
 begin from the returned error. While retaining the dispatch gate and exact
@@ -246,12 +251,12 @@ fabricating a model call or an execution result (INV-005, INV-006, INV-025,
 INV-029, INV-037).
 
 The schema independently enforces no live tool attempt while the lifecycle is
-`awaiting_approval`, at most one nonterminal tool attempt per turn, immutable
-attempt authorization facts, insert-as-`prepared`, the permitted monotonic
-transition matrix, and terminal immutability. A later concurrent-executor
-migration can relax exactly the one-live-attempt guard and substitute a fan-out
-/ join strategy behind the same ports; the all-resolved continuation barrier
-does not change.
+`awaiting_tool_approval`, at most one nonterminal tool attempt per turn,
+immutable attempt authorization facts, insert-as-`prepared`, the permitted
+monotonic transition matrix, and terminal immutability. A later
+concurrent-executor migration can relax exactly the one-live-attempt guard and
+substitute a fan-out / join strategy behind the same ports; the all-resolved
+continuation barrier does not change.
 
 ## Result authority and the continuation boundary
 
@@ -270,9 +275,9 @@ Semantic tool-result entries contain references only:
 - `ToolExecutionResult { attempt }` references executed success/error evidence;
 - `ToolDenied { request }` references the request's durable denial; and
 - `ToolClosed { request }` references a request closed because its turn ended
-  before it could complete ordinary execution, whether it remained undecided,
-  was approved but not yet attempted, or owned an unsent checkpoint classified
-  crash-lost by the interrupt boundary.
+  before it could complete ordinary execution, whether it remained undecided or
+  was approved but not yet attempted. A crash-lost attempt has durable
+  `KnownFailed` evidence and therefore uses `ToolExecutionResult`.
 
 No result entry copies output, error detail, or denial reason. Attempt evidence
 commits as soon as execution ends, independently of semantic projection. Once
@@ -300,23 +305,28 @@ preserving the existing staged-call discipline. If the call completes with
 another tool batch the loop repeats in the same turn; if it proposes no tools,
 its assistant text and `TurnCompleted` marker terminalize the turn.
 
-At most 32 provider rounds in one turn may complete with tool requests. The
-application counts distinct producing calls for the current turn, so every
-multi-request batch counts once and inherited tool history from earlier turns
-does not count. After the thirty-second batch resolves, the ordinary
+At most 32 requests may appear in one completed provider tool response. A
+response with a thirty-third request closes the producing model call as
+`KnownFailed` without creating a partial batch, request record, or tool-use
+entry. At most 32 provider rounds in one turn may complete with admitted tool
+requests. The application counts distinct producing calls for the current turn,
+so every multi-request batch counts once and inherited tool history from earlier
+turns does not count. After the thirty-second batch resolves, the ordinary
 continuation transaction still projects all results and creates its fresh
 `Prepared` call; model execution closes that checkpoint as `KnownFailed` before
 provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. This durable-content bound avoids wall-clock policy and
-ensures a model-controlled chain cannot retain the progressing slot forever.
+fails the turn honestly. These durable-content bounds avoid wall-clock policy
+and ensure one model-controlled response or chain cannot retain the progressing
+slot indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
 that did not complete ordinary execution as `ToolClosed` in proposal order, then
 appends the proof-bearing terminal marker. A prepared or effect-free crash loss
 that fails the turn uses that same proposal-ordered materialization before
-`TurnFailed`; its crash-lost request and every other request without an ordinary
-result become `ToolClosed`. A request can therefore never remain an open logical
+`TurnFailed`; the crash-lost `KnownFailed` attempt becomes
+`ToolExecutionResult`, while every other request without an ordinary result
+becomes `ToolClosed`. A request can therefore never remain an open logical
 dependency behind a terminal turn (INV-006).
 
 ## Approval waits and restart
@@ -342,12 +352,15 @@ depend on process-local wake memory.
 Running phases use the staged tool-attempt crash classification above; parked
 external-effect ambiguity is never automatically retried. Version one permits
 only proof-bearing interruption to terminalize that wait as reconciliation
-required; resolving evidence and accepted-risk continuation remain open. When
-restart observes a running batch whose requests are already durably resolved and
-which has no current turn attempt or continuation call, it reports that batch as
-resumable work. The next scheduler pass performs the ordinary atomic result
-projection and continuation preparation instead of failing the turn or waiting
-for process-local wake state.
+required; resolving evidence and accepted-risk continuation remain open. Restart
+requires the running batch's exact continuation turn attempt to remain current:
+`Prepared` after a final decision or a denial-only batch, and `Running` after
+physical execution began. With no live model call, a batch is resumable when it
+has no current tool attempt and either has an approved request not yet attempted
+or has durably resolved every request. The next scheduler pass performs the
+ordinary next-attempt or atomic result-projection-and-continuation transaction
+instead of failing the turn or waiting for process-local wake state. Restart
+never requires the current continuation attempt to disappear.
 
 ## Provider bridge and `current_time`
 
@@ -377,9 +390,10 @@ its reason, and terminal closure selects `closed_by_turn_end` with null detail.
 OpenAI carries that JSON as ordinary tool-message content because its wire shape
 has no failure flag; Anthropic also receives the provider-neutral failure flag.
 Malformed proposal arguments remain exact after preparation-time credential
-scrubbing on the durable request but replay as an object-shaped
-invalid-arguments placeholder, allowing the paired typed error result to reach
-either provider without pretending the placeholder is durable evidence.
+scrubbing on the durable request but replay as the exact provider-neutral JSON
+object `{"signalbox_invalid_arguments":true}`, allowing the paired typed error
+result to reach either provider without pretending the placeholder is durable
+evidence.
 
 The first compiled tool is `current_time`:
 

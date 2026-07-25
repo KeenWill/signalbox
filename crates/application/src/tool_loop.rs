@@ -1260,11 +1260,10 @@ mod tests {
 
     use super::*;
     use signalbox_domain::{
-        ResolvedContextFrontierReconstitutionInput, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
-        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration,
-        ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ResolvedContextFrontierReconstitutionInput, ToolApprovalResolutionReconstitutionInput,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDecisionSource,
+        ToolDispatchGeneration, ToolRequestOrdinal, ToolRequestReconstitutionInput,
     };
     use uuid::Uuid;
 
@@ -1311,13 +1310,9 @@ mod tests {
         let request = request(arguments);
         let attempt_id = ToolAttemptId::from_uuid(Uuid::from_u128(6));
         let turn_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(5));
-        let approval = ToolApprovalResolutionReconstitutionInput::new(
-            request.id(),
-            ToolApprovalDecision::Approve,
-            ToolDecisionSource::PolicyAuto,
-        )
-        .reconstitute()
-        .expect("implemented policy provenance reconstitutes");
+        let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+            .reconstitute()
+            .expect("implemented policy provenance reconstitutes");
         let attempt = ToolAttemptReconstitutionInput::new(
             attempt_id,
             request.id(),
@@ -1328,7 +1323,8 @@ mod tests {
             ToolDispatchGeneration::first(),
             ToolAttemptReconstitutionState::Prepared,
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("prepared attempt fixture reconstitutes");
         let snapshot = ResolvedContextFrontierReconstitutionInput::new(
             request.session(),
             signalbox_domain::ContextFrontierId::from_uuid(Uuid::from_u128(7)),

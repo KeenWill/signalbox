@@ -2534,6 +2534,7 @@ version = "0.0.0"
 dependencies = [
  "rustix",
  "signalbox-application",
+ "signalbox-conversation-import-claude-code",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",

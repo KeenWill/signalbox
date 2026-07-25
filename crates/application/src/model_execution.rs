@@ -745,12 +745,12 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     /// Generates a distinct context-frontier candidate.
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
-    /// Generates a distinct reclassified successor-turn candidate.
-    fn next_turn_id(&mut self) -> TurnId;
     /// Generates a distinct logical tool-request candidate.
     fn next_tool_request_id(&mut self) -> ToolRequestId;
-    /// Generates a distinct same-turn continuation attempt candidate.
-    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId;
+    /// Generates a distinct same-turn continuation-attempt candidate.
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId;
+    /// Generates a distinct reclassified successor-turn candidate.
+    fn next_turn_id(&mut self) -> TurnId;
 }
 
 /// Production UUIDv7 generator for model-call execution candidates.
@@ -770,16 +770,16 @@ impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
 
-    fn next_turn_id(&mut self) -> TurnId {
-        TurnId::from_uuid(uuid::Uuid::now_v7())
-    }
-
     fn next_tool_request_id(&mut self) -> ToolRequestId {
         ToolRequestId::from_uuid(uuid::Uuid::now_v7())
     }
 
-    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
         TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_turn_id(&mut self) -> TurnId {
+        TurnId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -1576,11 +1576,11 @@ where
                 let mut stopped = Vec::with_capacity(response.parts().len());
                 let mut every_request_approved = true;
                 for part in response.parts() {
-                    let entry = self.ids.next_semantic_entry_id();
                     match part {
                         AssistantResponsePart::Text(_) => {
-                            continuing.push(ToolResponsePartIdentity::text(entry));
-                            stopped.push(StoppedToolResponsePartIdentity::text(entry));
+                            continuing.push(ToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
                         }
                         AssistantResponsePart::ToolCall(_) => {
                             // A retained-policy count mismatch is an internal
@@ -1593,21 +1593,33 @@ where
                                 .unwrap_or(InitialToolApproval::Confirm);
                             approval_index += 1;
                             every_request_approved &= approval != InitialToolApproval::Confirm;
-                            let request = self.ids.next_tool_request_id();
                             continuing.push(ToolResponsePartIdentity::tool_call(
-                                entry, request, approval,
-                            ));
-                            stopped.push(StoppedToolResponsePartIdentity::tool_call(
-                                entry,
-                                request,
                                 self.ids.next_semantic_entry_id(),
+                                self.ids.next_tool_request_id(),
+                                approval,
                             ));
                         }
                     }
                 }
                 debug_assert_eq!(approval_index, tool_approvals.len());
                 let continuation_attempt =
-                    every_request_approved.then(|| self.ids.next_tool_continuation_attempt_id());
+                    every_request_approved.then(|| self.ids.next_turn_attempt_id());
+                for part in response.parts() {
+                    match part {
+                        AssistantResponsePart::Text(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::text(
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                        AssistantResponsePart::ToolCall(_) => {
+                            stopped.push(StoppedToolResponsePartIdentity::tool_call(
+                                self.ids.next_semantic_entry_id(),
+                                self.ids.next_tool_request_id(),
+                                self.ids.next_semantic_entry_id(),
+                            ));
+                        }
+                    }
+                }
                 return ModelCallTerminalIdentityCandidates::ToolRound {
                     continuing: ToolRoundModelCallIdentities::new(
                         continuing,
@@ -1745,6 +1757,7 @@ pub struct ScriptedModelCallProvider {
     capability_preparation_count: usize,
     interaction_count: usize,
     last_prepared_messages: Option<Box<[ModelConversationMessage]>>,
+    last_prepared_tools: Option<Box<[ToolDefinition]>>,
 }
 
 impl ScriptedModelCallProvider {
@@ -1759,6 +1772,7 @@ impl ScriptedModelCallProvider {
             capability_preparation_count: 0,
             interaction_count: 0,
             last_prepared_messages: None,
+            last_prepared_tools: None,
         }
     }
 
@@ -1782,6 +1796,12 @@ impl ScriptedModelCallProvider {
     pub fn last_prepared_messages(&self) -> Option<&[ModelConversationMessage]> {
         self.last_prepared_messages.as_deref()
     }
+
+    /// Borrows the exact catalog snapshot most recently presented for
+    /// capability preparation.
+    pub fn last_prepared_tools(&self) -> Option<&[ToolDefinition]> {
+        self.last_prepared_tools.as_deref()
+    }
 }
 
 impl ModelCallProvider for ScriptedModelCallProvider {
@@ -1799,6 +1819,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
         drop(cancellation);
         self.capability_preparation_count += 1;
         self.last_prepared_messages = Some(operation.messages().to_vec().into_boxed_slice());
+        self.last_prepared_tools = Some(operation.tools().to_vec().into_boxed_slice());
         let step = self.steps.front().cloned();
         if matches!(
             &step,
@@ -1893,8 +1914,8 @@ mod tests {
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, Actor,
-        DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenModelSelection,
-        ImportedMessageContentAbsence, ModelCallExecutionReconstitutionInput,
+        DecideToolRequest, DeliveryRequest, DirectModelSelection, DurableCommandId,
+        FrozenModelSelection, ImportedMessageContentAbsence, ModelCallExecutionReconstitutionInput,
         ModelCallOriginContent, ModelCallReconstitutionInput, ModelCallReconstitutionState,
         ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
         NormalizedToolArguments, PerInputConfigurationChoices,
@@ -1903,9 +1924,9 @@ mod tests {
         SessionCreationProvenance, SessionInputPosition, SessionReconstitutionInput, SubmitInput,
         SubmitInputReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
-        ToolAttemptReconstitutionState, ToolDecisionSource, ToolDispatchGeneration,
-        ToolEffectClass, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        ToolResultText, TranscriptAncestry,
+        ToolAttemptReconstitutionState, ToolDispatchGeneration, ToolEffectClass, ToolName,
+        ToolPermissionDefault, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultText,
+        TranscriptAncestry,
     };
     use uuid::Uuid;
 
@@ -2166,9 +2187,9 @@ mod tests {
         calls: VecDeque<ModelCallId>,
         entries: VecDeque<SemanticTranscriptEntryId>,
         frontiers: VecDeque<ContextFrontierId>,
+        requests: VecDeque<ToolRequestId>,
+        attempts: VecDeque<TurnAttemptId>,
         turns: VecDeque<TurnId>,
-        tool_requests: VecDeque<ToolRequestId>,
-        tool_attempts: VecDeque<TurnAttemptId>,
     }
 
     impl FixedIds {
@@ -2183,14 +2204,14 @@ mod tests {
                 frontiers: (40..50)
                     .map(|value| identity(value, ContextFrontierId::from_uuid))
                     .collect(),
-                turns: (50..60)
-                    .map(|value| identity(value, TurnId::from_uuid))
-                    .collect(),
-                tool_requests: (60..70)
+                requests: (60..70)
                     .map(|value| identity(value, ToolRequestId::from_uuid))
                     .collect(),
-                tool_attempts: (70..80)
+                attempts: (70..80)
                     .map(|value| identity(value, TurnAttemptId::from_uuid))
+                    .collect(),
+                turns: (50..60)
+                    .map(|value| identity(value, TurnId::from_uuid))
                     .collect(),
             }
         }
@@ -2211,20 +2232,16 @@ mod tests {
                 .expect("fixture frontier identity")
         }
 
+        fn next_tool_request_id(&mut self) -> ToolRequestId {
+            self.requests.pop_front().expect("fixture request identity")
+        }
+
+        fn next_turn_attempt_id(&mut self) -> TurnAttemptId {
+            self.attempts.pop_front().expect("fixture attempt identity")
+        }
+
         fn next_turn_id(&mut self) -> TurnId {
             self.turns.pop_front().expect("fixture turn identity")
-        }
-
-        fn next_tool_request_id(&mut self) -> ToolRequestId {
-            self.tool_requests
-                .pop_front()
-                .expect("fixture tool request identity")
-        }
-
-        fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId {
-            self.tool_attempts
-                .pop_front()
-                .expect("fixture tool continuation attempt identity")
         }
     }
 
@@ -2720,7 +2737,7 @@ mod tests {
 
         let ModelCallTerminalIdentityCandidates::ToolRound {
             continuing,
-            stopped: _,
+            stopped,
         } = service.next_terminal_identities(&observation, &approvals)
         else {
             panic!("tool response requires both race-safe closures");
@@ -2740,8 +2757,31 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].1, InitialToolApproval::PolicyAuto);
         assert_eq!(requests[1].1, InitialToolApproval::Confirm);
+        assert_eq!(
+            stopped,
+            StoppedToolRoundModelCallIdentities::new(
+                vec![
+                    StoppedToolResponsePartIdentity::text(identity(
+                        33,
+                        SemanticTranscriptEntryId::from_uuid,
+                    )),
+                    StoppedToolResponsePartIdentity::tool_call(
+                        identity(34, SemanticTranscriptEntryId::from_uuid),
+                        identity(62, ToolRequestId::from_uuid),
+                        identity(35, SemanticTranscriptEntryId::from_uuid),
+                    ),
+                    StoppedToolResponsePartIdentity::tool_call(
+                        identity(36, SemanticTranscriptEntryId::from_uuid),
+                        identity(63, ToolRequestId::from_uuid),
+                        identity(37, SemanticTranscriptEntryId::from_uuid),
+                    ),
+                ],
+                identity(38, SemanticTranscriptEntryId::from_uuid),
+                identity(41, ContextFrontierId::from_uuid),
+            ),
+            "lifecycle-dependent candidates receive a disjoint identity inventory"
+        );
     }
-
     /// S28 / INV-038 / INV-039: attested imported text keeps its exact
     /// source-attested role, semantic source, imported authority, and decoded
     /// text without acquiring a native input or call identity.
@@ -3276,20 +3316,25 @@ mod tests {
                 }),
             )
             .reconstitute()
+            .expect("the first tool dispatch generation is supported")
         else {
             panic!("terminal fixture reconstitutes as ended")
         };
         let denial_reason = ToolDenialReason::try_new(String::from("owner declined"))
             .expect("fixture denial reason is valid");
-        let denial = ToolApprovalResolutionReconstitutionInput::new(
+        let denial_command = DecideToolRequest::try_new(
+            identity(118, DurableCommandId::from_uuid),
             denied_request.id(),
             ToolApprovalDecision::Deny {
                 reason: Some(denial_reason.clone()),
             },
-            ToolDecisionSource::OwnerCommand,
         )
-        .reconstitute()
-        .expect("owner denial provenance is implemented");
+        .expect("the fixture command identity is admitted")
+        .prepare_applied(&denied_request)
+        .expect("the command names the exact request");
+        let denial = ToolApprovalResolutionReconstitutionInput::owner_command(denial_command)
+            .reconstitute()
+            .expect("owner denial provenance is implemented");
         let entries = [
             (
                 completed_use_source,
@@ -3433,6 +3478,7 @@ mod tests {
                 }),
             )
             .reconstitute()
+            .expect("the first tool dispatch generation is supported")
         else {
             panic!("terminal fixture reconstitutes as ended")
         };
@@ -3543,6 +3589,53 @@ mod tests {
         let (_, prepare, _, _, _, provider, ..) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_capability_receives_the_configured_tool_catalog_snapshot() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let definition = crate::ToolDefinition::new(
+            ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            String::from("Returns the current UTC time."),
+            crate::ToolInputSchema::try_new(String::from(
+                r#"{"additionalProperties":false,"properties":{},"type":"object"}"#,
+            ))
+            .expect("fixture schema"),
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        );
+        let catalog = crate::CompiledToolCatalog::try_new([crate::CompiledTool::new(
+            definition.clone(),
+            |_arguments: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("fixture catalog");
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_tool_catalog(catalog);
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("durable cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, _, _, _, _, provider, ..) = service.into_parts();
+        assert_eq!(
+            provider.last_prepared_tools(),
+            Some([definition].as_slice())
+        );
     }
 
     /// docs/spec/model-call-execution.md: a trustworthy capability failure

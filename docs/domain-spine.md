@@ -1725,7 +1725,12 @@ impl FailedTurnExecutionReconstitutionInput {
         interrupt: AppliedInterruptCommandResult,
         ended_call: ModelCallId,
     ) -> Self;
-    // accessors: owning_turn(), ended_attempt(), attempt_end(), ended_call()
+    pub fn with_terminal_tool_attempts(
+        self,
+        terminal_tool_attempts: Vec<EndedToolAttempt>,
+    ) -> Self;
+    // accessors: owning_turn(), ended_attempt(), attempt_end(), ended_call(),
+    // terminal_tool_attempts()
 }
 
 pub struct TerminalAttemptEndReconstitutionInput { /* private */ }
@@ -1747,6 +1752,11 @@ impl CancelledTurnExecutionReconstitutionInput {
         ended_call: Option<ModelCallId>,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub fn with_terminal_tool_attempts(
+        self,
+        terminal_tool_attempts: Vec<EndedToolAttempt>,
+    ) -> Self;
+    // accessor: terminal_tool_attempts()
 }
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
@@ -1766,10 +1776,10 @@ impl ActiveTurnSchedulingReconstitutionInput {
         call: ModelCallId,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
-    pub const fn awaiting_approval(
+    pub fn awaiting_approval(
         owning_turn: TurnId,
-        wait: AwaitingToolApproval,
-    ) -> Self;
+        batch: &ToolBatch,
+    ) -> Option<Self>;
     pub const fn awaiting_tool_recovery(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
@@ -2544,6 +2554,8 @@ impl PreparedSteeringConsumption {
     // accessors: accepted_input(), semantic_entry()
 }
 pub struct PreparedModelCallRequest { /* private */ }
+// accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
+// call(), frontier_entries(), origin_content()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -2835,6 +2847,7 @@ impl NormalizedToolArguments {
 pub enum ToolArgumentsFailure {
     TooLarge { bytes: usize },
     CanonicalTooLarge { bytes: usize },
+    ContainsNull,
     CanonicalizationFailed,
     StoredKindMismatch,
     StoredJsonNotCanonical,
@@ -2934,10 +2947,11 @@ impl ToolApprovalResolution {
 }
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
-    pub const fn new(
+    pub const fn owner_command(command: PreparedDecideToolRequest) -> Self;
+    pub const fn policy_auto(request: ToolRequestId) -> Self;
+    pub const fn session_blanket(
         request: ToolRequestId,
-        decision: ToolApprovalDecision,
-        source: ToolDecisionSource,
+        frozen_posture: DangerousToolAutoApproval,
     ) -> Self;
     pub fn reconstitute(
         self,
@@ -2954,11 +2968,11 @@ pub enum InitialToolApproval {
 pub struct DecideToolRequest { /* private */ }
 // canonical equality and hashing exclude command_id
 impl DecideToolRequest {
-    pub const fn new(
+    pub fn try_new(
         command_id: DurableCommandId,
         request: ToolRequestId,
         decision: ToolApprovalDecision,
-    ) -> Self;
+    ) -> Result<Self, DecideToolRequestConstructionError>;
     pub fn prepare_applied(
         self,
         request: &ToolRequest,
@@ -2971,6 +2985,8 @@ impl DecideToolRequest {
     ) -> PreparedDecideToolRequest;
     // accessors: command_id(), request(), decision()
 }
+pub struct DecideToolRequestConstructionError { /* private */ }
+// accessor: command_id()
 pub enum DecideToolRequestResult {
     Applied(DecideToolRequestAppliedResult),
     Rejected(DecideToolRequestRejectedResult),
@@ -3152,8 +3168,12 @@ impl ToolAttemptReconstitutionInput {
         generation: ToolDispatchGeneration,
         state: ToolAttemptReconstitutionState,
     ) -> Self;
-    pub fn reconstitute(self) -> ReconstitutedToolAttempt;
+    pub fn reconstitute(
+        self,
+    ) -> Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError>;
 }
+pub struct ToolAttemptReconstitutionError { /* private */ }
+// accessors: input(), into_input()
 pub enum ReconstitutedToolAttempt {
     Current(CurrentToolAttempt),
     Ended(EndedToolAttempt),
@@ -3184,6 +3204,7 @@ impl ToolBatchReconstitutionInput {
 }
 pub enum ToolBatchReconstitutionFailure {
     EmptyRequestBatch,
+    TooManyRequests,
     RequestOwnershipMismatch,
     RequestOrderMismatch,
     YieldedSnapshotSessionMismatch,
@@ -3975,9 +3996,9 @@ pub trait ModelCallExecutionIdGenerator {
     fn next_model_call_id(&mut self) -> ModelCallId;
     fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_context_frontier_id(&mut self) -> ContextFrontierId;
-    fn next_turn_id(&mut self) -> TurnId;
     fn next_tool_request_id(&mut self) -> ToolRequestId;
-    fn next_tool_continuation_attempt_id(&mut self) -> TurnAttemptId;
+    fn next_turn_attempt_id(&mut self) -> TurnAttemptId;
+    fn next_turn_id(&mut self) -> TurnId;
 }
 pub struct UuidV7ModelCallExecutionIdGenerator;
 // Default; impl ModelCallExecutionIdGenerator
@@ -4107,7 +4128,7 @@ pub struct ScriptedModelCallProvider { /* private */ }
 impl ScriptedModelCallProvider {
     pub fn new(steps: impl IntoIterator<Item = ScriptedModelCallStep>) -> Self;
     // accessors: capability_preparation_count(), interaction_count(), remaining_step_count(),
-    // last_prepared_messages()
+    // last_prepared_messages(), last_prepared_tools()
 }
 // impl ModelCallProvider
 ```
@@ -4883,14 +4904,14 @@ pub trait ToolExecutionTransaction {
 | domain: model_execution                            | 49                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
-| domain: tool                                       | 37                   |
-| domain: tool_attempt                               | 23                   |
+| domain: tool                                       | 38                   |
+| domain: tool_attempt                               | 24                   |
 | domain: tool_execution                             | 17                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| **signalbox-domain total**                         | **348 (+1 free fn)** |
+| **signalbox-domain total**                         | **350 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
