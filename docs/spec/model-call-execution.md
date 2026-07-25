@@ -196,9 +196,10 @@ that may already be terminal (INV-037).
    failure and commits no provider-failure closure.
 3. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
-   commits `Prepared -> InFlight`; an initial attempt moves
-   `Prepared -> Running`, while a tool-continuation attempt already entered
-   `Running` while executing its tool batch and remains there. The same
+   commits `Prepared -> InFlight`. A `Prepared` owning attempt moves
+   `Prepared -> Running`, whether it is the turn's initial attempt or a
+   denial-only tool continuation. A tool-continuation attempt that already
+   entered `Running` while executing its batch remains there. The same
    transaction appends a `ModelCallTransition` (`InFlight`) outbox event — every
    durable physical transition, not just the terminal one, is externally
    observable atomically with its commit. The gate permit is retained into the
@@ -318,7 +319,7 @@ terminal observation; nothing is inferred from timing or injected I/O errors.
 
 ## Terminal outcomes
 
-`apply_terminal_observation` derives one of six outcomes from fresh state, and
+`apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits it atomically with its outbox rows
 ([persistence-protocol](persistence-protocol.md)):
 

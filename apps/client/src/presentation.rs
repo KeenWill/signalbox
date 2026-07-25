@@ -5,8 +5,7 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
-    ModelCallState, ReconciliationOperation, SessionEvent, ToolBatchState, TranscriptEntry,
-    TranscriptTextEntry, TurnState,
+    ModelCallState, SessionEvent, ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -44,6 +43,7 @@ pub(crate) enum SnapshotSelection {
     ToolReconciliation {
         turn_id: CanonicalUuid,
         tool_attempt_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
     },
 }
 
@@ -282,17 +282,24 @@ impl<'a> Output<'a> {
             ),
             SessionEvent::TurnReconciliationRequired {
                 turn_id,
-                operation,
+                model_call_id,
                 terminal_frontier_id,
-            } => {
-                let (operation_kind, operation_id) = reconciliation_operation(*operation);
-                writeln!(
-                    self.stdout,
-                    "event={cursor} session={session_id} turn_reconciliation_required \
-                     turn={turn_id} operation={operation_kind} operation_id={operation_id} \
-                     frontier={terminal_frontier_id}"
-                )
-            }
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} turn_reconciliation_required \
+                 turn={turn_id} operation=model_call operation_id={model_call_id} \
+                 frontier={terminal_frontier_id}"
+            ),
+            SessionEvent::TurnToolReconciliationRequired {
+                turn_id,
+                tool_attempt_id,
+                terminal_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} turn_tool_reconciliation_required \
+                 turn={turn_id} operation=tool_attempt operation_id={tool_attempt_id} \
+                 frontier={terminal_frontier_id}"
+            ),
         }
     }
 
@@ -442,16 +449,23 @@ impl<'a> Output<'a> {
             TurnState::ReconciliationRequired {
                 terminal_frontier_id,
                 terminal_attempt_id,
-                operation,
-            } => {
-                let (operation_kind, operation_id) = reconciliation_operation(*operation);
-                writeln!(
-                    self.stdout,
-                    "turn={turn_id} position={position} state=reconciliation_required \
-                     frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
-                     operation={operation_kind} operation_id={operation_id}"
-                )
-            }
+                terminal_model_call_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=reconciliation_required \
+                 frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
+                 operation=model_call operation_id={terminal_model_call_id}"
+            ),
+            TurnState::ToolReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_tool_attempt_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=tool_reconciliation_required \
+                 frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
+                 operation=tool_attempt operation_id={terminal_tool_attempt_id}"
+            ),
         }
     }
 
@@ -564,6 +578,8 @@ impl SnapshotSelection {
         let mut results = HashSet::new();
         let mut trailing_results = HashSet::new();
         let mut terminal_results = HashSet::new();
+        let mut reconciliation_call = None;
+        let mut reconciliation_proposals = HashSet::new();
         let mut anchor_found = false;
         for record in snapshot.replay()? {
             let record = record?;
@@ -574,15 +590,16 @@ impl SnapshotSelection {
                         Self::ToolReconciliation {
                             turn_id,
                             tool_attempt_id,
+                            terminal_frontier_id,
                         },
-                        TurnState::ReconciliationRequired {
-                            operation:
-                                ReconciliationOperation::ToolAttempt {
-                                    tool_attempt_id: stored_attempt,
-                                },
+                        TurnState::ToolReconciliationRequired {
+                            terminal_frontier_id: stored_frontier,
+                            terminal_tool_attempt_id: stored_attempt,
                             ..
                         },
-                    ) if turn_id == turn.turn_id && tool_attempt_id == *stored_attempt
+                    ) if turn_id == turn.turn_id
+                        && tool_attempt_id == *stored_attempt
+                        && terminal_frontier_id == *stored_frontier
                 ) {
                     anchor_found = true;
                 }
@@ -604,6 +621,19 @@ impl SnapshotSelection {
                         if matches!(self, Self::ToolBatchProposed { .. }) {
                             anchor_found = true;
                         }
+                    }
+                    if matches!(
+                        self,
+                        Self::ToolReconciliation {
+                            turn_id: selected_turn,
+                            ..
+                        } if selected_turn == *turn_id
+                    ) {
+                        if reconciliation_call != Some(*model_call_id) {
+                            reconciliation_call = Some(*model_call_id);
+                            reconciliation_proposals.clear();
+                        }
+                        reconciliation_proposals.insert(*tool_request_id);
                     }
                 }
                 SnapshotEntryKind::Marker(
@@ -651,9 +681,15 @@ impl SnapshotSelection {
                     requests: terminal_results,
                 })
             }
-            Self::ToolReconciliation { .. } if anchor_found && !trailing_results.is_empty() => {
+            Self::ToolReconciliation { .. }
+                if anchor_found
+                    && !reconciliation_proposals.is_empty()
+                    && reconciliation_proposals
+                        .iter()
+                        .all(|request| results.contains(request)) =>
+            {
                 Ok(SnapshotSelectionContext {
-                    requests: trailing_results,
+                    requests: reconciliation_proposals,
                 })
             }
             Self::ToolBatchProposed { .. } => Err(ClientError::Protocol(
@@ -803,17 +839,6 @@ impl SnapshotSelection {
     }
 }
 
-const fn reconciliation_operation(
-    operation: ReconciliationOperation,
-) -> (&'static str, CanonicalUuid) {
-    match operation {
-        ReconciliationOperation::ModelCall { model_call_id } => ("model_call", model_call_id),
-        ReconciliationOperation::ToolAttempt { tool_attempt_id } => {
-            ("tool_attempt", tool_attempt_id)
-        }
-    }
-}
-
 fn model_call_state(state: ModelCallState) -> &'static str {
     match state {
         ModelCallState::Prepared {} => "prepared",
@@ -865,8 +890,7 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         FailedModelCallDisposition, FailedTerminalModelCall, InputContent, ModelCallState,
-        ReconciliationOperation, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-        TurnState,
+        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
     };
     use uuid::Uuid;
 
@@ -999,6 +1023,94 @@ mod tests {
         assert!(rendered.contains("turn_completed"));
         assert!(!rendered.contains("later reply"));
         assert!(!rendered.contains(&later_turn.to_string()));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn tool_reconciliation_reread_uses_its_terminal_turn_batch() {
+        let selected_turn = wire_uuid(1);
+        let selected_call = wire_uuid(2);
+        let selected_request = wire_uuid(3);
+        let selected_attempt = wire_uuid(4);
+        let selected_frontier = wire_uuid(5);
+        let later_turn = wire_uuid(6);
+        let later_call = wire_uuid(7);
+        let later_request = wire_uuid(8);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [
+                ServerMessage::TranscriptTurn {
+                    turn_id: selected_turn,
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::ToolReconciliationRequired {
+                        terminal_frontier_id: selected_frontier,
+                        terminal_attempt_id: wire_uuid(9),
+                        terminal_tool_attempt_id: selected_attempt,
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(11),
+                    entry: TranscriptEntry::AssistantToolUse {
+                        turn_id: selected_turn,
+                        model_call_id: selected_call,
+                        tool_request_id: selected_request,
+                        tool_name: String::from("selected"),
+                        arguments: String::from("{}"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(12),
+                    entry: TranscriptEntry::ToolClosed {
+                        tool_request_id: selected_request,
+                        content: String::from("selected result"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(2),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(13),
+                    entry: TranscriptEntry::AssistantToolUse {
+                        turn_id: later_turn,
+                        model_call_id: later_call,
+                        tool_request_id: later_request,
+                        tool_name: String::from("later"),
+                        arguments: String::from("{}"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(3),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(14),
+                    entry: TranscriptEntry::ToolClosed {
+                        tool_request_id: later_request,
+                        content: String::from("later result"),
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::ToolReconciliation {
+                    turn_id: selected_turn,
+                    tool_attempt_id: selected_attempt,
+                    terminal_frontier_id: selected_frontier,
+                },
+            )
+            .expect("the exact terminal tool batch renders");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains("selected result"));
+        assert!(!rendered.contains("later result"));
         assert!(stderr.is_empty());
     }
 
@@ -1148,9 +1260,7 @@ mod tests {
         let rendered = render_snapshot_turn(TurnState::ReconciliationRequired {
             terminal_frontier_id: wire_uuid(2),
             terminal_attempt_id: wire_uuid(3),
-            operation: ReconciliationOperation::ModelCall {
-                model_call_id: wire_uuid(4),
-            },
+            terminal_model_call_id: wire_uuid(4),
         });
 
         expect![[r#"
@@ -1191,9 +1301,7 @@ mod tests {
     fn follow_event_renders_reconciliation_required_turn() {
         let rendered = render_event(SessionEvent::TurnReconciliationRequired {
             turn_id: wire_uuid(2),
-            operation: ReconciliationOperation::ModelCall {
-                model_call_id: wire_uuid(3),
-            },
+            model_call_id: wire_uuid(3),
             terminal_frontier_id: wire_uuid(4),
         });
 

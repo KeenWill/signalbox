@@ -465,6 +465,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         listener,
         scheduler_pool.clone(),
         eligibility_nudge,
+        tool_dispatch_gate.clone(),
         model_configuration,
     );
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(

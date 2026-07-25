@@ -142,9 +142,9 @@ pub use submit_input::{
 };
 pub use tool::{
     AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestAppliedResult, DecideToolRequestPreparationError,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, InitialToolApproval,
-    NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecision,
+    DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
+    DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
+    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecision,
     ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
     ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
     ToolArgumentsKind, ToolCallProposal, ToolDecisionSource, ToolDenialReason,
@@ -159,10 +159,10 @@ pub use tool_attempt::{
     CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
     EndedToolAttempt, ReconstitutedToolAttempt, ToolAttemptCrashOutcome,
     ToolAttemptDispatchCorrelation, ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
-    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
-    ToolExecutionErrorKind,
+    ToolAttemptReconstitutionError, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolAttemptTransitionError, ToolAttemptTransitionFailure, ToolDispatchGeneration,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
+    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
 };
 pub use tool_execution::{
     AwaitingToolApproval, AwaitingToolRecovery, PreparedToolAttempt, PreparedToolBatchDecision,

@@ -53,13 +53,16 @@ one finished and awaiting owner merge:
 
 - CI is green on the final commit.
 - Every reviewer comment receives an in-thread reply, never deferred to a later
-  wave: an actionable finding is fixed with the fixing commit named or declined
-  with a stated reason; a question or informational comment is answered
-  in-thread, no disposition recorded. Replies post when the wave's fix commit is
-  pushed, or when the wave concludes without one; outdated threads are resolved
-  at the same time, a replied thread a later fix commit or rebase outdates is
-  resolved then, and a final sweep before declaring the pull request finished
-  confirms no unresolved outdated thread remains.
+  wave. For an accepted finding, push the commit or commits that resolve it,
+  then reply naming the fixing commit or commits. For a declined finding, reply
+  with the reason either immediately or during that pull request's disposition
+  round. Answer a question or informational comment in-thread without recording
+  a disposition. After a wave's fixes are pushed, complete every reply and
+  resolve eligible threads before moving to another pull request, propagating a
+  stack, or requesting another review wave. Resolve outdated threads at the same
+  time; resolve a replied thread when a later fix commit or rebase outdates it.
+  A final sweep before declaring the pull request finished confirms no
+  unresolved outdated thread remains.
 - External reviews are re-requested after a change that could alter what a
   reviewer already approved — code, tests, normative documentation or
   specifications, contract-bearing comments, or claims in the description — not
