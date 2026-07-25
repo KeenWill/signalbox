@@ -264,7 +264,8 @@ impl ReviewWorkflowStore {
                         AS turn_terminal_disposition_kind,
                     canonical_turn.terminal_frontier_id
                         AS turn_terminal_frontier_id,
-                    canonical_run.run_id AS canonical_run_id
+                    canonical_run.run_id AS canonical_run_id,
+                    canonical_run.target_id AS canonical_run_target_id
                FROM review_pass AS workflow_pass
                LEFT JOIN review_run AS canonical_run
                  ON canonical_run.run_id = workflow_pass.run_id
@@ -1246,9 +1247,16 @@ fn reconstitute_pass(
     let accepted_input_session = row
         .try_get::<Option<Uuid>, _>("accepted_input_session_id")?
         .ok_or_else(|| corruption("review_pass", String::from("accepted input row is missing")))?;
+    let workflow_run_id = row
+        .try_get::<Option<Uuid>, _>("canonical_run_id")?
+        .ok_or_else(|| corruption("review_pass", String::from("referenced run row is missing")))?;
+    let workflow_run_target = row
+        .try_get::<Option<Uuid>, _>("canonical_run_target_id")?
+        .ok_or_else(|| corruption("review_pass", String::from("referenced run row is missing")))?;
     ReviewPass::try_reconstitute(ReviewPassReconstitutionInput::new(
         reference,
         decode_pass_kind(&row.try_get::<String, _>("pass_kind")?)?,
+        ReviewRunRef::new(target_id(workflow_run_target), run_id(workflow_run_id)),
         decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
         session_id(row.try_get("pass_session_id")?),
         accepted_input_id(row.try_get("accepted_input_id")?),
