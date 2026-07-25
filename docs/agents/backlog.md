@@ -53,25 +53,30 @@ one provider.
 ## De-hub naming pass [blocked-on: in-flight stacks landing] [size: S-M]
 
 Owns: the `apps/hubd` rename (binary and directory to `signalboxd`) and "hub"
-vocabulary across code, spec prose, and config. Collides-with: everything
-touching `apps/hubd`, so it waits for the current stacks. "Hub" survives only as
-occasional prose metaphor, never as the name of a binary, crate, module, or
-protocol concept. The Swift client's LLMHub-prefixed naming is not this entry's
-job — the native client rewire replaces those names wholesale. Open point
-deferred to the runner-protocol design pass: whether future runner processes are
-the same binary in a different role or a separate `signalbox-runner` binary;
-this entry renames the server only and does not pre-decide that.
+vocabulary across code, spec prose, and config. Collides-with: broad — hub
+vocabulary reaches `crates/process-protocol`, persistence internals, and most
+`docs/spec/` pages, not just `apps/hubd` — so it runs effectively solo and waits
+for the current stacks. "Hub" survives only as occasional prose metaphor, never
+as the name of a binary, crate, module, or protocol concept. The Swift client's
+LLMHub-prefixed naming is not this entry's job — the native client rewire
+replaces those names wholesale. Open point deferred to the runner-protocol
+design pass: whether future runner processes are the same binary in a different
+role or a separate `signalbox-runner` binary; this entry renames the server only
+and does not pre-decide that.
 
 ## Owner-to-user rename [blocked-on: in-flight stacks landing; inventory step] [size: M]
 
 Owns: naming across domain types, spec prose, and client-facing surfaces.
 Collides-with: a broad prose surface, so it pairs with the de-hub pass after the
-board quiets. Rename the platform actor "owner" to "user" everywhere except two
-carve-outs the owner set: (1) process documents where "the owner" means the
-repository owner personally (`AGENTS.md`, `goal-mode.md`, this backlog, the
+board quiets. Rename the platform actor "owner" to "user" everywhere except
+three carve-outs the owner set: (1) process documents where "the owner" means
+the repository owner personally (`AGENTS.md`, `goal-mode.md`, this backlog, the
 decision-log voice); (2) uses meaning ownership in the computer-science sense —
-a row, aggregate, or state machine owning data. Starts with an inventory pass
-classifying every occurrence before any mechanical rename.
+a row, aggregate, or state machine owning data; (3) historical
+`docs/decisions.md` entries — the log is append-only, so past entries keep their
+original actor spellings and the rename is recorded there as a new terminology
+entry, never as edits. Starts with an inventory pass classifying every
+occurrence before any mechanical rename.
 
 ## Conversation import [in-flight] [size: L]
 
@@ -86,12 +91,14 @@ part of the entry's scope.
 
 ## Migration baseline reset [blocked-on: schema-audit verdict; owner checkpoint call] [size: S-M]
 
-Owns: `crates/persistence/migrations` (rewrite to a clean baseline) and
-dev-database recreation notes. Collides-with: any in-flight work carrying a new
-migration. Squash the migration set to a from-scratch baseline embodying the
-correct-choice schema, per the pre-production schema discipline decision; the
-pending schema audit decides scope, and each squash happens only at an
-owner-declared checkpoint.
+Owns: `crates/persistence/migrations` (rewrite to a clean baseline), the
+persistence spec's migration-inventory prose, history-sensitive tests that pin
+migration versions, and dev-database recreation notes. Collides-with: any
+in-flight work carrying a new migration or leaning on migration history. Squash
+the migration set to a from-scratch baseline embodying the correct-choice
+schema, per the pre-production schema discipline decision; the pending schema
+audit decides scope, and each squash happens only at an owner-declared
+checkpoint.
 
 ## Provider transport security [in-flight] [size: M]
 
