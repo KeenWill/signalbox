@@ -447,7 +447,7 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
 /// retained legacy request vocabulary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn inv012_inv033_process_runtime_serves_session_metadata_version_four()
+async fn inv012_inv013_inv033_process_runtime_serves_session_metadata_version_four()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -584,6 +584,7 @@ async fn inv012_inv033_process_runtime_serves_session_metadata_version_four()
         response_within(&mut connection).await?.message(),
         ServerMessage::SessionMetadataSummary {
             session_id,
+            dangerous_tool_auto_approval: false,
             title: Some(title),
             tags,
             archived: false,
@@ -735,6 +736,65 @@ async fn inv012_inv033_process_runtime_serves_session_metadata_version_four()
             detail.value(),
             Some(RejectionDetail::SessionNotFound { session_id }) if session_id == absent
         )
+    ));
+
+    let restored = SessionMetadata::try_new(
+        Some(String::from("Archived plan")),
+        vec![String::from("work"), String::from("daily")],
+        vec![(String::from("run"), String::from("17"))],
+        false,
+    )?;
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            21,
+            ClientRequest::ReplaceSessionMetadata {
+                command_id: command()?,
+                session_id: first_session,
+                metadata: restored.clone(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataReplaced {
+            session_id,
+            metadata,
+            ..
+        } if *session_id == first_session && metadata == &restored
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Four,
+            22,
+            ClientRequest::ListSessionMetadata {
+                required_tags: vec![String::from("daily")],
+                title_contains: Some(String::from("Archived")),
+                include_archived: false,
+                page_size: CanonicalU64::new(10),
+                after_session_id: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageStart {}
+    ));
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataSummary {
+            session_id,
+            archived: false,
+            ..
+        } if *session_id == first_session
+    ));
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::SessionMetadataPageEnd {
+            session_count,
+            next_after_session_id: None,
+        } if session_count.value() == 1
     ));
 
     drop(connection);

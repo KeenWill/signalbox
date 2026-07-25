@@ -18,8 +18,8 @@ use signalbox_application::{
     UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
+    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, DangerousToolAutoApproval,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
     ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
@@ -876,6 +876,10 @@ async fn spool_session_metadata_page(
                 session_id: wire_uuid(item.session().into_uuid()),
                 defaults_version: CanonicalU64::new(item.defaults_version().as_u64()),
                 model_selection: wire_domain_model_selection(item.defaults().model()),
+                dangerous_tool_auto_approval: matches!(
+                    item.defaults().dangerous_tool_auto_approval(),
+                    DangerousToolAutoApproval::ApproveAll
+                ),
                 title,
                 tags,
                 archived: item.archived(),
@@ -1343,7 +1347,7 @@ async fn selected_session_required_protocol_version(
     pool: &PgPool,
     session: SessionId,
 ) -> Result<Option<u64>, ProcessReadError> {
-    if version == ProtocolVersion::Three {
+    if version.as_u64() >= ProtocolVersion::Three.as_u64() {
         return Ok(None);
     }
     let repository = ProcessReadRepository::new(pool.clone());
@@ -2498,7 +2502,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1, 2, 3"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -3013,6 +3017,11 @@ mod tests {
                 .message
                 .contains("version 3")
         );
+        assert!(
+            ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
+                .message
+                .contains("1, 2, 3, 4")
+        );
     }
 
     #[test]
@@ -3039,6 +3048,14 @@ mod tests {
         assert_eq!(
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Three,
+                true,
+                Some(ProcessSessionAncestry::ImportedConversation),
+            ),
+            None
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Four,
                 true,
                 Some(ProcessSessionAncestry::ImportedConversation),
             ),
