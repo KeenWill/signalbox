@@ -10,6 +10,50 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Authenticate review effects with canonical pass outcomes
+
+**Context.** A same-target pass identity and compatible kind do not prove that
+the pass completed the claimed operation. External publication also needs to
+attribute a posted event to the pass that produced the attached object, not
+merely another publication pass for the same target.
+
+**Decision.** Finding production, finding events, external attachments, and
+external observations carry canonical pass evidence and admit only the
+successful or blocked outcomes defined by the
+[review-workflows specification](spec/review-workflows.md). A posted event names
+the attachment's exact producing pass. Reconciled publication may advance a
+publication-blocked finding to posted.
+
+**Rejected alternatives.** Kind-only checks admit failed work as evidence.
+Target-only attachment checks misattribute external effects. Leaving a
+publication-blocked finding terminal contradicts a later authoritative
+attachment.
+
+**Affects.** Review finding and external-link domain values, complete
+reconstitution, and the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Gate review passes through their exact run projection
+
+**Context.** Independently advancing a pass can leave durable work that its run
+never selected. Requiring a running pass to observe only an active session turn,
+however, treats the normal interval after the turn commits its terminal outcome
+as corruption.
+
+**Decision.** A run admits at most one pass, whose kind matches the run's
+workflow. Review run/pass lifecycle changes commit together, while a running
+pass may lag its canonical turn's terminal outcome until reconciliation closes
+the pass. Stack parents are distinct targets in the same provider and repository
+topology.
+
+**Rejected alternatives.** Unrestricted child transitions admit unprojected
+work. Cross-context atomicity with session execution would move the session
+boundary. Rejecting monotonic turn lag makes an ordinary crash window
+unloadable.
+
+**Affects.** Review target topology, run/pass construction and transitions,
+relational constraints, and the
+[review-workflows specification](spec/review-workflows.md).
+
 ## 2026-07-25 — Bind review claims to exact typed evidence
 
 **Context.** Same-target ancestry alone cannot prove that a finding event came
