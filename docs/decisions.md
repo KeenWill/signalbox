@@ -31,29 +31,32 @@ session model without an orchestration design.
 [review-workflows specification](spec/review-workflows.md), and the
 `2026072604xx` persistence slice.
 
-## 2026-07-25 — Bind finding events to pass results and acyclic references
+## 2026-07-25 — Bind review effects to exact pass results
 
-**Context.** A compatible terminal pass does not prove which finding event it
-produced. Duplicate and superseded references also admit a later reverse edge
-unless classification authenticates the referenced finding's state.
+**Context.** A compatible terminal pass does not prove which findings, finding
+event, attachment, or observation it produced. A finding-event discriminator
+alone also omits reasons and referenced identities that change the event's
+meaning. Duplicate and superseded references admit a later reverse edge unless
+classification authenticates the referenced finding's state.
 
-**Decision.** A finding-event pass result commits to the exact finding, ordinal,
-event kind, and every meaning-bearing payload identity or reason. Duplicate and
-superseded events additionally freeze the referenced finding's canonically
-authenticated status at admission, which must be `Open` or `Accepted`. The
-append-only event is the durable admission fact: persistence locks both finding
-roots in identity order, verifies that status, and appends the fact. Because a
-finding becomes terminal when it acquires a reference, no later admitted
-reference can point back to it.
+**Decision.** A terminal pass may bind one absent typed result exactly once in
+the same transaction that admits its effect; a bound result is immutable. A
+read-only result is a canonical identity-ordered inventory of at most 32 exact
+finding references, whose immutable canonical rows supply their content. Event,
+attachment, and observation results commit every meaning-bearing identity,
+ordinal, state, or reason. Duplicate and superseded events freeze the referenced
+finding's canonically authenticated `Open` or `Accepted` status. Persistence
+locks both finding roots in identity order before appending that durable
+admission fact; terminal classification prevents a later reverse edge.
 
 **Rejected alternatives.** Pass kind and outcome alone do not identify an
-effect. Detecting cycles only while loading allows invalid history to commit.
-Requiring a terminal referenced finding makes canonical and successor selection
-ambiguous and still admits reference chains.
+effect. Copying finding content into the result creates a second content
+authority. An unbounded finding inventory has no defensive admission budget.
+Detecting reference cycles only while loading allows invalid history to commit.
 
-**Affects.** Pass outcomes, finding-event admission and reconstitution, the
-[review-workflows specification](spec/review-workflows.md), and the
-`2026072604xx` persistence slice.
+**Affects.** Pass outcomes, finding and external-effect admission,
+reconstitution, the [review-workflows specification](spec/review-workflows.md),
+and the `2026072604xx` persistence slice.
 
 ## 2026-07-25 — Reassociate canonical external objects across target snapshots
 
@@ -63,15 +66,20 @@ from importing an existing review, thread, or comment even though the opaque
 object identity remains canonical.
 
 **Decision.** Adapters continue to construct one canonical provider-wide object
-key. Attachment uniqueness is scoped to the exact target snapshot, so a new
-target may reserve and attach the same object through its own canonically
+key. Attachment uniqueness is scoped to the exact target snapshot. The first
+attachment establishes that object's logical target identity. Another snapshot
+may attach it only when both snapshots are change requests with the same
+canonical provider, repository, and positive change-request number; their frozen
+revisions may differ. Each snapshot uses its own reservation and canonically
 succeeded publication or import pass. One target cannot attach the object
 through two reservations.
 
 **Rejected alternatives.** Global attachment uniqueness strands external state
-on an old snapshot. Reusing the old reservation crosses immutable target
-ancestry. Making the identifier target-relative creates multiple identities for
-one provider object.
+on an old snapshot. Unrestricted per-target uniqueness lets unrelated change
+requests or commits claim one object. Requiring target ancestry confuses review
+stack topology with refresh identity. Reusing the old reservation crosses
+immutable target snapshots. Making the identifier target-relative creates
+multiple identities for one provider object.
 
 **Affects.** External-link attachment persistence, refreshed-target imports, the
 [review-workflows specification](spec/review-workflows.md), and the
@@ -396,15 +404,20 @@ used by an old run nor provide one exact relational representation.
 
 **Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
 integer basis-point thresholds from zero through 10,000. Version one fixes
-exactly 7,000 basis points for judgment and exactly 8,000 for unattended
-publication; the publication threshold may not be lower than the judgment
-threshold. Dedupe and judge passes consume the same frozen run policy.
+exactly 7,000 basis points for judgment and exactly 8,000 for publication; the
+publication threshold may not be lower than the judgment threshold. Dedupe and
+judge passes consume the same frozen run policy. An `Accepted` event requires
+the finding's confidence to meet the judgment threshold; a `Posted` event
+requires it to meet the publication threshold. This foundation defines no
+threshold override.
 
 **Rejected alternatives.** Process-wide defaults make old decisions depend on
 current configuration. Binary floating point admits storage/JSON comparison
 drift. A per-finding threshold copies policy and permits one run to judge its
-findings under inconsistent gates. Hard-coding policy without storing its
-version prevents intentional later evolution.
+findings under inconsistent gates. Recording thresholds without enforcing them
+turns policy into unauthenticated metadata. A hidden override makes
+reconstitution depend on evidence the aggregate does not carry. Hard-coding
+policy without storing its version prevents intentional later evolution.
 
 **Affects.** `ReviewPolicy`, `ReviewConfidence`, run persistence, the
 [review-workflows specification](spec/review-workflows.md), and later judgment,

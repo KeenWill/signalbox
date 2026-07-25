@@ -924,13 +924,16 @@ those tests.
 - **Durable commands:** Freeze a target snapshot and complete policy; create a
   queued run and pass only after the pass input is accepted in its exact session
   and prove that no other review pass owns that input; project the pass from
-  that input's canonical turn; append each proposed finding's own contiguous
-  event history, with each event's full projected payload named by its pass
-  result. Duplicate and superseded events authenticate an open or accepted
-  referenced finding before committing. Publication, when requested by later
-  orchestration, reserves its link under the target's canonical provider before
-  the external call and attaches the canonical provider-wide object identity
-  afterward.
+  that input's canonical turn; bind each effect-producing pass once to its exact
+  bounded finding inventory, complete finding-event payload, attachment, or
+  observation result; and append each proposed finding's own contiguous event
+  history. Duplicate and superseded events authenticate an open or accepted
+  referenced finding before committing. Acceptance and posting enforce the
+  finding's frozen judgment and publication confidence thresholds. Publication,
+  when requested by later orchestration, reserves its link under the target's
+  canonical provider before the external call and attaches the canonical
+  provider-wide object identity afterward. Only a refreshed snapshot of the same
+  canonical change request may reassociate that object.
 - **State transitions:** Follow the closed target, run, pass, finding, and
   external-link machines in the
   [review-workflows specification](spec/review-workflows.md). The S29 fixture
@@ -941,13 +944,13 @@ those tests.
 - **Owning component:** The review-workflow domain validates its projections;
   sessions and turns own execution evidence; Postgres loads and correlates both;
   future orchestration coordinates adapters.
-- **Failure behavior:** A reused or foreign accepted input, turn, pass, finding
-  event, event-result commitment, referenced-finding status, external-link
-  provider, frontier, or lifecycle outcome fails reconstitution as corruption.
-  Finding-reference cycles fail at admission. A pending external reservation
-  does not prove absence of an external effect and is not retried automatically.
-  No transcript content or general-purpose artifact is copied into workflow
-  rows.
+- **Failure behavior:** A reused or foreign accepted input, turn, pass, finding,
+  pass-result commitment, referenced-finding status, external-link provider or
+  logical target, frontier, below-threshold transition, or lifecycle outcome
+  fails reconstitution as corruption. Finding-reference cycles fail at
+  admission. A pending external reservation does not prove absence of an
+  external effect and is not retried automatically. No transcript content or
+  general-purpose artifact is copied into workflow rows.
 - **Required invariants:** INV-002, INV-007, INV-025, INV-026.
 - **Remaining questions:** Application commands, scheduling, prompts,
   automation, repair, and stack propagation remain in
