@@ -7,7 +7,10 @@ in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
 catalog, and the provider bridge in `crates/model-provider-runtime`, together
 with the model-runtime crates it composes
 (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
-`crates/model-runtime-anthropic/src/runtime.rs`). Invariant law lives in
+`crates/model-runtime-anthropic/src/runtime.rs`); the database-channel refusals
+in [process configuration](#process-configuration) were verified through PR #237
+(`agent/fix-pg-env-surface`; `production_connection_options` in
+`crates/persistence/src/lib.rs`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
@@ -25,6 +28,36 @@ environment at startup:
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
+
+`DATABASE_URL` is the whole database configuration channel. The SQLx driver
+would otherwise seed anything the URL omits from the ambient libpq-style `PG*`
+variables — host, port, user, database, TLS material, application name, and
+runtime options, plus `PGPASSWORD` and `PGPASSFILE` as a second credential
+channel — so the production connection path refuses to parse when any of them is
+present in the environment, whatever its value. `SSL_CERT_FILE` and
+`SSL_CERT_DIR` are refused on the same terms: the driver's selected TLS backend
+takes its root certificates only from what those two name whenever either is
+set, and adds an `sslrootcert` the URL states to that set rather than replacing
+it, so a root named by the environment would verify the production server even
+under an explicit root certificate. The driver also falls back to libpq's
+default password file when the URL carries no password and `PGPASSFILE` is
+unset, so the same path refuses when `~/.pgpass` exists under the process home
+directory; presence alone decides and the file is never opened. With those
+closed the driver still completes an incomplete URL from outside it — an omitted
+user name from the process account, an omitted host by probing the local socket
+directories and then `localhost` — so the same path refuses a URL that states
+either nowhere the driver reads it: the authority, or the `user`, `host`, and
+`hostaddr` query parameters. Port and database name stay with the driver and the
+server, which derive them from the URL alone: an omitted port is the fixed 5432,
+and an omitted database name is the user name the URL states. The refusal names
+the offending channel and never its contents, and it happens before any database
+contact. A deployment carries every connection parameter in the URL. The
+separate local test connection path is unchanged and keeps SQLx's behavior; it
+is a development and test channel by intent — the integration suites and
+`signalbox-debug`, which reads its own `SIGNALBOX_DEBUG_DATABASE_URL` — and no
+check confines the URL it is given to a local cluster, so the refusals above are
+what stand between a production cluster and ambient configuration, not that
+path's name.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,
