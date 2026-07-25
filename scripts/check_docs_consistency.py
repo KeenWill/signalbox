@@ -16,6 +16,14 @@ The check is deterministic and offline. It verifies:
 External links, semantic freshness of verification references, and reverse
 discovery of every INV-tagged test are deliberately outside this check. Run
 from any directory; exits nonzero with one stable line per violation.
+
+The input domain is mdformat-canonical Markdown: CI enforces ``mdformat
+--check`` over the same files before this check runs, so shapes that
+canonicalization cannot emit (unbalanced reference-definition destinations,
+inline links split across blocks, semicolonless entity references, raw-HTML
+attribute traps, Setext underlines adjacent to foreign containers) are outside
+the parsing contract. Hardening against non-canonical Markdown is deliberately
+out of scope while that gate holds.
 """
 
 from __future__ import annotations
