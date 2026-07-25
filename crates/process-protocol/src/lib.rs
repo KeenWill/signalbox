@@ -12,7 +12,7 @@ use std::{
 
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
-    de::{MapAccess, Visitor},
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
 use uuid::Uuid;
@@ -523,6 +523,7 @@ impl SessionMetadata {
 struct RawSessionMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     title: Option<String>,
+    #[serde(deserialize_with = "deserialize_session_metadata_tags")]
     tags: Vec<String>,
     attributes: MetadataAttributes,
     archived: bool,
@@ -659,6 +660,65 @@ fn canonical_metadata_tags(
     Ok(tags.into_iter().collect())
 }
 
+struct MetadataTagsVisitor<const MAXIMUM: usize>;
+
+impl<'de, const MAXIMUM: usize> Visitor<'de> for MetadataTagsVisitor<MAXIMUM> {
+    type Value = Vec<String>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "at most {MAXIMUM} exact session metadata tag strings"
+        )
+    }
+
+    fn visit_seq<AccessT>(self, mut sequence: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: SeqAccess<'de>,
+    {
+        let mut tags = Vec::with_capacity(sequence.size_hint().unwrap_or_default().min(MAXIMUM));
+        while tags.len() < MAXIMUM {
+            match sequence.next_element::<String>()? {
+                Some(tag) => tags.push(tag),
+                None => return Ok(tags),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom("too many session metadata tags"));
+        }
+        Ok(tags)
+    }
+}
+
+fn deserialize_bounded_metadata_tags<'de, DeserializerT, const MAXIMUM: usize>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    deserializer.deserialize_seq(MetadataTagsVisitor::<MAXIMUM>)
+}
+
+fn deserialize_session_metadata_tags<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    deserialize_bounded_metadata_tags::<DeserializerT, MAX_SESSION_METADATA_TAGS>(deserializer)
+}
+
+fn deserialize_required_metadata_tags<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    deserialize_bounded_metadata_tags::<DeserializerT, MAX_SESSION_METADATA_REQUIRED_TAGS>(
+        deserializer,
+    )
+}
+
 /// Closed actor provenance carried by a metadata last-writer stamp.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -744,6 +804,7 @@ pub enum ClientRequest {
     /// Read one filtered bounded metadata-summary page.
     ListSessionMetadata {
         /// Exact tags every result must carry.
+        #[serde(deserialize_with = "deserialize_required_metadata_tags")]
         required_tags: Vec<String>,
         /// Optional exact case-sensitive title substring.
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3424,21 +3485,99 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_request_values_fail_before_application_mapping() {
-        for json in [
+    fn inv033_metadata_list_requires_title_query_member() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"include_archived":false,"page_size":"50","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_requires_cursor_member() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"50"}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_duplicate_required_tags() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":["same","same"],"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_empty_title_query() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":"","include_archived":false,"page_size":"50","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_zero_page_size() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"0","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_list_rejects_page_size_over_bound() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"101","after_session_id":null}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_rejects_empty_title() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":"","tags":[],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_requires_title_member() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"tags":[],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_metadata_replacement_rejects_duplicate_tags() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":["same","same"],"attributes":{},"archived":false}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_duplicate_metadata_attribute_member_is_malformed() {
+        assert_client_malformed(
             r#"{"version":4,"request_id":"1","request":{"type":"replace_session_metadata","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000006","metadata":{"title":null,"tags":[],"attributes":{"same":"first","\u0073ame":"second"},"archived":false}}}"#,
-        ] {
-            assert_client_malformed(json);
-        }
+        );
+    }
+
+    #[test]
+    fn metadata_required_tag_deserializer_rejects_member_beyond_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let required_tags = serde_json::to_string(&numbered_metadata_strings(
+            MAX_SESSION_METADATA_REQUIRED_TAGS + 1,
+        ))?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
+        );
+        assert_client_malformed(&json);
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_required_tag_deserializer_accepts_exact_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let required_tags = serde_json::to_string(&numbered_metadata_strings(
+            MAX_SESSION_METADATA_REQUIRED_TAGS,
+        ))?;
+        let json = format!(
+            r#"{{"version":4,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
+        );
+        decode_client_line(&line(&json))?;
+        Ok(())
     }
 
     #[test]
