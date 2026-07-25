@@ -2463,10 +2463,28 @@ dependencies = [
 name = "signalbox-conversation-import-claude-code"
 version = "0.0.0"
 dependencies = [
- "serde_json",
  "signalbox-application",
+ "signalbox-conversation-import-json",
  "signalbox-domain",
  "uuid",
+]
+
+[[package]]
+name = "signalbox-conversation-import-codex"
+version = "0.0.0"
+dependencies = [
+ "signalbox-application",
+ "signalbox-conversation-import-json",
+ "signalbox-domain",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-conversation-import-json"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "signalbox-domain",
 ]
 
 [[package]]
@@ -2492,6 +2510,7 @@ version = "0.0.0"
 dependencies = [
  "rustix",
  "signalbox-application",
+ "signalbox-conversation-import-claude-code",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
@@ -2567,6 +2586,7 @@ dependencies = [
  "rust_decimal",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",
+ "signalbox-conversation-import-codex",
  "signalbox-domain",
  "sqlx",
  "testcontainers-modules",

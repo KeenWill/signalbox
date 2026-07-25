@@ -4,6 +4,8 @@ members = [
     "apps/hubd",
     "crates/application",
     "crates/conversation-import-claude-code",
+    "crates/conversation-import-codex",
+    "crates/conversation-import-json",
     "crates/domain",
     "crates/expect-table",
     "crates/model-runtime",

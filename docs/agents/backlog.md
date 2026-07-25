@@ -236,9 +236,10 @@ native client against it (scripted provider, no real credentials).
 Collides-with: CI config and `apps/hubd` composition. Exercises the
 client-server protocol as CI evidence rather than manual smoke.
 
-## Tool loop foundation [blocked-on: owner design pass] [size: XL]
+## Tool loop foundation [in-flight] [size: XL]
 
-Owner-flagged: the next major milestone — schedule the design pass first.
+Owner-flagged: the next major milestone. The owner design pass completed on
+2026-07-23; implementation is running as a solo turn-side goal session.
 
 Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra

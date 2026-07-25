@@ -46,6 +46,7 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+signalbox-conversation-import-claude-code = { path = "../../crates/conversation-import-claude-code" }
 testcontainers-modules = { version = "0.15.0", default-features = false, features = [
     "postgres",
     "ring",

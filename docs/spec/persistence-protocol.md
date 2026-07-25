@@ -80,7 +80,8 @@ Implemented table families (across the forward-only migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
-  `replace_session_defaults_command`, `submit_input_command`);
+  `replace_session_defaults_command`, `submit_input_command`,
+  `decide_tool_request_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
   `session_current_defaults`, `session_scheduler`;
 - `imported_raw_source_record`, `imported_conversation`,
@@ -93,6 +94,7 @@ Implemented table families (across the forward-only migrations):
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   hub-owned session advisory pool fences;
 - the outbox family (below).
@@ -103,8 +105,9 @@ Representation rules, all enforced in the schema:
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
   implemented sets are exactly the admitted slices: turn state
-  `queued`/`active`/`terminal`, active phase `running` or
-  `awaiting_model_call_recovery`, terminal disposition
+  `queued`/`active`/`terminal`, active phase `running`,
+  `awaiting_model_call_recovery`, `awaiting_tool_approval`, or
+  `awaiting_tool_recovery`, terminal disposition
   `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`, attempt
   state `prepared`/`running`/`stop_requested`/`ended` with end variants
   `without_stop` and `after_cancellation`, and model-call state
@@ -182,15 +185,17 @@ One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
-`submit_input`) and a kind-scoped `storage_version`. Each kind has one typed
-subordinate record keyed by `command_id` that stores every caller-supplied
-semantic field in typed, `CHECK`-constrained columns, plus the terminal
-`applied`/`rejected` result and its typed result fields; result-shape `CHECK`
-constraints tie each rejection kind to exactly its fields, and deferred reverse
-constraints require exactly one typed record per claimed registry row at commit.
-Why: typed per-kind records keep replay semantics reviewable and
-constraint-checked, where a universal serialized payload would make the
-serializer a second semantic authority.
+`submit_input`, `decide_tool_request`) and a kind-scoped `storage_version`.
+Defaults-bearing create/imported-create/replace records write version 2 and
+reconstitute version 1 with the disabled dangerous-tool posture, while submit
+and decision records use version 1. Each kind has one typed subordinate record
+keyed by `command_id` that stores every caller-supplied semantic field in typed,
+`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
+its typed result fields; result-shape `CHECK` constraints tie each rejection
+kind to exactly its fields, and deferred reverse constraints require exactly one
+typed record per claimed registry row at commit. Why: typed per-kind records
+keep replay semantics reviewable and constraint-checked, where a universal
+serialized payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -248,6 +253,17 @@ Locks per transaction, in acquisition order:
   existence is checked with a bare `EXISTS`). The session row is locked only
   `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
   `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+- **Tool-loop transactions** (owner decision, attempt prepare, attempt
+  authorization, preflight failure, result commit, crash classification, result
+  projection plus continuation preparation, and their authoritative rereads):
+  the `session_scheduler` row `FOR UPDATE` is the first and only explicit lock.
+  An unseen decision command first claims the owner-global registry; after
+  resolving the request's owning session it takes that scheduler lock before
+  reading or mutating the active tool batch. A replay resolves entirely from the
+  command registry and receipt and takes no lifecycle lock. Guarded
+  `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call updates then
+  serialize under the scheduler lock; their foreign keys may take implicit
+  `KEY SHARE` locks on parent rows.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
@@ -302,13 +318,13 @@ the active turn's pinned provider target and complete call history, and
 ended attempt and optional `known_failed`/`cancelled` call provenance
 (backfilled and closed by migration `202607220003`). Cancelled and
 reconciliation-required terminal turns additionally supply their exact
-proof-bearing attempt end, applied-interrupt result, and optional cancelled or
-required ambiguous call through the scheduling input described in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). The
-scheduling load proves its own completeness — it counts `queued_input_origin`
-against `turn_lifecycle` and fails on mismatch — rather than trusting whichever
-rows a filter returned. Active-phase, terminal-evidence, and acceptance-tail
-validation semantics are owned by
+proof-bearing attempt end, applied-interrupt result, and optional cancelled call
+or required ambiguous model call/tool attempt through the scheduling input
+described in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+The scheduling load proves its own completeness — it counts
+`queued_input_origin` against `turn_lifecycle` and fails on mismatch — rather
+than trusting whichever rows a filter returned. Active-phase, terminal-evidence,
+and acceptance-tail validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
@@ -416,12 +432,16 @@ protocol scope). Implemented storage:
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `turn_activated_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
-  `turn_reconciliation_required_outbox_event` — with a deferred trigger
-  requiring exactly one typed record per header. The header and typed record
-  tables are append-only (`reject_immutable_record_change`), and every outbox
-  table rejects `TRUNCATE`.
+  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
+  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
+  `turn_cancelled_outbox_event`, and `turn_reconciliation_required_outbox_event`
+  — with a deferred trigger requiring exactly one typed record per header.
+  Tool-batch transition records carry the producing call and exactly one closed
+  state shape: `proposed` names the yielded assistant/tool-use frontier,
+  `results_projected` names the all-resolved result frontier, and
+  `recovery_required` names the exact ambiguous physical attempt. The header and
+  typed record tables are append-only (`reject_immutable_record_change`), and
+  every outbox table rejects `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -444,14 +464,20 @@ applied `SubmitInput` that creates a turn origin appends `input_accepted`, while
 successor turn and appends that correlated `input_accepted`; an applied
 `StartEligibleTurn` appends `turn_activated`. Startup recovery appends
 `turn_failed` for a failed lost turn and `turn_reconciliation_required` when
-stopped issued work becomes ambiguous. Model-call state transitions append
-`model_call_transition`, completion closure appends `turn_completed`, refusal
-closure appends `turn_refused`, and known-failure closure appends `turn_failed`;
-interrupt-confirmed cancellation appends `turn_cancelled`, and live stopped
-ambiguity appends `turn_reconciliation_required`. A guarded transition that
-changes zero rows appends zero events. Why: writing the event in the committing
-transaction makes the dual-write failure (state without event, or event without
-state) unrepresentable.
+stopped issued work becomes ambiguous; terminal reclassification of pending
+steering appends its correlated `input_accepted`. Model-call state transitions
+append `model_call_transition`, tool-round creation appends
+`tool_batch_transition { proposed }`, all-resolved result projection appends
+`tool_batch_transition { results_projected }`, and an external-effect ambiguity
+appends `tool_batch_transition { recovery_required }`. Completion closure
+appends `turn_completed`, refusal closure appends `turn_refused`, and
+known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
+appends `turn_cancelled`, and live stopped ambiguity appends
+`turn_reconciliation_required`; an interrupt against a parked ambiguous tool
+attempt appends the same event kind with that exact tool-attempt reference. A
+guarded transition that changes zero rows appends zero events. Why: writing the
+event in the committing transaction makes the dual-write failure (state without
+event, or event without state) unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a
@@ -467,24 +493,26 @@ terminal attempt; a model-call transition must be reachable from the
 authoritative monotonic call state, with an exact disposition match at terminal;
 and failed, completed, refused, cancelled, and reconciliation-required records
 must agree with the durable turn, terminal frontier, semantic marker where
-present, and terminal model call where present. Historical Prepared and InFlight
-transition records remain dispatchable after their call advances. Exhausted
-delivery still validates the allocator singleton and cursor. Hub task ownership,
-polling, fan-out, and client observation semantics are owned by
-[process-protocol](process-protocol.md).
+present, and terminal model call or tool attempt where present. A
+reconciliation-required event carries exactly one of those two operation
+references. Tool-batch cancellation and known crash-failure records validate
+their terminal marker after the earlier producing model call and ended physical
+attempts rather than requiring an otherwise empty call history. Historical
+Prepared and InFlight transition records remain dispatchable after their call
+advances. Exhausted delivery still validates the allocator singleton and cursor.
+Hub task ownership, polling, fan-out, and client observation semantics are owned
+by [process-protocol](process-protocol.md).
 
 ## Open edges
 
 - Deferred outbox retention, pruning, and multiple-hub fan-out are cataloged in
   [open questions](../open-questions.md#protocols-and-persistence).
-- Attempt continuation is deliberately blocked: a `turn_attempt` with a
-  predecessor is rejected (`turn_attempt_continuation_unavailable`) until
-  durable wait/closure storage exists.
+- Attempt continuation is admitted only for the tool-loop yield/approval path;
+  no other producer can construct a predecessor-linked attempt.
 - Frontier lineage checks admit `none` and checked imported-frontier ancestry;
   native `SingleSource` fork ancestry remains unimplemented.
-- The designed aggregate-map rows for model calls landed (`model_call`, the
-  turn-level target pin, the pinned credential reference); provider evidence,
-  authority transfers, fatal cancellation intent, and tool tables are not yet in
+- The aggregate-map rows for model calls and the tool loop have landed; provider
+  evidence, authority transfers, and fatal cancellation intent are not yet in
   the schema.
 - Command-handling error families implement no `ClassifyOperatorFailure`;
   operator classification covers only startup scan, turn activation, the

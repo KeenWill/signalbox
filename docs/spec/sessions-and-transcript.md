@@ -1,7 +1,6 @@
 # Sessions and the transcript
 
-The baseline session and transcript behavior was verified through PR #175
-(`agent/stop-requests`). This page covers session creation and ancestry,
+This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, the long-lived session aggregate, semantic transcript
 entries, accepted-input user content, and actor attribution. The
@@ -113,8 +112,10 @@ carrying command identity, one addressable `ImportedTranscriptFrontier`, one
 initial defaults. The frontier itself names its `ImportedConversationId` and
 inclusive entry boundary; the command accepts no second independently supplied
 conversation identity. Its structural replay equality excludes only command
-identity. Separating the family preserves storage version 1 and the no-ancestry
-contract of `CreateSession`.
+identity. Separating the family preserves its imported-ancestry contract and
+keeps its replay record distinct from the no-ancestry `CreateSession` family;
+the shared defaults-bearing storage versions are owned by
+[persistence-protocol](persistence-protocol.md).
 
 The relationship records the client's creation-time intent: `Resume` declares a
 new Signalbox continuation from the selected imported point; `Fork` declares a
@@ -192,12 +193,13 @@ identity; neither reconstructs authority by minting another frontier.
 
 ## Session defaults and replacement
 
-Session configuration defaults are model-selection-only in the baseline; the
-selection algebra, configuration freeze at acceptance, and per-turn effective
-configuration are owned by
-[configuration-and-credentials](configuration-and-credentials.md) and
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). Defaults are
-immutable versions with a positive `u64` ordinal:
+Session configuration defaults contain the model-selection request and the
+dangerously named tool blanket
+`DangerousToolAutoApproval::{Disabled, ApproveAll}`. The selection algebra and
+model configuration are owned by
+[configuration-and-credentials](configuration-and-credentials.md); blanket
+semantics and per-turn freeze are owned by [tool-loop](tool-loop.md). Defaults
+are immutable versions with a positive `u64` ordinal:
 
 - session creation establishes version one;
 - each replacement installs the checked successor ordinal as a new immutable row
@@ -304,9 +306,17 @@ and closed:
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
   outcome-authoritative producing-call provenance;
-- `AssistantToolUse { producing_call, request }` — typed, but storage rejects it
-  (`semantic_transcript_entry_tool_use_unavailable`) until the reserved tool
-  decisions land;
+- `AssistantToolUse { producing_call, request }` — one logical request from the
+  completed producing call, with name and arguments resolved through the request
+  record;
+- `ToolExecutionResult { attempt }` — executed success or error evidence owned
+  by the referenced attempt;
+- `ToolDenied { request }` — a denial owned by the referenced request and
+  decision;
+- `ToolClosed { request }` — a request closed by turn end before it completed
+  ordinary execution, including undecided and approved-but-unattempted requests.
+  A crash-lost attempt is terminal `KnownFailed` evidence and uses
+  `ToolExecutionResult`;
 - `Imported { imported_entry, source_speaker, content }` — one exact normalized
   imported content value and its speaker attestation, including source event,
   source-defined message block, message-content absence, text, tool, result,
@@ -319,9 +329,12 @@ and closed:
 There is no generic text, role, metadata, or "other" payload. Entry identity is
 distinct from accepted-input, imported-entry, and turn identity (INV-001); equal
 content in two inputs or imports yields distinct entries. Entry construction is
-sealed inside the domain crate. Native producers remain eligibility and model
-execution; imported-frontier session creation is the only producer of
-`Imported`.
+sealed inside the domain crate — checked constructors are `pub(crate)`.
+`turn_eligibility.rs` produces eligibility and recovery history;
+`model_execution.rs` produces assistant and turn-terminal history;
+imported-frontier session creation is the only producer of `Imported`; and
+sealed tool transitions produce tool-use/result references only through the
+atomic boundaries owned by [tool-loop](tool-loop.md).
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -338,13 +351,14 @@ restricts it to imported-ancestry sessions and the exact selected source prefix,
 and keeps imported entries outside every native subject-identity constraint.
 Migration `202607220001` adds the unique completion marker, `202607220004` adds
 the unique steering entry, and `202607220005` adds the unique cancellation
-marker while widening the corresponding closed payload shapes. The
-origin-disposition guard arrived later: migration
-`202607180005_occupied_slot_submit_input.sql` — the migration that first admits
-the `pending_steering` disposition — replaces the entry/turn-state trigger so an
-origin entry additionally requires its input's `origin_of` disposition
-(constraint `semantic_transcript_entry_origin_disposition`); pending steering
-can never appear as a semantic origin.
+marker. The tool-loop migration adds request/result references while widening
+the corresponding closed payload shapes. The origin-disposition guard arrived
+later: migration `202607180005_occupied_slot_submit_input.sql` — the migration
+that first admits the `pending_steering` disposition — replaces the
+entry/turn-state trigger so an origin entry additionally requires its input's
+`origin_of` disposition (constraint
+`semantic_transcript_entry_origin_disposition`); pending steering can never
+appear as a semantic origin.
 
 ### When entries come to exist
 
@@ -369,7 +383,7 @@ the ordinary `OriginAcceptedInput`; every later native frontier follows the
 existing predecessor-prefix rules (INV-039).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
-before a later call is prepared, the transaction appends one
+before an initial or continuation call is prepared, the transaction appends one
 `SteeringAcceptedInput` per pending input in ascending acceptance position,
 derives one frontier extending the starting frontier for the admitted initial
 call, changes every input to `ConsumedAsSteering { call }`, and inserts that
@@ -378,24 +392,34 @@ roll back together. The entry therefore becomes semantic history only with the
 call that first observes it; the immutable accepted-input row remains the
 content authority.
 
+Tool-use entries become history with the producing call's completed observation;
+tool-result entries become history only at the all-resolved continuation or
+terminal-stop boundary. Request, attempt, and decision records remain the single
+content authorities. Exact ordering and closure rules are owned by
+[tool-loop](tool-loop.md).
+
 Entry/turn-state agreement is a durable schema invariant, not only transactional
 practice. Deferred constraint triggers around
 `assert_turn_lifecycle_final_state` (migration `202607180004`) check every
 commit bidirectionally: a queued turn carries zero origin or failure entries; a
 started turn carries exactly one correlated origin entry, and its starting
 frontier ends with exactly that entry; a failed turn's terminal frontier extends
-its latest call frontier (or starting frontier) by exactly its failure marker; a
+its latest call frontier (or starting frontier) by its exact terminal
+tool-result suffix when one exists and exactly its failure marker last; a
 completed turn's terminal frontier extends its producing call's frontier by the
 call's assistant entries plus exactly its completion marker last; a cancelled
 turn's terminal frontier extends the latest call frontier (or starting frontier)
-with exactly its cancellation marker; and a refused turn's terminal frontier is
-a distinct equal-content copy of its latest call frontier. A
-reconciliation-required turn likewise carries a distinct equal-content terminal
-frontier over its exact ambiguous call, correlated ended attempt, and applied
-interrupt proof. Migration `202607220001` first defined the model-call
-assertion; migrations `202607220004` and `202607220005` widen it for steering
-and stop requests. A writer that diverges from the transactional practice above
-is rejected at the commit boundary.
+by its exact terminal tool-result suffix when one exists and exactly its
+cancellation marker last; and a refused turn's terminal frontier is a distinct
+equal-content copy of its latest call frontier. A reconciliation-required turn
+over a model call likewise carries a distinct equal-content terminal frontier;
+one over a tool attempt extends the producing call's frontier by its exact
+terminal tool-result suffix. Both retain exactly one ambiguous operation plus
+the correlated ended turn attempt and applied interrupt proof. Migration
+`202607220001` first defined the model-call assertion; migrations `202607220004`
+and `202607220005` widen it for steering and stop requests. A writer that
+diverges from the transactional practice above is rejected at the commit
+boundary.
 
 `TurnFailed` now has two producers — the model-call known-failure closure and
 startup recovery — each appending the marker after every earlier committed entry
@@ -496,15 +520,14 @@ open edges of [model-call-execution](model-call-execution.md).
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant-text, completed-turn, steering, and cancelled-turn semantic entries
-  are implemented; the tool-use variant is typed but storage-blocked; refusal,
-  reconciliation, approval, and delegation entry variants remain open.
+- Assistant text, tool-use/result references, completed-turn, steering, and
+  cancelled-turn semantic entries are implemented; refusal, reconciliation,
+  approval-event, and delegation entry variants remain open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
-  record family has since committed at storage version 1 without one, so under
-  the first-acceptance storage freeze later adoption needs a kind-scoped storage
-  version, while the truthful `Owner` backfill that design relies on still
-  exists.
+  record family has since committed storage versions 1 and 2 without one, so
+  later adoption needs another kind-scoped storage version; the truthful `Owner`
+  backfill that design relies on still exists.
 - `CreateSession` actor attribution remains implicit pending an explicit owner
   amendment choice.
 - `Recovery`, `Model`, and `Tool` actor variants have no constructing boundary;
