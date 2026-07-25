@@ -240,12 +240,12 @@ pub struct SessionMetadataLastWriter {
 }
 
 impl SessionMetadataLastWriter {
-    /// Pairs the transaction timestamp with its attributed writer.
+    /// Pairs the post-lock database statement timestamp with its writer.
     pub const fn new(updated_at: SessionMetadataUpdatedAt, actor: Actor) -> Self {
         Self { updated_at, actor }
     }
 
-    /// Returns when the replacement committed.
+    /// Returns the database statement time sampled after the writer lock.
     pub const fn updated_at(self) -> SessionMetadataUpdatedAt {
         self.updated_at
     }
