@@ -267,19 +267,41 @@ the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
 outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
 executors, with replay eligibility conditioned on turn state.
 
-## Session metadata, tags, and visibility [blocked-on: owner design pass] [size: M-L]
+## Session metadata, tags, and visibility [blocked-on: owner commission call] [size: M-L]
 
 Owns: session satellite tables, list projection, additive protocol frames.
-Collides-with: little — parallel-safe against turn machinery. Titles, tags,
-archive/restore, filtered and paginated listing — plus visibility control for
-the automation era: sessions spawned by automations and background work must not
-crowd the interactive default view, while monitor surfaces see everything and
-can hop into any session. A likely simple starting point, to be settled in the
-entry's spec-diff and not here: creation cause and actor attribution already
-distinguish owner-initiated from automation-spawned sessions for free, so the
-interactive default could derive from that attribution with manual tags as an
-override; expressive filter rules stay an open edge. Owner-flagged high priority
-— the daily-driver item.
+Collides-with: the session-creation command surface (the creation-time
+visibility override lands there, where Context assembly's session-defaults stage
+also composes); otherwise little — parallel-safe against turn machinery. Titles,
+tags, archive/restore, filtered and paginated listing — plus visibility control
+for the automation era: sessions spawned by automations and background work must
+not crowd the interactive default view, while monitor surfaces see everything
+and can hop into any session. Owner-flagged high priority — the daily-driver
+item.
+
+Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
+carries the real design and its decision-log entries — direction is set, and the
+owner explicitly gates pickup timing with a commission call): metadata lives in
+satellite tables, not the session aggregate — titles, tags, and archive state
+are organizational, not conversational — with a last-writer audit stamp (updated
+time plus actor) and no aggregate versioning. Accepted cost, stated: no full
+causal history of metadata edits; last-writer suffices for a single-owner
+system. Visibility is derived, not a taxonomy — this settles the entry's earlier
+simple-starting-point sketch in its favor: the derivation rides on creation
+cause and actor attribution rather than a parallel classification. Today only
+the owner-initiated creation cause is constructible and `CreateSession` carries
+no actor (adding one is a recorded owner choice not yet taken), so the default
+view is trivially everything-not-archived until the automation era adds its
+variants; clearing that creation-attribution gate is a named dependency of the
+pickup spec-diff, which also decides what authority may set the override. Once
+the variants exist, the default interactive view is owner-initiated creation
+cause and not archived, automation-spawned sessions sit outside it, monitor
+surfaces see everything, and one nullable creation-time override handles the
+exceptions. Two boring shapes, both: tags (a flat string set, human-facing
+organization, AND-filtering) and attributes (a string-to-string map,
+machine-facing — automations stamping provenance such as a trigger name or run
+id). Keeping them separate is deliberate; map-only would make the human case
+awkward. Expressive filter rules stay an open edge.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 
@@ -324,20 +346,53 @@ sessions natively in the platform — the workflow the owner currently drives
 through external CLI agents — as a first-class session kind. A destination-tier
 feature from the target model that previously had no entry.
 
-## Context assembly pipeline [blocked-on: owner design pass] [size: XL]
+## Context assembly pipeline [blocked-on: in-flight stacks landing; pickup spec-diff] [size: XL]
 
 Owns: the model-facing prompt/context composition seam — default and
 per-use-case system prompts, instruction files, skill/tool description
 injection, and lifecycle transformation points. Collides-with: frontier
-materialization, Compaction, Templates. The organizing idea (owner-stated):
-everything composed into the model call — system prompt, instruction files, tool
-metadata, compaction — is frontier composition, so the plugin interface is typed
-transformations over the structured operation at defined lifecycle points, not
-string-to-string middleware. This is the owning entry that Templates' pending
-"system-prompt configuration category," Compaction's prompts, and
-goal-mode-as-plugin hang off; the design pass decides the stage vocabulary.
-Vendoring stance: openly licensed CLI implementations may be vendored with
-attribution; closed-source clients are reference-only — observe, do not copy.
+materialization, Compaction, Templates, and the session-creation command surface
+— the session-defaults stage composes at creation, shared with Session
+metadata's creation-time visibility override. The organizing idea
+(owner-stated): everything composed into the model call — system prompt,
+instruction files, tool metadata, compaction — is frontier composition, so the
+plugin interface is typed transformations over the structured operation at
+defined lifecycle points, not string-to-string middleware. This is the owning
+entry that Templates' pending "system-prompt configuration category,"
+Compaction's prompts, and goal-mode-as-plugin hang off. Vendoring stance: openly
+licensed CLI implementations may be vendored with attribution; closed-source
+clients are reference-only — observe, do not copy.
+
+Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
+carries the real design and its decision-log entries): composed context follows
+a derivation-with-pinning-plus-observation model, with two stage kinds. Pure
+transforms are typed frontier-to-frontier, or frontier-to-provider-messages at
+render, and deterministic — the call records the stage identity/version vector
+it was rendered under, so attribution is durable and core stages are
+byte-reconstructible. Observer stages may read the world — clock, files,
+external sources — but whatever they contribute is durably recorded before the
+call consumes it. The bright line the owner adopted: if the repo can't re-derive
+it, the store remembers it — core built-in pure stages are pin-only, while
+observer stages and swap-outable third-party plugin stages record their output
+verbatim, so every byte the model saw is either reconstructible or stored.
+Plugin composability is configuration: the pipeline is an ordered list of stage
+bindings, changing config changes future calls only, and recorded history names
+the composition it used. Accepted costs, stated: observer outputs consume
+storage; observers run in the turn's critical path; observation granularity is a
+deliberate policy knob, since per-render observation (e.g. seconds-precision
+time) breaks provider prompt-cache prefixes; and the pure/observer boundary is
+enforced by seam types and review for now, with process isolation for plugins
+later. Initial stage vocabulary — explicitly non-exhaustive and additive:
+session-defaults (system-prompt composition at session creation), turn-open
+(per-turn injection), render (frontier to provider messages); compaction joins
+later as the first rewriting stage, with its own design session. First
+deliverable: system-prompt composition only — base, per-use-case, and
+instruction-file contributions with a defined merge order, declarative config,
+no plugin runtime yet; the typed seam is the deliverable. Later layers, in no
+committed order: compaction as a rewriting stage; observer stages with
+freshness/TTL policies; the plugin isolation runtime; goal-mode-as-plugin (the
+goal-mode entry above stays the owning entry for that); per-session pipeline
+overrides; cache-aware stage placement.
 
 ## Durable session tasks [blocked-on: owner design pass] [size: M]
 
