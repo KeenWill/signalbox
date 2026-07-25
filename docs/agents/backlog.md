@@ -267,7 +267,7 @@ the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
 outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
 executors, with replay eligibility conditioned on turn state.
 
-## Session metadata, tags, and visibility [blocked-on: owner commission call] [size: M-L]
+## Session metadata, tags, and visibility [in-flight] [size: M-L]
 
 Owns: session satellite tables, list projection, additive protocol frames.
 Collides-with: the session-creation command surface (the creation-time
@@ -279,29 +279,14 @@ not crowd the interactive default view, while monitor surfaces see everything
 and can hop into any session. Owner-flagged high priority — the daily-driver
 item.
 
-Owner direction, 2026-07-25 (orientation only; the pickup spec-diff still
-carries the real design and its decision-log entries — direction is set, and the
-owner explicitly gates pickup timing with a commission call): metadata lives in
-satellite tables, not the session aggregate — titles, tags, and archive state
-are organizational, not conversational — with a last-writer audit stamp (updated
-time plus actor) and no aggregate versioning. Accepted cost, stated: no full
-causal history of metadata edits; last-writer suffices for a single-owner
-system. Visibility is derived, not a taxonomy — this settles the entry's earlier
-simple-starting-point sketch in its favor: the derivation rides on creation
-cause and actor attribution rather than a parallel classification. Today only
-the owner-initiated creation cause is constructible and `CreateSession` carries
-no actor (adding one is a recorded owner choice not yet taken), so the default
-view is trivially everything-not-archived until the automation era adds its
-variants; clearing that creation-attribution gate is a named dependency of the
-pickup spec-diff, which also decides what authority may set the override. Once
-the variants exist, the default interactive view is owner-initiated creation
-cause and not archived, automation-spawned sessions sit outside it, monitor
-surfaces see everything, and one nullable creation-time override handles the
-exceptions. Two boring shapes, both: tags (a flat string set, human-facing
-organization, AND-filtering) and attributes (a string-to-string map,
-machine-facing — automations stamping provenance such as a trigger name or run
-id). Keeping them separate is deliberate; map-only would make the human case
-awkward. Expressive filter rules stay an open edge.
+The owner commissioned the pickup on 2026-07-25. The bottom specification diff
+and its decision-log entries govern the implementation:
+[sessions-and-transcript](../spec/sessions-and-transcript.md#session-metadata-and-list-projection)
+owns the metadata and listing contract,
+[process-protocol](../spec/process-protocol.md) owns the additive wire surface,
+and
+[open-questions.md](../open-questions.md#session-organization-visibility-and-retention)
+owns deferred visibility and filter design.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 

@@ -541,8 +541,9 @@ async fn insert_prepared(
         .map_err(|_| ImportedSessionCorruption::Inconsistent("seed member count"))?;
     sqlx::query(
         "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id, member_count)
-         VALUES ($1, $2, $3)",
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, NULL, $3)",
     )
     .bind(session_id_to_uuid(seed_context.owning_session()))
     .bind(seed_context.snapshot().into_uuid())
@@ -558,7 +559,7 @@ async fn insert_prepared(
                 "seed member position",
             ))?;
         sqlx::query(
-            "INSERT INTO context_frontier_member
+            "INSERT INTO context_frontier_delta
                 (owning_session_id, context_frontier_id, member_position,
                  source_session_id, semantic_entry_id)
              VALUES ($1, $2, $3, $4, $5)",
@@ -899,9 +900,10 @@ async fn load_seed_projection(
          LEFT JOIN context_frontier AS frontier
            ON frontier.owning_session_id = seed.session_id
           AND frontier.context_frontier_id = seed.seed_context_frontier_id
-         LEFT JOIN context_frontier_member AS member
-           ON member.owning_session_id = frontier.owning_session_id
-          AND member.context_frontier_id = frontier.context_frontier_id
+         LEFT JOIN LATERAL resolve_context_frontier_members(
+            frontier.owning_session_id,
+            frontier.context_frontier_id
+         ) AS member ON true
          WHERE seed.session_id = $1
          ORDER BY member.member_position",
     )

@@ -170,6 +170,38 @@ async fn postgres_before_codex_format()
     Ok((container, pool, database_url))
 }
 
+async fn postgres_before_frontier_prefixes()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202607260300)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool))
+}
+
 #[derive(Clone, Copy)]
 /// Named behavior facts returned by the plumbing-only resume fixture.
 ///
@@ -335,7 +367,7 @@ async fn insert_exact_seed_members(
     facts: ImportedSeedFacts,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES
@@ -348,6 +380,123 @@ async fn insert_exact_seed_members(
     .bind(facts.semantic_prefix[1])
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+/// INV-015: the forward migration preserves two distinct equal-content
+/// identities and both exact ordered sequences while replacing their repeated
+/// complete rows with one immutable physical prefix.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres_before_frontier_prefixes().await?;
+    let second_frontier = Uuid::from_u128(0x7000_0000_0000_4000_8000_0000_0000_0040);
+    let mut transaction = pool.begin().await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES
+            ($1, $2, 1, $1, $3),
+            ($1, $2, 2, $1, $4)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .bind(seed.semantic_prefix[0])
+    .bind(seed.semantic_prefix[1])
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 2)",
+    )
+    .bind(seed.session)
+    .bind(second_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES
+            ($1, $2, 1, $1, $3),
+            ($1, $2, 2, $1, $4)",
+    )
+    .bind(seed.session)
+    .bind(second_frontier)
+    .bind(seed.semantic_prefix[0])
+    .bind(seed.semantic_prefix[1])
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let mut connection = pool.acquire().await?;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version >= 202607260300)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+
+    let storage_shape: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM context_frontier
+              WHERE owning_session_id = $1),
+            (SELECT count(*)
+               FROM context_frontier
+              WHERE owning_session_id = $1
+                AND prefix_context_frontier_id IS NOT NULL),
+            (SELECT count(*)
+               FROM context_frontier_delta
+              WHERE owning_session_id = $1)",
+    )
+    .bind(seed.session)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(storage_shape, (2, 1, 2));
+    let resolved: Vec<(Uuid, i64, Uuid)> = sqlx::query_as(
+        "SELECT
+            frontier.context_frontier_id,
+            member.member_position::bigint,
+            member.semantic_entry_id
+           FROM context_frontier AS frontier
+          CROSS JOIN LATERAL resolve_context_frontier_members(
+            frontier.owning_session_id,
+            frontier.context_frontier_id
+          ) AS member
+          WHERE frontier.owning_session_id = $1
+          ORDER BY frontier.context_frontier_id, member.member_position",
+    )
+    .bind(seed.session)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        resolved,
+        vec![
+            (seed.seed_frontier, 1, seed.semantic_prefix[0]),
+            (seed.seed_frontier, 2, seed.semantic_prefix[1]),
+            (second_frontier, 1, seed.semantic_prefix[0]),
+            (second_frontier, 2, seed.semantic_prefix[1]),
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 
@@ -597,7 +746,7 @@ async fn s28_inv039_reordered_imported_seed_members_are_rejected() -> Result<(),
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
     insert_imported_semantic_prefix(&mut transaction, seed).await?;
     sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES
@@ -727,7 +876,7 @@ async fn s28_inv039_native_creation_command_truncate_remains_rejected() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s28_inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let error = sqlx::query("TRUNCATE TABLE context_frontier_member")
+    let error = sqlx::query("TRUNCATE TABLE context_frontier_delta")
         .execute(&pool)
         .await
         .expect_err("seed-bearing frontier membership must reject truncate");

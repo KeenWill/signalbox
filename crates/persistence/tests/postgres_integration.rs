@@ -258,7 +258,7 @@ async fn insert_frontier(
 
     for (member_position, source_session, semantic_entry) in members {
         sqlx::query(
-            "INSERT INTO context_frontier_member
+            "INSERT INTO context_frontier_delta
                 (owning_session_id, context_frontier_id, member_position,
                  source_session_id, semantic_entry_id)
              VALUES ($1, $2, $3, $4, $5)",
@@ -1840,13 +1840,13 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
 
     let mut missing_current_result = pool.begin().await?;
     sqlx::query(
-        "ALTER TABLE context_frontier_member
+        "ALTER TABLE context_frontier_delta
          DISABLE TRIGGER context_frontier_member_is_append_only",
     )
     .execute(&mut *missing_current_result)
     .await?;
     sqlx::query(
-        "DELETE FROM context_frontier_member
+        "DELETE FROM context_frontier_delta
           WHERE owning_session_id = $1
             AND context_frontier_id = $2
             AND source_session_id = $1
@@ -2775,7 +2775,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     );
     let mut reordered_terminal = pool.begin().await?;
     sqlx::query(
-        "ALTER TABLE context_frontier_member
+        "ALTER TABLE context_frontier_delta
          DISABLE TRIGGER context_frontier_member_is_append_only",
     )
     .execute(&mut *reordered_terminal)
@@ -2786,7 +2786,7 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         (Uuid::from_u128(effect_free_seed + 31), 4_i64),
     ] {
         sqlx::query(
-            "UPDATE context_frontier_member
+            "UPDATE context_frontier_delta
                 SET member_position = $1
               WHERE owning_session_id = $2
                 AND context_frontier_id = $3
@@ -3069,13 +3069,13 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     assert_eq!(response_positions.len(), 3);
     let mut swapped = pool.begin().await?;
     sqlx::query(
-        "ALTER TABLE context_frontier_member
+        "ALTER TABLE context_frontier_delta
          DISABLE TRIGGER context_frontier_member_is_append_only",
     )
     .execute(&mut *swapped)
     .await?;
     sqlx::query(
-        "UPDATE context_frontier_member
+        "UPDATE context_frontier_delta
             SET member_position = member_position + 100
           WHERE owning_session_id = $1
             AND context_frontier_id = $2
@@ -3087,7 +3087,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     .execute(&mut *swapped)
     .await?;
     sqlx::query(
-        "UPDATE context_frontier_member
+        "UPDATE context_frontier_delta
             SET member_position = $1
           WHERE owning_session_id = $2
             AND context_frontier_id = $3
@@ -3100,7 +3100,7 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     .execute(&mut *swapped)
     .await?;
     sqlx::query(
-        "UPDATE context_frontier_member
+        "UPDATE context_frontier_delta
             SET member_position = $1
           WHERE owning_session_id = $2
             AND context_frontier_id = $3
@@ -3140,13 +3140,13 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     .await?;
     let mut omitted_closure = pool.begin().await?;
     sqlx::query(
-        "ALTER TABLE context_frontier_member
+        "ALTER TABLE context_frontier_delta
          DISABLE TRIGGER context_frontier_member_is_append_only",
     )
     .execute(&mut *omitted_closure)
     .await?;
     sqlx::query(
-        "DELETE FROM context_frontier_member
+        "DELETE FROM context_frontier_delta
           WHERE owning_session_id = $1
             AND context_frontier_id = $2
             AND semantic_entry_id = $3",
@@ -5423,11 +5423,11 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         turn,
         "second steering",
     );
-    sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     sqlx::query(
-        "UPDATE context_frontier_member
+        "UPDATE context_frontier_delta
             SET member_position = 4
           WHERE owning_session_id = $1
             AND context_frontier_id = $2
@@ -5437,7 +5437,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     .bind(steering_frontier.into_uuid())
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE context_frontier_delta ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     let corrupt_snapshot = service
@@ -5455,11 +5455,11 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         ),
         "unexpected noncontiguous-snapshot result: {corrupt_snapshot:?}"
     );
-    sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     sqlx::query(
-        "UPDATE context_frontier_member
+        "UPDATE context_frontier_delta
             SET member_position = 3
           WHERE owning_session_id = $1
             AND context_frontier_id = $2
@@ -5469,7 +5469,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     .bind(steering_frontier.into_uuid())
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE context_frontier_delta ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     let ModelCallExecutionOutcome::ObservationCommitted(outcome) = service.execute(session).await?
@@ -10513,7 +10513,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     );
 
     let immutable_member = sqlx::query(
-        "UPDATE context_frontier_member
+        "UPDATE context_frontier_delta
             SET member_position = 2
           WHERE owning_session_id = $1
             AND context_frontier_id = $2",
@@ -10531,7 +10531,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     );
 
     let out_of_bounds_member = sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES ($1, $2, 2, $1, $3)",
@@ -10561,7 +10561,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     .execute(&mut *duplicate_membership)
     .await?;
     sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES ($1, $2, 1, $1, $3)",
@@ -10572,7 +10572,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     .execute(&mut *duplicate_membership)
     .await?;
     let duplicate_member = sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES ($1, $2, 2, $1, $3)",
@@ -13702,7 +13702,7 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
     );
 
     let overrun = sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES ($1, $2, 3, $1, $3)",
@@ -13728,16 +13728,16 @@ async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlate
                   AND candidate.tgdeferrable
             ),
             count(*) FILTER (
-                WHERE relation.relname = 'context_frontier_member'
+                WHERE relation.relname = 'context_frontier_delta'
                   AND candidate.tgname = 'context_frontier_member_requires_complete_membership'
             ),
             count(*) FILTER (
-                WHERE relation.relname = 'context_frontier_member'
+                WHERE relation.relname = 'context_frontier_delta'
                   AND candidate.tgname = 'context_frontier_member_stays_within_declared_count'
                   AND NOT candidate.tgdeferrable
             ),
             count(*) FILTER (
-                WHERE relation.relname = 'context_frontier_member'
+                WHERE relation.relname = 'context_frontier_delta'
                   AND candidate.tgname = 'context_frontier_member_rechecks_declared_count'
                   AND candidate.tgdeferrable
             )
@@ -14101,7 +14101,7 @@ async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
 
     let mut member = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO context_frontier_member
+        "INSERT INTO context_frontier_delta
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES ($1, $2, 1, $1, $3)",

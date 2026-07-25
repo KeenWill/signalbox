@@ -609,9 +609,8 @@ those tests.
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-031, INV-034.
 - **Remaining questions:** The delegation decision remains blocking for
   propagation, detached-child support, result delivery after parent termination,
-  and the parent/child disposition model; archival coupling remains with the
-  open archive lifecycle decision
-  ([archival and retention](open-questions.md#archival-and-retention)).
+  and the parent/child disposition model. Ordinary archive is independently
+  non-cascading; destructive retention remains separate later scope.
 
 ## S20 — Resolve a curated model alias
 
@@ -796,24 +795,22 @@ those tests.
 
 - **User intent:** Remove a conversation from the active list without losing its
   identity, provenance, or ability to return.
-- **Durable commands:** Subject to the future archive lifecycle policy, persist
-  `ArchiveSession`; later persist `RestoreSession`, each idempotently against
-  the same session identity.
-- **State transitions:** An eligible lifecycle state → archived → a
-  policy-selected restored state; eligibility, nonterminal-work handling, and
-  the restore target remain unresolved.
+- **Durable commands:** Persist `ReplaceSessionMetadata` with `archived = true`;
+  later persist another complete replacement with `archived = false`. Each
+  command has its own durable identity and replay behavior.
+- **State transitions:** The organizational metadata snapshot changes between
+  archived and non-archived. Session and turn lifecycle state does not change.
 - **Transient updates:** Client list filtering and confirmation.
-- **Owning component:** Hub validates lifecycle; Postgres preserves history;
+- **Owning component:** Hub validates metadata; Postgres preserves history;
   clients present archive state.
-- **Failure behavior:** Restart preserves archive status. A request made while
-  work is active or otherwise nonterminal must explicitly fail, wait, or request
-  cancellation according to future policy; it never silently abandons work.
-- **Required invariants:** INV-010, INV-012, INV-013, INV-034.
-- **Remaining questions:** The open archive lifecycle decision
-  ([archival and retention](open-questions.md#archival-and-retention)) must
-  define archive eligibility, nonterminal-work handling, restored lifecycle
-  state, and effects on delegated children or related sessions. Destructive
-  retention and purge are separate later scope, not ordinary archive behavior.
+- **Failure behavior:** Restart preserves archive status. Archiving never
+  cancels, pauses, rejects, or rewrites work and never cascades to another
+  session. A missing session is a durable typed rejection.
+- **Required invariants:** INV-005, INV-012, INV-013.
+- **Remaining questions:** Destructive retention and purge are separate later
+  scope under
+  [session organization and retention](open-questions.md#session-organization-visibility-and-retention),
+  not ordinary archive behavior.
 
 ## S26 — Manually regenerate a prior answer
 

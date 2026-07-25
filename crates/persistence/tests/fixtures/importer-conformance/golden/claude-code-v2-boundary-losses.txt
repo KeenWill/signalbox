@@ -1,0 +1,26 @@
+format: ClaudeCodeSessionJsonlV2
+raw_records: 3
+  1: raw="{\"type\":\"user\",\"uuid\":\"observed-middle\",\"parentUuid\":\"missing-before-fixture\",\"message\":{\"role\":\"user\",\"content\":\"Retained suffix.\"}}"
+    normalized={"type": "user", "uuid": "observed-middle", "parentUuid": "missing-before-fixture", "message": {"role": "user", "content": "Retained suffix."}}
+  2: raw="{\"type\":\"assistant\",\"uuid\":\"observed-after-gap\",\"parentUuid\":\"missing-inside-fixture\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"future_block\",\"payload\":{\"nested\":[1,1.0,1e0]}},{\"type\":\"text\",\"text\":\"Retained after gap.\"}]}}"
+    normalized={"type": "assistant", "uuid": "observed-after-gap", "parentUuid": "missing-inside-fixture", "message": {"role": "assistant", "content": [{"type": "future_block", "payload": {"nested": [1, 1.0, 1e0]}}, {"type": "text", "text": "Retained after gap."}]}}
+  3: raw="{\"type\":\"user\",\"uuid\":null,\"parentUuid\":\"observed-after-gap\",\"message\":{\"role\":\"user\",\"content\":null}}"
+    normalized={"type": "user", "uuid": null, "parentUuid": "observed-after-gap", "message": {"role": "user", "content": null}}
+entries: 4
+  1: raw=1.1 speaker=attested(User)
+    content=text(attested("Retained suffix."))
+    source=record_id=attested("observed-middle") parent_record_id=attested("missing-before-fixture") source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=attested(User)
+  2: raw=2.1 speaker=attested(Assistant)
+    content=source_message_block(type=attested("future_block"))
+    source=record_id=attested("observed-after-gap") parent_record_id=attested("missing-inside-fixture") source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=attested(Assistant)
+  3: raw=2.2 speaker=attested(Assistant)
+    content=text(attested("Retained after gap."))
+    source=record_id=attested("observed-after-gap") parent_record_id=attested("missing-inside-fixture") source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=attested(Assistant)
+  4: raw=3.1 speaker=attested(User)
+    content=message_content_absent(ContentAttestedAbsent)
+    source=record_id=attested_absent parent_record_id=attested("observed-after-gap") source_session_id=not_attested timestamp=not_attested sidechain=not_attested metadata=not_attested message_role=attested(User)
+addressable_frontiers: 4
+  1: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000200 through_position=1
+  2: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000201 through_position=2
+  3: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000202 through_position=3
+  4: conversation=00000000-0000-0000-0000-000000000100 through_entry=00000000-0000-0000-0000-000000000203 through_position=4

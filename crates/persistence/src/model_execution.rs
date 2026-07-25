@@ -1351,15 +1351,13 @@ async fn tool_round_terminal_closure_matches(
                 entry.assistant_tool_request_id,
                 request.tool_name, request.arguments_kind,
                 request.arguments_text
-           FROM context_frontier_member AS member
+           FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
            LEFT JOIN tool_request AS request
              ON request.request_id = entry.assistant_tool_request_id
-          WHERE member.owning_session_id = $1
-            AND member.context_frontier_id = $2
-            AND member.member_position >= $3
+          WHERE member.member_position >= $3
             AND member.member_position < $4
           ORDER BY member.member_position",
     )
@@ -2015,9 +2013,7 @@ async fn load_frontier_members(
 ) -> Result<Vec<(Uuid, Uuid)>, ModelCallRepositoryError> {
     Ok(sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT source_session_id, semantic_entry_id
-           FROM context_frontier_member
-          WHERE owning_session_id = $1
-            AND context_frontier_id = $2
+           FROM resolve_context_frontier_members($1, $2)
           ORDER BY member_position",
     )
     .bind(session_id_to_uuid(session))
@@ -2036,12 +2032,10 @@ async fn load_terminal_frontier(
                 entry.payload_kind, entry.assistant_text_value,
                 entry.producing_model_call_id, entry.completed_turn_id,
                 entry.failed_turn_id, entry.cancelled_turn_id
-           FROM context_frontier_member AS member
+           FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
-          WHERE member.owning_session_id = $1
-            AND member.context_frontier_id = $2
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
@@ -2578,9 +2572,7 @@ async fn load_call_snapshot(
     .ok_or(ModelCallCorruption::Missing("model-call snapshot"))?;
     let rows = sqlx::query_as::<_, (Decimal, Uuid, Uuid)>(
         "SELECT member_position, source_session_id, semantic_entry_id
-           FROM context_frontier_member
-          WHERE owning_session_id = $1
-            AND context_frontier_id = $2
+           FROM resolve_context_frontier_members($1, $2)
           ORDER BY member_position",
     )
     .bind(session_id_to_uuid(session))
@@ -4398,21 +4390,39 @@ pub(crate) async fn insert_snapshot(
 ) -> Result<(), ModelCallRepositoryError> {
     let member_count = u64::try_from(snapshot.entry_count())
         .map_err(|_| ModelCallCorruption::Inconsistent("frontier member count"))?;
+    let appended_entry_count = snapshot.appended_entries().len();
+    let prefix_member_count = snapshot
+        .entry_count()
+        .checked_sub(appended_entry_count)
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "frontier prefix member count",
+        ))?;
     sqlx::query(
         "INSERT INTO context_frontier
-            (owning_session_id, context_frontier_id, member_count)
-         VALUES ($1, $2, $3)",
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(session_id_to_uuid(snapshot.frontier().owning_session()))
     .bind(snapshot.frontier().snapshot().into_uuid())
+    .bind(
+        snapshot
+            .immediate_semantic_prefix()
+            .map(|prefix| prefix.snapshot().into_uuid()),
+    )
     .bind(Decimal::from(member_count))
     .execute(&mut *connection)
     .await?;
-    for (index, entry) in snapshot.ordered_entries().enumerate() {
-        let position = u64::try_from(index + 1)
-            .map_err(|_| ModelCallCorruption::Inconsistent("frontier member position"))?;
+    for (index, entry) in snapshot.appended_entries().enumerate() {
+        let position = prefix_member_count
+            .checked_add(index)
+            .and_then(|index| index.checked_add(1))
+            .and_then(|position| u64::try_from(position).ok())
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "frontier member position",
+            ))?;
         sqlx::query(
-            "INSERT INTO context_frontier_member
+            "INSERT INTO context_frontier_delta
                 (owning_session_id, context_frontier_id, member_position,
                  source_session_id, semantic_entry_id)
              VALUES ($1, $2, $3, $4, $5)",
