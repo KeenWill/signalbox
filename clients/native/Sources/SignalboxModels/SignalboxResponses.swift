@@ -72,7 +72,12 @@ public enum SignalboxServerMessage: Codable, Equatable, Sendable {
     case metadataChanged(SignalboxSessionMetadata)
     case artifactCreated(SignalboxArtifact)
     case heartbeat(Date)
-    case unknown(kind: String, payload: [String: SignalboxJSONValue])
+    case diagnostic(SignalboxDecodingDiagnostic)
+    case unknown(
+        kind: String,
+        payload: [String: SignalboxJSONValue],
+        decodingDiagnostic: SignalboxDecodingDiagnostic?
+    )
 
     public var kind: String {
         switch self {
@@ -92,7 +97,9 @@ public enum SignalboxServerMessage: Codable, Equatable, Sendable {
             return "artifact_created"
         case .heartbeat:
             return "heartbeat"
-        case .unknown(let kind, _):
+        case .diagnostic:
+            return "client_diagnostic"
+        case .unknown(let kind, _, _):
             return kind
         }
     }
@@ -109,26 +116,35 @@ public enum SignalboxServerMessage: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let kind = try container.decode(String.self, forKey: .kind)
-        switch kind {
-        case "stream_hello":
-            self = .streamHello(try SignalboxStreamHello(from: decoder))
-        case "event_appended":
-            self = .eventAppended(try SignalboxStreamEventMutation(from: decoder))
-        case "event_updated":
-            self = .eventUpdated(try SignalboxStreamEventMutation(from: decoder))
-        case "event_deleted":
-            self = .eventDeleted(try container.decode(SignalboxEventID.self, forKey: .eventID))
-        case "status_changed":
-            self = .statusChanged(try container.decode(SignalboxSessionStatus.self, forKey: .status))
-        case "metadata_changed":
-            self = .metadataChanged(try container.decode(SignalboxSessionMetadata.self, forKey: .metadata))
-        case "artifact_created":
-            self = .artifactCreated(try container.decode(SignalboxArtifact.self, forKey: .artifact))
-        case "heartbeat":
-            self = .heartbeat(try container.decode(Date.self, forKey: .sentAt))
-        default:
+        do {
+            switch kind {
+            case "stream_hello":
+                self = .streamHello(try SignalboxStreamHello(from: decoder))
+            case "event_appended":
+                self = .eventAppended(try SignalboxStreamEventMutation(from: decoder))
+            case "event_updated":
+                self = .eventUpdated(try SignalboxStreamEventMutation(from: decoder))
+            case "event_deleted":
+                self = .eventDeleted(try container.decode(SignalboxEventID.self, forKey: .eventID))
+            case "status_changed":
+                self = .statusChanged(try container.decode(SignalboxSessionStatus.self, forKey: .status))
+            case "metadata_changed":
+                self = .metadataChanged(try container.decode(SignalboxSessionMetadata.self, forKey: .metadata))
+            case "artifact_created":
+                self = .artifactCreated(try container.decode(SignalboxArtifact.self, forKey: .artifact))
+            case "heartbeat":
+                self = .heartbeat(try container.decode(Date.self, forKey: .sentAt))
+            default:
+                let payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
+                self = .unknown(kind: kind, payload: payload, decodingDiagnostic: nil)
+            }
+        } catch {
             let payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
-            self = .unknown(kind: kind, payload: payload)
+            self = .unknown(
+                kind: kind,
+                payload: payload,
+                decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+            )
         }
     }
 
@@ -160,7 +176,12 @@ public enum SignalboxServerMessage: Codable, Equatable, Sendable {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode("heartbeat", forKey: .kind)
             try container.encode(date, forKey: .sentAt)
-        case .unknown(let kind, let payload):
+        case .diagnostic(let diagnostic):
+            throw EncodingError.invalidValue(
+                diagnostic,
+                .init(codingPath: encoder.codingPath, debugDescription: "Client diagnostics are not wire messages.")
+            )
+        case .unknown(let kind, let payload, _):
             var payload = payload
             payload["kind"] = .string(kind)
             try payload.encode(to: encoder)

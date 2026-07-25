@@ -1988,30 +1988,29 @@ pub(crate) async fn load_scheduling_projection(
                         if let Some(call) = terminal_model_call {
                             required_model_calls.insert(call);
                         }
-                        let (terminal_tool_attempts, terminal_tool_denials) = if terminal_model_call
-                            .is_none()
-                        {
-                            let terminal_frontier = ContextFrontierId::from_uuid(terminal_frontier);
-                            let attempts = load_terminal_result_attempts(
-                                connection,
-                                lifecycle_session,
-                                lifecycle_turn,
-                                terminal_frontier,
-                            )
-                            .await
-                            .map_err(map_tool_loop_error)?;
-                            let denials = load_terminal_result_denials(
-                                connection,
-                                lifecycle_session,
-                                lifecycle_turn,
-                                terminal_frontier,
-                            )
-                            .await
-                            .map_err(map_tool_loop_error)?;
-                            (attempts, denials)
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
+                        // A cancelled turn's terminal frontier can close a tool
+                        // round whether the stored provenance names no call (a
+                        // batch interrupt) or the round's completed producing
+                        // call (a stop racing a tool-using response), so the
+                        // result evidence loads for both shapes.
+                        let cancelled_terminal_frontier =
+                            ContextFrontierId::from_uuid(terminal_frontier);
+                        let terminal_tool_attempts = load_terminal_result_attempts(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                            cancelled_terminal_frontier,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?;
+                        let terminal_tool_denials = load_terminal_result_denials(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                            cancelled_terminal_frontier,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?;
                         AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
                             starting_lineage,
                             starting_frontier: ContextFrontierId::from_uuid(starting_frontier),

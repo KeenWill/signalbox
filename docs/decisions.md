@@ -465,6 +465,86 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
+
+**Context.** The native client holds an API credential, and an error-path test
+can prove that today's surfaced errors omit one synthetic credential but cannot
+prevent a future shipping source from logging credentials or surrounding request
+state. The existing privacy scan is the native client's automated gate for
+prohibited data-collection and disclosure mechanisms.
+
+**Decision.** Make the native privacy scan reject direct Swift logging
+primitives and standard instance logging methods anywhere under shipping
+`Sources`. Exercise the instance-method detector with a synthetic fixture every
+time the scan runs so changes to the expression cannot silently reopen that
+path. Keep credentials out of diagnostic output instead of attempting to redact
+them after logging.
+
+**Rejected alternatives.** Manual review alone does not continuously enforce the
+rule. Searching for current credential variable names misses aliases and future
+names. An allow-list makes the protection depend on reviewers proving that every
+permitted call can never receive credential-bearing data.
+
+**Affects.** `clients/native/scripts/check-privacy.sh` and future additions to
+the native client's shipping Swift sources.
+
+## 2026-07-25 — Bound native-client heartbeat silence to 45 seconds
+
+**Context.** The native client acknowledges server heartbeat frames, but an open
+WebSocket that stops delivering frames can otherwise remain connected
+indefinitely. The stream needs a finite quiet deadline that tolerates ordinary
+scheduling and network jitter while still correcting stale connection state.
+
+**Decision.** Start a 45-second liveness deadline when the WebSocket connection
+attempt begins. Before the first acknowledged heartbeat, expiry surfaces a
+connection-timeout error. Restart the deadline after each acknowledged
+heartbeat; a later expiry surfaces a connection-quiet error. Both failures close
+the transport. Keep the deadline injectable so tests can exercise the watchdog
+without wall-clock delays.
+
+**Rejected alternatives.** Relying on platform request timeouts does not detect
+an already-open but silent WebSocket. Waiting indefinitely preserves stale
+connected state. A much shorter fixed deadline raises false disconnect risk
+without a recorded server heartbeat cadence that justifies it.
+
+**Affects.** The native client's `SignalboxWebSocketStream` liveness behavior
+and its unit-test seam; the wire protocol and heartbeat acknowledgment remain
+unchanged.
+
+## 2026-07-25 — Run Swift client CI on the wired unit-test bundle
+
+**Context.** The native-client snapshot import deferred Swift CI wholesale,
+parking the Tart VM scripts inert "with the rest of Swift CI" because
+GitHub-hosted macOS runners lack nested virtualization. Meanwhile nothing
+mechanical checks `clients/native` at all: a change can break the Xcode build,
+the privacy boundary, the Tart script contracts, or the screenshot manifest with
+no signal until someone builds locally. The imported `Tests/SignalboxAppTests`,
+`Tests/SignalboxClientTests`, and `Tests/SignalboxModelsTests` are still not
+wired as Xcode targets, so `SignalboxNativeTests` is the only unit-test bundle
+that can run today.
+
+**Decision.** Land a macOS workflow now for what a hosted runner can actually do
+— the Debug simulator build, the wired `SignalboxNativeTests` bundle, and the
+privacy, Tart dry-run, and screenshot-golden-hash script checks — pinned to the
+image's Xcode 26.6 rather than its rolling default. The UI and
+screenshot-capture bundles are excluded through a new
+`SIGNALBOX_NATIVE_SKIP_TESTING` option on `test-xcode.sh`, and the real-server
+smoke test stays out; both need an interactive session or a live server and
+credential. This supersedes the blanket Swift-CI deferral for the build and
+script surface only. Restoring the unreachable test targets remains the rewire's
+first task, and the Tart device matrix stays deferred pending self-hosted Apple
+Silicon or a managed Tart service.
+
+**Rejected alternatives.** Waiting for the rewire leaves `clients/native`
+unchecked through the milestone that changes it most. Running the UI and
+screenshot-capture suites in CI trades a real signal for a flaky one, and the
+golden hashes already catch manifest drift without a simulator. Following the
+image's default Xcode would let a runner-image bump change the toolchain under a
+project created against a pinned one.
+
+**Affects.** `.github/workflows/swift.yml` (new),
+`clients/native/scripts/test-xcode.sh`.
+
 ## 2026-07-25 — Adopt house style guide (literal provenance, label discipline)
 
 **Context.** [docs/agents/testing-style.md](agents/testing-style.md) owns how a

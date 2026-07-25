@@ -24,10 +24,7 @@ final class AppCoordinator: ObservableObject {
         self.isMockMode = shouldInstallMockService
         if resetPersistedSettings {
             UserDefaults.standard.removeObject(forKey: NativeAppConstants.serverURLDefaultsKey)
-            KeychainSecretStore().deleteSecret(
-                service: NativeAppConstants.serviceName,
-                account: NativeAppConstants.apiKeyAccount
-            )
+            KeychainSecretStore().deleteSecret()
         }
         self.settings = SignalboxSettingsViewModel()
         if resetPersistedSettings {
@@ -330,6 +327,9 @@ final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var status: SignalboxSessionStatus = SignalboxSessionStatus(state: .idle)
     @Published private(set) var events: [SignalboxStoredEvent] = []
     @Published private(set) var artifacts: [SignalboxArtifact] = []
+    @Published private(set) var unhandledFrameKinds: [String: Int] = [:]
+    @Published private(set) var latestStreamDiagnostic: String?
+    @Published private(set) var ignoredStaleStreamCompletionCount = 0
     @Published var composerText: String = ""
     @Published var errorMessage: String?
     @Published var isStreaming = false
@@ -487,13 +487,15 @@ final class SessionDetailViewModel: ObservableObject {
             upsert(artifact: artifact)
         case .heartbeat:
             break
-        case .unknown(let kind, let payload):
-            events.append(
-                SignalboxStoredEvent(
-                    eventID: SignalboxEventID(rawValue: (events.last?.eventID.rawValue ?? 0) + 1),
-                    event: .unknown(SignalboxUnknownEvent(kind: kind, payload: payload))
-                )
-            )
+        case .diagnostic(let diagnostic):
+            latestStreamDiagnostic = diagnostic.message
+            errorMessage = diagnostic.message
+        case .unknown(let kind, _, let decodingDiagnostic):
+            unhandledFrameKinds[kind, default: 0] += 1
+            if let decodingDiagnostic {
+                latestStreamDiagnostic = decodingDiagnostic.message
+                errorMessage = decodingDiagnostic.message
+            }
         }
     }
 
@@ -518,6 +520,7 @@ final class SessionDetailViewModel: ObservableObject {
 
     private func finishStream(streamID: UUID, error: Error?) {
         guard activeStreamID == streamID else {
+            ignoredStaleStreamCompletionCount += 1
             return
         }
         activeStreamID = nil
