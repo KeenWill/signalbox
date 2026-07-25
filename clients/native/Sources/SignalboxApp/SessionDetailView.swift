@@ -77,9 +77,8 @@ struct SessionDetailScreen: View {
         #endif
         .task {
             viewModel.replaceServiceProvider { coordinator.service }
-            await viewModel.load()
+            await viewModel.loadAndConnect()
             presentScreenshotArtifactIfNeeded()
-            viewModel.connectStream()
         }
         .onDisappear {
             viewModel.disconnectStream()

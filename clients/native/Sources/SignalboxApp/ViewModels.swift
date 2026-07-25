@@ -323,6 +323,18 @@ final class SessionListViewModel: ObservableObject {
 
 @MainActor
 final class SessionDetailViewModel: ObservableObject {
+    private enum StreamMessageDisposition: Sendable {
+        case applied
+        case bufferedForHistorySynchronization
+        case ignored
+    }
+
+    private struct StreamHistorySynchronization {
+        let streamID: UUID
+        var bufferedMessages: [SignalboxServerMessage]
+        let completion: CheckedContinuation<Bool, Never>?
+    }
+
     @Published private(set) var session: SignalboxSessionMetadata
     @Published private(set) var status: SignalboxSessionStatus = SignalboxSessionStatus(state: .idle)
     @Published private(set) var artifacts: [SignalboxArtifact] = []
@@ -337,6 +349,7 @@ final class SessionDetailViewModel: ObservableObject {
     private var streamTask: Task<Void, Never>?
     private var activeStreamID: UUID?
     private var eventNormalizer = SignalboxIncrementalEventNormalizer()
+    private var streamHistorySynchronization: StreamHistorySynchronization?
 
     init(session: SignalboxSessionMetadata, serviceProvider: @escaping () -> (any SignalboxClientProtocol)?) {
         self.session = session
@@ -382,26 +395,80 @@ final class SessionDetailViewModel: ObservableObject {
         }
     }
 
+    func loadAndConnect() async {
+        guard let service = serviceProvider() else {
+            errorMessage = "Configure a server connection in Settings."
+            return
+        }
+        let synchronized: Bool = await withCheckedContinuation { continuation in
+            let started = startStream(
+                service: service,
+                synchronizeHistory: true,
+                completion: continuation
+            )
+            if !started {
+                continuation.resume(returning: false)
+            }
+        }
+        if !synchronized, !Task.isCancelled {
+            await load()
+        }
+    }
+
     func connectStream() {
         guard streamTask == nil, let service = serviceProvider() else {
             return
         }
+        _ = startStream(
+            service: service,
+            synchronizeHistory: !eventNormalizer.records.isEmpty,
+            completion: nil
+        )
+    }
+
+    @discardableResult
+    private func startStream(
+        service: any SignalboxClientProtocol,
+        synchronizeHistory: Bool,
+        completion: CheckedContinuation<Bool, Never>?
+    ) -> Bool {
+        guard streamTask == nil else {
+            return false
+        }
         let sessionID = session.id
         let streamID = UUID()
+        if synchronizeHistory {
+            streamHistorySynchronization = StreamHistorySynchronization(
+                streamID: streamID,
+                bufferedMessages: [],
+                completion: completion
+            )
+        }
         activeStreamID = streamID
         isStreaming = true
         streamTask = Task { [weak self] in
             do {
                 for try await message in service.streamMessages(sessionID: sessionID) {
-                    await MainActor.run {
-                        self?.apply(message, streamID: streamID)
+                    let disposition = await MainActor.run {
+                        self?.receive(message, streamID: streamID) ?? .ignored
                     }
                     if case .streamHello = message {
-                        await self?.refreshArtifactsAfterStreamHello(
-                            service: service,
-                            sessionID: sessionID,
-                            streamID: streamID
-                        )
+                        switch disposition {
+                        case .applied:
+                            await self?.refreshArtifactsAfterStreamHello(
+                                service: service,
+                                sessionID: sessionID,
+                                streamID: streamID
+                            )
+                        case .bufferedForHistorySynchronization:
+                            await self?.synchronizeHistoryAfterStreamHello(
+                                service: service,
+                                sessionID: sessionID,
+                                streamID: streamID
+                            )
+                        case .ignored:
+                            break
+                        }
                     }
                 }
                 await MainActor.run {
@@ -417,9 +484,11 @@ final class SessionDetailViewModel: ObservableObject {
                 }
             }
         }
+        return true
     }
 
     func disconnectStream() {
+        cancelHistorySynchronization(streamID: activeStreamID)
         activeStreamID = nil
         streamTask?.cancel()
         streamTask = nil
@@ -466,11 +535,22 @@ final class SessionDetailViewModel: ObservableObject {
         }
     }
 
-    private func apply(_ message: SignalboxServerMessage, streamID: UUID) {
+    private func receive(
+        _ message: SignalboxServerMessage,
+        streamID: UUID
+    ) -> StreamMessageDisposition {
         guard activeStreamID == streamID else {
-            return
+            return .ignored
+        }
+        if var synchronization = streamHistorySynchronization,
+           synchronization.streamID == streamID
+        {
+            synchronization.bufferedMessages.append(message)
+            streamHistorySynchronization = synchronization
+            return .bufferedForHistorySynchronization
         }
         apply(message)
+        return .applied
     }
 
     private func apply(_ message: SignalboxServerMessage) {
@@ -522,11 +602,61 @@ final class SessionDetailViewModel: ObservableObject {
         }
     }
 
+    private func synchronizeHistoryAfterStreamHello(
+        service: any SignalboxClientProtocol,
+        sessionID: SignalboxSessionID,
+        streamID: UUID
+    ) async {
+        do {
+            async let events = service.listEvents(sessionID: sessionID)
+            async let artifacts = service.listArtifacts(sessionID: sessionID)
+            let synchronizedEvents = try await events
+            let synchronizedArtifacts = try await artifacts
+            guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
+                return
+            }
+            replaceEvents(with: synchronizedEvents)
+            self.artifacts = synchronizedArtifacts
+            synchronization.bufferedMessages.forEach(apply)
+            errorMessage = nil
+            synchronization.completion?.resume(returning: true)
+        } catch {
+            guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
+                return
+            }
+            synchronization.bufferedMessages.forEach(apply)
+            errorMessage = error.localizedDescription
+            synchronization.completion?.resume(returning: true)
+        }
+    }
+
+    private func takeHistorySynchronization(
+        streamID: UUID
+    ) -> StreamHistorySynchronization? {
+        guard let synchronization = streamHistorySynchronization,
+              synchronization.streamID == streamID
+        else {
+            return nil
+        }
+        streamHistorySynchronization = nil
+        return synchronization
+    }
+
+    private func cancelHistorySynchronization(streamID: UUID?) {
+        guard let streamID,
+              let synchronization = takeHistorySynchronization(streamID: streamID)
+        else {
+            return
+        }
+        synchronization.completion?.resume(returning: false)
+    }
+
     private func finishStream(streamID: UUID, error: Error?) {
         guard activeStreamID == streamID else {
             ignoredStaleStreamCompletionCount += 1
             return
         }
+        cancelHistorySynchronization(streamID: streamID)
         activeStreamID = nil
         streamTask = nil
         isStreaming = false

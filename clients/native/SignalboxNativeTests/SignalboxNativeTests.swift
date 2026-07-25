@@ -232,18 +232,21 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
-    func testStreamHelloReusesFullyLoadedHistory() async throws {
+    func testStreamHelloReusesLoadedHistoryAndReplaysConcurrentDeletion() async throws {
         let fixture = try await streamHelloHistoryReuseFixture()
         let service = HistoryReuseStreamSignalboxService(fixture: fixture)
         let viewModel = SessionDetailViewModel(session: fixture.session) { service }
 
-        await viewModel.load()
-        XCTAssertEqual(viewModel.events, fixture.historyEvents)
-
-        viewModel.connectStream()
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
         await service.waitForStreamInvocation()
         let streamStopped = observeCurrentStreamStopped(on: viewModel)
-        service.sendStreamHelloAndFinish()
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.sendDeletedEventAndFinish()
+        service.resumeHistoryEvents()
+        await loadTask.value
         await fulfillment(
             of: [streamStopped.expectation],
             timeout: StreamHelloHistoryReuseFixture.observationTimeout
@@ -693,6 +696,7 @@ final class SignalboxNativeTests: XCTestCase {
             [SignalboxStoredEvent].self,
             from: Data(MockSignalboxFixtures.approvedToolEvents.utf8)
         )
+        let deletedEventID = try XCTUnwrap(historyEvents.first?.eventID)
         let helloEvents = Array(
             expectedMergedEvents.suffix(StreamHelloHistoryReuseFixture.helloWindowEventCount)
         )
@@ -700,7 +704,10 @@ final class SignalboxNativeTests: XCTestCase {
             session: session,
             historyEvents: historyEvents,
             helloEvents: helloEvents,
-            expectedMergedEvents: expectedMergedEvents
+            deletedEventID: deletedEventID,
+            expectedMergedEvents: expectedMergedEvents.filter {
+                $0.eventID != deletedEventID
+            }
         )
     }
 
@@ -863,6 +870,7 @@ private struct StreamHelloHistoryReuseFixture {
     let session: SignalboxSessionMetadata
     let historyEvents: [SignalboxStoredEvent]
     let helloEvents: [SignalboxStoredEvent]
+    let deletedEventID: SignalboxEventID
     let expectedMergedEvents: [SignalboxStoredEvent]
 }
 
@@ -1035,6 +1043,8 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     private let fixture: StreamHelloHistoryReuseFixture
     private let lock = NSLock()
     private var lockedListEventsCallCount = 0
+    private var listEventsContinuation: CheckedContinuation<[SignalboxStoredEvent], Never>?
+    private var listEventsInvocationWaiters: [CheckedContinuation<Void, Never>] = []
     private var streamContinuation: AsyncThrowingStream<SignalboxServerMessage, Error>.Continuation?
     private var streamInvocationWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -1061,12 +1071,24 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         }
     }
 
-    func sendStreamHelloAndFinish() {
+    func waitForListEventsInvocation() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if listEventsContinuation != nil {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                listEventsInvocationWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func sendStreamHello() {
         let continuation = lock.withLock {
             guard let continuation = streamContinuation else {
                 preconditionFailure("No stream invocation is ready")
             }
-            streamContinuation = nil
             return continuation
         }
         continuation.yield(
@@ -1079,7 +1101,29 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
                 )
             )
         )
+    }
+
+    func sendDeletedEventAndFinish() {
+        let continuation = lock.withLock {
+            guard let continuation = streamContinuation else {
+                preconditionFailure("No stream invocation is ready")
+            }
+            streamContinuation = nil
+            return continuation
+        }
+        continuation.yield(.eventDeleted(fixture.deletedEventID))
         continuation.finish()
+    }
+
+    func resumeHistoryEvents() {
+        let continuation = lock.withLock {
+            guard let continuation = listEventsContinuation else {
+                preconditionFailure("No history load is ready")
+            }
+            listEventsContinuation = nil
+            return continuation
+        }
+        continuation.resume(returning: fixture.historyEvents)
     }
 
     func testConnection() async throws {
@@ -1104,10 +1148,15 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         throw unexpectedCall()
     }
     func listEvents(sessionID: SignalboxSessionID) async throws -> [SignalboxStoredEvent] {
-        lock.withLock {
+        await withCheckedContinuation { continuation in
+            lock.lock()
             lockedListEventsCallCount += 1
+            listEventsContinuation = continuation
+            let waiters = listEventsInvocationWaiters
+            listEventsInvocationWaiters = []
+            lock.unlock()
+            waiters.forEach { $0.resume() }
         }
-        return fixture.historyEvents
     }
     func appendUserMessage(
         sessionID: SignalboxSessionID,
