@@ -259,11 +259,12 @@ caller order; duplicate tags or attribute keys fail construction rather than
 silently selecting a winner. Tags are human-facing organization and attributes
 are machine-facing provenance; neither shape substitutes for the other.
 
-A snapshot carries at most 262,144 total UTF-8 bytes across its present title,
-tags, attribute keys, and attribute values. Each tag and attribute key carries
-at most 1,024 UTF-8 bytes so its composite PostgreSQL index entry remains
-representable. Construction rejects either excess before command handling; the
-exact provisional capacity choice is recorded in the
+A snapshot carries at most 256 tags, at most 256 attributes, and at most 262,144
+total UTF-8 bytes across its present title, tags, attribute keys, and attribute
+values. Each tag and attribute key carries at most 1,024 UTF-8 bytes so its
+composite PostgreSQL index entry remains representable. Construction rejects any
+excess before command handling; the exact provisional capacity choice is
+recorded in the
 [metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
 
 The root `session_metadata` row and normalized
@@ -284,11 +285,12 @@ field except command identity (INV-012). The implemented application request
 fixes `Actor::Owner`; non-owner metadata writers are not constructible through
 the process boundary. First handling locks the target session, then either
 records `SessionNotFound` without an effect or atomically replaces the complete
-root, tag, and attribute snapshot. The applied result records the transaction's
-PostgreSQL timestamp at microsecond precision together with the command actor as
-the one last-writer stamp. An equal replay returns that exact recorded result
-and timestamp. The database timestamp is result evidence, not caller intent, so
-it does not participate in command equality.
+root, tag, and attribute snapshot. After acquiring that lock, a separate
+statement samples PostgreSQL statement time at microsecond precision; the
+applied result records it together with the command actor as the one last-writer
+stamp. An equal replay returns that exact recorded result and timestamp. The
+database timestamp is result evidence, not caller intent or a global ordering
+token, so it does not participate in command equality.
 
 There is deliberately no expected or installed metadata version and no edit
 history. Two distinct writes are last-writer-wins after serialization on the
@@ -308,10 +310,11 @@ reconstitute the `Session` aggregate. Each result carries session identity, the
 complete current defaults (model selection and dangerous-tool auto-approval
 flag), title, tags, archive state, and optional last-writer stamp; attributes
 remain available through the single-session metadata read. A query has an exact
-tag set, optional exact case-sensitive title substring, `include_archived`, a
-page size from 1 through 100, and an exclusive `after_session_id` cursor.
-Required tags use the metadata tag rules, a title substring rejects U+0000, and
-all filter strings together carry at most 262,144 UTF-8 bytes:
+tag set of at most 256 members, optional exact case-sensitive title substring,
+`include_archived`, a page size from 1 through 100, and an exclusive
+`after_session_id` cursor. Required tags use the metadata tag rules, a present
+title substring is nonempty and rejects U+0000, and all filter strings together
+carry at most 262,144 UTF-8 bytes:
 
 - every requested tag must exist (AND-match); an empty set matches all;
 - a title query matches only a present title containing that exact scalar

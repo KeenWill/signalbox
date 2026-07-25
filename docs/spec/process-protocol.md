@@ -185,10 +185,11 @@ rejects U+0000. Attribute values may be empty. Duplicate tags and duplicate
 decoded attribute member names are invalid requests. Tag order and attribute
 member order do not affect durable command equality. Wire validation enforces
 the domain capacity contract: at most 262,144 total UTF-8 bytes across the
-object, and at most 1,024 UTF-8 bytes in each tag or attribute key. That bound
-leaves response-envelope and worst-case JSON-escaping headroom below the 8 MiB
-frame limit when a complete accepted object is echoed by a read or replacement
-receipt. The exact capacity choice is recorded in the
+object, at most 256 tags, at most 256 attributes, and at most 1,024 UTF-8 bytes
+in each tag or attribute key. Those bounds leave response-envelope and
+worst-case JSON-escaping headroom below the 8 MiB frame limit while bounding
+normalized satellite work when a complete accepted object is echoed by a read or
+replacement receipt. The exact capacity choice is recorded in the
 [metadata-bound decision](../decisions.md#2026-07-25--bound-session-metadata-for-storage-and-process-frames).
 
 `list_session_metadata` admits one through 100 results. `required_tags` is an
@@ -197,9 +198,9 @@ case-sensitive substring filter, `include_archived = false` selects the default
 all-non-archived view, and `after_session_id` is an exclusive keyset cursor. An
 empty tag array, null title query, false archive switch, page size 50, and null
 cursor form the ordinary default request; the wire carries every field
-explicitly. Required tags are nonempty, reject U+0000, and carry at most 1,024
-UTF-8 bytes each; a title query rejects U+0000; and all required tags plus the
-title query carry at most 262,144 UTF-8 bytes.
+explicitly. At most 256 required tags are admitted. They are nonempty, reject
+U+0000, and carry at most 1,024 UTF-8 bytes each; a title query rejects U+0000;
+and all required tags plus the title query carry at most 262,144 UTF-8 bytes.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
 treatment in all four versions. If a turn is already active, the normal typed

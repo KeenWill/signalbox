@@ -15,21 +15,24 @@ recorded here (see `AGENTS.md`). Unresolved questions live in
 **Context.** Metadata is echoed in complete read and replacement frames, while
 tags and attribute keys are stored in composite PostgreSQL B-tree indexes.
 Unbounded valid domain values could therefore exceed either the 8 MiB process
-frame or a finite index-entry capacity only after mutation handling.
+frame or a finite index-entry capacity only after mutation handling. A byte-only
+aggregate bound still admits tens of thousands of short normalized satellites or
+required-tag predicates in one otherwise valid request.
 
 **Decision.** Admit at most 262,144 total UTF-8 bytes across a metadata
 snapshot, counting title, every tag, and every attribute key and value.
-Additionally bound each indexed tag and attribute key to 1,024 UTF-8 bytes.
-Apply the same 262,144 byte aggregate bound to list-filter strings and the same
-per-tag bound to each required tag. These are provisional capacity limits
-enforced before mutation or database access and by storage checks where one row
-owns the bounded value.
+Additionally admit at most 256 tags and 256 attributes, and bound each indexed
+tag and attribute key to 1,024 UTF-8 bytes. Apply the same 262,144 byte
+aggregate bound, 256-tag cardinality bound, and per-tag bound to list filters.
+These are provisional capacity limits enforced before mutation or database
+access and by storage checks where one row owns the bounded value.
 
 **Rejected alternatives.** Relying on the inbound frame cap leaves no headroom
 for response envelopes and worst-case JSON escaping. Depending on PostgreSQL to
 reject oversized index tuples turns a valid domain value into infrastructure
-failure. Hash-only indexes would change exact-match and corruption semantics for
-a capacity problem that explicit bounds solve.
+failure. A byte-only bound leaves normalized row and predicate counts
+pathological. Hash-only indexes would change exact-match and corruption
+semantics for a capacity problem that explicit bounds solve.
 
 **Affects.** Session-metadata domain construction, list-query admission,
 protocol version four, migration `202607260101`, and their boundary tests.
@@ -79,15 +82,18 @@ string-to-string attribute map, and archive boolean. Persist a mutable root plus
 normalized tag and attribute satellites only after the first write; absence
 means the empty, non-archived snapshot with no last writer. A durable
 `ReplaceSessionMetadata` command atomically replaces the whole snapshot and
-records PostgreSQL transaction time (microsecond precision) plus its actor.
-Equal replay returns that recorded stamp. Archive is view-only: it neither
-cancels work nor cascades, and restore only clears the flag.
+records PostgreSQL statement time (microsecond precision), sampled in a separate
+statement after acquiring the target session lock, plus its actor. Equal replay
+returns that recorded stamp. Archive is view-only: it neither cancels work nor
+cascades, and restore only clears the flag.
 
 **Rejected alternatives.** Adding fields to `Session` makes organizational state
 part of the conversational aggregate. Per-field patch commands complicate replay
 and attribution without a commissioned merge policy. Compare-and-set versioning
 contradicts the accepted last-writer posture. Treating archive as a lifecycle
-transition silently abandons or moves work.
+transition silently abandons or moves work. PostgreSQL transaction time is fixed
+before a transaction waits for the writer lock, so a later winning write could
+otherwise carry an earlier stamp than the snapshot it replaced.
 
 **Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
 [identity-and-commands](spec/identity-and-commands.md), migration
