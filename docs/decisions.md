@@ -10,6 +10,27 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Give each review pass one accepted input
+
+**Context.** A session accepted input executes through one canonical turn.
+Allowing several review passes to name that input lets each pass project a
+different workflow result from the same execution even though session evidence
+commits no such pass inventory.
+
+**Decision.** One accepted input is owned by at most one review pass.
+Persistence enforces the global identity claim in addition to checking that the
+input belongs to the pass session. Executable admission coordination remains
+owned by the review-workflow open question.
+
+**Rejected alternatives.** Treating one turn as implicit evidence for several
+passes attributes results the session aggregate never recorded. Adding a
+pass-identity set to session execution moves the review boundary into the
+session model without an orchestration design.
+
+**Affects.** Review-pass construction and persistence, exact turn evidence, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
 ## 2026-07-25 — Bind finding events to pass results and acyclic references
 
 **Context.** A compatible terminal pass does not prove which finding event it
@@ -17,11 +38,13 @@ produced. Duplicate and superseded references also admit a later reverse edge
 unless classification authenticates the referenced finding's state.
 
 **Decision.** A finding-event pass result commits to the exact finding, ordinal,
-and event kind. Duplicate and superseded events additionally freeze the
-referenced finding's canonically authenticated status at admission, which must
-be `Open` or `Accepted`. The referenced finding is locked while the event is
-admitted. Because a finding becomes terminal when it acquires a reference, no
-later admitted reference can point back to it.
+event kind, and every meaning-bearing payload identity or reason. Duplicate and
+superseded events additionally freeze the referenced finding's canonically
+authenticated status at admission, which must be `Open` or `Accepted`. The
+append-only event is the durable admission fact: persistence locks both finding
+roots in identity order, verifies that status, and appends the fact. Because a
+finding becomes terminal when it acquires a reference, no later admitted
+reference can point back to it.
 
 **Rejected alternatives.** Pass kind and outcome alone do not identify an
 effect. Detecting cycles only while loading allows invalid history to commit.
@@ -52,8 +75,7 @@ one provider object.
 
 **Affects.** External-link attachment persistence, refreshed-target imports, the
 [review-workflows specification](spec/review-workflows.md), and the
-`2026072604xx` persistence slice. This supersedes only the global attachment
-uniqueness chosen in
+`2026072604xx` persistence slice. This refines
 [the earlier identity decision](#2026-07-25--canonicalize-external-review-object-identities-provider-wide);
 provider-wide key canonicalization remains unchanged.
 
@@ -85,9 +107,8 @@ atomically participates in the session command that admitted it, so aggregate
 construction alone cannot guarantee that run/pass projection precedes execution.
 
 **Decision.** This foundation does not schedule or authorize executable review
-work. Application orchestration must later choose and implement a durable hold
-or atomic accepted-input admission and run/pass projection before review inputs
-become executable. That coordination remains an open foundation edge.
+work. The remaining design is owned only by the
+[review-workflow orchestration question](open-questions.md#destination-features-target-model).
 
 **Rejected alternatives.** Claiming the current aggregates prevent execution
 would describe behavior they do not implement. Moving session scheduling into
@@ -231,10 +252,11 @@ terminal frontier. Leaving external object kind open also permits adapters and
 storage to choose incompatible discriminators.
 
 **Decision.** Finding event kinds admit only their recorded judgment,
-deduplication, publication, or repair pass kinds. A successful pass carries its
-turn's exact canonical terminal frontier. External review objects use the closed
-kind vocabulary change request, commit, review, review thread, inline review
-comment, and general change-request comment.
+deduplication, external-publication or external-context-import, or repair pass
+kinds. A successful pass carries its turn's exact canonical terminal frontier.
+External review objects use the closed kind vocabulary change request, commit,
+review, review thread, inline review comment, and general change-request
+comment.
 
 **Rejected alternatives.** Target-only pass checks authenticate ancestry but not
 responsibility. A containing frontier includes unrelated later transcript
@@ -324,13 +346,16 @@ uniqueness constraint would conflate unrelated objects.
 **Decision.** The code-host adapter supplies each external review object as one
 opaque, canonical provider-wide key. When the host's native identifier is
 repository-scoped, the adapter qualifies it with the canonical repository key
-before constructing the domain value. Persistence uniquely admits the resulting
-provider, object-kind, and object-key tuple.
+before constructing the domain value. A reservation's provider equals the
+canonical provider of its associated target. Persistence admits the resulting
+provider, object-kind, and object-key tuple at most once per exact target
+snapshot.
 
-**Rejected alternatives.** Target-scoped uniqueness permits the same external
-object to be attached again through a later snapshot. Teaching the domain every
-host's identifier grammar couples it to adapter details. Persisting both raw and
-qualified forms creates competing object identities.
+**Rejected alternatives.** Global attachment uniqueness strands an object on an
+older target snapshot. Teaching the domain every host's identifier grammar
+couples it to adapter details. Persisting both raw and qualified forms creates
+competing object identities. Trusting a caller-supplied provider independently
+of the target admits cross-provider posting evidence.
 
 **Affects.** External-link adapters, `ReviewExternalObjectKey`, attachment
 persistence, and the
