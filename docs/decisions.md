@@ -34,8 +34,8 @@ reopens duplicate effects after a lost acknowledgement. Copying transcripts or
 general artifacts into workflow rows creates competing content authorities.
 
 **Affects.** The new [review-workflows specification](spec/review-workflows.md),
-review-workflow domain aggregates, the `2026072602xx` persistence slice, INV-040
-and INV-041, and the later application/protocol stack.
+review-workflow domain aggregates, the `2026072602xx` persistence slice, its
+review-workflow invariants, and the later application/protocol stack.
 
 ## 2026-07-25 — Store review confidence as versioned basis-point policy
 
