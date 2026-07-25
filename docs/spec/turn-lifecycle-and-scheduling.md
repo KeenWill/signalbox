@@ -1,7 +1,8 @@
 # Turn lifecycle and scheduling
 
 This page specifies the implemented behavior of turns, turn attempts,
-eligibility derivation, the scheduler, and startup recovery. Code homes:
+eligibility derivation, the scheduler, and startup recovery, as verified against
+the implementing stack through PR #230 (`agent/frontier-scaling`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
