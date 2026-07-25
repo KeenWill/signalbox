@@ -10,7 +10,7 @@ protocol version four for paginated metadata listing, single-session metadata
 reads, and durable complete-snapshot replacement; versions one through three
 retain their closed request and message vocabularies unchanged. The one-file
 conversation-import surface adds protocol version five; versions one through
-four remain unchanged, verified against `agent/import-surfaces`. The
+four remain unchanged, verified through PR #252 (`agent/import-surfaces`). The
 implementation in this stack speaks versions one through five, and its terminal
 client selects version five. This page is the normative boundary between a local
 client process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
