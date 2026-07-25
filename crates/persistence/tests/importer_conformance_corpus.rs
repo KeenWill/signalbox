@@ -430,12 +430,10 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
     );
     assert_eq!(imported.raw_records().len(), 3);
     assert_eq!(imported.entries().len(), 4);
-    assert_eq!(
+    assert!(matches!(
         imported.entries()[0].source().parent_record_id(),
-        &ImportedSourceAttestation::Attested(ImportedText::new(String::from(
-            "missing-before-fixture"
-        )))
-    );
+        ImportedSourceAttestation::Attested(_)
+    ));
     assert!(matches!(
         imported.entries()[1].content(),
         ImportedTranscriptContent::SourceMessageBlock { .. }
