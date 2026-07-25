@@ -438,6 +438,10 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   as the turn disposition. It names either no call, proving direct cancellation
   before any call was prepared, or its one correlated terminal `cancelled` call.
   Its terminal frontier must extend the starting or call frontier by exactly the
+  correlated `TurnCancelled` marker. When the cancellation terminalized a tool
+  round, the input instead names the batch's `completed` producing call, and the
+  terminal frontier extends that call's yielded frontier by exactly one
+  batch-correlated result entry per request in proposal order before the
   correlated `TurnCancelled` marker.
 - A reconciliation-required terminal turn names its exact ended turn attempt and
   exactly one required terminal `ambiguous` model call or tool attempt. The
