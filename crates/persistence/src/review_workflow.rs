@@ -16,8 +16,8 @@ use signalbox_domain::{
     ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewKey, ReviewLineRange,
     ReviewPass, ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassReconstitutionInput,
     ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
-    ReviewPolicyVersion, ReviewRun, ReviewRunId, ReviewRunReconstitutionInput, ReviewRunRef,
-    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewPolicyVersion, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunReconstitutionInput,
+    ReviewRunRef, ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
     ReviewWorkflowKind, SessionId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
@@ -156,7 +156,8 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_target AS canonical_target
                  ON canonical_target.target_id = workflow_run.target_id
                LEFT JOIN review_pass AS canonical_pass
-                 ON canonical_pass.pass_id = workflow_run.state_pass_id
+                 ON canonical_pass.run_id = workflow_run.run_id
+                AND canonical_pass.target_id = workflow_run.target_id
               WHERE workflow_run.run_id = $1",
         )
         .bind(run.into_uuid())
@@ -183,7 +184,6 @@ impl ReviewWorkflowStore {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
             .bind(run.into_uuid())
-            .bind(encode_run_state(next).1.map(ReviewPassId::into_uuid))
             .fetch_optional(&mut *transaction)
             .await?;
         let Some(row) = row else {
@@ -341,7 +341,6 @@ impl ReviewWorkflowStore {
         let mut transaction = self.pool.begin().await?;
         let run_row = sqlx::query(crate::lock_inventory::REVIEW_RUN_TRANSITION)
             .bind(run.into_uuid())
-            .bind(encode_run_state(next_run).1.map(ReviewPassId::into_uuid))
             .fetch_optional(&mut *transaction)
             .await?;
         let Some(run_row) = run_row else {
@@ -520,6 +519,8 @@ impl ReviewWorkflowStore {
                         AS producing_pass_output_frontier_id,
                     producing_run.policy_version
                         AS producing_policy_version,
+                    producing_run.run_id AS canonical_producing_run_id,
+                    producing_run.workflow_kind AS producing_workflow_kind,
                     producing_run.minimum_judge_confidence
                         AS producing_minimum_judge_confidence,
                     producing_run.minimum_publication_confidence
@@ -556,6 +557,12 @@ impl ReviewWorkflowStore {
             "canonical_producing_pass_id",
             "review_finding",
             "producing pass row is missing",
+        )?;
+        require_joined_reference(
+            &row,
+            "canonical_producing_run_id",
+            "review_finding",
+            "producing run row is missing",
         )?;
         let proposal = decode_finding_proposal(&row)?;
         let event_rows = sqlx::query(
@@ -792,6 +799,8 @@ impl ReviewWorkflowStore {
                     canonical_run.run_id AS canonical_run_id,
                     association_finding.producing_pass_id
                         AS finding_producing_pass_id,
+                    association_finding_pass.pass_id
+                        AS canonical_finding_producing_pass_id,
                     link.provider_key, link.object_kind
                FROM review_external_link AS link
                LEFT JOIN review_target AS canonical_target
@@ -803,6 +812,13 @@ impl ReviewWorkflowStore {
                  ON association_finding.finding_id = link.finding_id
                 AND association_finding.run_id = link.run_id
                 AND association_finding.target_id = link.target_id
+               LEFT JOIN review_pass AS association_finding_pass
+                 ON association_finding_pass.pass_id =
+                    association_finding.producing_pass_id
+                AND association_finding_pass.run_id =
+                    association_finding.run_id
+                AND association_finding_pass.target_id =
+                    association_finding.target_id
               WHERE link.external_link_id = $1",
         )
         .bind(link.into_uuid())
@@ -824,6 +840,14 @@ impl ReviewWorkflowStore {
                 "canonical_run_id",
                 "review_external_link",
                 "referenced run row is missing",
+            )?;
+        }
+        if row.try_get::<String, _>("association_kind")? == "finding" {
+            require_joined_reference(
+                &row,
+                "canonical_finding_producing_pass_id",
+                "review_external_link",
+                "finding producing pass row is missing",
             )?;
         }
         let (id, association, provider, kind) = decode_external_link_root(&row)?;
@@ -1180,7 +1204,7 @@ fn projected_current_run_pass_evidence(
     canonical: Option<ReviewPassEvidence>,
 ) -> Result<Option<ReviewPassEvidence>, ReviewWorkflowStoreError> {
     let Some(expected) = encode_run_state(state).1 else {
-        return Ok(None);
+        return Ok(canonical);
     };
     let Some(canonical) = canonical else {
         return Err(corruption(
@@ -1382,6 +1406,11 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
             row.try_get("producing_pass_output_frontier_id")?,
         )?,
     );
+    let producing_run = ReviewRunEvidence::new(
+        run,
+        decode_workflow_kind(&row.try_get::<String, _>("producing_workflow_kind")?)?,
+        producing_pass.policy(),
+    );
     let reference = ReviewFindingRef::new(
         producing_pass_reference,
         finding_id(row.try_get("finding_id")?),
@@ -1422,7 +1451,7 @@ fn decode_finding_proposal(row: &PgRow) -> Result<ReviewFindingProposal, ReviewW
             .transpose()?,
     );
     let target = decode_target(row)?;
-    ReviewFindingProposal::try_new(reference, producing_pass, &target, content)
+    ReviewFindingProposal::try_new(reference, producing_pass, producing_run, &target, content)
         .map_err(|error| corruption("review_finding", format!("{error:?}")))
 }
 

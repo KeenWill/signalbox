@@ -74,8 +74,8 @@ pub(crate) const REVIEW_RUN_TRANSITION: &str = "SELECT
                 AS evidence_pass_output_frontier_id
        FROM review_run AS workflow_run
        LEFT JOIN review_pass AS canonical_pass
-         ON canonical_pass.pass_id =
-            COALESCE(workflow_run.state_pass_id, $2)
+         ON canonical_pass.run_id = workflow_run.run_id
+        AND canonical_pass.target_id = workflow_run.target_id
       WHERE workflow_run.run_id = $1
       FOR UPDATE OF workflow_run";
 

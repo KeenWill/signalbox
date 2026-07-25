@@ -1319,7 +1319,7 @@ BEGIN
     PERFORM 1
       FROM review_external_link
      WHERE external_link_id = NEW.external_link_id
-     FOR UPDATE;
+     FOR NO KEY UPDATE;
 
     SELECT pass_kind, state_kind
       INTO canonical_pass_kind, canonical_pass_state
