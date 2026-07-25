@@ -29,7 +29,7 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
 
 use crate::config::OpenAiConfig;
-use crate::response::decode_buffered_response;
+use crate::response::{StopSequences, decode_buffered_response};
 use crate::status::{classify_error, classify_error_envelope};
 use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
@@ -74,7 +74,7 @@ struct PreparedTransport {
 struct ExecutionSettings {
     delivery: DeliveryMode,
     sse_record_limit: usize,
-    stop_sequences_declared: bool,
+    stop_sequences: StopSequences,
 }
 
 impl<A> std::fmt::Debug for OpenAiRuntime<A> {
@@ -307,7 +307,11 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             };
         };
         let delivery = operation.delivery;
-        let stop_sequences_declared = !operation.settings.stop_sequences.is_empty();
+        let stop_sequences = if operation.settings.stop_sequences.is_empty() {
+            StopSequences::NotDeclared
+        } else {
+            StopSequences::Declared
+        };
         let request = match build_http_request(
             self.client
                 .post(self.completions_url.clone())
@@ -330,7 +334,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 settings: ExecutionSettings {
                     delivery,
                     sse_record_limit: self.sse_record_limit,
-                    stop_sequences_declared,
+                    stop_sequences,
                 },
             },
             correlation,
@@ -378,7 +382,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                         correlation,
                         sink,
                         cancellation,
-                        settings.stop_sequences_declared,
+                        settings.stop_sequences,
                     )
                     .await
                 }
@@ -418,14 +422,14 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
-        stop_sequences_declared: bool,
+        stop_sequences: StopSequences,
     ) -> TerminalEvidence {
         let body = match collect_response_body(response, cancellation).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, correlation, sink, stop_sequences_declared)
+        decode_buffered_response(&body, exchange, correlation, sink, stop_sequences)
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
@@ -438,7 +442,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         settings: &ExecutionSettings,
     ) -> TerminalEvidence {
         let mut framing = SseFraming::new(settings.sse_record_limit);
-        let mut decoder = StreamDecoder::new(exchange, settings.stop_sequences_declared);
+        let mut decoder = StreamDecoder::new(exchange, settings.stop_sequences);
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -503,9 +507,21 @@ fn build_http_request(
         })
 }
 
-fn streamed_response_prefix_len(current: usize, chunk: usize) -> (usize, bool) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefixBudget {
+    Accepted { len: usize },
+    Overflowed { accepted_len: usize },
+}
+
+fn streamed_response_prefix_len(current: usize, chunk: usize) -> PrefixBudget {
     let remaining = MAX_STREAMED_RESPONSE_BYTES.saturating_sub(current);
-    (chunk.min(remaining), chunk > remaining)
+    if chunk > remaining {
+        PrefixBudget::Overflowed {
+            accepted_len: remaining,
+        }
+    } else {
+        PrefixBudget::Accepted { len: chunk }
+    }
 }
 
 fn process_streamed_chunk<C: Clone>(
@@ -517,7 +533,11 @@ fn process_streamed_chunk<C: Clone>(
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> Option<TerminalEvidence> {
-    let (accepted, exceeded) = streamed_response_prefix_len(*streamed_bytes, bytes.len());
+    let budget = streamed_response_prefix_len(*streamed_bytes, bytes.len());
+    let accepted = match budget {
+        PrefixBudget::Accepted { len } => len,
+        PrefixBudget::Overflowed { accepted_len } => accepted_len,
+    };
     *streamed_bytes += accepted;
     // Apply records completed by the in-budget prefix before reporting a
     // framing or aggregate-size failure. A terminal marker in that prefix
@@ -535,11 +555,12 @@ fn process_streamed_chunk<C: Clone>(
     if let Some(error) = outcome.error {
         return Some(decoder.violation_evidence(error.to_string()));
     }
-    exceeded.then(|| {
-        decoder.violation_evidence(format!(
+    match budget {
+        PrefixBudget::Accepted { .. } => None,
+        PrefixBudget::Overflowed { .. } => Some(decoder.violation_evidence(format!(
             "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
-        ))
-    })
+        ))),
+    }
 }
 
 impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRuntime<A> {
@@ -1602,10 +1623,12 @@ mod tests {
     };
 
     use super::{
-        MAX_STREAMED_RESPONSE_BYTES, RedactingSink, build_http_request, process_streamed_chunk,
-        redact_evidence, redact_json, redact_json_stream_fragment, redact_native_message,
-        serialize_request, streamed_response_prefix_len, without_unproven_refusal,
+        MAX_STREAMED_RESPONSE_BYTES, PrefixBudget, RedactingSink, build_http_request,
+        process_streamed_chunk, redact_evidence, redact_json, redact_json_stream_fragment,
+        redact_native_message, serialize_request, streamed_response_prefix_len,
+        without_unproven_refusal,
     };
+    use crate::response::StopSequences;
     use crate::stream::StreamDecoder;
 
     #[test]
@@ -2037,15 +2060,15 @@ mod tests {
     fn streamed_response_budget_rejects_aggregate_overflow() {
         assert_eq!(
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 1),
-            (1, false)
+            PrefixBudget::Accepted { len: 1 }
         );
         assert_eq!(
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 2),
-            (1, true)
+            PrefixBudget::Overflowed { accepted_len: 1 }
         );
         assert_eq!(
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES, usize::MAX),
-            (0, true)
+            PrefixBudget::Overflowed { accepted_len: 0 }
         );
     }
 
@@ -2053,7 +2076,7 @@ mod tests {
     fn streamed_response_overflow_is_typed_protocol_loss() {
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -2089,7 +2112,7 @@ mod tests {
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
         let mut observations = Vec::new();
         let mut cancellation = CancellationSignal::never();
 
@@ -2135,7 +2158,7 @@ mod tests {
         });
         let mut streamed_bytes = 0;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), StopSequences::NotDeclared);
         let mut sink = CancelOnModel {
             observations: Vec::new(),
             sender: Some(sender),

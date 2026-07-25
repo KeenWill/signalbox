@@ -23,7 +23,7 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
-use crate::response::{convert_usage, map_finish};
+use crate::response::{StopSequences, convert_usage, map_finish};
 use crate::status::classify_error_envelope;
 use crate::translate::is_valid_function_name;
 use crate::wire::ChatChunk;
@@ -51,7 +51,7 @@ pub(crate) struct StreamDecoder {
     exchange: ExchangeFacts,
     completion_id: Option<String>,
     reported_model: Option<ProviderReportedModel>,
-    stop_sequences_declared: bool,
+    stop_sequences: StopSequences,
     saw_assistant_role: bool,
     usage: TokenUsage,
     finish: Option<FinishReason>,
@@ -63,12 +63,12 @@ pub(crate) struct StreamDecoder {
 }
 
 impl StreamDecoder {
-    pub(crate) fn new(exchange: ExchangeFacts, stop_sequences_declared: bool) -> Self {
+    pub(crate) fn new(exchange: ExchangeFacts, stop_sequences: StopSequences) -> Self {
         Self {
             exchange,
             completion_id: None,
             reported_model: None,
-            stop_sequences_declared,
+            stop_sequences,
             saw_assistant_role: false,
             usage: TokenUsage::unreported(),
             finish: None,
@@ -327,7 +327,7 @@ impl StreamDecoder {
                 }
             }
             if let Some(token) = choice.finish_reason {
-                let mut finish = map_finish(&token, self.stop_sequences_declared);
+                let mut finish = map_finish(&token, self.stop_sequences);
                 if matches!(finish, FinishReason::Unrecognized { .. }) {
                     self.finish = Some(finish);
                     return self.violation("stream carries an unrecognized finish_reason");
@@ -568,6 +568,7 @@ mod tests {
     };
 
     use super::{StreamDecoder, StreamStep};
+    use crate::response::StopSequences;
 
     /// Pushes one chunk that must frame without a failure and returns its
     /// completed records.
@@ -588,15 +589,15 @@ mod tests {
     /// Runs byte chunks through real SSE framing and the decoder, exactly as
     /// the runtime does, correlating to `"call-1"`.
     fn drive(chunks: &[&[u8]]) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
-        drive_with_stop_sequences(chunks, false)
+        drive_with_stop_sequences(chunks, StopSequences::NotDeclared)
     }
 
     fn drive_with_stop_sequences(
         chunks: &[&[u8]],
-        stop_sequences_declared: bool,
+        stop_sequences: StopSequences,
     ) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::new(exchange(), stop_sequences_declared);
+        let mut decoder = StreamDecoder::new(exchange(), stop_sequences);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         let mut terminal = None;
@@ -620,7 +621,7 @@ mod tests {
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::new(exchange(), false);
+        let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         for chunk in chunks {
@@ -1382,7 +1383,7 @@ mod tests {
                 b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
                   \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             ],
-            true,
+            StopSequences::Declared,
         );
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
