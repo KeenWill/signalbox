@@ -325,15 +325,16 @@ pub struct ReviewTargetParentRef {
     target: ReviewTargetId,
     provider: ReviewKey,
     repository: ReviewKey,
+    head_revision: ReviewKey,
 }
 
 impl ReviewTargetParentRef {
-    /// Supplies the parent's canonical identity and repository scope.
-    pub const fn new(target: ReviewTargetId, provider: ReviewKey, repository: ReviewKey) -> Self {
+    fn from_target(target: &ReviewTarget) -> Self {
         Self {
-            target,
-            provider,
-            repository,
+            target: target.id,
+            provider: target.provider.clone(),
+            repository: target.repository.clone(),
+            head_revision: target.head_revision.clone(),
         }
     }
 
@@ -351,6 +352,11 @@ impl ReviewTargetParentRef {
     pub const fn repository(&self) -> &ReviewKey {
         &self.repository
     }
+
+    /// Borrows the parent's frozen head revision.
+    pub const fn head_revision(&self) -> &ReviewKey {
+        &self.head_revision
+    }
 }
 
 /// One immutable review-target snapshot.
@@ -367,7 +373,7 @@ pub struct ReviewTarget {
 
 impl ReviewTarget {
     /// Constructs a target snapshot, rejecting incomplete comparison evidence
-    /// or a self-parent edge.
+    /// or an unauthenticated parent edge.
     pub fn try_new(
         id: ReviewTargetId,
         provider: ReviewKey,
@@ -375,17 +381,23 @@ impl ReviewTarget {
         subject: ReviewTargetSubject,
         head_revision: ReviewKey,
         base_revision: Option<ReviewKey>,
-        stack_parent: Option<ReviewTargetParentRef>,
+        stack_parent: Option<&ReviewTarget>,
     ) -> Result<Self, ReviewTargetError> {
         if matches!(subject, ReviewTargetSubject::ChangeRequest(_)) && base_revision.is_none() {
             return Err(ReviewTargetError::MissingChangeRequestBase { target: id });
         }
-        if let Some(parent) = &stack_parent {
-            if parent.target == id {
+        if let Some(parent) = stack_parent {
+            if parent.id == id {
                 return Err(ReviewTargetError::SelfParent { target: id });
             }
             if parent.provider != provider || parent.repository != repository {
                 return Err(ReviewTargetError::ForeignParent { target: id });
+            }
+            let Some(base_revision) = &base_revision else {
+                return Err(ReviewTargetError::MissingParentBase { target: id });
+            };
+            if parent.head_revision != *base_revision {
+                return Err(ReviewTargetError::DisconnectedParent { target: id });
             }
         }
         Ok(Self {
@@ -395,7 +407,7 @@ impl ReviewTarget {
             subject,
             head_revision,
             base_revision,
-            stack_parent,
+            stack_parent: stack_parent.map(ReviewTargetParentRef::from_target),
         })
     }
 
@@ -450,6 +462,16 @@ pub enum ReviewTargetError {
     },
     /// The parent belongs to another provider or repository.
     ForeignParent {
+        /// The child target whose topology was rejected.
+        target: ReviewTargetId,
+    },
+    /// A parented target lacks the exact comparison revision.
+    MissingParentBase {
+        /// The child target whose topology was rejected.
+        target: ReviewTargetId,
+    },
+    /// The child's comparison revision is not its canonical parent's head.
+    DisconnectedParent {
         /// The child target whose topology was rejected.
         target: ReviewTargetId,
     },
@@ -1443,7 +1465,9 @@ fn pass_state_matches_turn_outcome(state: ReviewPassState, outcome: ReviewPassTu
             ReviewPassTurnOutcome::Completed
         ) | (
             ReviewPassState::Failed { .. },
-            ReviewPassTurnOutcome::Failed | ReviewPassTurnOutcome::Refused
+            ReviewPassTurnOutcome::Completed
+                | ReviewPassTurnOutcome::Failed
+                | ReviewPassTurnOutcome::Refused
         ) | (
             ReviewPassState::Blocked { .. },
             ReviewPassTurnOutcome::ReconciliationRequired
@@ -1861,6 +1885,20 @@ impl ReviewFindingExternalLinkRef {
                 failure: ReviewFindingExternalLinkFailure::ForeignAssociation,
             });
         }
+        if !matches!(
+            link.object_kind(),
+            ReviewExternalObjectKind::Review
+                | ReviewExternalObjectKind::ReviewThread
+                | ReviewExternalObjectKind::ReviewComment
+                | ReviewExternalObjectKind::ChangeRequestComment
+        ) {
+            return Err(ReviewFindingExternalLinkError {
+                finding,
+                link: link.id(),
+                association: link.association(),
+                failure: ReviewFindingExternalLinkFailure::IncompatibleObjectKind,
+            });
+        }
         let Some(attachment) = link.attachment() else {
             return Err(ReviewFindingExternalLinkError {
                 finding,
@@ -1897,6 +1935,8 @@ impl ReviewFindingExternalLinkRef {
 pub enum ReviewFindingExternalLinkFailure {
     /// The link is not canonically associated with the finding.
     ForeignAssociation,
+    /// The external object does not carry review content.
+    IncompatibleObjectKind,
     /// The link remains a pending reservation without an external identity.
     NotAttached,
 }
@@ -3018,18 +3058,24 @@ mod tests {
     /// topology.
     #[test]
     fn inv040_review_target_rejects_foreign_stack_parent() {
+        let parent = ReviewTarget::try_new(
+            target_id(2),
+            key("other-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("base"),
+            None,
+            None,
+        )
+        .expect("standalone parent snapshot is valid");
         let error = ReviewTarget::try_new(
             target_id(1),
             key("code-host"),
             key("repository"),
             ReviewTargetSubject::Commit,
             key("head"),
-            None,
-            Some(ReviewTargetParentRef::new(
-                target_id(2),
-                key("other-host"),
-                key("repository"),
-            )),
+            Some(key("base")),
+            Some(&parent),
         )
         .expect_err("stack parent must share the child's provider and repository");
         assert_eq!(
@@ -3038,6 +3084,100 @@ mod tests {
                 target: target_id(1)
             }
         );
+    }
+
+    /// INV-040: a parent edge requires an exact frozen child comparison.
+    #[test]
+    fn inv040_review_target_rejects_parent_without_base_revision() {
+        let parent = ReviewTarget::try_new(
+            target_id(2),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("base"),
+            None,
+            None,
+        )
+        .expect("standalone parent snapshot is valid");
+        let error = ReviewTarget::try_new(
+            target_id(1),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("head"),
+            None,
+            Some(&parent),
+        )
+        .expect_err("a parented target must freeze its comparison revision");
+        assert_eq!(
+            error,
+            ReviewTargetError::MissingParentBase {
+                target: target_id(1)
+            }
+        );
+    }
+
+    /// INV-040: the child's comparison revision is the canonical parent head.
+    #[test]
+    fn inv040_review_target_rejects_revision_disconnected_stack_parent() {
+        let parent = ReviewTarget::try_new(
+            target_id(2),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("parent-head"),
+            None,
+            None,
+        )
+        .expect("standalone parent snapshot is valid");
+        let error = ReviewTarget::try_new(
+            target_id(1),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("child-head"),
+            Some(key("unrelated-base")),
+            Some(&parent),
+        )
+        .expect_err("a stack edge must join the exact frozen revisions");
+        assert_eq!(
+            error,
+            ReviewTargetError::DisconnectedParent {
+                target: target_id(1)
+            }
+        );
+    }
+
+    /// INV-040: a valid parent reference retains canonical scope and head
+    /// evidence from the supplied snapshot.
+    #[test]
+    fn inv040_review_target_derives_parent_evidence_from_canonical_snapshot() {
+        let parent = ReviewTarget::try_new(
+            target_id(2),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("parent-head"),
+            None,
+            None,
+        )
+        .expect("standalone parent snapshot is valid");
+        let child = ReviewTarget::try_new(
+            target_id(1),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("child-head"),
+            Some(key("parent-head")),
+            Some(&parent),
+        )
+        .expect("canonical parent head matches the child base");
+        let edge = child.stack_parent().expect("child retains its parent edge");
+
+        assert_eq!(edge.target(), parent.id());
+        assert_eq!(edge.provider(), parent.provider());
+        assert_eq!(edge.repository(), parent.repository());
+        assert_eq!(edge.head_revision(), parent.head_revision());
     }
 
     /// INV-001: review identities remain distinct while composite references
@@ -3677,6 +3817,11 @@ mod tests {
         );
         assert_pass_outcome_reconstitutes(
             ReviewPassState::Failed { turn: turn_id(6) },
+            ReviewPassTurnOutcome::Completed,
+            Some(frontier_id(8)),
+        );
+        assert_pass_outcome_reconstitutes(
+            ReviewPassState::Failed { turn: turn_id(6) },
             ReviewPassTurnOutcome::Failed,
             Some(frontier_id(8)),
         );
@@ -3786,6 +3931,33 @@ mod tests {
         assert_eq!(
             error.association(),
             ReviewExternalLinkAssociation::Finding(finding_ref(11))
+        );
+    }
+
+    /// INV-040 / INV-041: a repository correlation that carries no review
+    /// content cannot prove that a finding was posted.
+    #[test]
+    fn inv040_posted_link_rejects_non_review_external_object() {
+        let finding = finding_ref(10);
+        let link = ReviewExternalLink::reserve(
+            link_id(32),
+            ReviewExternalLinkAssociation::Finding(finding),
+            key("code-host"),
+            ReviewExternalObjectKind::Commit,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            link_id(32),
+            succeeded_pass(20, ReviewPassKind::Publish),
+            key("external-commit"),
+        ))
+        .expect("fixture attachment belongs to the finding target");
+
+        let error = ReviewFindingExternalLinkRef::try_new(finding, &link)
+            .expect_err("an attached commit does not prove review publication");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingExternalLinkFailure::IncompatibleObjectKind
         );
     }
 
