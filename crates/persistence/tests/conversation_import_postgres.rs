@@ -16,9 +16,10 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationIdGenerator,
+    ImportedConversationConverter, ImportedConversationIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
+use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
@@ -29,13 +30,14 @@ use signalbox_domain::{
     ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
     },
     local_test_connection_options, migrate,
 };
-use sqlx::{PgPool, Transaction, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, Transaction, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -133,6 +135,38 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
     migrate(&pool).await?;
+    Ok((container, pool, database_url))
+}
+
+async fn postgres_before_codex_format()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202607240005)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
     Ok((container, pool, database_url))
 }
 
@@ -858,6 +892,74 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     Ok(())
 }
 
+/// S28 / INV-038: Codex rollout entries use the same append-only,
+/// content-addressed persistence boundary as every imported conversation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_codex_rollout_round_trip_is_idempotent_and_restart_safe()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = postgres_before_codex_format().await?;
+    migrate(&pool).await?;
+    let source = concat!(
+        "{\"timestamp\":\"t0\",\"type\":\"response_item\",\"payload\":",
+        "{\"type\":\"message\",\"role\":\"user\",\"content\":",
+        "[{\"type\":\"input_text\",\"text\":\"question\"}]}}\n",
+        "{\"timestamp\":\"t1\",\"type\":\"response_item\",\"payload\":",
+        "{\"type\":\"function_call\",\"call_id\":\"call-1\",",
+        "\"name\":\"lookup\",\"arguments\":\"{\\\"key\\\":\\\"value\\\"}\"}}\n",
+        "{\"timestamp\":\"t2\",\"type\":\"response_item\",\"payload\":",
+        "{\"type\":\"function_call_output\",\"call_id\":\"call-1\",",
+        "\"output\":\"result\"}}"
+    );
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x8100));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x8100, 0x8200], 0x8300..0x8306),
+        CodexRolloutJsonlConverter,
+        repository,
+    );
+
+    assert_eq!(
+        service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+    assert_eq!(
+        service.execute(source.as_bytes()).await?,
+        ImportConversationOutcome::AlreadyImported {
+            conversation: winner
+        }
+    );
+    let (_, _, repository) = service.into_parts();
+    let stored = repository
+        .load(winner)
+        .await?
+        .expect("inserted Codex rollout must load");
+    assert_eq!(
+        stored.format(),
+        ImportedConversationFormat::CodexRolloutJsonlV1
+    );
+    assert_eq!(stored.raw_records().len(), 3);
+    assert_eq!(stored.entries().len(), 3);
+    assert_eq!(stored.frontiers().count(), 3);
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let restarted = ImportedConversationRepository::new(restarted_pool.clone())
+        .load(winner)
+        .await?
+        .expect("durable Codex rollout must survive pool restart");
+    assert_eq!(restarted, stored);
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S28 / INV-038: equal source bytes cannot resolve as replay when a drifting
 /// converter supplies a different normalized record and semantic projection.
 #[tokio::test]
@@ -1291,12 +1393,12 @@ async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-002 / INV-038: the schema admits the two implemented converter versions
-/// and rejects every unimplemented version before storing a header.
+/// INV-002 / INV-038: the schema admits only implemented format/version pairs
+/// and rejects every unimplemented combination before storing a header.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv002_inv038_unknown_converter_version_is_schema_rejected() -> Result<(), Box<dyn Error>>
-{
+async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
         "INSERT INTO imported_conversation
@@ -1315,6 +1417,24 @@ async fn inv002_inv038_unknown_converter_version_is_schema_rejected() -> Result<
             .as_database_error()
             .and_then(sqlx::error::DatabaseError::constraint),
         Some("imported_conversation_converter_version_supported")
+    );
+    let pair_error = sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x4fe))
+    .bind(vec![1_u8; 32])
+    .execute(&pool)
+    .await
+    .expect_err("an unimplemented format/version pair must violate the schema");
+    assert_eq!(
+        pair_error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_conversation_format_version_supported")
     );
 
     pool.close().await;
@@ -1491,6 +1611,14 @@ async fn opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Erro
     validate_opt_in_real_transcript_postgres_round_trip().await
 }
 
+/// Local-only Codex validation with the same content-silent contract as the
+/// Claude Code real-transcript test above.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires explicit local real-rollout and PostgreSQL opt-in"]
+async fn opt_in_real_codex_rollout_postgres_round_trip() -> Result<(), Box<dyn Error>> {
+    validate_opt_in_real_codex_rollout_postgres_round_trip().await
+}
+
 async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Error>> {
     if env::var("SIGNALBOX_RUN_REAL_CLAUDE_IMPORT").as_deref() != Ok("1") {
         return Ok(());
@@ -1509,7 +1637,7 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
     let (container, pool, _database_url) = migrated_postgres().await?;
     for (file_index, path) in paths.into_iter().enumerate() {
         let source = fs::read(path).map_err(|_| "real input unavailable")?;
-        validate_real_transcript(&pool, &source, file_index).await?;
+        validate_real_source(&pool, &source, file_index, ClaudeCodeJsonlConverter).await?;
     }
 
     pool.close().await;
@@ -1517,11 +1645,41 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
     Ok(())
 }
 
-async fn validate_real_transcript(
+async fn validate_opt_in_real_codex_rollout_postgres_round_trip() -> Result<(), Box<dyn Error>> {
+    if env::var("SIGNALBOX_RUN_REAL_CODEX_IMPORT").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let Some(root) = env::var_os("SIGNALBOX_REAL_CODEX_ROLLOUTS") else {
+        return Err("real rollout inputs were not configured".into());
+    };
+    let mut paths = Vec::new();
+    for root in env::split_paths(&root) {
+        collect_transcripts(&root, &mut paths).map_err(|()| "real inputs unavailable")?;
+    }
+    paths.sort();
+    if paths.is_empty() {
+        return Err("real rollout directory contained no JSONL files".into());
+    }
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    for (file_index, path) in paths.into_iter().enumerate() {
+        let source = fs::read(path).map_err(|_| "real input unavailable")?;
+        validate_real_source(&pool, &source, file_index, CodexRolloutJsonlConverter).await?;
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn validate_real_source<Converter>(
     pool: &PgPool,
     source: &[u8],
     file_index: usize,
-) -> Result<(), Box<dyn Error>> {
+    converter: Converter,
+) -> Result<(), Box<dyn Error>>
+where
+    Converter: ImportedConversationConverter,
+{
     let ordinal = u128::try_from(file_index)
         .ok()
         .and_then(|value| value.checked_add(1))
@@ -1539,13 +1697,13 @@ async fn validate_real_transcript(
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
         SequentialIds::new([first_candidate, second_candidate], first_entry),
-        ClaudeCodeJsonlConverter,
+        converter,
         repository,
     );
     let winner = match service
         .execute(source)
         .await
-        .map_err(|_| "real transcript first import failed")?
+        .map_err(|_| "real source first import failed")?
     {
         ImportConversationOutcome::Inserted { conversation }
         | ImportConversationOutcome::AlreadyImported { conversation } => conversation,
@@ -1553,14 +1711,14 @@ async fn validate_real_transcript(
     match service
         .execute(source)
         .await
-        .map_err(|_| "real transcript repeat import failed")?
+        .map_err(|_| "real source repeat import failed")?
     {
         ImportConversationOutcome::AlreadyImported { conversation } if conversation == winner => {}
         ImportConversationOutcome::AlreadyImported { .. } => {
-            return Err("real transcript reimport resolved a different identity".into());
+            return Err("real source reimport resolved a different identity".into());
         }
         ImportConversationOutcome::Inserted { .. } => {
-            return Err("real transcript reimport was not idempotent".into());
+            return Err("real source reimport was not idempotent".into());
         }
     }
     let (_, _, repository) = service.into_parts();

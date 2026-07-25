@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Share the lossless JSON decoder across import edges
+
+**Context.** Codex rollout JSONL needs the same ordered-member,
+duplicate-member, exact-number, Unicode, and depth guarantees as the Claude Code
+converter. The existing bounded decoder contains no Claude-specific semantics,
+but lived inside that provider adapter.
+
+**Decision.** Move the decoder unchanged into a provider-neutral import-edge
+crate used by both converters. It continues to construct the domain's
+source-neutral structured values directly, delegates only JSON string-token
+decoding to `serde_json`, and exposes content-silent syntax, UTF-8, and depth
+failures. Provider record and block semantics remain in their separate edge
+crates.
+
+**Rejected alternatives.** Duplicating the decoder would create two subtly
+different definitions of exact JSON preservation. Depending on the Claude Code
+crate from the Codex crate would couple unrelated providers. Moving parsing into
+the domain would reverse the recorded edge boundary.
+
+**Affects.** The Claude Code and Codex converter dependencies, workspace layout,
+lossless JSON parser tests, and converter implementation ownership; no
+normalized or durable representation changes.
+
 ## 2026-07-24 — Run Docker-backed integration suites concurrently in CI
 
 **Context.** GitHub-hosted Ubuntu runners provide Docker, and Signalbox's
