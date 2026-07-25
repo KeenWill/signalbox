@@ -3098,9 +3098,13 @@ mod tests {
     }
 
     /// Reprojects one `response_item` payload through the Codex projection and
-    /// checks that it yields exactly the expected single entry.
+    /// checks that it yields exactly the expected single entry, whose speaker
+    /// the projection leaves unattested rather than fabricating one. The
+    /// speaker expectation is fixed here — never a per-call value — because no
+    /// Codex tool payload attests a speaker; the helper's name carries it to
+    /// every call site.
     #[track_caller]
-    fn assert_codex_payload_projects_one_entry(
+    fn assert_codex_payload_projects_one_entry_attesting_no_speaker(
         payload: ImportedStructuredValue,
         expected: ImportedTranscriptContent,
     ) {
@@ -3124,11 +3128,11 @@ mod tests {
         );
     }
 
-    /// S28 / INV-038: the Codex reprojection maps a structured tool call's
-    /// exact input field and fabricates no tool name for it.
+    /// S28 / INV-038: the Codex reprojection maps a `tool_search_call`'s exact
+    /// `arguments` value as tool input and fabricates no tool name for it.
     #[test]
-    fn s28_inv038_codex_reprojection_maps_structured_tool_input_without_a_name() {
-        assert_codex_payload_projects_one_entry(
+    fn s28_inv038_codex_reprojection_maps_tool_search_call_arguments_without_a_name() {
+        assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
                     "type",
@@ -3153,7 +3157,13 @@ mod tests {
                 caller: ImportedSourceAttestation::NotAttested,
             },
         );
-        assert_codex_payload_projects_one_entry(
+    }
+
+    /// S28 / INV-038: the Codex reprojection maps a `local_shell_call`'s exact
+    /// `action` value as tool input and fabricates no tool name for it.
+    #[test]
+    fn s28_inv038_codex_reprojection_maps_local_shell_call_action_without_a_name() {
+        assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
                     "type",
@@ -3185,7 +3195,7 @@ mod tests {
     /// mapping must not read.
     #[test]
     fn s28_inv038_codex_reprojection_maps_web_search_item_id_as_call_identity() {
-        assert_codex_payload_projects_one_entry(
+        assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
                     "type",
@@ -3217,7 +3227,7 @@ mod tests {
     /// from `input` while retaining its exact attested name.
     #[test]
     fn s28_inv038_codex_reprojection_maps_custom_tool_call_input_field() {
-        assert_codex_payload_projects_one_entry(
+        assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
                     "type",
@@ -3249,7 +3259,7 @@ mod tests {
     /// attestation and leaving a non-object element unattested.
     #[test]
     fn s28_inv038_codex_reprojection_maps_tool_search_output_as_ordered_blocks() {
-        assert_codex_payload_projects_one_entry(
+        assert_codex_payload_projects_one_entry_attesting_no_speaker(
             object_with_members(vec![
                 (
                     "type",
