@@ -400,9 +400,47 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF TG_OP = 'UPDATE'
-       AND NEW.source_command_id IS NOT DISTINCT FROM OLD.source_command_id
-    THEN
+    IF NEW.result_kind <> 'applied' THEN
+        RETURN NEW;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM session_metadata_installation
+         WHERE session_id = NEW.result_applied_session_id
+           AND source_command_id = NEW.command_id
+    ) THEN
+        RAISE EXCEPTION
+            'session metadata receipt % was already installed for session %',
+            NEW.command_id,
+            NEW.result_applied_session_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    INSERT INTO session_metadata_installation (
+        session_id,
+        source_command_id
+    )
+    VALUES (
+        NEW.result_applied_session_id,
+        NEW.command_id
+    );
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER replace_session_metadata_command_records_installation
+AFTER INSERT ON replace_session_metadata_command
+FOR EACH ROW
+EXECUTE FUNCTION record_session_metadata_installation();
+
+CREATE FUNCTION reject_session_metadata_receipt_reinstallation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.source_command_id IS NOT DISTINCT FROM OLD.source_command_id THEN
         RETURN NEW;
     END IF;
 
@@ -419,28 +457,14 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    INSERT INTO session_metadata_installation (
-        session_id,
-        source_command_id
-    )
-    VALUES (
-        NEW.session_id,
-        NEW.source_command_id
-    );
-
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER session_metadata_insert_records_installation
-AFTER INSERT ON session_metadata
+CREATE TRIGGER session_metadata_receipt_reinstallation_is_rejected
+BEFORE UPDATE OF source_command_id ON session_metadata
 FOR EACH ROW
-EXECUTE FUNCTION record_session_metadata_installation();
-
-CREATE TRIGGER session_metadata_update_records_installation
-AFTER UPDATE OF source_command_id ON session_metadata
-FOR EACH ROW
-EXECUTE FUNCTION record_session_metadata_installation();
+EXECUTE FUNCTION reject_session_metadata_receipt_reinstallation();
 
 CREATE TRIGGER session_metadata_installation_is_append_only
 BEFORE UPDATE OR DELETE ON session_metadata_installation
@@ -541,9 +565,18 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    RETURN NULL;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+
+    RETURN NEW;
 END;
 $$;
+
+CREATE TRIGGER session_metadata_installation_matches_receipt
+BEFORE INSERT ON session_metadata_installation
+FOR EACH ROW
+EXECUTE FUNCTION require_session_metadata_matches_receipt();
 
 CREATE CONSTRAINT TRIGGER session_metadata_matches_receipt
 AFTER INSERT OR UPDATE ON session_metadata

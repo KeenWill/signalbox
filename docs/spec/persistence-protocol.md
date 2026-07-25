@@ -48,8 +48,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-four files, `202607180001` through
-`202607260101` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-five files, `202607180001` through
+`202607260300` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -156,12 +156,14 @@ Representation rules, all enforced in the schema:
   current root, tag, and attribute tables also reject `TRUNCATE`; complete
   replacement through the adapter is their only admitted mutation. An
   append-only `session_metadata_installation` row records each source receipt
-  when it first becomes current. Deferred foreign keys bind both the current
-  root and every applied receipt to that evidence, while its insert trigger
-  requires the source to be current and rejects a source already recorded for
-  the session. Reinstalling an older receipt after a later replacement therefore
-  cannot commit, and installation evidence cannot be updated, deleted, or
-  truncated.
+  when its applied receipt parent is sealed. Before admitting that evidence, an
+  immediate trigger requires the source to be current and compares the complete
+  current root and both satellite sets with the sealed receipt. Each
+  installation is therefore authenticated before another write in the same
+  transaction can supersede it. Deferred foreign keys bind both the final
+  current root and every applied receipt to the evidence. Reinstalling an older
+  receipt after a later replacement cannot commit, and installation evidence
+  cannot be updated, deleted, or truncated.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live

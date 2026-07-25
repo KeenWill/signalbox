@@ -140,17 +140,6 @@ fn assert_check_violation(error: &sqlx::Error) {
     );
 }
 
-#[track_caller]
-fn assert_foreign_key_violation(error: &sqlx::Error) {
-    assert_eq!(
-        error
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("23503")
-    );
-}
-
 /// INV-002: a created session with no metadata write has the canonical
 /// unwritten snapshot.
 #[tokio::test(flavor = "multi_thread")]
@@ -640,6 +629,60 @@ async fn inv012_prior_metadata_receipt_cannot_be_reinstalled() -> Result<(), Box
     Ok(())
 }
 
+/// INV-012: each installation authenticates the complete current snapshot
+/// before another write in the same transaction can supersede it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_metadata_installation_authenticates_snapshot_before_supersession()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x905))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_metadata
+            (session_id, source_command_id, title, archived, updated_at,
+             actor_kind)
+         VALUES ($1, $2, 'current title', false, to_timestamp(1), 'owner')",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .bind(Uuid::from_u128(0x905))
+    .execute(&mut *transaction)
+    .await?;
+
+    let unauthenticated = sqlx::query(
+        "INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, replacement_title, replacement_archived,
+             result_kind, result_session_id, result_applied_session_id,
+             result_updated_at, result_actor_kind)
+         VALUES
+            ($1, 'replace_session_metadata', 1, $2,
+             'owner', 'receipt title', false,
+             'applied', $2, $2, to_timestamp(1), 'owner')",
+    )
+    .bind(Uuid::from_u128(0x905))
+    .bind(Uuid::from_u128(0x701))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("installation evidence must authenticate its snapshot immediately");
+    assert_check_violation(&unauthenticated);
+    transaction.rollback().await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-012: deleting installation evidence cannot reopen an applied receipt for
 /// a second physical installation.
 #[tokio::test(flavor = "multi_thread")]
@@ -1027,7 +1070,7 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     .bind(Uuid::from_u128(0x908))
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
+    let missing_root = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, replacement_archived, result_kind,
@@ -1041,12 +1084,10 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     .bind(Uuid::from_u128(0x908))
     .bind(Uuid::from_u128(0x701))
     .execute(&mut *transaction)
-    .await?;
-    let missing_root = transaction
-        .commit()
-        .await
-        .expect_err("an applied receipt must retain its current metadata root");
-    assert_foreign_key_violation(&missing_root);
+    .await
+    .expect_err("an applied receipt must name its current metadata root immediately");
+    assert_check_violation(&missing_root);
+    transaction.rollback().await?;
 
     pool.close().await;
     drop(container);
