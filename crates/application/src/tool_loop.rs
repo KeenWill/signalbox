@@ -928,7 +928,11 @@ where
                             result_entry_count,
                             dispatch_permit,
                         )
-                        .await;
+                        .await
+                        .map(|outcome| {
+                            ToolExecutionServiceOutcome::CrashClassified(Box::new(outcome))
+                        })
+                        .map_err(ToolExecutionServiceError::CrashClassification);
                 }
             }
         }
@@ -1004,6 +1008,10 @@ where
                             _dispatch_permit,
                         )
                         .await
+                        .map(|outcome| {
+                            ToolExecutionServiceOutcome::CrashClassified(Box::new(outcome))
+                        })
+                        .map_err(ToolExecutionServiceError::CrashClassification)
                     }
                 };
             }
@@ -1246,29 +1254,21 @@ where
             )
             .await;
         match (failure, classification) {
-            (
-                UntrustedExecutorFailure::Executor(error),
-                Ok(ToolExecutionServiceOutcome::CrashClassified(_)),
-            ) => Err(ToolExecutionServiceError::Executor(error)),
-            (
-                UntrustedExecutorFailure::CorrelationMismatch,
-                Ok(ToolExecutionServiceOutcome::CrashClassified(_)),
-            ) => Err(ToolExecutionServiceError::ExecutorCorrelationMismatch),
-            (
-                UntrustedExecutorFailure::Executor(executor_error),
-                Err(ToolExecutionServiceError::CrashClassification(classification_error)),
-            ) => Err(ToolExecutionServiceError::ExecutorCrashClassification {
-                executor_error,
-                classification_error,
-            }),
-            (
-                UntrustedExecutorFailure::CorrelationMismatch,
-                Err(ToolExecutionServiceError::CrashClassification(error)),
-            ) => Err(
+            (UntrustedExecutorFailure::Executor(error), Ok(_)) => {
+                Err(ToolExecutionServiceError::Executor(error))
+            }
+            (UntrustedExecutorFailure::CorrelationMismatch, Ok(_)) => {
+                Err(ToolExecutionServiceError::ExecutorCorrelationMismatch)
+            }
+            (UntrustedExecutorFailure::Executor(executor_error), Err(classification_error)) => {
+                Err(ToolExecutionServiceError::ExecutorCrashClassification {
+                    executor_error,
+                    classification_error,
+                })
+            }
+            (UntrustedExecutorFailure::CorrelationMismatch, Err(error)) => Err(
                 ToolExecutionServiceError::ExecutorCorrelationMismatchCrashClassification(error),
             ),
-            (_, Ok(_)) => unreachable!("crash classification has one successful outcome"),
-            (_, Err(_)) => unreachable!("crash classification has one failure stage"),
         }
     }
 
@@ -1307,10 +1307,7 @@ where
         attempt: ToolAttemptId,
         result_entry_count: usize,
         dispatch_permit: InProcessToolDispatchPermit,
-    ) -> Result<
-        ToolExecutionServiceOutcome,
-        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
-    > {
+    ) -> Result<ToolAttemptCrashOutcome, Transaction::Error> {
         loop {
             let identities = ToolCrashClosureIdentities::new(
                 (0..result_entry_count)
@@ -1336,11 +1333,7 @@ where
                 {
                     continue;
                 }
-                Ok(outcome) => {
-                    return Ok(ToolExecutionServiceOutcome::CrashClassified(Box::new(
-                        outcome,
-                    )));
-                }
+                Ok(outcome) => return Ok(outcome),
                 Err(error) => {
                     self.retained_state = Some(RetainedToolExecutionState {
                         state: RetainedToolExecutionStateKind::CrashClassification {
@@ -1351,7 +1344,7 @@ where
                             dispatch_permit,
                         },
                     });
-                    return Err(ToolExecutionServiceError::CrashClassification(error));
+                    return Err(error);
                 }
             }
         }

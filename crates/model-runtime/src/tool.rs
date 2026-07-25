@@ -74,9 +74,13 @@ impl ToolDefinition {
         description: impl Into<String>,
         input_schema: serde_json::Value,
     ) -> Self {
+        // Invariant: `serde_json::Value` contains only JSON values, so its
+        // `Serialize` implementation cannot reject this conversion. The
+        // `explicit_schema_serializes_as_raw_json` test exercises this exact
+        // boundary.
         #[expect(
             clippy::expect_used,
-            reason = "serde_json::Value has no fallible serialization shape"
+            reason = "serde_json::Value serialization is total; explicit_schema_serializes_as_raw_json enforces the boundary"
         )]
         let input_schema =
             to_raw_value(&input_schema).expect("serde_json::Value always serializes as JSON");
@@ -221,6 +225,21 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(definition.input_schema.get())
                 .expect("generated schema remains valid JSON")
         ));
+    }
+
+    #[test]
+    fn explicit_schema_serializes_as_raw_json() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            }
+        });
+        let definition = ToolDefinition::with_schema("lookup", "Looks up a city.", schema.clone());
+        let round_trip = serde_json::from_str::<serde_json::Value>(definition.input_schema.get())
+            .expect("the explicit raw schema remains valid JSON");
+
+        assert_eq!(round_trip, schema);
     }
 
     #[test]

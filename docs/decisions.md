@@ -33,6 +33,67 @@ manual and leaves tooling with no owner to resolve.
 
 **Affects.** `.github/CODEOWNERS` (new) and pull-request reviewer assignment.
 
+## 2026-07-25 — Deny untracked production panic primitives
+
+**Context.** The workspace already denied direct `panic!`, `expect()`, and
+`unwrap()` use, while the 2026-07-20 panic ledger commissioned typed conversions
+and an `unreachable!` gate. Rechecking every production target found twelve
+`unreachable!` sites and seven temporary ledger `expect()` sites. Two additional
+`expect()` calls serialize `serde_json::Value`, a representation whose
+serialization is total.
+
+**Decision.** Convert the nineteen temporary or branch-derived sites to
+exhaustive matches, structurally correlated values, or existing typed errors.
+Retain only the two total `serde_json::Value` conversions, each with a local
+invariant comment, a narrow lint expectation, and a named unit check. Deny
+Clippy's `unreachable`, `todo`, and `unimplemented` lints workspace-wide
+alongside the existing panic, expect, and unwrap gates; test targets retain the
+workspace's test-only panic allowance.
+
+**Rejected alternatives.** A source grep cannot distinguish production code from
+inline test modules as reliably as target-aware Clippy. A permanent allow-list
+would let stale line-oriented exceptions survive refactors. Returning `Result`
+from otherwise infallible public schema constructors would export a failure
+state their input type cannot produce.
+
+**Affects.** The workspace Clippy policy, the closed 2026-07-20 panic ledger,
+and the locally rewritten domain, application, persistence, runtime-bridge, and
+client branches. Public API shapes and accepted runtime semantics do not change.
+
+## 2026-07-25 — Phase-one review-process amendments
+
+**Context.** The first heavy-throughput week under the living-specification
+regime retired the doc-consistency tax but concentrated review-loop waste in
+four places: stale-head re-reviews and re-raises (~62 threads that week),
+first-wave testing-style findings agents could have caught themselves (164
+threads), a wave-cap ladder practiced but written nowhere, and unattended
+overnight loops on core pull requests.
+
+**Decision.** Amend the process documents only: [AGENTS.md](../AGENTS.md) gains
+the actual wave-cap ladder (escalate at wave five, one owner-authorized
+extension of up to three waves, then a hard stop), a mandatory reply-and-resolve
+sweep past ~50 open threads, a symmetric standing decline for re-raises of
+prior-wave findings, a review-loop sequencing rule, a pre-first-request
+self-review checklist, and a no-request rule for banner-only diffs.
+[goal-mode.md](agents/goal-mode.md) pauses the loop after wave three on
+`crates/domain`/`crates/persistence` pull requests until the owner's next
+check-in. [persistence-protocol.md](spec/persistence-protocol.md) reserves
+migration prefix blocks per stack. [.coderabbit.yaml](../.coderabbit.yaml)
+exempts banner files and clarifies migration ordering against the ultimate
+main-merge target. Those four documents are the amended rules' single normative
+homes; this entry records the choice and its rationale, and their text — not
+this summary — governs as the rules evolve.
+
+**Rejected alternatives.** A per-content-type wave cap: earlier measurement
+showed real findings surviving into late waves, so a fixed cap discards defects.
+Mechanizing the self-review checks in CI now: deferred to a focused follow-up
+that mirrors `scripts/check_domain_spine.py`. Leaving the wave ladder informal:
+the practiced rule stayed unwritten and unenforceable.
+
+**Affects.** [AGENTS.md](../AGENTS.md), [goal-mode.md](agents/goal-mode.md),
+[persistence-protocol.md](spec/persistence-protocol.md),
+[.coderabbit.yaml](../.coderabbit.yaml); every reviewed pull request.
+
 ## 2026-07-25 — Default session-metadata lists to fifty rows
 
 **Context.** Metadata list queries admit page sizes from one through one

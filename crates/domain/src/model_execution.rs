@@ -3427,20 +3427,20 @@ fn frontier_closes_latest_tool_round(
     tool_denial_correlations: &BTreeSet<crate::ToolRequestId>,
 ) -> Result<bool, ()> {
     let suffix = &frontier_entries[starting_snapshot.entry_count()..];
-    let Some(last_tool_use) = suffix.iter().rposition(|entry| {
-        matches!(
-            entry.payload(),
-            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
-        )
-    }) else {
+    let Some((last_tool_use, producing_call)) =
+        suffix
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(position, entry)| match entry.payload() {
+                SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
+                    Some((position, *producing_call))
+                }
+                _ => None,
+            })
+    else {
         return Ok(false);
     };
-    let SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } =
-        suffix[last_tool_use].payload()
-    else {
-        unreachable!("the position was selected from assistant tool-use entries");
-    };
-    let producing_call = *producing_call;
     let response_start = (0..=last_tool_use)
         .rev()
         .take_while(|index| assistant_entry_call(&suffix[*index]) == Some(producing_call))
