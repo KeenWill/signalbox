@@ -42,6 +42,7 @@ ALTER TABLE durable_command
 
 CREATE TABLE session_metadata (
     session_id uuid PRIMARY KEY,
+    source_command_id uuid NOT NULL,
     title text,
     archived boolean NOT NULL,
     updated_at timestamptz NOT NULL,
@@ -56,6 +57,11 @@ CREATE TABLE session_metadata (
         ON DELETE RESTRICT,
     CONSTRAINT session_metadata_title_nonempty
         CHECK (title IS NULL OR octet_length(title) > 0),
+    CONSTRAINT session_metadata_updated_at_finite
+        CHECK (
+            updated_at > '-infinity'::timestamptz
+            AND updated_at < 'infinity'::timestamptz
+        ),
     CONSTRAINT session_metadata_actor_kind_closed
         CHECK (actor_kind IN ('owner', 'model', 'recovery', 'tool')),
     CONSTRAINT session_metadata_actor_shape
@@ -196,6 +202,14 @@ CREATE TABLE replace_session_metadata_command (
         ),
     CONSTRAINT replace_session_metadata_command_result_session_matches
         CHECK (result_session_id = session_id),
+    CONSTRAINT replace_session_metadata_command_result_updated_at_finite
+        CHECK (
+            result_updated_at IS NULL
+            OR (
+                result_updated_at > '-infinity'::timestamptz
+                AND result_updated_at < 'infinity'::timestamptz
+            )
+        ),
     CONSTRAINT replace_session_metadata_command_result_actor_kind_closed
         CHECK (
             result_actor_kind IS NULL
@@ -263,8 +277,21 @@ CREATE TABLE replace_session_metadata_command (
         REFERENCES session_metadata (session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT replace_session_metadata_command_applied_session_unique
+        UNIQUE (command_id, result_applied_session_id)
 );
+
+ALTER TABLE session_metadata
+    ADD CONSTRAINT session_metadata_source_command_fk
+        FOREIGN KEY (source_command_id, session_id)
+        REFERENCES replace_session_metadata_command (
+            command_id,
+            result_applied_session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE replace_session_metadata_command_tag (
     command_id uuid NOT NULL,
@@ -302,6 +329,122 @@ CREATE TABLE replace_session_metadata_command_attribute (
     CONSTRAINT replace_session_metadata_command_attribute_key_indexed_bound
         CHECK (octet_length(convert_to(attribute_key, 'UTF8')) <= 1024)
 );
+
+CREATE TRIGGER session_metadata_tag_update_is_rejected
+BEFORE UPDATE ON session_metadata_tag
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER session_metadata_attribute_update_is_rejected
+BEFORE UPDATE ON session_metadata_attribute
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION require_session_metadata_matches_receipt()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_session_id uuid;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        checked_session_id := OLD.session_id;
+    ELSE
+        checked_session_id := NEW.session_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM session_metadata AS current
+          LEFT JOIN replace_session_metadata_command AS receipt
+            ON receipt.command_id = current.source_command_id
+           AND receipt.result_applied_session_id = current.session_id
+         WHERE current.session_id = checked_session_id
+           AND (
+                receipt.command_id IS NULL
+                OR receipt.result_kind <> 'applied'
+                OR current.title IS DISTINCT FROM receipt.replacement_title
+                OR current.archived IS DISTINCT FROM receipt.replacement_archived
+                OR current.updated_at IS DISTINCT FROM receipt.result_updated_at
+                OR current.actor_kind IS DISTINCT FROM receipt.result_actor_kind
+                OR current.actor_turn_id
+                    IS DISTINCT FROM receipt.result_actor_turn_id
+                OR current.actor_tool_request_id
+                    IS DISTINCT FROM receipt.result_actor_tool_request_id
+                OR EXISTS (
+                    SELECT current_tag.tag
+                      FROM session_metadata_tag AS current_tag
+                     WHERE current_tag.session_id = current.session_id
+                    EXCEPT
+                    SELECT receipt_tag.tag
+                      FROM replace_session_metadata_command_tag AS receipt_tag
+                     WHERE receipt_tag.command_id = receipt.command_id
+                )
+                OR EXISTS (
+                    SELECT receipt_tag.tag
+                      FROM replace_session_metadata_command_tag AS receipt_tag
+                     WHERE receipt_tag.command_id = receipt.command_id
+                    EXCEPT
+                    SELECT current_tag.tag
+                      FROM session_metadata_tag AS current_tag
+                     WHERE current_tag.session_id = current.session_id
+                )
+                OR EXISTS (
+                    SELECT
+                        current_attribute.attribute_key,
+                        current_attribute.attribute_value
+                      FROM session_metadata_attribute AS current_attribute
+                     WHERE current_attribute.session_id = current.session_id
+                    EXCEPT
+                    SELECT
+                        receipt_attribute.attribute_key,
+                        receipt_attribute.attribute_value
+                      FROM replace_session_metadata_command_attribute
+                        AS receipt_attribute
+                     WHERE receipt_attribute.command_id = receipt.command_id
+                )
+                OR EXISTS (
+                    SELECT
+                        receipt_attribute.attribute_key,
+                        receipt_attribute.attribute_value
+                      FROM replace_session_metadata_command_attribute
+                        AS receipt_attribute
+                     WHERE receipt_attribute.command_id = receipt.command_id
+                    EXCEPT
+                    SELECT
+                        current_attribute.attribute_key,
+                        current_attribute.attribute_value
+                      FROM session_metadata_attribute AS current_attribute
+                     WHERE current_attribute.session_id = current.session_id
+                )
+           )
+    ) THEN
+        RAISE EXCEPTION
+            'current session metadata does not match its source receipt'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER session_metadata_matches_receipt
+AFTER INSERT OR UPDATE ON session_metadata
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_session_metadata_matches_receipt();
+
+CREATE CONSTRAINT TRIGGER session_metadata_tag_matches_receipt
+AFTER INSERT OR UPDATE OR DELETE ON session_metadata_tag
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_session_metadata_matches_receipt();
+
+CREATE CONSTRAINT TRIGGER session_metadata_attribute_matches_receipt
+AFTER INSERT OR UPDATE OR DELETE ON session_metadata_attribute
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_session_metadata_matches_receipt();
 
 CREATE FUNCTION reject_sealed_session_metadata_receipt_satellite_insert()
 RETURNS trigger

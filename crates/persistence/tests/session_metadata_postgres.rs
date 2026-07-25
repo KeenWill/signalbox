@@ -612,14 +612,14 @@ async fn inv002_metadata_root_rejects_identity_change_without_satellites()
     let create_repository = CreateSessionRepository::new(pool.clone());
     create_repository.handle(creation(0x801, 0x701)).await?;
     create_repository.handle(creation(0x802, 0x702)).await?;
-    sqlx::query(
-        "INSERT INTO session_metadata
-            (session_id, title, archived, updated_at, actor_kind)
-         VALUES ($1, 'root-only', false, statement_timestamp(), 'owner')",
-    )
-    .bind(Uuid::from_u128(0x701))
-    .execute(&pool)
-    .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            0x901,
+            0x701,
+            metadata(Some("root-only"), &[], &[], false),
+        ))
+        .await?;
 
     let moved_root = sqlx::query(
         "UPDATE session_metadata
@@ -633,7 +633,6 @@ async fn inv002_metadata_root_rejects_identity_change_without_satellites()
     .expect_err("a metadata root cannot move to another session");
     assert_check_violation(&moved_root);
 
-    let repository = SessionMetadataRepository::new(pool.clone());
     assert_eq!(
         repository
             .load_session_metadata(session(0x701))
@@ -650,6 +649,91 @@ async fn inv002_metadata_root_rejects_identity_change_without_satellites()
             .expect("target session remains readable")
             .last_writer(),
         None
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: deleting one current tag cannot silently change a snapshot without
+/// a matching immutable replacement receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_current_metadata_tag_rejects_partial_delete() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let written = metadata(
+        Some("guarded"),
+        &["retained"],
+        &[("source", "fixture")],
+        false,
+    );
+    repository
+        .handle(replacement(0x901, 0x701, written.clone()))
+        .await?;
+
+    let partial_delete = sqlx::query(
+        "DELETE FROM session_metadata_tag
+          WHERE session_id = $1
+            AND tag = 'retained'",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .execute(&pool)
+    .await
+    .expect_err("a current tag cannot be deleted outside complete replacement");
+    assert_check_violation(&partial_delete);
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x701))
+            .await?
+            .expect("guarded metadata remains readable")
+            .content(),
+        &written
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: updating one current attribute cannot silently change a snapshot
+/// without a matching immutable replacement receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_current_metadata_attribute_rejects_out_of_band_update() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let written = metadata(Some("guarded"), &[], &[("source", "fixture")], false);
+    repository
+        .handle(replacement(0x901, 0x701, written.clone()))
+        .await?;
+
+    let partial_update = sqlx::query(
+        "UPDATE session_metadata_attribute
+            SET attribute_value = 'changed'
+          WHERE session_id = $1
+            AND attribute_key = 'source'",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .execute(&pool)
+    .await
+    .expect_err("a current attribute cannot be updated outside complete replacement");
+    assert_check_violation(&partial_update);
+    assert_eq!(
+        repository
+            .load_session_metadata(session(0x701))
+            .await?
+            .expect("guarded metadata remains readable")
+            .content(),
+        &written
     );
 
     pool.close().await;
@@ -720,6 +804,68 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
     .await
     .expect_err("an applied receipt must name its result actor");
     assert_check_violation(&missing_applied_actor);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: the current metadata timestamp cannot use PostgreSQL's positive
+/// infinity sentinel.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_current_metadata_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, 0x701))
+        .await?;
+    SessionMetadataRepository::new(pool.clone())
+        .handle(replacement(
+            0x901,
+            0x701,
+            metadata(Some("finite"), &[], &[], false),
+        ))
+        .await?;
+
+    let infinite = sqlx::query(
+        "UPDATE session_metadata
+            SET updated_at = 'infinity'::timestamptz
+          WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x701))
+    .execute(&pool)
+    .await
+    .expect_err("current metadata timestamps must be finite");
+    assert_check_violation(&infinite);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002: an applied receipt timestamp cannot use PostgreSQL's negative
+/// infinity sentinel.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let infinite = sqlx::query(
+        "INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, replacement_archived, result_kind,
+             result_session_id, result_applied_session_id,
+             result_updated_at, result_actor_kind)
+         VALUES
+            ($1, 'replace_session_metadata', 1, $2,
+             'owner', false, 'applied', $2, $2,
+             '-infinity'::timestamptz, 'owner')",
+    )
+    .bind(Uuid::from_u128(0x908))
+    .bind(Uuid::from_u128(0x701))
+    .execute(&pool)
+    .await
+    .expect_err("metadata receipt timestamps must be finite");
+    assert_check_violation(&infinite);
 
     pool.close().await;
     drop(container);
@@ -816,12 +962,36 @@ async fn inv002_metadata_list_validates_omitted_attributes() -> Result<(), Box<d
         .await?;
     let oversized = "x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES);
     sqlx::query(
+        "ALTER TABLE session_metadata_attribute
+         DISABLE TRIGGER session_metadata_attribute_update_is_rejected",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_metadata_attribute
+         DISABLE TRIGGER session_metadata_attribute_matches_receipt",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "UPDATE session_metadata_attribute
          SET attribute_value = $2
          WHERE session_id = $1 AND attribute_key = 'payload'",
     )
     .bind(Uuid::from_u128(0x701))
     .bind(oversized)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_metadata_attribute
+         ENABLE TRIGGER session_metadata_attribute_matches_receipt",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_metadata_attribute
+         ENABLE TRIGGER session_metadata_attribute_update_is_rejected",
+    )
     .execute(&pool)
     .await?;
 

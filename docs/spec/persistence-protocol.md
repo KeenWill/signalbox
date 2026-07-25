@@ -148,8 +148,12 @@ Representation rules, all enforced in the schema:
   but rejects deletion and any change to its `session_id`. Once a session has a
   recorded metadata write, root absence can therefore never be reinterpreted as
   the initial unwritten state, and the mutable fields cannot move to another
-  session. The current root, tag, and attribute tables also reject `TRUNCATE`;
-  complete replacement through the adapter is their only admitted bulk mutation.
+  session. Its `source_command_id` names the exact immutable applied receipt.
+  Deferred constraint triggers compare every current root field and both
+  complete satellite sets to that receipt, so a partial direct insert, update,
+  or delete cannot commit. Current satellite updates are rejected outright. The
+  current root, tag, and attribute tables also reject `TRUNCATE`; complete
+  replacement through the adapter is their only admitted mutation.
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -197,6 +201,9 @@ Representation rules, all enforced in the schema:
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
+- Current and applied-receipt metadata timestamps reject PostgreSQL positive and
+  negative infinity, so every admitted value reaches the checked
+  Unix-microsecond decoder.
 
 Some rules are deliberately enforced twice — typed domain transitions and
 database constraints — for the database-level invariants; a passing SQL row set

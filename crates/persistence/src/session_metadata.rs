@@ -648,12 +648,13 @@ async fn replace_current_snapshot(
     let actor = encode_actor(command.actor());
     sqlx::query(
         "INSERT INTO session_metadata
-            (session_id, title, archived, updated_at, actor_kind,
+            (session_id, source_command_id, title, archived, updated_at, actor_kind,
              actor_turn_id, actor_tool_request_id)
          VALUES
-            ($1, $2, $3, to_timestamp($4::numeric / 1000000), $5, $6, $7)
+            ($1, $2, $3, $4, to_timestamp($5::numeric / 1000000), $6, $7, $8)
          ON CONFLICT (session_id) DO UPDATE
-         SET title = EXCLUDED.title,
+         SET source_command_id = EXCLUDED.source_command_id,
+             title = EXCLUDED.title,
              archived = EXCLUDED.archived,
              updated_at = EXCLUDED.updated_at,
              actor_kind = EXCLUDED.actor_kind,
@@ -661,6 +662,7 @@ async fn replace_current_snapshot(
              actor_tool_request_id = EXCLUDED.actor_tool_request_id",
     )
     .bind(session_id_to_uuid(command.session()))
+    .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(command.replacement().title())
     .bind(command.replacement().archived())
     .bind(Decimal::from(updated_at.as_unix_micros()))
@@ -1239,30 +1241,29 @@ mod tests {
         encode_actor,
     };
 
+    #[track_caller]
+    fn assert_actor_storage_round_trip(actor: Actor) {
+        let encoded = encode_actor(actor);
+        let decoded = decode_actor(
+            encoded.kind.to_owned(),
+            encoded.turn,
+            encoded.tool_request,
+            "fixture actor",
+        )
+        .expect("encoded actor is complete");
+        assert_eq!(decoded, actor);
+    }
+
     #[test]
     fn actor_storage_round_trips_every_variant() {
-        let actors = [
-            Actor::Owner,
-            Actor::Model {
-                turn: TurnId::from_uuid(Uuid::from_u128(1)),
-            },
-            Actor::Recovery,
-            Actor::Tool {
-                request: ToolRequestId::from_uuid(Uuid::from_u128(2)),
-            },
-        ];
-
-        for actor in actors {
-            let encoded = encode_actor(actor);
-            let decoded = decode_actor(
-                encoded.kind.to_owned(),
-                encoded.turn,
-                encoded.tool_request,
-                "fixture actor",
-            )
-            .expect("encoded actor is complete");
-            assert_eq!(decoded, actor);
-        }
+        assert_actor_storage_round_trip(Actor::Owner);
+        assert_actor_storage_round_trip(Actor::Model {
+            turn: TurnId::from_uuid(Uuid::from_u128(1)),
+        });
+        assert_actor_storage_round_trip(Actor::Recovery);
+        assert_actor_storage_round_trip(Actor::Tool {
+            request: ToolRequestId::from_uuid(Uuid::from_u128(2)),
+        });
     }
 
     #[test]
@@ -1299,21 +1300,20 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_updated_at_is_rejected(value: Decimal) {
+        assert!(matches!(
+            decode_updated_at(value),
+            Err(SessionMetadataRepositoryError::Corruption(
+                SessionMetadataCorruption::InvalidUpdatedAt
+            ))
+        ));
+    }
+
     #[test]
     fn timestamp_mapping_rejects_negative_fractional_and_overflow() {
-        let invalid = [
-            Decimal::NEGATIVE_ONE,
-            Decimal::new(1, 1),
-            Decimal::from(u64::MAX) + Decimal::ONE,
-        ];
-
-        for value in invalid {
-            assert!(matches!(
-                decode_updated_at(value),
-                Err(SessionMetadataRepositoryError::Corruption(
-                    SessionMetadataCorruption::InvalidUpdatedAt
-                ))
-            ));
-        }
+        assert_updated_at_is_rejected(Decimal::NEGATIVE_ONE);
+        assert_updated_at_is_rejected(Decimal::new(1, 1));
+        assert_updated_at_is_rejected(Decimal::from(u64::MAX) + Decimal::ONE);
     }
 }
