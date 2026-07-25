@@ -45,6 +45,7 @@ impl ReviewWorkflowStore {
             }
             ReviewTargetSubject::Commit => ("commit", None),
         };
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_target
                 (target_id, provider_key, repository_key, subject_kind,
@@ -64,8 +65,9 @@ impl ReviewWorkflowStore {
                 .stack_parent()
                 .map(|parent| parent.target().into_uuid()),
         )
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        commit_mutation(transaction).await?;
         Ok(())
     }
 
@@ -101,6 +103,7 @@ impl ReviewWorkflowStore {
         }
         let (state_kind, state_pass_id) = encode_run_state(run.state());
         let policy = run.policy();
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_run
                 (run_id, target_id, workflow_kind, policy_version,
@@ -118,8 +121,9 @@ impl ReviewWorkflowStore {
         ))
         .bind(state_kind)
         .bind(state_pass_id.map(ReviewPassId::into_uuid))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        commit_mutation(transaction).await?;
         Ok(())
     }
 
@@ -211,6 +215,7 @@ impl ReviewWorkflowStore {
             ));
         }
         let state = encode_pass_state(pass.state());
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO review_pass
                 (pass_id, run_id, target_id, pass_kind, session_id,
@@ -226,8 +231,9 @@ impl ReviewWorkflowStore {
         .bind(state.kind)
         .bind(state.turn.map(TurnId::into_uuid))
         .bind(state.frontier.map(ContextFrontierId::into_uuid))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        commit_mutation(transaction).await?;
         Ok(())
     }
 
