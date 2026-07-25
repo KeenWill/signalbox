@@ -884,6 +884,7 @@ impl ModelCallExecution {
                 != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
                     predecessor: self.turn,
                 })
+            || result_projection.turn() != self.turn
             || result_projection.snapshot().frontier().owning_session() != self.session
             || result_projection.source_frontier() != self.current_snapshot.frontier().snapshot()
             || !self
@@ -5948,6 +5949,107 @@ mod tests {
             )
             .expect_err("same semantic content cannot substitute another yielded frontier");
         assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+
+    /// S07 / INV-006 / INV-029 / INV-037: an executing-batch cancellation
+    /// projection must be bound to the interrupted turn. A projection prepared
+    /// for a foreign turn, but reusing this turn's current frontier identity as
+    /// its yielded source, cannot terminalize this turn with foreign results.
+    #[test]
+    fn s07_inv006_inv029_tool_cancellation_rejects_foreign_turn_projection() {
+        let execution = active_execution();
+        let foreign_turn = turn_id(99);
+        assert_ne!(foreign_turn, execution.turn());
+        let foreign_request = ToolRequestReconstitutionInput::new(
+            tool_request_id(41),
+            execution.session(),
+            foreign_turn,
+            model_call_id(40),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("fixture_tool")).expect("the tool name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("the fixture arguments are canonical"),
+        )
+        .into_request();
+        let projection = ToolBatchReconstitutionInput::new(
+            execution.session(),
+            foreign_turn,
+            foreign_request.producing_call(),
+            execution.current_snapshot.clone(),
+            vec![foreign_request.clone()],
+            vec![denied_approval(foreign_request.id())],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(50),
+            },
+        )
+        .reconstitute()
+        .expect("a foreign-turn batch reusing this frontier reconstitutes")
+        .prepare_cancellation_projection(
+            vec![semantic_transcript_entry_id(42)],
+            context_frontier_id(43),
+        )
+        .expect("the foreign batch can prepare its own cancellation projection");
+        assert_eq!(
+            projection.source_frontier(),
+            execution.current_snapshot.frontier().snapshot()
+        );
+        assert_ne!(projection.turn(), execution.turn());
+        let interrupt = applied_interrupt(&execution);
+
+        let error = execution
+            .apply_interrupt_to_tool_batch(
+                interrupt,
+                projection,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(44),
+                    context_frontier_id(45),
+                ),
+            )
+            .expect_err("a foreign-turn projection cannot terminalize this turn");
+        assert_eq!(error, ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+
+    /// S07 / INV-029: the legitimate same-turn executing-batch cancellation
+    /// projection remains accepted after the turn binding is added.
+    #[test]
+    fn s07_inv029_tool_cancellation_accepts_same_turn_projection() {
+        let execution = active_execution();
+        let expected_turn = execution.turn();
+        let request = batch_request(41, &execution);
+        let projection = ToolBatchReconstitutionInput::new(
+            execution.session(),
+            execution.turn(),
+            request.producing_call(),
+            execution.current_snapshot.clone(),
+            vec![request.clone()],
+            vec![denied_approval(request.id())],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: execution.current_attempt().id(),
+            },
+        )
+        .reconstitute()
+        .expect("the same-turn denied batch is complete")
+        .prepare_cancellation_projection(
+            vec![semantic_transcript_entry_id(42)],
+            context_frontier_id(43),
+        )
+        .expect("the same-turn batch prepares its cancellation projection");
+        let interrupt = applied_interrupt(&execution);
+
+        let cancelled = execution
+            .apply_interrupt_to_tool_batch(
+                interrupt,
+                projection,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(44),
+                    context_frontier_id(45),
+                ),
+            )
+            .expect("a turn-bound same-frontier projection terminalizes this turn");
+        assert_eq!(cancelled.turn(), expected_turn);
+        assert_eq!(cancelled.tool_result_entries().len(), 1);
     }
 
     /// S07 / INV-006 / INV-029 / INV-037: a prepared but unsent call closes

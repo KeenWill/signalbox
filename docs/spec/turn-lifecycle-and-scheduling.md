@@ -433,7 +433,11 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   attempt, plus a correlated `known_failed`/`cancelled` call when one exists —
   instead of accepting an evidence-free failure record, and the deferred
   `assert_failed_terminal_execution_final_state` assertion re-closes the shape
-  at every commit.
+  at every commit. When the failure closed a tool round, the same input names
+  the complete owner-sourced denial resolutions backing every `ToolDenied`
+  result entry in the terminal suffix; a `ToolDenied` entry whose request lacks
+  an exact `Deny` resolution — including a missing or approving decision — fails
+  reconstitution rather than fabricating an owner denial.
 - A cancelled terminal turn reconstructs only from
   `CancelledTurnExecutionReconstitutionInput`: its exact ended attempt carries
   `AfterCancellation(Cancelled)` and the same complete applied-interrupt result
@@ -444,7 +448,9 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   round, the input instead names the batch's `completed` producing call, and the
   terminal frontier extends that call's yielded frontier by exactly one
   batch-correlated result entry per request in proposal order before the
-  correlated `TurnCancelled` marker.
+  correlated `TurnCancelled` marker. Each `ToolDenied` entry in that suffix is
+  batch-correlated only against a named owner-sourced `Deny` resolution for its
+  exact request; a missing or approving decision fails reconstitution.
 - A reconciliation-required terminal turn names its exact ended turn attempt and
   exactly one required terminal `ambiguous` model call or tool attempt. The
   attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
