@@ -11,6 +11,7 @@ TART_DERIVED_DATA_ROOT="${TART_DERIVED_DATA_ROOT:-$PROJECT_ROOT/.tart-derived-da
 
 IPHONE_DEVICE_NAMES="iPhone 17,iPhone 17 Pro"
 IPAD_DEVICE_NAMES="iPad Pro 11-inch (M5),iPad Pro 13-inch (M5),iPad Air 13-inch (M4)"
+REAL_SERVER_SMOKE_TEST_IDENTIFIER="SignalboxNativeUITests/SignalboxNativeUITests/testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured"
 
 usage() {
 	cat <<'EOF'
@@ -19,7 +20,7 @@ Usage: run-guest-shard.sh <shard>
 Run one Signalbox Native validation shard inside a macOS Tart guest.
 
 Shards:
-  xcode              Xcode iOS Simulator build and unit/UI tests.
+  xcode              Xcode iOS Simulator build and tests except real-server smoke.
   bazel              Bazel Apple build/test and screenshot golden test.
   macos-screenshots  macOS screenshot export and golden check.
   ios-screenshots    iPhone screenshot capture.
@@ -199,16 +200,11 @@ resolved_real_server_api_key() {
 	return 1
 }
 
-# The three helpers below have parenthesised bodies, so they always run in a
+# The two helpers below have parenthesised bodies, so they always run in a
 # subshell. Environment-file values loaded inside them stay in that subshell and
 # never become exported state of the shard process, which keeps the real server
 # API key out of every build/test process except the one command that is given
 # it explicitly.
-real_server_api_key_is_available() (
-	load_server_environment_if_present
-	resolved_real_server_api_key >/dev/null
-)
-
 load_and_resolve_real_server_url() (
 	load_server_environment_if_present
 	resolved_real_server_url
@@ -232,14 +228,11 @@ assert_xcresult_passed() {
 
 run_xcode_shard() {
 	require_tool xcodebuild
-	local server_url=""
-	if real_server_api_key_is_available && server_url="$(load_and_resolve_real_server_url)"; then
-		export SIGNALBOX_NATIVE_REAL_SERVER_URL="$server_url"
-		echo "==> Real server URL configured for $server_url; the API key stays scoped to the real-smoke shard."
-	fi
+	local skip_testing="${SIGNALBOX_NATIVE_SKIP_TESTING:+$SIGNALBOX_NATIVE_SKIP_TESTING }$REAL_SERVER_SMOKE_TEST_IDENTIFIER"
 
 	run_step "Xcode iOS Simulator build" "$PROJECT_ROOT/scripts/build-xcode.sh"
-	run_step "Xcode iOS Simulator tests" "$PROJECT_ROOT/scripts/test-xcode.sh"
+	run_step "Xcode iOS Simulator tests except real-server smoke" \
+		env SIGNALBOX_NATIVE_SKIP_TESTING="$skip_testing" "$PROJECT_ROOT/scripts/test-xcode.sh"
 }
 
 run_bazel_shard() {
@@ -310,7 +303,7 @@ run_real_smoke_shard() {
 		-destination "$destination" \
 		-derivedDataPath "$SIGNALBOX_NATIVE_DERIVED_DATA_PATH" \
 		-resultBundlePath "$result_bundle_path" \
-		-only-testing:SignalboxNativeUITests/SignalboxNativeUITests/testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured \
+		"-only-testing:$REAL_SERVER_SMOKE_TEST_IDENTIFIER" \
 		-parallel-testing-enabled NO \
 		CODE_SIGNING_ALLOWED=YES \
 		CODE_SIGN_IDENTITY=- \
