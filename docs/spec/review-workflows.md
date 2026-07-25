@@ -26,7 +26,7 @@ run and target; and a `ReviewFindingRef` binds a finding to its exact producing
 pass and therefore its run and target. Child records carry those complete
 references. Why: complete typed ownership facts make a cross-wired
 target/run/pass/finding combination unconstructible in normal domain use and
-rejectable during reconstitution (INV-002).
+rejectable during reconstitution.
 
 Key-like and narrative values preserve their exact UTF-8 content without
 trimming or normalization. Construction rejects empty values, U+0000, and values
@@ -51,7 +51,9 @@ that snapshot, not permission to rewrite either branch. It must be a distinct
 target whose canonical provider and repository equal the child snapshot's; its
 canonical head revision must equal the child's exact base revision. Construction
 and reconstitution reject self-parent, base-less parented targets,
-cross-repository edges, and revision-disconnected edges.
+cross-repository edges, revision-disconnected edges, and any repeated target in
+the complete canonical parent chain. Review-target parentage is therefore
+acyclic and always terminates at a root.
 
 Every `ReviewRun` names one target, one closed workflow kind, and one complete
 `ReviewPolicy`. The implemented workflow kinds are external-context import,
@@ -309,8 +311,7 @@ Store loaders read a complete aggregate projection. The adapter decodes closed
 discriminators and assembles domain reconstitution inputs; the domain validates
 ownership, state shape, event order, and transitions. A missing referenced
 record, unknown discriminator, incomplete history, or failed domain check is
-reported as corruption rather than normalized into a plausible aggregate
-(INV-002).
+reported as corruption rather than normalized into a plausible aggregate state.
 
 The first store surface creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, and appends external

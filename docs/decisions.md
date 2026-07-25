@@ -185,15 +185,18 @@ parent. The child already freezes its exact comparison revision.
 **Decision.** A parented target requires an exact child base revision, and the
 canonical parent target's head revision must equal that base. Construction,
 reconstitution, and persistence validate identity, scope, and revision
-continuity from the canonical parent snapshot.
+continuity from the canonical parent snapshot. Reconstitution validates the
+complete canonical parent chain and rejects any repeated target identity, so
+parentage always terminates at a root.
 
 **Rejected alternatives.** Scope-only validation admits false stack topology.
 Copying unverified parent scope or revision strings into a detached reference
 does not authenticate the named target. Resolving a moving host branch while
-loading would make old topology time-dependent.
+loading would make old topology time-dependent. Checking only the immediate edge
+admits corrupt cyclic ancestry whose traversal never reaches a stack root.
 
-**Affects.** `ReviewTarget`, stack propagation prerequisites, target
-persistence, and the
+**Affects.** `ReviewTarget`, stack propagation prerequisites, target persistence
+and reconstitution, and the
 [review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy).
 
 ## 2026-07-25 — Bind finding event passes to one frozen policy
