@@ -23,10 +23,11 @@ and message vocabularies unchanged, verified through PR #281
 version eight for the `stop_turn` and `decide_tool_request` requests, taken
 while version seven was still reserved by the then-open turn-reconciliation
 stack; versions one through seven retain their closed request and message
-vocabularies unchanged. The implementation in this stack speaks versions one
-through eight, and its terminal client selects version eight. This page is the
-normative boundary between a local client process and `signalboxd`; domain
-values, PostgreSQL records, and wire messages remain distinct representations.
+vocabularies unchanged, verified through PR #291 (`agent/turn-control-verbs`).
+The implementation in this stack speaks versions one through eight, and its
+terminal client selects version eight. This page is the normative boundary
+between a local client process and `signalboxd`; domain values, PostgreSQL
+records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
