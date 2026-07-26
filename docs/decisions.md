@@ -76,7 +76,6 @@ exists.
 of the tool-loop page, and the telemetry field inventory in the
 identity-and-commands and configuration-and-credentials pages.
 
-
 ## 2026-07-26 — Add an explicit recursive conversation-import scan
 
 **Context.** The terminal import verb accepted one named source file, while an
