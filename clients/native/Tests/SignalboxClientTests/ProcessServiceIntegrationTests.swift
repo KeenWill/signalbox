@@ -195,6 +195,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testSideSnapshotDoesNotPublishLaterProposalApprovalState() async throws {
+    let service = makeService(scenario: .pendingApproval)
+    let sessions = try await service.listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.approvalSessionID, in: sessions)
+    let snapshot = try await authoritativeSnapshot(service: service, session: session)
+    let trigger = try ProcessProjectionFixture.proposedToolTrigger()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(.event(trigger))
+    viewModel.apply(.sideSnapshot(snapshot: snapshot, trigger: trigger))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+  }
+
+  @MainActor
   func testSideSnapshotPreservesOrderedStateAndReconcilesTriggerInput() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)

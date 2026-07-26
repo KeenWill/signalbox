@@ -458,7 +458,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if projection.activity.state == .waitingForToolDecision {
+        if projection.activity.state == .waitingForToolDecision,
+          sideSnapshotApprovalMatchesTrigger(snapshot, trigger: trigger)
+        {
           activity = projection.activity
         }
         pendingInputs.removeAll {
@@ -480,6 +482,43 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func hasExactUTF8(_ lhs: String, _ rhs: String) -> Bool {
     lhs.utf8.elementsEqual(rhs.utf8)
+  }
+
+  private func sideSnapshotApprovalMatchesTrigger(
+    _ snapshot: SignalboxSynchronizationSnapshot,
+    trigger: SignalboxFollowedSessionEvent
+  ) -> Bool {
+    guard
+      case .toolBatchTransition(let triggerTurnID, let triggerModelCallID, .proposed) =
+        trigger.event,
+      let requestID = snapshot.records.compactMap({ record -> SignalboxCanonicalUUID? in
+        guard case .turn(let turn) = record,
+          turn.turnID == triggerTurnID,
+          case .activeAwaitingToolApproval(let requestID) = turn.state
+        else {
+          return nil
+        }
+        return requestID
+      }).first
+    else {
+      return false
+    }
+    return snapshot.records.contains { record in
+      guard case .entry(let entry) = record,
+        case .assistantToolUse(
+          let turnID,
+          let modelCallID,
+          let entryRequestID,
+          _,
+          _
+        ) = entry.entry
+      else {
+        return false
+      }
+      return turnID == triggerTurnID
+        && modelCallID == triggerModelCallID
+        && entryRequestID == requestID
+    }
   }
 
   private func resetServiceOwnedPresentation() {
