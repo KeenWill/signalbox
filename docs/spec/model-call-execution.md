@@ -121,9 +121,11 @@ projects the exact frontier order into provider-neutral messages:
   input content;
 - `SteeringAcceptedInput` renders as a user message with the referenced accepted
   input's checked content;
-- `ModelIdentityChanged` renders as an injected user-role message with the fixed
-  `Signalbox session event: your model identity is now` prefix, the exact
-  selected-model UUID, and the bound session-defaults epoch (INV-046);
+- `ModelIdentityChanged` renders as the structured provider-neutral identity
+  change retaining the exact selected-model UUID and bound session-defaults
+  epoch; the provider bridge later projects it as an injected user-role message
+  with the fixed `Signalbox session event: your model identity is now` prefix
+  (INV-046);
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or

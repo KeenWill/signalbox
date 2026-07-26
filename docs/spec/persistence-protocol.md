@@ -517,14 +517,16 @@ isolate the affected session while remaining fail-closed.
 
 ## Commit-ambiguity handling
 
-Transactions classify commit failures with `commit_failure_is_ambiguous`,
-crate-shared in `lib.rs` for command adapters and repeated at the local
-transaction boundaries in `start_eligible_turn.rs`, `startup.rs`,
-`model_execution.rs`, and `tool_loop.rs`. A database-reported error is ambiguous
-only for SQLSTATE `08007` (transaction resolution unknown) and `40003`
-(statement completion unknown); any non-database failure awaiting the commit
-response (lost connection, IO error) is ambiguous; every other database-reported
-commit rejection is a definite failure.
+Transaction boundaries that retain the failing phase classify commit failures
+with `commit_failure_is_ambiguous`: the helper is crate-shared in `lib.rs` for
+durable-command adapters and repeated locally in `start_eligible_turn.rs`,
+`startup.rs`, `model_execution.rs`, and `tool_loop.rs`. This inventory excludes
+the phase-insensitive conversation-import repository, whose conservative wire
+mapping is owned by [process-protocol](process-protocol.md). A database-reported
+error is ambiguous only for SQLSTATE `08007` (transaction resolution unknown)
+and `40003` (statement completion unknown); any non-database failure awaiting
+the commit response (lost connection, IO error) is ambiguous; every other
+database-reported commit rejection is a definite failure.
 
 The activation and recovery families surface ambiguity as
 `Infrastructure { commit_ambiguous: true }` because they mint fresh identities

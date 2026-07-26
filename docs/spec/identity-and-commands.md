@@ -210,17 +210,20 @@ Migration `202607220005` adds `submit_input_command_requires_interrupt_effect`.
 Its guarded trigger exclusively checks applied interrupts plus
 `safe_point_unavailable_while_stopping` and `interrupt_already_applied`
 rejections, and migration `202607280001` extends that trigger to
-`interrupt_unavailable_while_awaiting_approval`. An applied interrupt must
-correlate its accepted input and immediate successor with the stopped
-predecessor attempt. A stopping or already-applied rejection must instead
-correlate with exactly one already-applied interrupt for the actual active turn
-and create no accepted-input effect of its own. The parked-approval rejection
-must create no accepted-input effect and must name a turn whose durable
-lifecycle is active in the `awaiting_tool_approval` phase; it does not name an
-earlier interrupt. The next-safe-point receipt remains immutable when its
-accepted input later becomes consumed steering or a reclassified origin. Equal
-replay returns its original `Applied(PendingSteering)` result only after the
-accepted input's current lifecycle passes the correlation checks owned by
+`interrupt_unavailable_while_awaiting_approval`. An applied interrupt normally
+correlates its accepted input and immediate successor with the stopped
+predecessor attempt. The reconciliation path instead admits an ended
+`without_stop` predecessor with an `ambiguous` or `lost` disposition and no
+interrupt proof only when its terminal lifecycle is `reconciliation_required`
+and names that exact attempt. A stopping or already-applied rejection must
+instead correlate with exactly one already-applied interrupt for the actual
+active turn and create no accepted-input effect of its own. The parked-approval
+rejection must create no accepted-input effect and must name a turn whose
+durable lifecycle is active in the `awaiting_tool_approval` phase; it does not
+name an earlier interrupt. The next-safe-point receipt remains immutable when
+its accepted input later becomes consumed steering or a reclassified origin.
+Equal replay returns its original `Applied(PendingSteering)` result only after
+the accepted input's current lifecycle passes the correlation checks owned by
 [persistence-protocol](persistence-protocol.md). Why: replay returns recorded
 results as truth, so an applied record without its exact committed effect must
 be unable to commit.
