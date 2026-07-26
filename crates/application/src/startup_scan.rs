@@ -73,6 +73,13 @@ pub enum StartupScanSessionOutcome {
         /// Active turn whose result/next-attempt boundary is ready.
         turn: TurnId,
     },
+    /// A prior process already ended this turn's tenure and parked it on an
+    /// exact ambiguity set. The scan has nothing left to classify; only an
+    /// owner reconciliation decision can release the slot.
+    AwaitingRecoveryDecision {
+        /// The active turn holding the slot until reconciliation.
+        turn: TurnId,
+    },
 }
 
 /// Authoritative inventory and per-session transaction boundary.
@@ -101,12 +108,25 @@ pub trait StartupScanRepository {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupScanOutcome {
     recovered_turn_count: usize,
+    awaiting_recovery_decision_sessions: Box<[SessionId]>,
 }
 
 impl StartupScanOutcome {
     /// Returns the number of prior-process turns terminalized by this scan.
     pub const fn recovered_turn_count(&self) -> usize {
         self.recovered_turn_count
+    }
+
+    /// Returns every session whose active turn holds the slot awaiting an
+    /// owner reconciliation decision.
+    ///
+    /// The scan cannot resolve these turns: their physical tenure has ended
+    /// and the exact ambiguity set is durable, whether this scan classified
+    /// the issued call or found the wait already parked. They do not block
+    /// startup, so they are reported rather than counted as recovered. Only
+    /// waits with an operator surface are reported.
+    pub fn awaiting_recovery_decision_sessions(&self) -> &[SessionId] {
+        &self.awaiting_recovery_decision_sessions
     }
 }
 
@@ -216,6 +236,7 @@ where
             .await
             .map_err(StartupScanError::inventory)?;
         let mut recovered_turn_count = 0_usize;
+        let mut awaiting_recovery_decision_sessions = Vec::new();
 
         for session in sessions {
             loop {
@@ -234,7 +255,12 @@ where
                         break;
                     }
                     Ok(StartupScanSessionOutcome::RecoveredModelCall(outcome)) => {
-                        if !matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
+                        // This scan just created the wait, so the session is
+                        // reported on the restart that wedges it rather than
+                        // only on a later one that observes it already parked.
+                        if matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
+                            awaiting_recovery_decision_sessions.push(session);
+                        } else {
                             recovered_turn_count += 1;
                         }
                         break;
@@ -246,6 +272,10 @@ where
                         break;
                     }
                     Ok(StartupScanSessionOutcome::ResumableToolBatch { .. }) => break,
+                    Ok(StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }) => {
+                        awaiting_recovery_decision_sessions.push(session);
+                        break;
+                    }
                     Err(error)
                         if error.operator_failure_class()
                             == OperatorFailureClass::IdentityCollision =>
@@ -259,6 +289,8 @@ where
 
         Ok(StartupScanOutcome {
             recovered_turn_count,
+            awaiting_recovery_decision_sessions: awaiting_recovery_decision_sessions
+                .into_boxed_slice(),
         })
     }
 }
@@ -386,6 +418,30 @@ mod tests {
         assert_eq!(ids.calls, 6);
         assert_eq!(repository.observed, vec![first, first, second]);
         assert_eq!(outcome.recovered_turn_count(), 0);
+    }
+
+    /// INV-034: a turn parked on an owner reconciliation decision is neither
+    /// counted as recovered nor hidden — it is reported and startup proceeds.
+    #[test]
+    fn inv034_reports_awaiting_recovery_decision_without_blocking_startup() {
+        let parked = session(1);
+        let healthy = session(2);
+        let repository = FakeRepository {
+            inventory: Some(Ok(vec![parked, healthy].into_boxed_slice())),
+            responses: VecDeque::from([
+                Ok(StartupScanSessionOutcome::AwaitingRecoveryDecision {
+                    turn: TurnId::from_uuid(Uuid::from_u128(7)),
+                }),
+                Ok(StartupScanSessionOutcome::NoActiveTurn),
+            ]),
+            observed: Vec::new(),
+        };
+        let mut service = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
+
+        let outcome = run_ready(service.execute()).expect("scan succeeds");
+
+        assert_eq!(outcome.recovered_turn_count(), 0);
+        assert_eq!(outcome.awaiting_recovery_decision_sessions(), &[parked]);
     }
 
     /// docs/spec/turn-lifecycle-and-scheduling.md: non-collision

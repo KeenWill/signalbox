@@ -422,8 +422,17 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             tracing::info!(
                 phase = ?RuntimePhase::StartupScan,
                 recovered_turn_count = outcome.recovered_turn_count(),
+                awaiting_recovery_decision_session_count =
+                    outcome.awaiting_recovery_decision_sessions().len(),
                 "daemon startup phase completed"
             );
+            for session in outcome.awaiting_recovery_decision_sessions() {
+                tracing::warn!(
+                    phase = ?RuntimePhase::StartupScan,
+                    session = %session.into_uuid(),
+                    "session holds its slot awaiting an owner reconciliation decision"
+                );
+            }
             Ok(())
         },
         || std::future::ready(()),
