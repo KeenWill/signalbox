@@ -18,20 +18,24 @@ are owned by [sessions-and-transcript](sessions-and-transcript.md),
 tool-attributed metadata command and reconstitution surface was verified through
 PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
 were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
-current identity-generation, command-family, and ambiguity-ownership inventory
-was verified through PR #288 (`agent/audit-fix-docs-coherence`).
+current command/telemetry identity-generation, command-family, and
+ambiguity-ownership inventory was verified through PR #288
+(`agent/audit-fix-docs-coherence`).
 
 ## Identity model
 
-Every semantic identity is a distinct, opaque, UUID-backed newtype built by the
-`define_identity!` macro in `crates/domain/src/lib.rs`: `DurableCommandId`,
-`SessionId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
+The session, command, transcript, model, and tool identities owned by this page
+are distinct, opaque, UUID-backed newtypes built by the `define_identity!` macro
+in `crates/domain/src/lib.rs`: `DurableCommandId`, `SessionId`,
+`AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
 `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` there, plus
 `ImportedConversationId` and `ImportedTranscriptEntryId`
 (`imported_conversation.rs`), `SemanticTranscriptEntryId` and
 `ContextFrontierId` (`context_frontier.rs`), `DirectModelSelection` and
 `ModelAlias` (`configuration.rs`), and `ProviderModelIdentity`
-(`model_call.rs`). Each exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
+(`model_call.rs`). Review-run, pass, finding, target, and external-link
+identities are owned and inventoried by [review-workflows](review-workflows.md).
+Each identity listed here exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
 the macro derives value semantics and `Debug` but no storage or serialization
 traits, so every storage boundary maps explicitly (INV-001, INV-002). The
 derived `Debug` is the one logging-reachable render path (see Encoding).
