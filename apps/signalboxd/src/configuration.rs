@@ -252,7 +252,7 @@ impl fmt::Display for HubModelConfigurationError {
 impl Error for HubModelConfigurationError {}
 
 /// Credential source that rereads one deployment-owned secret file for every
-/// request preparation so rotation is visible without restarting hubd.
+/// request preparation so rotation is visible without restarting signalboxd.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     path: Arc<PathBuf>,
@@ -454,7 +454,7 @@ mod checked_in_example {
     use super::HubModelConfiguration;
 
     fn example_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/hubd.example.toml")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml")
     }
 
     /// The checked-in operator example is the one configuration document a

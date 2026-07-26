@@ -31,11 +31,6 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSignal,
-    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration,
-    PostgresProviderModelExecution, PostgresScriptedModelExecution,
-};
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
@@ -43,6 +38,11 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
+};
+use signalboxd::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSignal,
+    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration,
+    PostgresProviderModelExecution, PostgresScriptedModelExecution,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{

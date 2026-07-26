@@ -196,6 +196,14 @@ impl fmt::Display for RejectionDisplay {
                 "acceptance_position_exhausted session={session_id} last={}",
                 last.value()
             ),
+            RejectionDetail::DefaultsVersionExhausted {
+                session_id,
+                current,
+            } => write!(
+                formatter,
+                "defaults_version_exhausted session={session_id} current={}",
+                current.value()
+            ),
         }
     }
 }

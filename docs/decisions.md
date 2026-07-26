@@ -10,6 +10,60 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Add sccache as the devenv shared compiler cache
+
+**Context.** Every checkout and worktree cold-builds the full dependency graph,
+which takes tens of minutes on the primary development machine, and concurrent
+agent worktrees repeat identical dependency compilation. Continuous integration
+already caches its target directory; local builds share nothing across
+worktrees.
+
+**Decision.** The developer environment provides sccache and sets
+`RUSTC_WRAPPER` inside the devenv shell. Dependency compilation is cached once
+per machine, in sccache's per-user default cache directory (`SCCACHE_DIR`
+overrides), and reused across checkouts and worktrees; workspace crates keep
+incremental compilation and pass through uncached. No machine-specific path is
+committed. Continuous integration does not enter the devenv environment and
+keeps its existing target-directory cache.
+
+**Rejected alternatives.** A committed `.cargo/config.toml` imposes the wrapper
+on every consumer, including CI and machines without sccache installed. A shared
+`CARGO_TARGET_DIR` across worktrees serializes concurrent builds on the
+target-directory lock and collides on profiles and features. Adding sccache to
+CI duplicates the existing target-directory cache and, without a shared remote
+backend, every job would start against a cold cache.
+
+**Affects.** `devenv.nix`, the build-tooling guidance in `AGENTS.md`, and build
+behavior inside the devenv shell only; no Cargo dependency, workspace
+configuration, or CI behavior changes.
+
+## 2026-07-26 — Renumber the review-workflow migration after main advanced
+
+**Context.** The review-workflow foundation reserved the `2026072602xx` block
+when its specification stack opened. Before the persistence pull request merged,
+its ultimate `main` parent acquired migrations `202607270001` and
+`202607280001`. Retaining the lower reserved version would make a database
+upgraded through that parent apply a newly introduced migration out of ledger
+order.
+
+**Decision.** The merged review-workflow persistence artifact is
+`202607280002_review_workflow.sql`, strictly after the highest migration on its
+ultimate `main` parent. References to `2026072602xx` in earlier decision entries
+record the stack's original reservation; this entry records the required
+renumber, and the
+[persistence protocol](spec/persistence-protocol.md#migrations) owns the current
+implemented inventory.
+
+**Rejected alternatives.** Keeping `2026072602xx` preserves the initial
+reservation but violates strictly increasing migration history. Renumbering or
+editing migrations already on `main` violates forward-only migration discipline.
+Rewriting the earlier decisions would erase the sequence that explains why the
+reservation and merged filename differ.
+
+**Affects.** The review-workflow migration filename, the provenance of PR #227,
+and interpretation of the earlier review-workflow decision entries' affected
+slice.
+
 ## 2026-07-26 — Make runner lease authority single-use and tool-bound
 
 **Context.** An authorized physical attempt identifies its request, session,
@@ -39,6 +93,57 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
+
+## 2026-07-25 — Grandfather pre-boundary started frontiers
+
+**Context.** Before durable model-identity boundaries existed, per-input model
+replacement could start adjacent turns with different frozen direct selections.
+Those immutable historical frontiers contain no boundary entry. The new law must
+apply to work that can still start without fabricating or rewriting
+already-executed history.
+
+**Decision.** Give each turn lifecycle an immutable boundary-requirement bit.
+The migration marks existing active and terminal turns false, existing queued
+turns true, and defaults every new turn to true. Reconstitution permits a
+marker-free changed-model start only when that durable bit is false and rejects
+a boundary entry on such a grandfathered start.
+
+**Rejected alternatives.** Rewriting immutable prefix frontiers would invent
+historical conversation events and alter every descendant snapshot. Treating all
+pre-migration turns alike would let queued work start after deployment without
+the newly implemented boundary.
+
+**Affects.** Turn-lifecycle storage, scheduling reconstitution, the
+model-identity boundary constraint, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Render model-identity boundaries as injected user-role events
+
+**Context.** The recorded mid-session model-selection direction fixes
+forward-only defaults replacement and requires the new model to learn its
+identity through the conversation frontier. The existing provider-neutral
+runtime message algebra has user and assistant roles but no system-event role.
+The remaining implementation choice was the exact durable boundary and its
+provider-visible projection.
+
+**Decision.** When a started turn's frozen direct selection differs from its
+immediate predecessor's, one durable `ModelIdentityChanged` semantic entry sits
+immediately before that turn's origin. It names the turn, defaults epoch, and
+direct selection. The application preserves that distinct entry kind; the
+provider bridge projects it as a user-role message with the fixed
+`Signalbox session event:` prefix and exact selected-model UUID and epoch. No
+entry is created for the first turn, an equal-selection successor, or a defaults
+epoch no turn ever binds.
+
+**Rejected alternatives.** An assistant-role message would fabricate model
+authorship. A silent switch would leave the new model unaware of context
+identity. Recording every replacement would put unused configuration history in
+the conversation frontier. Adding a new provider-runtime role would broaden the
+runtime contract beyond this boundary.
+
+**Affects.** Semantic transcript entries, turn-start frontier construction,
+provider-neutral conversation rendering, protocol version six, and
+[sessions and transcript](spec/sessions-and-transcript.md).
 
 ## 2026-07-25 — Scoped verification references on specification pages
 
@@ -239,6 +344,40 @@ boundaries.
 INV-001 and INV-042, S30, the
 [runner-protocol specification](spec/runner-protocol.md), and later
 configuration, authentication, persistence, and transport stacks.
+
+## 2026-07-25 — Ship the server daemon as signalboxd
+
+**Context.** The recorded de-hub naming direction settled the server's name: the
+daemon ships as `signalboxd`, and future runner processes are a separate
+`signalbox-runner` binary. The crate still built as `signalbox-hubd` in
+`apps/hubd`, and the living documents still named the server process "the hub".
+This entry records that rename's execution.
+
+**Decision.** Rename the crate directory to `apps/signalboxd` and the package
+and binary target to `signalboxd`; rename `config/hubd.example.toml` to
+`config/signalboxd.example.toml`; update the CI integration-matrix label and
+package flags; and move the living surface — specification pages, architecture,
+vision, glossary, scenarios, invariant text, README, and config comments — to
+`signalboxd`/"the daemon" vocabulary, with "hub-local" tool placement becoming
+"daemon-local". Historical decision entries are append-only and keep their hubd
+vocabulary. Hub-named code identifiers (`SingleHubGuard`, `run_hub`, the
+persistence `hub_fence` module) and migration-committed SQL names stay for the
+recorded follow-on vocabulary pass, so cited code homes keep matching source.
+The native client's stored keychain-account and defaults-key literals
+(`hub-api-key`, `hub-url`) stay permanently on PR #238's recorded ground:
+renaming a stored-state identifier orphans already-saved settings and buys
+nothing, so only the Swift constants naming them carry the new vocabulary.
+
+**Rejected alternatives.** Keeping the package name `signalbox-hubd` with only a
+binary-target rename would preserve dependency-graph continuity but leave the
+legacy name on the Cargo surface every reference spells. Renaming code
+identifiers in the same pass would mix a mechanical move with the broad
+vocabulary sweep the backlog scopes separately.
+
+**Affects.** `apps/signalboxd`, `apps/client` imports, the workspace member list
+and `Cargo.lock`, `.github/workflows/rust.yml`,
+`config/signalboxd.example.toml`, and the living documents naming the server
+process.
 
 ## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
 

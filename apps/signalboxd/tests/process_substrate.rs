@@ -6,8 +6,8 @@
 
 use std::error::Error;
 
-use signalbox_hubd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
 use signalbox_persistence::local_test_connection_options;
+use signalboxd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
 use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,

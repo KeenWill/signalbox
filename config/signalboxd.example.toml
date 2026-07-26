@@ -1,4 +1,4 @@
-# Signalbox hub model configuration, version 1.
+# Signalbox daemon model configuration, version 1.
 #
 # Every identity below is an example. Generate fresh UUIDs for a real
 # deployment: `selection_id` is the immutable key clients name, `target_id` is
