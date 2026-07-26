@@ -200,20 +200,41 @@ enum MockSignalboxFixtures {
         """
     }
 
-    static let streamMessages: [String] = [
-        """
+    static let streamHelloMessage = """
+    {
+      "kind": "stream_hello",
+      "session": \(sessionJSON(id: activeSessionID, title: "Research runner status", status: "prompting", archived: false, runnerID: "local-runner")),
+      "status": {"state":"prompting","current_tool_calls":[],"status_updates":["streaming answer"],"pending_user_messages":0},
+      "events": \(activeEvents)
+    }
+    """
+
+    static let promptingStatusStreamMessage = """
         {"kind":"status_changed","status":{"state":"prompting","current_tool_calls":[],"status_updates":["runner accepted turn"],"pending_user_messages":0}}
-        """,
-        """
+    """
+
+    static let appendedAssistantStreamMessage = """
         {"kind":"event_appended","event_id":21,"event":{"kind":"message","message":{"role":"assistant","parts":[{"kind":"text","text":"I am checking the runner fleet and current task state."}]},"visible_to_llm":true,"visible_to_user":true,"is_streaming":true,"parent_tool_invocation":null,"created_at":"2026-05-10T12:06:01Z","last_modified_at":"2026-05-10T12:06:01Z","created_from":"runner:local-runner"}}
-        """,
-        """
+    """
+
+    static let completedAssistantStreamMessage = """
         {"kind":"event_updated","event_id":21,"event":{"kind":"message","message":{"role":"assistant","parts":[{"kind":"text","text":"I am checking the runner fleet and current task state. The local runner is online."}]},"visible_to_llm":true,"visible_to_user":true,"is_streaming":false,"parent_tool_invocation":null,"created_at":"2026-05-10T12:06:01Z","last_modified_at":"2026-05-10T12:06:02Z","created_from":"runner:local-runner"}}
-        """,
-        """
+    """
+
+    static let idleStatusStreamMessage = """
         {"kind":"status_changed","status":{"state":"idle"}}
-        """
+    """
+
+    static let streamMessages: [String] = [
+        streamHelloMessage,
+        promptingStatusStreamMessage,
+        appendedAssistantStreamMessage,
+        completedAssistantStreamMessage,
+        idleStatusStreamMessage,
     ]
+
+    /// A short visible cadence keeps screenshot state transitions observable.
+    static let streamMessageDelayNanoseconds: UInt64 = 180_000_000
 
     static let pendingToolEvents = """
     [

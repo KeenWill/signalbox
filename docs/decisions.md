@@ -10,6 +10,44 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Scoped verification references on specification pages
+
+**Context.** Every `docs/spec/` page names the pull request its claims were last
+verified against, and pages narrow that claim to the surface the pull request
+actually settled whenever one reference no longer covers the whole page —
+[configuration-and-credentials](spec/configuration-and-credentials.md) and
+[persistence-protocol](spec/persistence-protocol.md) both carry per-surface
+references today. Those narrowings were written as prose outside the
+parenthetical because `scripts/check_docs_consistency.py` recognized nothing but
+a bare `` PR #N (`branch-ref`) `` token. The practice grew by imitation, and no
+documentation statement owned the reference format at all: the checker's
+docstring was the only place it appeared.
+
+**Decision.** [The specification index](spec/README.md) owns the format. A
+verification reference is `` PR #N (`branch-ref`) ``, optionally narrowed by a
+semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) ``. The
+scope is free-form prose that must render as more than whitespace and
+block-quote markers (an empty, whitespace-only, or marker-only tail is rejected)
+and must stay inside the reference's own block, ending at a blank line or a
+sibling list item in either raw or block-quoted form. A scope may name code in
+backticks, and the parentheses inside such a span do not close the reference.
+`scripts/check_docs_consistency.py` enforces the format and captures nothing
+from the tail, so no consumer can come to depend on its wording.
+
+**Rejected alternatives.** Admitting only the scope-outside-the-parentheses form
+the pages use today: it separates the narrowing from the reference it narrows
+and reads as page prose rather than as part of the reference. Both forms stay
+valid and no existing page changes; the choice is which shapes an author may
+write. Validating the tail's content — requiring a path, a symbol, or a section
+link: it would freeze a prose vocabulary the pages have not settled and turn
+wording edits into checker changes. Leaving the convention to the checker alone:
+a repo-wide documentation format stated only in a script's docstring has no
+owner a page author would read.
+
+**Affects.** [The specification index](spec/README.md),
+`scripts/check_docs_consistency.py`, and the verification reference on every
+`docs/spec/` page.
+
 ## 2026-07-25 — Keep runner credentials local and daemon policy authoritative
 
 **Context.** Sessions need to select machine-local credentials without sending
@@ -27,10 +65,12 @@ dangerous session blanket, `Automatic` authorizes only its exact catalog pair;
 tool-only automatic default. Session creation records the profile request, and
 pinning snapshots it with the now-exact runner and advertised tool inventory.
 Replacement is a checked forward-only complete snapshot that emits typed change
-facts for later frontier injection. Revocation gates later lease creation but
-does not cancel or rewrite an already offered lease. Arbitrary tool output is a
-separate result-egress boundary and carries no no-disclosure claim in this
-slice.
+facts for later frontier injection. Runner replacement consumes a prior
+pinned-profile grant and creates a checked successor revision rather than
+recreating revision one. Revocation gates later lease creation but does not
+cancel or rewrite an already offered lease; its prior revision remains terminal.
+Arbitrary tool output is a separate result-egress boundary and carries no
+no-disclosure claim in this slice.
 
 **Rejected alternatives.** Sending values from the daemon creates a second
 credential-distribution system. Letting a runner advertise approval posture
@@ -53,14 +93,15 @@ boundary and the model's available tools without extending conversation context.
 
 **Decision.** Session placement begins with a class-or-identity selector,
 working-directory selection, optional credential profile, and workspace
-requirement. The first eligible execution pins the exact runner and its
-validated capability snapshot. Ordinary dispatch cannot move the session. Runner
-loss is explicit and disables future leasing. Owner-directed replacement checks
-one complete new placement, advances a positive revision, and emits complete
-before-and-after change facts for mandatory later frontier injection. A
-repository workspace requires the runner-advertised `WorktreePerSession`
-capability; its provisioned path is runner-owned and a replacement cannot
-inherit it across runners.
+requirement. The first eligible execution consumes its exact authorized
+tool-attempt fence and atomically pins the exact runner, its validated
+capability snapshot, and the initial runner lease; mere attachment cannot pin.
+Ordinary dispatch cannot move the session. Runner loss is explicit and disables
+future leasing. Owner-directed replacement checks one complete new placement,
+advances a positive revision, and emits complete before-and-after change facts
+for mandatory later frontier injection. A repository workspace requires the
+runner-advertised `WorktreePerSession` capability; its provisioned path is
+runner-owned and a replacement cannot inherit it across runners.
 
 **Rejected alternatives.** Re-evaluating a class before every call permits
 silent migration. Pinning only a working-directory string treats paths on
@@ -85,21 +126,29 @@ duplicates unsafe work.
 `Pure`, `Idempotent`, or `SideEffecting`; pure implies idempotent. Tool
 placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
 or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
-the combined case. Runner leases bind an exact pinned runner, tool, physical
-attempt, and positive dispatch generation; effect is derived from the validated
-declaration. Loss before claim may advance every class while retaining the
-never-executed attempt. Loss after claim produces re-lease authority only for
-pure or idempotent work and requires a fresh physical attempt identity;
-side-effecting loss produces exact crash-classification authority and cannot
-produce re-lease authority. Undeclared advertised tools are rejected; an
-untrusted pre-validation boundary classifies an absent effect declaration as
+the combined case and daemon fallback retained if that runner later omits the
+combined tool. Runner leases consume the tool loop's exact authorized
+physical-attempt dispatch correlation and bind it to an exact pinned runner,
+tool, and positive lease-lineage generation; active enrollment, current
+placement, registration, and grant jointly authorize the lease, and effect is
+derived from the validated declaration. Loss before claim may advance every
+class while retaining the never-executed attempt. Loss after claim produces
+re-lease authority only for pure or idempotent work and requires a fresh
+authorized physical attempt identity; the lease-lineage generation advances
+while that new physical attempt's own dispatch generation starts at its required
+first value. Side-effecting loss produces exact crash-classification authority
+and cannot produce re-lease authority. Undeclared advertised tools are rejected;
+an untrusted pre-validation boundary classifies an absent effect declaration as
 side-effecting.
 
 The later runner transport uses one runner-initiated held outbound streaming
 connection and runners accept no inbound connection. The channel carries offers,
 claims, and results but is never their authority: registration and lease
 aggregates are independent of connection state, and later persistence must
-reconstitute them before reconnect synchronization.
+reconstitute them before reconnect synchronization. The later transport must
+durably commit and acknowledge an exact claim before that acknowledgement
+becomes the runner's execution capability; absence of a claim frame alone never
+proves that an offered operation did not execute.
 
 **Rejected alternatives.** A default effect class hides missing policy. Treating
 all state-changing work as ambiguous throws away idempotency. Re-leasing side
@@ -109,7 +158,7 @@ a call to widen the registry. Treating the stream as truth loses claims on
 reconnect.
 
 **Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
-INV-004, INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
+INV-004, INV-021, INV-025, INV-026, INV-043, S16 and S31, the
 [tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
 specifications, and later store and wire stacks.
 
@@ -129,17 +178,24 @@ availability names only. The complete advertisement is validated against the
 active enrollment and one daemon-side owner-editable catalog parsed into typed
 domain, including its allowed capability classes. Unknown or disallowed claims
 reject registration. The validated result attaches daemon declarations for
-permission, placement, effect, credential-pair approval, and workspace
-capability; re-registration can change availability but carries no field capable
-of changing that policy. The runner declaration is authoritative for runner
-dispatch; a later adapter must reject any shared daemon-local definition whose
-permission or mapped effect disagrees.
+model-facing description and argument schema, permission, placement, effect,
+credential-pair approval, and workspace capability. The runner declaration is
+authoritative for runner dispatch, including runner-only tools; a later adapter
+must compile its schema and reject any shared daemon-local definition whose
+description, schema, permission, or mapped effect disagrees. Re-registration can
+change availability but carries no field capable of changing policy. It cannot
+widen an established session snapshot; narrowing a runner-required capability
+disables lease creation and is reconciled as explicit runner loss, while
+omission of a combined-locus tool retains placement and daemon fallback.
+Enrollment revocation also disables later lease creation through a registration
+it previously validated.
 
 Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
 letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
-Working-directory and repository keys retain exact bounded UTF-8 without
-host-platform parsing in the domain. Catalog file syntax, authentication
-exchange, rotation, and durable registration storage are later boundaries.
+Working-directory and repository keys retain exact nonempty, U+0000-free UTF-8
+up to 4,096 bytes without host-platform parsing in the domain. Catalog file
+syntax, authentication exchange, rotation, and durable registration storage are
+later boundaries.
 
 **Rejected alternatives.** Hardware fingerprints exclude ephemeral runners and
 silently change identity when machines are replaced. Hostnames and network

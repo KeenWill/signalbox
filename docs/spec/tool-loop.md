@@ -145,14 +145,17 @@ permission default (`Auto` or `Confirm`), and the stored two-class crash
 classification used by the implemented local attempt machinery.
 
 The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
-per runner-advertisable name. It carries the required three-way
-`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`) and one
+per runner-advertisable name. It carries a required checked model-facing
+description and canonical JSON-object argument schema, the required three-way
+`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`), and one
 nonempty `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
 `DaemonOrRunner { selector }`). Pure implies idempotent; idempotent work may
 change state but is safe to repeat. The combined locus prefers the session's
 attached eligible runner, falling back to daemon-local execution. Declarations
-are static per tool; a model or runner cannot select another locus per call. The
-typed placement and runner-dispatch law is owned by
+are static per tool; a model or runner cannot select another locus per call.
+Every runner-only tool therefore still has one authoritative definition for
+model advertisement and argument validation. The typed placement and
+runner-dispatch law is owned by
 [runner protocol and placement](runner-protocol.md).
 
 The current daemon-local application catalog remains one process-lifetime
@@ -160,14 +163,15 @@ immutable compiled value. Its existing `EffectFree` declaration maps to
 `RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
 `RunnerToolEffectClass::SideEffecting`; no current local declaration can project
 `Idempotent`. Before a shared name can use a daemon locus, the later application
-adapter must validate exact permission equality and this effect mapping against
-the authoritative runner declaration. A mismatch is unavailable, never a choice
-between two policies. Consolidating the typed representations requires the later
-application and persistence stack and no migration is introduced here. Catalog
-lookup and iteration are ports rather than a static global, but runtime
-rebinding and deployment compatibility for outstanding requests are not
-implemented; they require the durable definition-revision decision recorded
-under Open edges.
+adapter must validate exact model-facing description and schema, permission
+equality, and this effect mapping against the authoritative runner declaration;
+it also compiles the schema into the executable validator used before dispatch.
+A mismatch is unavailable, never a choice between two policies. Consolidating
+the typed representations requires the later application and persistence stack
+and no migration is introduced here. Catalog lookup and iteration are ports
+rather than a static global, but runtime rebinding and deployment compatibility
+for outstanding requests are not implemented; they require the durable
+definition-revision decision recorded under Open edges.
 
 Each provider operation carries one exact definition snapshot. Initial approval
 for proposals returned by that operation is derived from that same advertised

@@ -20,10 +20,12 @@ use signalbox_domain::{
     RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState,
     RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
     RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerWorkingDirectory, SessionId, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptId, ToolName,
-    ToolPermissionDefault, ValidatedRunnerRegistration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolDispatchGeneration, ToolName, ToolPermissionDefault, ToolRequestId,
+    TurnAttemptId, TurnId, ValidatedRunnerRegistration,
     ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
     WorkspaceRepositoryKey, WorkspaceRequirement,
 };
@@ -317,7 +319,7 @@ impl RunnerProtocolStore {
         registration: Option<&StoredValidatedRunnerRegistration>,
         grant: Option<&CredentialProfileGrant>,
     ) -> Result<StoredSessionRunnerPlacement, RunnerProtocolStoreError> {
-        SessionRunnerPlacement::reconstitute(
+        SessionRunnerPlacement::reconstitute_from_facts(
             SessionRunnerPlacementReconstitutionInput {
                 session: placement.session(),
                 revision: placement.revision(),
@@ -391,6 +393,80 @@ impl RunnerProtocolStore {
             placement: placement.clone(),
             grant: grant.cloned(),
         })
+    }
+
+    /// Atomically stores the first pinned placement, grant, and offered lease.
+    pub async fn store_pin(
+        &self,
+        pin: &SessionRunnerPin,
+        registration: &StoredValidatedRunnerRegistration,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let prior = sqlx::query(
+            "SELECT record.event_ordinal, record.placement_revision,
+                    record.state_kind
+               FROM runner_current_session_placement AS current_placement
+               JOIN runner_session_placement_record AS record
+                 ON record.session_id = current_placement.session_id
+                AND record.event_ordinal = current_placement.event_ordinal
+              WHERE current_placement.session_id = $1
+              FOR UPDATE OF current_placement",
+        )
+        .bind(pin.placement.session().into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let event_ordinal = prior
+            .as_ref()
+            .map(|row| decode_u64(row.get("event_ordinal")))
+            .transpose()?
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        let event_kind = classify_placement_event(prior.as_ref(), &pin.placement)?;
+        insert_placement_record(
+            &mut transaction,
+            event_ordinal,
+            event_kind,
+            &pin.placement,
+            Some(registration),
+            pin.grant.as_ref(),
+        )
+        .await?;
+        if let Some(grant) = pin.grant.as_ref() {
+            insert_grant_if_new(&mut transaction, event_ordinal, grant, registration).await?;
+        }
+        sqlx::query(
+            "INSERT INTO runner_current_session_placement
+                (session_id, event_ordinal)
+             VALUES ($1, $2)
+             ON CONFLICT (session_id)
+             DO UPDATE SET event_ordinal = EXCLUDED.event_ordinal",
+        )
+        .bind(pin.placement.session().into_uuid())
+        .bind(Decimal::from(event_ordinal))
+        .execute(&mut *transaction)
+        .await?;
+        insert_lease_generation(&mut transaction, &pin.lease).await?;
+        let correlation = pin.lease.correlation();
+        sqlx::query(
+            "INSERT INTO runner_lease_event
+                (lease_id, generation, event_ordinal, state_kind)
+             VALUES ($1, $2, 1, 'offered')",
+        )
+        .bind(correlation.lease.into_uuid())
+        .bind(Decimal::from(correlation.generation.get()))
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO runner_current_lease_event
+                (lease_id, generation, event_ordinal)
+             VALUES ($1, $2, 1)",
+        )
+        .bind(correlation.lease.into_uuid())
+        .bind(Decimal::from(correlation.generation.get()))
+        .execute(&mut *transaction)
+        .await?;
+        commit_mutation(transaction).await
     }
 
     /// Loads and reconstitutes the current placement and selected grant.
@@ -557,6 +633,12 @@ impl RunnerProtocolStore {
         let row = sqlx::query(
             "SELECT lease_generation.*, event.state_kind,
                     request.tool_name AS canonical_attempt_tool,
+                    attempt.turn_id AS canonical_attempt_turn,
+                    attempt.issuing_turn_attempt_id
+                        AS canonical_issuing_attempt,
+                    attempt.request_id AS canonical_attempt_request,
+                    attempt.dispatch_generation
+                        AS canonical_dispatch_generation,
                     placement.state_kind AS canonical_placement_state,
                     placement.pinned_runner_id AS canonical_placement_runner,
                     placement.registration_enrollment_id
@@ -699,13 +781,16 @@ async fn insert_registration(
         sqlx::query(
             "INSERT INTO runner_registration_tool
                 (enrollment_id, registration_revision, tool_name,
-                 permission_kind, effect_class, loci_kind, selector_kind,
-                 selector_runner_id, selector_capability_class)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 model_description, model_input_schema, permission_kind,
+                 effect_class, loci_kind, selector_kind, selector_runner_id,
+                 selector_capability_class)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(registration.enrollment().into_uuid())
         .bind(Decimal::from(revision.get()))
         .bind(tool.name().as_str())
+        .bind(tool.model().description())
+        .bind(tool.model().input_schema().as_str())
         .bind(encode_permission(tool.permission()))
         .bind(encode_effect(tool.effect()))
         .bind(loci.kind)
@@ -1005,12 +1090,13 @@ async fn insert_placement_record(
     for tool in state.tools {
         sqlx::query(
             "INSERT INTO runner_session_placement_tool
-                (session_id, event_ordinal, tool_name)
-             VALUES ($1, $2, $3)",
+                (session_id, event_ordinal, tool_name, runner_required)
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(placement.session().into_uuid())
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
+        .bind(state.runner_required_tools.contains(tool))
         .execute(&mut **transaction)
         .await?;
     }
@@ -1144,7 +1230,7 @@ async fn decode_placement(
         SessionRunnerPlacementState::Unpinned
     } else {
         let tool_rows = sqlx::query(
-            "SELECT tool_name
+            "SELECT tool_name, runner_required
                FROM runner_session_placement_tool
               WHERE session_id = $1 AND event_ordinal = $2
               ORDER BY tool_name",
@@ -1156,6 +1242,11 @@ async fn decode_placement(
         require_count(row, "pinned_tool_count", tool_rows.len())?;
         let tools = tool_rows
             .iter()
+            .map(|row| tool_name(row.get("tool_name")))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let runner_required_tools = tool_rows
+            .iter()
+            .filter(|row| row.get::<bool, _>("runner_required"))
             .map(|row| tool_name(row.get("tool_name")))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let runner = row
@@ -1188,6 +1279,7 @@ async fn decode_placement(
                 .map(profile_name)
                 .transpose()?,
             tools,
+            runner_required_tools,
             workspace,
         };
         match state_kind.as_str() {
@@ -1196,7 +1288,7 @@ async fn decode_placement(
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
-    SessionRunnerPlacement::reconstitute(
+    SessionRunnerPlacement::reconstitute_from_facts(
         SessionRunnerPlacementReconstitutionInput {
             session,
             revision: decode_generation(row.get("placement_revision"))?,
@@ -1327,7 +1419,7 @@ async fn insert_lease_generation(
     )
     .bind(correlation.lease.into_uuid())
     .bind(Decimal::from(correlation.generation.get()))
-    .bind(correlation.attempt.into_uuid())
+    .bind(correlation.dispatch.attempt().into_uuid())
     .bind(lease.session().into_uuid())
     .bind(lease.runner().into_uuid())
     .bind(lease.tool().as_str())
@@ -1369,6 +1461,28 @@ fn decode_lease(row: &PgRow) -> Result<RunnerLease, RunnerProtocolStoreError> {
     let canonical_tool = row
         .try_get::<Option<String>, _>("canonical_attempt_tool")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
+    let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
+        ToolAttemptDispatchCorrelationReconstitutionInput {
+            session,
+            turn: TurnId::from_uuid(
+                row.try_get::<Option<Uuid>, _>("canonical_attempt_turn")?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
+            ),
+            issuing_attempt: TurnAttemptId::from_uuid(
+                row.try_get::<Option<Uuid>, _>("canonical_issuing_attempt")?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
+            ),
+            request: ToolRequestId::from_uuid(
+                row.try_get::<Option<Uuid>, _>("canonical_attempt_request")?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
+            ),
+            attempt,
+            generation: decode_dispatch_generation(
+                row.try_get::<Option<Decimal>, _>("canonical_dispatch_generation")?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
+            )?,
+        },
+    );
     let canonical_runner = row
         .try_get::<Option<Uuid>, _>("canonical_placement_runner")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
@@ -1428,21 +1542,24 @@ fn decode_lease(row: &PgRow) -> Result<RunnerLease, RunnerProtocolStoreError> {
     };
     RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
         lease,
-        attempt,
-        session,
+        dispatch,
         runner,
         tool: tool.clone(),
         effect: decode_effect(row.get("effect_class"))?,
-        credential_authorization: authorization,
+        credential_authorization: authorization.clone(),
         generation,
         state: decode_lease_state(row.get("state_kind"))?,
         recorded_correlation: RunnerLeaseCorrelation {
             lease,
             runner: runner_id(canonical_runner),
             tool: tool_name(canonical_tool)?,
-            attempt,
+            dispatch,
             generation,
         },
+        recorded_session: session,
+        recorded_effect: decode_effect(row.get("effect_class"))?,
+        recorded_credential_authorization: authorization.clone(),
+        recorded_state: decode_lease_state(row.get("state_kind"))?,
     })
     .map_err(RunnerProtocolStoreError::Domain)
 }
@@ -1483,7 +1600,7 @@ fn require_stored_lease_identity(
         }),
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
-    if row.get::<Uuid, _>("attempt_id") != correlation.attempt.into_uuid()
+    if row.get::<Uuid, _>("attempt_id") != correlation.dispatch.attempt().into_uuid()
         || row.get::<Uuid, _>("session_id") != lease.session().into_uuid()
         || row.get::<Uuid, _>("runner_id") != correlation.runner.into_uuid()
         || row.get::<String, _>("tool_name") != correlation.tool.as_str()
@@ -1501,6 +1618,7 @@ struct EncodedPlacementState<'a> {
     pinned_directory: Option<&'a str>,
     pinned_profile: Option<&'a str>,
     tools: Vec<&'a ToolName>,
+    runner_required_tools: BTreeSet<&'a ToolName>,
     workspace_repository: Option<&'a str>,
     workspace_directory: Option<&'a str>,
 }
@@ -1514,6 +1632,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
                 pinned_directory: None,
                 pinned_profile: None,
                 tools: Vec::new(),
+                runner_required_tools: BTreeSet::new(),
                 workspace_repository: None,
                 workspace_directory: None,
             };
@@ -1530,6 +1649,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
             .as_ref()
             .map(CredentialProfileName::as_str),
         tools: pinned.tools.iter().collect(),
+        runner_required_tools: pinned.runner_required_tools.iter().collect(),
         workspace_repository: pinned
             .workspace
             .as_ref()
@@ -1657,6 +1777,11 @@ fn decode_tool_declaration(row: &PgRow) -> Result<RunnerToolDeclaration, RunnerP
     };
     Ok(RunnerToolDeclaration::new(
         tool_name(row.get("tool_name"))?,
+        RunnerToolModelDefinition::try_new(
+            row.get("model_description"),
+            row.get("model_input_schema"),
+        )
+        .map_err(RunnerProtocolStoreError::Domain)?,
         decode_permission(row.get("permission_kind"))?,
         decode_effect(row.get("effect_class"))?,
         loci,
@@ -1802,6 +1927,14 @@ fn decode_u64(value: Decimal) -> Result<u64, RunnerProtocolStoreError> {
 
 fn decode_generation(value: Decimal) -> Result<RunnerGeneration, RunnerProtocolStoreError> {
     RunnerGeneration::try_from_u64(decode_u64(value)?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding.into())
+}
+
+fn decode_dispatch_generation(
+    value: Decimal,
+) -> Result<ToolDispatchGeneration, RunnerProtocolStoreError> {
+    let value = decode_u64(value)?;
+    ToolDispatchGeneration::try_from_u64(value)
         .ok_or(RunnerProtocolCorruption::InvalidEncoding.into())
 }
 

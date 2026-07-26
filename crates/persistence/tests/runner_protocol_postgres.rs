@@ -7,13 +7,16 @@
 use std::error::Error;
 
 use signalbox_domain::{
-    CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerEnrollment,
-    RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLeaseId, RunnerSelector,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPlacement, SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolAttemptId,
-    ToolName, ToolPermissionDefault, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRequirement,
+    AuthorizedToolAttempt, CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval,
+    ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
+    RunnerCatalog, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLeaseId,
+    RunnerLeaseOfferRequest, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPlacement,
+    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
+    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -53,8 +56,8 @@ const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
 };
 const RETRY_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
     attempt: RETRY_ATTEMPT,
-    request: 0x9701,
-    turn: 0x9801,
+    request: INITIAL_PHYSICAL_ATTEMPT.request,
+    turn: INITIAL_PHYSICAL_ATTEMPT.turn,
 };
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -97,6 +100,51 @@ fn profile() -> CredentialProfileName {
         .expect("the fixture profile name is valid")
 }
 
+fn model_definition() -> RunnerToolModelDefinition {
+    RunnerToolModelDefinition::try_new(
+        "Inspect the fixture workspace".to_owned(),
+        r#"{"type":"object"}"#.to_owned(),
+    )
+    .expect("the fixture model definition is valid")
+}
+
+fn authorized(facts: PhysicalAttemptFacts) -> AuthorizedToolAttempt {
+    let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
+        ToolAttemptDispatchCorrelationReconstitutionInput {
+            session: SessionId::from_uuid(uuid(SESSION)),
+            turn: TurnId::from_uuid(uuid(facts.turn)),
+            issuing_attempt: TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+            request: ToolRequestId::from_uuid(uuid(facts.request)),
+            attempt: ToolAttemptId::from_uuid(uuid(facts.attempt)),
+            generation: ToolDispatchGeneration::first(),
+        },
+    );
+    let attempt = ToolAttemptReconstitutionInput::new(
+        ToolAttemptId::from_uuid(uuid(facts.attempt)),
+        ToolRequestId::from_uuid(uuid(facts.request)),
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+        ToolEffectClass::EffectFree,
+        ToolDispatchGeneration::first(),
+        ToolAttemptReconstitutionState::InFlight,
+    )
+    .reconstitute()
+    .expect("the fixture in-flight attempt reconstitutes");
+    let ReconstitutedToolAttempt::Current(attempt) = attempt else {
+        panic!("the fixture attempt is current")
+    };
+    AuthorizedToolAttempt::reconstitute(attempt, dispatch)
+        .expect("the canonical in-flight fixture authorizes")
+}
+
+fn offer_request() -> RunnerLeaseOfferRequest {
+    RunnerLeaseOfferRequest {
+        lease: RunnerLeaseId::from_uuid(uuid(LEASE)),
+        tool: tool("inspect"),
+    }
+}
+
 fn enrollment() -> RunnerEnrollment {
     RunnerEnrollment::new(
         RunnerEnrollmentId::from_uuid(uuid(ENROLLMENT)),
@@ -109,6 +157,7 @@ fn enrollment() -> RunnerEnrollment {
 fn catalog() -> RunnerCatalog {
     let inspect = RunnerToolDeclaration::new(
         tool("inspect"),
+        model_definition(),
         ToolPermissionDefault::Auto,
         RunnerToolEffectClass::Pure,
         ToolAdmissibleLoci::RunnerOnly {
@@ -166,7 +215,8 @@ async fn insert_physical_attempt(
         "INSERT INTO tool_request
             (request_id, session_id, turn_id, producing_model_call_id,
              request_ordinal, tool_name, arguments_kind, arguments_text)
-         VALUES ($1, $2, $3, $4, 0, 'inspect', 'json', '{}')",
+         VALUES ($1, $2, $3, $4, 0, 'inspect', 'json', '{}')
+         ON CONFLICT (request_id) DO NOTHING",
     )
     .bind(uuid(facts.request))
     .bind(uuid(SESSION))
@@ -192,6 +242,29 @@ async fn insert_physical_attempt(
     .bind(uuid(SESSION))
     .bind(uuid(facts.turn))
     .bind(uuid(facts.turn + RELATED_IDENTITY_OFFSET))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn terminalize_physical_attempt(
+    pool: &PgPool,
+    facts: PhysicalAttemptFacts,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'execution_failed'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(facts.attempt))
     .execute(pool)
     .await?;
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
@@ -288,6 +361,7 @@ async fn s32_inv035_credential_relations_admit_names_and_audit_only() -> Result<
 async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
@@ -307,16 +381,17 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
     let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
     store.store_placement(&placement, None, None).await?;
     let pin = placement
-        .pin(
+        .pin_and_offer_lease(
+            &expected_enrollment,
             registration.registration(),
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
         )
         .expect("the validated registration pins the placement");
-    store
-        .store_placement(&pin.placement, Some(&registration), pin.grant.as_ref())
-        .await?;
+    store.store_pin(&pin, &registration).await?;
 
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
@@ -336,7 +411,6 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
@@ -356,28 +430,18 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
     store.store_placement(&placement, None, None).await?;
     let pin = placement
-        .pin(
+        .pin_and_offer_lease(
+            &expected_enrollment,
             registration.registration(),
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
         )
         .expect("the validated registration pins the placement");
-    store
-        .store_placement(&pin.placement, Some(&registration), pin.grant.as_ref())
-        .await?;
-    let offered = pin
-        .placement
-        .offer_lease(
-            registration.registration(),
-            pin.grant.as_ref(),
-            RunnerLeaseId::from_uuid(uuid(LEASE)),
-            ToolAttemptId::from_uuid(uuid(ATTEMPT)),
-            tool("inspect"),
-            RunnerGeneration::one(),
-        )
-        .expect("the pinned placement authorizes the fixture lease");
-    store.store_lease(&offered).await?;
+    let offered = pin.lease.clone();
+    store.store_pin(&pin, &registration).await?;
     let correlation = offered.correlation();
     let claimed = offered
         .claim(correlation)
@@ -392,13 +456,16 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         )
         .await?
         .expect("the first generation is durable before the loss event");
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let retry = pin
         .placement
         .offer_retry(
+            &expected_enrollment,
             registration.registration(),
             pin.grant.as_ref(),
             loss,
-            ToolAttemptId::from_uuid(uuid(RETRY_ATTEMPT)),
+            authorized(RETRY_PHYSICAL_ATTEMPT),
         )
         .expect("claimed pure work requires a fresh physical attempt");
     store.store_lease(&retry).await?;
@@ -442,28 +509,18 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
     store.store_placement(&placement, None, None).await?;
     let pin = placement
-        .pin(
+        .pin_and_offer_lease(
+            &expected_enrollment,
             registration.registration(),
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
         )
         .expect("the validated registration pins the placement");
-    store
-        .store_placement(&pin.placement, Some(&registration), pin.grant.as_ref())
-        .await?;
-    let offered = pin
-        .placement
-        .offer_lease(
-            registration.registration(),
-            pin.grant.as_ref(),
-            RunnerLeaseId::from_uuid(uuid(LEASE)),
-            ToolAttemptId::from_uuid(uuid(ATTEMPT)),
-            tool("inspect"),
-            RunnerGeneration::one(),
-        )
-        .expect("the pinned placement authorizes the fixture lease");
-    store.store_lease(&offered).await?;
+    let offered = pin.lease.clone();
+    store.store_pin(&pin, &registration).await?;
     let correlation = offered.correlation();
     let claimed = offered
         .claim(correlation)

@@ -325,6 +325,18 @@ pub struct ToolAttemptDispatchCorrelation {
 }
 
 impl ToolAttemptDispatchCorrelation {
+    /// Reconstitutes one exact dispatch fence from canonical durable facts.
+    pub const fn reconstitute(input: ToolAttemptDispatchCorrelationReconstitutionInput) -> Self {
+        Self {
+            session: input.session,
+            turn: input.turn,
+            issuing_attempt: input.issuing_attempt,
+            request: input.request,
+            attempt: input.attempt,
+            generation: input.generation,
+        }
+    }
+
     /// Returns the owning session.
     pub const fn session(&self) -> SessionId {
         self.session
@@ -365,6 +377,17 @@ impl ToolAttemptDispatchCorrelation {
             observation,
         }
     }
+}
+
+/// Complete canonical durable facts for one physical-attempt dispatch fence.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub issuing_attempt: TurnAttemptId,
+    pub request: ToolRequestId,
+    pub attempt: ToolAttemptId,
+    pub generation: ToolDispatchGeneration,
 }
 
 /// One executor observation bound to exact issued authority.
@@ -600,6 +623,25 @@ pub struct AuthorizedToolAttempt {
 }
 
 impl AuthorizedToolAttempt {
+    /// Reconstitutes exact durable in-flight authority and rejects cross-wiring.
+    pub fn reconstitute(
+        attempt: CurrentToolAttempt,
+        recorded_correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<Self, ToolAttemptTransitionError> {
+        if attempt.state != CurrentToolAttemptState::InFlight
+            || attempt.correlation() != recorded_correlation
+        {
+            return Err(ToolAttemptTransitionError {
+                attempt,
+                failure: ToolAttemptTransitionFailure::InvalidState,
+            });
+        }
+        Ok(Self {
+            attempt,
+            correlation: recorded_correlation,
+        })
+    }
+
     /// Borrows the in-flight attempt.
     pub const fn attempt(&self) -> &CurrentToolAttempt {
         &self.attempt

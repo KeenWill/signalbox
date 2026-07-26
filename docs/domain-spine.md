@@ -3149,6 +3149,10 @@ pub enum ToolAttemptObservation {
 }
 
 pub struct ToolAttemptDispatchCorrelation { /* private */ }
+// canonical durable-fact reconstitution plus fence accessors
+pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
+    /* public complete typed fence facts */
+}
 impl ToolAttemptDispatchCorrelation {
     pub const fn bind(
         self,
@@ -3173,7 +3177,7 @@ impl CurrentToolAttempt {
     // generation(), state()
 }
 pub struct AuthorizedToolAttempt { /* private */ }
-// accessors: attempt(), correlation(), into_parts()
+// fail-closed in-flight reconstitution; accessors: attempt(), correlation(), into_parts()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -5207,11 +5211,13 @@ pub enum RunnerDomainError {
     ContainsNull,
     TooLong,
     InvalidName,
+    InvalidToolInputSchema,
     DuplicateCapabilityClass(RunnerCapabilityClass),
     DuplicateTool(ToolName),
     DuplicateProfile(CredentialProfileName),
     DuplicateWorkspaceCapability(WorkspaceCapability),
     UndeclaredProfileTool(ToolName),
+    UnsupportedDaemonIdempotency(ToolName),
     EnrollmentRevoked,
     CapabilityClassNotAllowed(RunnerCapabilityClass),
     ToolUndeclared(ToolName),
@@ -5229,6 +5235,7 @@ pub enum RunnerDomainError {
     WorkspaceMismatch,
     ToolUnavailable,
     GrantRevoked,
+    RegistrationChanged,
     CorruptStoredFacts,
 }
 
@@ -5260,11 +5267,20 @@ pub struct RunnerToolDeclaration { /* private */ }
 impl RunnerToolDeclaration {
     pub const fn new(
         name: ToolName,
+        model: RunnerToolModelDefinition,
         permission: ToolPermissionDefault,
         effect: RunnerToolEffectClass,
         loci: ToolAdmissibleLoci,
     ) -> Self;
-    // accessors: name(), permission(), effect(), loci()
+    // accessors: name(), model(), permission(), effect(), loci()
+}
+pub struct RunnerToolModelDefinition { /* private */ }
+impl RunnerToolModelDefinition {
+    pub fn try_new(
+        description: String,
+        input_schema: String,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: description(), input_schema()
 }
 
 pub enum CredentialToolApproval {
@@ -5273,6 +5289,13 @@ pub enum CredentialToolApproval {
 }
 
 pub struct CredentialProfilePolicy { /* private */ }
+impl CredentialProfilePolicy {
+    pub fn try_new(
+        name: CredentialProfileName,
+        approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: name(), approval_for()
+}
 pub enum WorkspaceCapability {
     WorktreePerSession,
 }
@@ -5286,12 +5309,38 @@ impl RunnerCatalog {
     ) -> Result<Self, RunnerDomainError>;
 }
 pub struct RunnerAdvertisement { /* private */ }
+impl RunnerAdvertisement {
+    pub fn new(
+        classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        tools: impl IntoIterator<Item = ToolName>,
+        profiles: impl IntoIterator<Item = CredentialProfileName>,
+        workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+    ) -> Self;
+}
 
 pub enum RunnerEnrollmentState {
     Active,
     Revoked,
 }
 pub struct RunnerEnrollment { /* private */ }
+impl RunnerEnrollment {
+    pub fn new(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+    ) -> Self;
+    pub fn revoke(self) -> Result<Self, RunnerDomainError>;
+    pub fn register(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<ValidatedRunnerRegistration, RunnerDomainError>;
+    pub fn reconstitute(
+        input: RunnerEnrollmentReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: enrollment(), runner(), authentication(), state()
+}
 pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts */
 }
@@ -5300,12 +5349,32 @@ pub struct ValidatedRunnerRegistration { /* private */ }
 pub struct ValidatedRunnerRegistrationReconstitutionInput {
     /* public complete typed catalog-validation facts */
 }
-// validated-registration accessors expose exact class, tool, profile, and
-// workspace inventories; reconstitution requires canonical enrollment.
+impl ValidatedRunnerRegistration {
+    // accessors: enrollment(), runner(), authentication()
+    pub fn satisfies(&self, selector: &RunnerSelector) -> bool;
+    pub fn tool(&self, tool: &ToolName) -> Option<&RunnerToolDeclaration>;
+    pub fn profile(
+        &self,
+        profile: &CredentialProfileName,
+    ) -> Option<&CredentialProfilePolicy>;
+    pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool;
+    pub fn tool_names(&self) -> impl Iterator<Item = &ToolName>;
+    // Additional accessors expose exact class, tool, profile, and workspace
+    // inventories; reconstitution requires canonical enrollment.
+}
 
 pub struct RunnerGeneration(/* private NonZeroU64 */);
+impl RunnerGeneration {
+    pub const fn one() -> Self;
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn get(self) -> u64;
+    pub const fn checked_next(self) -> Option<Self>;
+}
 pub struct RunnerLeaseCorrelation {
     /* public exact fence fields */
+}
+pub struct RunnerLeaseOfferRequest {
+    /* public exact initial-offer fields */
 }
 pub enum RunnerLeaseState {
     Offered,
@@ -5327,6 +5396,9 @@ impl RunnerLease {
         correlation: RunnerLeaseCorrelation,
     ) -> Result<Self, RunnerDomainError>;
     pub fn lose(self) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+    pub fn reconstitute(
+        input: RunnerLeaseReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
 }
 pub struct RunnerLeaseReconstitutionInput {
     /* public lease and independent fence */
@@ -5334,7 +5406,7 @@ pub struct RunnerLeaseReconstitutionInput {
 pub enum RunnerLeaseLoss {
     RetryPermitted {
         lost: RunnerLease,
-        retry: RunnerLeaseRetryAuthority,
+        retry: Box<RunnerLeaseRetryAuthority>,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
@@ -5374,31 +5446,68 @@ pub struct SessionRunnerPlacementReconstitutionInput {
 }
 impl SessionRunnerPlacement {
     // placement is the only producer of initial and retry lease offers
-    pub fn pin(
+    pub const fn new(
+        session: SessionId,
+        request: SessionRunnerPlacementRequest,
+    ) -> Self;
+    pub fn pin_and_offer_lease(
         self,
+        enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
+        authorized: AuthorizedToolAttempt,
+        offer: RunnerLeaseOfferRequest,
     ) -> Result<SessionRunnerPin, RunnerDomainError>;
     pub fn offer_lease(
         &self,
+        enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
-        lease: RunnerLeaseId,
-        attempt: ToolAttemptId,
-        tool: ToolName,
-        generation: RunnerGeneration,
+        authorized: AuthorizedToolAttempt,
+        offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn offer_retry(
         &self,
+        enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
         loss: RunnerLeaseLoss,
-        attempt: ToolAttemptId,
+        authorized: AuthorizedToolAttempt,
     ) -> Result<RunnerLease, RunnerDomainError>;
+    pub fn mark_runner_lost(self) -> Result<Self, RunnerDomainError>;
+    pub fn reconcile_registration(
+        self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn replace_lost_runner(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
+    pub fn replace_credential_profile(
+        self,
+        grant: CredentialProfileGrant,
+        registration: &ValidatedRunnerRegistration,
+        profile: CredentialProfileName,
+        tools: impl IntoIterator<Item = ToolName>,
+    ) -> Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
+    pub fn reconstitute(
+        self,
+        expected_session: SessionId,
+        registration: Option<&ValidatedRunnerRegistration>,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn reconstitute_from_facts(
+        input: SessionRunnerPlacementReconstitutionInput,
+        registration: Option<&ValidatedRunnerRegistration>,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: session(), request(), state(), revision()
 }
 pub struct SessionRunnerPin {
-    /* public placement and optional initial grant */
+    /* public placement, optional initial grant, and initial lease */
 }
 pub struct RunnerPlacementReplacement {
     /* public placement, change, and optional replacement grant */
@@ -5462,15 +5571,15 @@ pub struct CredentialProfileChange {
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
 | domain: tool                                       | 38                   |
-| domain: tool_attempt                               | 24                   |
+| domain: tool_attempt                               | 25                   |
 | domain: tool_execution                             | 17                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 44                   |
-| **signalbox-domain total**                         | **413 (+1 free fn)** |
+| domain: runner                                     | 46                   |
+| **signalbox-domain total**                         | **416 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

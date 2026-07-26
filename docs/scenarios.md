@@ -434,9 +434,11 @@ those tests.
 
 - **User intent:** Trust current state despite delayed or retried transport
   delivery.
-- **Durable commands:** Validate result envelope against tool-attempt identity
-  and dispatch generation; record duplicate/stale evidence if audit policy
-  requires, without applying it again.
+- **Durable commands:** For daemon-local execution, validate the result envelope
+  against the authorized tool-attempt dispatch correlation. For runner
+  execution, additionally validate the exact runner lease identity, runner
+  identity, tool name, and lease-lineage generation; record duplicate/stale
+  evidence if audit policy requires, without applying it again.
 - **State transitions:** Current work remains unchanged; a first valid current
   result may advance exactly once.
 - **Transient updates:** Runner acknowledgement may state “duplicate” or
@@ -445,7 +447,7 @@ those tests.
   fencing; runner retries delivery until acknowledged.
 - **Failure behavior:** A stale success cannot overwrite a newer failure,
   result, cancellation, or reconciliation state.
-- **Required invariants:** INV-011, INV-012, INV-021.
+- **Required invariants:** INV-011, INV-012, INV-021, INV-043.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   result acknowledgement, compatibility, and subscriber observation remain
   [open](open-questions.md#scheduling-and-runners): the retired protocol designs
@@ -954,8 +956,8 @@ those tests.
 ## S30 — Enroll a runner and pin a session
 
 - **User intent:** Target either one exact runner or a capability class and know
-  which machine, working directory, tools, credential profile, and workspace
-  boundary the session actually received.
+  which logical runner, working directory, tools, credential profile, and
+  workspace boundary the session actually received.
 - **Durable commands:** A later application stack records logical enrollment and
   validates the runner's advertised names against active enrollment and the
   daemon catalog. Session creation records its class-or-identity selector,
@@ -988,10 +990,11 @@ those tests.
 - **User intent:** Resume work that is known safe to repeat without silently
   duplicating a side effect.
 - **Durable commands:** A later store stack persists an offered lease before
-  streaming it, then persists its exact runner/generation claim before accepting
-  a result. Domain transition inputs retain the runner, lease, physical tool
-  attempt, session, tool, declaration-derived effect class, and dispatch
-  generation.
+  streaming it, then persists its exact runner/generation claim before
+  acknowledging execution capability or accepting a result. Domain transition
+  inputs retain the runner, lease, physical tool attempt, session, tool,
+  declaration-derived effect class, and lease-lineage generation. A fresh
+  physical attempt begins at its own first tool-dispatch generation.
 - **State transitions:** An unclaimed lost lease advances to a checked successor
   generation for every class while retaining the never-executed attempt. A
   claimed lost pure or idempotent lease produces re-lease authority that
@@ -1015,8 +1018,8 @@ those tests.
 ## S32 — Replace a lost runner and credential grant
 
 - **User intent:** Continue a pinned session on an explicitly selected
-  replacement while ensuring the model learns the changed machine, directory,
-  tools, credential profile, and workspace.
+  replacement while ensuring the model learns the changed logical runner,
+  directory, tools, credential profile, and workspace.
 - **Durable commands:** A later owner command marks the runner lost and supplies
   one complete validated replacement placement. Credential-profile replacement
   separately installs one complete forward-only grant snapshot. Each transition

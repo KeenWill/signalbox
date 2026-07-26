@@ -11,6 +11,12 @@ CHECK (
     octet_length(VALUE) BETWEEN 1 AND 4096
 );
 
+ALTER TABLE tool_attempt
+    DROP CONSTRAINT tool_attempt_request_id_key;
+
+CREATE INDEX tool_attempt_request_id_idx
+    ON tool_attempt (request_id);
+
 CREATE TABLE runner_enrollment_audit (
     enrollment_id uuid NOT NULL,
     revision numeric(20, 0) NOT NULL,
@@ -252,6 +258,8 @@ CREATE TABLE runner_registration_tool (
     enrollment_id uuid NOT NULL,
     registration_revision numeric(20, 0) NOT NULL,
     tool_name text NOT NULL,
+    model_description runner_exact_text NOT NULL,
+    model_input_schema runner_exact_text NOT NULL,
     permission_kind text NOT NULL,
     effect_class text NOT NULL,
     loci_kind text NOT NULL,
@@ -288,6 +296,11 @@ CREATE TABLE runner_registration_tool (
                 AND selector_runner_id IS NULL
                 AND selector_capability_class IS NOT NULL
             )
+        ),
+    CONSTRAINT runner_registration_tool_model_schema
+        CHECK (
+            left(model_input_schema, 1) = '{'
+            AND jsonb_typeof(model_input_schema::jsonb) = 'object'
         ),
     CONSTRAINT runner_registration_tool_registration_fk
         FOREIGN KEY (enrollment_id, registration_revision)
@@ -579,6 +592,7 @@ BEGIN
         COALESCE(NEW.enrollment_id, OLD.enrollment_id),
         COALESCE(NEW.registration_revision, OLD.registration_revision)
     );
+
     RETURN NULL;
 END;
 $$;
@@ -775,6 +789,7 @@ CREATE TABLE runner_session_placement_tool (
     session_id uuid NOT NULL,
     event_ordinal numeric(20, 0) NOT NULL,
     tool_name text NOT NULL,
+    runner_required boolean NOT NULL,
 
     CONSTRAINT runner_session_placement_tool_pk
         PRIMARY KEY (session_id, event_ordinal, tool_name),
@@ -1527,6 +1542,33 @@ CREATE TABLE runner_current_lease_event (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE FUNCTION require_runner_initial_pin_has_lease()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.event_kind = 'pinned'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM runner_lease_generation AS lease
+             WHERE lease.session_id = NEW.session_id
+               AND lease.placement_event_ordinal = NEW.event_ordinal
+               AND lease.generation = 1
+       )
+    THEN
+        RAISE EXCEPTION 'initial runner pin lacks its atomic lease offer'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_initial_pin_requires_lease
+AFTER INSERT ON runner_session_placement_record
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_initial_pin_has_lease();
 
 CREATE TRIGGER runner_lease_generation_is_append_only
 BEFORE UPDATE OR DELETE ON runner_lease_generation
