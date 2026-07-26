@@ -5864,6 +5864,11 @@ impl ReviewExternalLinkObservation {
     // accessors: link(), ordinal(), pass(), pass_evidence(), run_evidence(),
     // state()
 }
+pub struct ReviewExternalLinkClaim { /* pass + run */ }
+impl ReviewExternalLinkClaim {
+    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
+    // accessors: pass(), pass_evidence(), run_evidence()
+}
 pub struct ReviewExternalLink { /* reservation + attachment + observations + consumed claims */ }
 impl ReviewExternalLink {
     pub fn try_reserve(
@@ -5880,6 +5885,7 @@ impl ReviewExternalLink {
         object_kind: ReviewExternalObjectKind,
         attachment: Option<ReviewExternalLinkAttachment>,
         observations: Vec<ReviewExternalLinkObservation>,
+        claims: Vec<ReviewExternalLinkClaim>,
         target: &ReviewTarget,
     ) -> Result<Self, ReviewExternalLinkTransitionFailure>;
     pub fn attach(self, attachment: ReviewExternalLinkAttachment)
@@ -5897,7 +5903,7 @@ impl ReviewExternalLink {
         run: ReviewRunEvidence,
     ) -> Result<Self, ReviewExternalLinkTransitionError>;
     // accessors: id(), association(), provider(), object_kind(), attachment(),
-    // observations()
+    // observations(), claims()
 }
 pub struct ReviewExternalObjectClaim {
     /* target + provider + repository + subject + canonical object */
@@ -5974,9 +5980,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 80                   |
+| domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **450 (+1 free fn)** |
+| **signalbox-domain total**                         | **451 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
