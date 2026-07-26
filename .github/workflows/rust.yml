@@ -70,8 +70,9 @@ jobs:
       - name: Build documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
-  # GitHub-hosted Ubuntu runners provide Docker. Each suite below starts its
-  # own pinned PostgreSQL containers through testcontainers.
+  # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
+  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
+  # can execute isolated tests concurrently without sharing database state.
   postgres-integration-suite:
     name: postgres-integration (${{ matrix.suite }})
     runs-on: ubuntu-latest
@@ -85,18 +86,18 @@ jobs:
               cargo test -p signalbox-persistence
               --features postgres-integration
               --tests
-              -- --ignored --test-threads=1
+              -- --ignored --test-threads=4
           - suite: hubd
             command: >-
               cargo test -p signalbox-hubd
               --tests
-              -- --ignored --test-threads=1
+              -- --ignored --test-threads=4
           - suite: terminal-client
             command: >-
               cargo test -p signalbox-client
               --test end_to_end
               terminal_client_completes_an_offline_scripted_conversation
-              -- --ignored --test-threads=1
+              -- --ignored --test-threads=4
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

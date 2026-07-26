@@ -82,6 +82,26 @@ impl<'a> Output<'a> {
         writeln!(self.stdout, "{session_id}")
     }
 
+    pub(crate) fn conversation_import_inserted(
+        &mut self,
+        imported_conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "inserted imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_already_imported(
+        &mut self,
+        imported_conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "already_imported imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
     pub(crate) fn session_summary(
         &mut self,
         session_id: CanonicalUuid,
