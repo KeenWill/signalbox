@@ -8,13 +8,14 @@ page states for the composition root, its telemetry, and the production
 `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
-(`agent/provider-identity-normalization`). The five-family operator-failure
-inventory was verified through PR #288 (`agent/audit-fix-docs-coherence`). It
-covers the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the two provider
-adapters; and the in-process credential-access boundary. Layer-2 authorization
-and evidence classification ([model-call-execution](model-call-execution.md)),
-credential channels, delivery, and rotation discipline
+(`agent/provider-identity-normalization`). The five persistence-repository
+families in the operator-failure inventory were verified through PR #288
+(`agent/audit-fix-docs-coherence`). It covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the two provider adapters; and the in-process
+credential-access boundary. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
