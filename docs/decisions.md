@@ -33,6 +33,7 @@ documentation, so reverse discovery is limited to test declarations.
 **Affects.** `scripts/check_docs_consistency.py`, its tests, the validate
 checkout, and [the invariant catalog](invariants.md). Reachability does not
 judge whether a verification PR is the newest relevant implementation.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a
