@@ -286,11 +286,17 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       var skippedMalformedSummaries: UInt64 = 0
       var started = false
       var priorSessionID: String?
+      var cursorValidationIsComplete = true
       while let frame = try await exchange.next() {
         switch frame.message {
         case .sessionMetadataPageStart where !started:
           started = true
         case .sessionMetadataSummary(let summary) where started:
+          guard cursor.map({ $0.rawValue < summary.sessionID.rawValue }) ?? true else {
+            throw SignalboxProcessServiceError.invalidPage(
+              "A metadata summary did not advance beyond the request cursor."
+            )
+          }
           guard priorSessionID.map({ $0 < summary.sessionID.rawValue }) ?? true else {
             throw SignalboxProcessServiceError.invalidPage(
               "Metadata summaries were not in strict session-identity order."
@@ -298,6 +304,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           }
           priorSessionID = summary.sessionID.rawValue
           sessions.append(SignalboxProcessSession(summary: summary))
+          try validateMetadataPageCapacity(
+            admittedCount: sessions.count,
+            malformedCount: skippedMalformedSummaries,
+            pageSize: pageSize
+          )
         case .sessionMetadataPageEnd(let end) where started:
           guard end.sessionCount.rawValue == UInt64(sessions.count) + skippedMalformedSummaries
           else {
@@ -305,14 +316,37 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
               "The metadata page count did not match its admitted summaries."
             )
           }
+          if let next = end.nextAfterSessionID, cursorValidationIsComplete {
+            guard next.rawValue == priorSessionID else {
+              throw SignalboxProcessServiceError.invalidPage(
+                "The metadata page cursor did not match its last emitted identity."
+              )
+            }
+          }
           return MetadataPage(
             sessions: sessions,
             nextAfterSessionID: end.nextAfterSessionID
           )
-        case .unknown(let kind, _, _):
+        case .unknown(let kind, let payload, _) where started:
           if kind == "session_metadata_summary" {
             skippedMalformedSummaries += 1
+            if case .string(let rawSessionID) = payload["session_id"],
+              let sessionID = try? SignalboxCanonicalUUID(validating: rawSessionID),
+              cursor.map({ $0.rawValue < sessionID.rawValue }) ?? true,
+              priorSessionID.map({ $0 < sessionID.rawValue }) ?? true
+            {
+              priorSessionID = sessionID.rawValue
+            } else {
+              cursorValidationIsComplete = false
+            }
+            try validateMetadataPageCapacity(
+              admittedCount: sessions.count,
+              malformedCount: skippedMalformedSummaries,
+              pageSize: pageSize
+            )
           }
+        case .unknown:
+          continue
         case .protocolError(let error):
           throw remote(error)
         default:
@@ -323,6 +357,18 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       }
       throw SignalboxProcessServiceError.invalidPage(
         "The metadata page ended before its terminal boundary."
+      )
+    }
+  }
+
+  private func validateMetadataPageCapacity(
+    admittedCount: Int,
+    malformedCount: UInt64,
+    pageSize: SignalboxCanonicalUInt64
+  ) throws {
+    guard UInt64(admittedCount) + malformedCount <= pageSize.rawValue else {
+      throw SignalboxProcessServiceError.invalidPage(
+        "The metadata page exceeded its requested row limit."
       )
     }
   }

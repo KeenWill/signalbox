@@ -25,15 +25,18 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
   public let records: [SignalboxStoredEvent]
   public let pendingInputs: [SignalboxProcessPendingInput]
   public let activity: SignalboxProcessActivity
+  public let materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
 
   public init(
     records: [SignalboxStoredEvent],
     pendingInputs: [SignalboxProcessPendingInput],
-    activity: SignalboxProcessActivity
+    activity: SignalboxProcessActivity,
+    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
   ) {
     self.records = records
     self.pendingInputs = pendingInputs
     self.activity = activity
+    self.materializedAcceptedInputIDs = materializedAcceptedInputIDs
   }
 }
 
@@ -96,7 +99,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var projectedByID: [SignalboxEventID: SignalboxStoredEvent] = [:]
     var projectedOrder: [SignalboxEventID] = []
     var pendingByAcceptedInputID: [String: SignalboxProcessPendingInput] = [:]
-    var materializedAcceptedInputIDs: Set<String> = []
+    var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
     var currentActivity = SignalboxProcessActivity.unavailable
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
@@ -117,9 +120,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
-        if case .user(let acceptedInputID, _) = message.entry {
-          materializedAcceptedInputIDs.insert(acceptedInputID.rawValue)
-        }
       case .content(let content):
         guard var assembly = textAssembly else {
           throw SignalboxProcessTranscriptProjectionError.missingTextContent
@@ -133,6 +133,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           )
           if let projected {
             store(projected, in: &projectedByID, order: &projectedOrder)
+            if case .user(let acceptedInputID, _) = assembly.message.entry {
+              materializedAcceptedInputIDs.insert(acceptedInputID)
+            }
           }
           textAssembly = nil
         } else {
@@ -153,12 +156,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       throw SignalboxProcessTranscriptProjectionError.missingTextContent
     }
     for acceptedInputID in materializedAcceptedInputIDs {
-      pendingByAcceptedInputID.removeValue(forKey: acceptedInputID)
+      pendingByAcceptedInputID.removeValue(forKey: acceptedInputID.rawValue)
     }
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingByAcceptedInputID.values.sorted { $0.id.rawValue < $1.id.rawValue },
-      activity: currentActivity
+      activity: currentActivity,
+      materializedAcceptedInputIDs: materializedAcceptedInputIDs
     )
   }
 

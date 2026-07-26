@@ -244,6 +244,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var activity = SignalboxProcessActivity.unavailable
   @Published private(set) var phase: SignalboxSessionSynchronizationPhase = .stopped
   @Published private(set) var latestDiagnostic: String?
+  @Published private(set) var isSubmitting = false
   @Published var composerText = ""
   @Published var errorMessage: String?
 
@@ -292,22 +293,26 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   func send() async {
     let content = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !content.isEmpty, let service = serviceProvider() else {
+    guard !content.isEmpty, !isSubmitting, let service = serviceProvider() else {
       return
     }
+    isSubmitting = true
+    defer { isSubmitting = false }
     var preparedForAttempt: SignalboxPreparedInputSubmission?
     do {
-      let prepared =
-        if let unresolvedSubmission {
-          unresolvedSubmission
-        } else {
-          try await service.prepareInputSubmission(
-            session: session,
-            content: content
-          )
-        }
+      let prepared: SignalboxPreparedInputSubmission
+      if let unresolvedSubmission, unresolvedSubmission.content == content {
+        prepared = unresolvedSubmission
+      } else {
+        unresolvedSubmission = nil
+        prepared = try await service.prepareInputSubmission(
+          session: session,
+          content: content
+        )
+      }
       preparedForAttempt = prepared
       let submitted = try await service.submit(prepared)
+      pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
       pendingInputs.append(
         SignalboxProcessPendingInput(
           id: submitted.acceptedInputID,
@@ -332,7 +337,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
-  private func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
+  func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
     do {
       switch update {
       case .phase(let phase):
@@ -348,8 +353,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
-        pendingInputs = projection.pendingInputs
-        activity = projection.activity
+        pendingInputs.removeAll {
+          projection.materializedAcceptedInputIDs.contains($0.id)
+        }
       case .event(let followed):
         applyLiveEvent(followed.event)
       case .diagnostic(let diagnostic):
@@ -541,6 +547,7 @@ struct ProcessSessionDetailScreen: View {
       .buttonStyle(.borderedProminent)
       .disabled(
         viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          || viewModel.isSubmitting
       )
       .accessibilityLabel("Send")
       .accessibilityIdentifier("send-message-button")

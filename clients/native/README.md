@@ -16,9 +16,10 @@ WebSocket, or OpenAI-compatible surfaces.
   bounded-recovery states.
 - Project transcript snapshots into the existing timeline normalizer.
 - Preserve queued input separately until matching transcript content appears.
-- Submit input with the session's defaults version and retry only an exact
-  `commit_ambiguous` command, with a finite schedule; if that schedule is
-  exhausted, retain the prepared command identity for an explicit retry.
+- Submit one input at a time with the session's defaults version and retry only
+  an exact `commit_ambiguous` command, with a finite schedule; if that schedule
+  is exhausted, retain the prepared command identity while its composer draft is
+  unchanged and prepare a new identity after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
@@ -95,9 +96,10 @@ Phase A closes the imported transport and synchronization findings: settings now
 install the tested socket client; every reconnect path is capped; deadlines are
 typed separately from heartbeat concerns; snapshot/stream ordering is owned by
 the synchronization machine; fallbacks preserve diagnostics; failed submission
-preserves the composer and an unresolved ambiguous submission preserves its
-prepared command identity; internal wire details do not become legacy
-`visible_to_user` failures; and no credential crosses a plaintext URL.
+preserves the composer; one submission is in flight at a time; an unresolved
+ambiguous submission preserves its prepared command identity while the draft is
+unchanged; internal wire details do not become legacy `visible_to_user`
+failures; and no credential crosses a plaintext URL.
 
 The following work remains:
 
