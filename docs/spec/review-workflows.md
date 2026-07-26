@@ -157,9 +157,9 @@ The optional `result` is one closed `ReviewPassResult`:
   same result.
 - `ExternalLinkObservation` names the exact reservation, observation ordinal,
   and observed state.
-- `ExternalLinkNoChange` names the exact reservation and unchanged reported
-  state. It consumes a succeeded external-context-import pass without appending
-  a meaning-bearing observation.
+- `ExternalLinkNoChange` names the exact reservation, consumed observation
+  ordinal, and unchanged reported state. It consumes a succeeded
+  external-context-import pass without appending a meaning-bearing observation.
 - `ExternalLinkPublicationBlocked` names the exact pending reservation and
   nonempty reason for a blocked publication that does not use the
   reservation-bearing finding event.
@@ -316,13 +316,14 @@ After attachment, append-only observations record `Current`, `Outdated`, or
 contiguous ordinal. The observing pass and its canonical run agree on a
 succeeded external-context-import operation. A report equal to the latest
 recorded state is a semantic no-op: it appends no observation but binds the
-observing pass's exact reservation and reported state as `ExternalLinkNoChange`,
-making that pass ineligible for any later effect. A changed report appends the
-next ordinal and binds that exact effect. Reconstitution rejects another
-reservation even when both share a target and rejects contradictory evidence
-reused under one pass identity across the attachment or observations.
-Observations describe the external object's reported state; they do not rewrite
-finding status.
+observing pass's exact reservation, latest durable observation ordinal, and
+reported state as `ExternalLinkNoChange`, making that pass ineligible for any
+later effect. A changed report appends the next ordinal and binds that exact
+effect. Reconstitution validates a no-change claim against its consumed
+observation ordinal, rejects another reservation even when both share a target,
+and rejects contradictory evidence reused under one pass identity across the
+attachment or observations. Observations describe the external object's reported
+state; they do not rewrite finding status.
 
 ## Store and reconstitution
 
