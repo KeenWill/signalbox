@@ -1545,6 +1545,27 @@ async fn insert_lease_generation(
     lease: &RunnerLease,
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
+    let canonical_dispatch = sqlx::query(
+        "SELECT session_id, turn_id, issuing_turn_attempt_id,
+                request_id, dispatch_generation
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
+    if canonical_dispatch.get::<Uuid, _>("session_id") != correlation.dispatch.session().into_uuid()
+        || canonical_dispatch.get::<Uuid, _>("turn_id") != correlation.dispatch.turn().into_uuid()
+        || canonical_dispatch.get::<Uuid, _>("issuing_turn_attempt_id")
+            != correlation.dispatch.issuing_attempt().into_uuid()
+        || canonical_dispatch.get::<Uuid, _>("request_id")
+            != correlation.dispatch.request().into_uuid()
+        || canonical_dispatch.get::<Decimal, _>("dispatch_generation")
+            != Decimal::from(correlation.dispatch.generation().as_u64())
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
     let placement = sqlx::query(RUNNER_LEASE_PLACEMENT)
         .bind(lease.session().into_uuid())
         .fetch_optional(&mut **transaction)
@@ -1830,6 +1851,15 @@ fn require_stored_lease_identity(
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
     if row.get::<Uuid, _>("attempt_id") != correlation.dispatch.attempt().into_uuid()
+        || row.get::<Uuid, _>("canonical_dispatch_session")
+            != correlation.dispatch.session().into_uuid()
+        || row.get::<Uuid, _>("canonical_dispatch_turn") != correlation.dispatch.turn().into_uuid()
+        || row.get::<Uuid, _>("canonical_dispatch_issuing_attempt")
+            != correlation.dispatch.issuing_attempt().into_uuid()
+        || row.get::<Uuid, _>("canonical_dispatch_request")
+            != correlation.dispatch.request().into_uuid()
+        || row.get::<Decimal, _>("canonical_dispatch_generation")
+            != Decimal::from(correlation.dispatch.generation().as_u64())
         || row.get::<Uuid, _>("session_id") != lease.session().into_uuid()
         || row.get::<Uuid, _>("runner_id") != correlation.runner.into_uuid()
         || row.get::<String, _>("tool_name") != correlation.tool.as_str()

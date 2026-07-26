@@ -42,7 +42,8 @@ The relational projection stores the typed enrollment and append-only
 active-or-revoked audit evidence. The current row and its current audit revision
 independently record the runner, authentication reference, allowed-class count,
 and exact allowed-class inventory; reconstitution requires those records to
-agree. Every appended audit revision must be installed as that enrollment's
+agree. Every historical audit revision retains and rechecks its own exact class
+inventory. Every appended audit revision must be installed as that enrollment's
 canonical current revision in the same transaction, so orphan terminal audit
 evidence fails closed. Runner identity and authentication-reference identity
 each remain one-to-one with the logical enrollment. Registration insertion locks
@@ -140,10 +141,11 @@ Every successful advertisement is retained as one append-only validation
 revision: exact advertised classes, tool declarations and selectors,
 credential-profile names and their complete daemon policy snapshots (including
 pairs for catalog tools not advertised by that runner), and workspace
-capabilities. Deferred inventory checks reject partial revisions at commit.
-Loads join the canonical enrollment and every normalized satellite, then invoke
-domain reconstitution; a missing or cross-wired enrollment, selector, policy
-pair, or declared inventory fails closed.
+capabilities. Deferred inventory checks reject partial revisions and require
+every appended revision to advance the current-registration head in the same
+transaction. Loads join the canonical enrollment and every normalized satellite,
+then invoke domain reconstitution; a missing or cross-wired enrollment,
+selector, policy pair, or declared inventory fails closed.
 
 ## Effect classes and runner leases
 
@@ -223,20 +225,23 @@ runner-required pinned capability, mismatched tool or effect, non-successor
 generation, attempt reuse after claimed safe work, and every retry after claimed
 side-effecting loss. One durable request-to-lease binding prevents a fresh lease
 identity from bypassing an established request's retry lineage and must commit
-with a matching generation for that request. Every generation must commit its
-ordinal-one offered event and a current event head; every later event must
-advance that head to the latest ordinal in the same transaction. A generation
-without loadable state evidence fails closed. Lease admission shares the
-canonical enrollment, current registration pointer, and selected grant authority
-locks, so enrollment or grant revocation and registration replacement serialize
-before the relational checks admit a new generation. Loads independently join
-the physical-attempt tool and pinned runner before invoking lease
-reconstitution. After claimed retryable loss, the failed physical attempt leaves
-the tool-loop current-attempt projection before its fresh replacement is
-prepared and authorized; that fresh attempt becomes current before its successor
-lease generation is stored, avoiding a circular dependency between authorization
-and lease persistence. The single runner-initiated outbound stream, reconnect
-resynchronization, and exact wire correlations remain later stacks.
+with a matching generation for that request. The durable physical-attempt
+binding likewise requires a matching lease generation. Every generation must
+commit its ordinal-one offered event and a current event head; every later event
+must advance that head to the latest ordinal in the same transaction. A
+generation without loadable state evidence fails closed. Initial insertion and
+later state appends compare the complete caller-supplied dispatch fence with the
+canonical physical attempt. Lease admission shares the canonical enrollment,
+current registration pointer, and selected grant authority locks, so enrollment
+or grant revocation and registration replacement serialize before the relational
+checks admit a new generation. Loads independently join the physical-attempt
+tool and pinned runner before invoking lease reconstitution. After claimed
+retryable loss, the failed physical attempt leaves the tool-loop current-attempt
+projection before its fresh replacement is prepared and authorized; that fresh
+attempt becomes current before its successor lease generation is stored,
+avoiding a circular dependency between authorization and lease persistence. The
+single runner-initiated outbound stream, reconnect resynchronization, and exact
+wire correlations remain later stacks.
 
 ## Session placement and affinity
 
@@ -295,7 +300,8 @@ records behind one current pointer. Relational transition checks require
 contiguous event history, exact revision succession, unchanged affinity facts at
 runner loss, profile-only changes for profile replacement, and each stored
 tool's runner-required flag to match its declaration's runner-only or combined
-locus. Reconstitution reads the current record with its exact validated
+locus. Every appended record must advance the current-placement head in the same
+transaction. Reconstitution reads the current record with its exact validated
 registration and tool inventory. The loaded persistence wrapper retains that
 historical registration and its durable revision so a caller can reconcile
 against newer availability and persist `RunnerLost` without reconstructing or
@@ -362,9 +368,11 @@ registration tool inventory; explicit profile replacement may select a checked
 subset. The store retains normalized grant snapshots and append-only issued,
 replaced, and revoked audit events. Grant relations contain only profile names,
 tool names, pair approval posture, and typed audit correlations: there is no
-credential-value or generic payload column. Lease insertion joins the current
-unrevoked grant and exact tool/profile pair atomically with dispatch
-authorization (INV-035, INV-045).
+credential-value or generic payload column. A stored grant must preserve an
+explicit profile approval exactly; only a genuinely absent policy pair may use
+the session-policy fallback. Truncation of immutable grant audit evidence is
+rejected. Lease insertion joins the current unrevoked grant and exact
+tool/profile pair atomically with dispatch authorization (INV-035, INV-045).
 
 ## Workspace provisioning
 

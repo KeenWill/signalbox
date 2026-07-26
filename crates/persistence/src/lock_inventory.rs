@@ -107,7 +107,14 @@ pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, 
                     lease_generation.effect_class,
                     lease_generation.credential_profile_name,
                     lease_generation.credential_grant_revision,
-                    lease_generation.credential_approval_kind
+                    lease_generation.credential_approval_kind,
+                    attempt.session_id AS canonical_dispatch_session,
+                    attempt.turn_id AS canonical_dispatch_turn,
+                    attempt.issuing_turn_attempt_id
+                        AS canonical_dispatch_issuing_attempt,
+                    attempt.request_id AS canonical_dispatch_request,
+                    attempt.dispatch_generation
+                        AS canonical_dispatch_generation
                FROM runner_current_lease_event AS current_event
                JOIN runner_lease_event AS event
                  ON event.lease_id = current_event.lease_id
@@ -116,6 +123,8 @@ pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, 
                JOIN runner_lease_generation AS lease_generation
                  ON lease_generation.lease_id = current_event.lease_id
                 AND lease_generation.generation = current_event.generation
+               JOIN tool_attempt AS attempt
+                 ON attempt.attempt_id = lease_generation.attempt_id
               WHERE current_event.lease_id = $1
                 AND current_event.generation = $2
               FOR UPDATE OF current_event";

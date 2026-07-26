@@ -11,14 +11,15 @@ use signalbox_domain::{
     AuthorizedToolAttempt, CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval,
     ProvisionedWorkspace, ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId,
     RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
-    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolDispatchGeneration, ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId,
+    TurnAttemptId, TurnId, WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey,
+    WorkspaceRequirement,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -176,6 +177,45 @@ fn offer_request() -> RunnerLeaseOfferRequest {
         lease: RunnerLeaseId::from_uuid(uuid(LEASE)),
         tool: tool("inspect"),
     }
+}
+
+fn lease_with_cross_wired_dispatch(lease: &RunnerLease) -> RunnerLease {
+    let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
+        ToolAttemptDispatchCorrelationReconstitutionInput {
+            session: lease.session(),
+            turn: TurnId::from_uuid(uuid(FOREIGN_SESSION)),
+            issuing_attempt: TurnAttemptId::from_uuid(uuid(FOREIGN_SESSION + 1)),
+            request: ToolRequestId::from_uuid(uuid(FOREIGN_SESSION + 2)),
+            attempt: lease.attempt(),
+            generation: ToolDispatchGeneration::first()
+                .checked_next()
+                .expect("the second dispatch generation is representable"),
+        },
+    );
+    let authorization = lease.credential_authorization().cloned();
+    let correlation = RunnerLeaseCorrelation {
+        lease: lease.correlation().lease,
+        runner: lease.runner(),
+        tool: lease.tool().clone(),
+        dispatch,
+        generation: lease.generation(),
+    };
+    RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
+        lease: correlation.lease,
+        dispatch,
+        runner: lease.runner(),
+        tool: lease.tool().clone(),
+        effect: lease.effect(),
+        credential_authorization: authorization.clone(),
+        generation: lease.generation(),
+        state: lease.state(),
+        recorded_correlation: correlation,
+        recorded_session: lease.session(),
+        recorded_effect: lease.effect(),
+        recorded_credential_authorization: authorization,
+        recorded_state: lease.state(),
+    })
+    .expect("the cross-wired dispatch remains internally self-consistent")
 }
 
 fn enrollment() -> RunnerEnrollment {
@@ -454,6 +494,119 @@ async fn terminalize_physical_attempt(
     Ok(())
 }
 
+async fn clone_registration_without_advancing_head(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    enrollment: RunnerEnrollmentId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_registration
+            (enrollment_id, registration_revision, runner_id,
+             authentication_reference_id, class_count, tool_count,
+             profile_count, workspace_count)
+         SELECT enrollment_id, 2, runner_id, authentication_reference_id,
+                class_count, tool_count, profile_count, workspace_count
+           FROM runner_registration
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_class
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_registration_class
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_tool
+         SELECT enrollment_id, 2, tool_name, model_description,
+                model_input_schema, permission_kind, effect_class,
+                loci_kind, selector_kind, selector_runner_id,
+                selector_capability_class
+           FROM runner_registration_tool
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_profile
+         SELECT enrollment_id, 2, credential_profile_name, approval_count
+           FROM runner_registration_profile
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_profile_approval
+         SELECT enrollment_id, 2, credential_profile_name,
+                tool_name, approval_kind
+           FROM runner_registration_profile_approval
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_workspace
+         SELECT enrollment_id, 2, workspace_kind
+           FROM runner_registration_workspace
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn append_runner_lost_without_advancing_head(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, selector_capability_class,
+             directory_selection_kind, requested_working_directory,
+             requested_credential_profile_name, workspace_requirement_kind,
+             requested_repository_key, state_kind, pinned_runner_id,
+             pinned_working_directory, pinned_credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count, workspace_repository_key,
+             workspace_working_directory, credential_grant_revision)
+         SELECT session_id, event_ordinal + 1, placement_revision,
+                'runner_lost', selector_kind, selector_runner_id,
+                selector_capability_class, directory_selection_kind,
+                requested_working_directory,
+                requested_credential_profile_name,
+                workspace_requirement_kind, requested_repository_key,
+                'runner_lost', pinned_runner_id,
+                pinned_working_directory, pinned_credential_profile_name,
+                registration_enrollment_id, registration_revision,
+                pinned_tool_count, workspace_repository_key,
+                workspace_working_directory, credential_grant_revision
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = 2",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_tool
+         SELECT session_id, event_ordinal + 1, tool_name, runner_required
+           FROM runner_session_placement_tool
+          WHERE session_id = $1 AND event_ordinal = 2",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 #[track_caller]
 fn assert_check_violation(error: sqlx::Error) {
     assert_eq!(
@@ -577,6 +730,32 @@ async fn s30_inv042_orphan_revocation_audit_cannot_commit() -> Result<(), Box<dy
 
     assert_check_violation(orphan);
     malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_historical_enrollment_audit_rechecks_its_own_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    store
+        .revoke_enrollment(expected_enrollment.enrollment())
+        .await?;
+    let corrupted_history = sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         VALUES ($1, 1, 'foreign.class')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("historical audit satellites must recheck their named revision");
+
+    assert_check_violation(corrupted_history);
     drop(pool);
     Ok(())
 }
@@ -932,6 +1111,35 @@ async fn s30_inv042_current_registration_head_cannot_rewind() -> Result<(), Box<
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_appended_registration_must_advance_current_head() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let mut malformed = pool.begin().await?;
+    clone_registration_without_advancing_head(&mut malformed, expected_enrollment.enrollment())
+        .await?;
+    let stale_head = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("every complete registration append must advance its current head");
+
+    assert_check_violation(stale_head);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn s31_inv004_inv043_concurrent_attempt_binding_has_one_lease_lineage()
@@ -1043,6 +1251,29 @@ async fn s31_inv004_inv043_orphan_request_lease_binding_cannot_commit() -> Resul
 
     assert_check_violation(orphan);
     malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv004_inv043_orphan_physical_attempt_binding_cannot_commit()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
+    let orphan = sqlx::query(
+        "INSERT INTO runner_physical_attempt_lease_binding
+            (attempt_id, lease_id)
+         VALUES ($1, $2)",
+    )
+    .bind(uuid(LATER_LEASE_PHYSICAL_ATTEMPT.attempt))
+    .bind(uuid(LEASE + 99))
+    .execute(&pool)
+    .await
+    .expect_err("a physical attempt binding must install its matching lease lineage");
+
+    assert_check_violation(orphan);
     drop(pool);
     Ok(())
 }
@@ -1885,6 +2116,63 @@ async fn s32_inv044_current_placement_head_cannot_rewind() -> Result<(), Box<dyn
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv044_appended_placement_must_advance_current_head() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let mut malformed = pool.begin().await?;
+    append_runner_lost_without_advancing_head(&mut malformed, pin.placement.session()).await?;
+    let stale_head = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("every complete placement append must advance its current head");
+
+    assert_check_violation(stale_head);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_initial_lease_rejects_cross_wired_dispatch_fence() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let cross_wired = lease_with_cross_wired_dispatch(&lease);
+    let rejected = store
+        .store_lease(&cross_wired)
+        .await
+        .expect_err("an offered lease must match every canonical dispatch-fence field");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    store.store_lease(&lease).await?;
+    let claimed = lease
+        .clone()
+        .claim(lease.correlation())
+        .expect("the exact lease fence claims");
+    let cross_wired = lease_with_cross_wired_dispatch(&claimed);
+    let rejected = store
+        .store_lease(&cross_wired)
+        .await
+        .expect_err("a later event must match every canonical dispatch-fence field");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -1970,6 +2258,97 @@ async fn s31_inv043_every_generation_requires_offered_event_head() -> Result<(),
 
     assert_check_violation(missing_events);
     malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_explicit_automatic_grant_approval_cannot_be_downgraded()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .clone()
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    store
+        .store_placement(&lost, Some(&registration), pin.grant.as_ref())
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let revoked = store
+        .revoke_grant(
+            pin.placement.session(),
+            original_grant.runner(),
+            original_grant.revision(),
+        )
+        .await?
+        .expect("the active grant revokes exactly once");
+    let replacement = lost
+        .replace_lost_runner(
+            pin.placement.request().clone(),
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+                .expect("the replacement directory is valid"),
+            None,
+            Some(revoked),
+        )
+        .expect("the domain records a successor grant revision");
+    let grant = replacement
+        .grant
+        .as_ref()
+        .expect("the replacement carries its successor grant");
+    store
+        .store_placement(&replacement.placement, Some(&registration), Some(grant))
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant_tool
+         DISABLE TRIGGER runner_credential_grant_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let downgraded = sqlx::query(
+        "UPDATE runner_credential_grant_tool
+            SET approval_kind = 'session_policy'
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3
+            AND tool_name = $4",
+    )
+    .bind(grant.session().into_uuid())
+    .bind(grant.runner().into_uuid())
+    .bind(Decimal::from(grant.revision().get()))
+    .bind(tool("inspect").as_str())
+    .execute(&pool)
+    .await
+    .expect_err("an explicit automatic profile approval cannot be downgraded");
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant_tool
+         ENABLE TRIGGER runner_credential_grant_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(downgraded);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_credential_grant_audit")
+        .execute(&pool)
+        .await
+        .expect_err("immutable credential grant audit evidence cannot be truncated");
+
+    assert_check_violation(truncated);
     drop(pool);
     Ok(())
 }

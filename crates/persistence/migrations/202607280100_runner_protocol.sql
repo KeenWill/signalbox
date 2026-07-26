@@ -297,11 +297,73 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_enrollment_complete();
 
+CREATE FUNCTION require_runner_enrollment_audit_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_enrollment uuid :=
+        COALESCE(NEW.enrollment_id, OLD.enrollment_id);
+    checked_revision numeric :=
+        COALESCE(NEW.revision, OLD.revision);
+    declared_count numeric;
+    actual_count bigint;
+    mismatched_classes bigint;
+BEGIN
+    SELECT allowed_class_count INTO declared_count
+      FROM runner_enrollment_audit
+     WHERE enrollment_id = checked_enrollment
+       AND revision = checked_revision;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    SELECT count(*) INTO actual_count
+      FROM runner_enrollment_audit_allowed_class
+     WHERE enrollment_id = checked_enrollment
+       AND revision = checked_revision;
+    SELECT count(*) INTO mismatched_classes
+      FROM (
+            (
+                SELECT capability_class
+                  FROM runner_enrollment_allowed_class
+                 WHERE enrollment_id = checked_enrollment
+                EXCEPT
+                SELECT capability_class
+                  FROM runner_enrollment_audit_allowed_class
+                 WHERE enrollment_id = checked_enrollment
+                   AND revision = checked_revision
+            )
+            UNION ALL
+            (
+                SELECT capability_class
+                  FROM runner_enrollment_audit_allowed_class
+                 WHERE enrollment_id = checked_enrollment
+                   AND revision = checked_revision
+                EXCEPT
+                SELECT capability_class
+                  FROM runner_enrollment_allowed_class
+                 WHERE enrollment_id = checked_enrollment
+            )
+      ) AS mismatch;
+    IF declared_count <> actual_count OR mismatched_classes <> 0 THEN
+        RAISE EXCEPTION 'runner enrollment audit class inventory is incomplete'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_enrollment_audit_requires_complete_classes
+AFTER INSERT OR UPDATE OR DELETE ON runner_enrollment_audit
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_enrollment_audit_complete();
+
 CREATE CONSTRAINT TRIGGER runner_enrollment_audit_class_rechecks_inventory
 AFTER INSERT OR UPDATE OR DELETE ON runner_enrollment_audit_allowed_class
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
-EXECUTE FUNCTION require_runner_enrollment_complete();
+EXECUTE FUNCTION require_runner_enrollment_audit_complete();
 
 CREATE TABLE runner_registration (
     enrollment_id uuid NOT NULL,
@@ -749,6 +811,19 @@ BEGIN
         actual_workspaces
     )
        OR incomplete_profiles <> 0
+       OR NOT EXISTS (
+            SELECT 1
+              FROM runner_current_registration AS current_registration
+             WHERE current_registration.enrollment_id =
+                    checked_enrollment
+               AND current_registration.registration_revision =
+                    checked_revision
+               AND checked_revision = (
+                    SELECT max(latest.registration_revision)
+                      FROM runner_registration AS latest
+                     WHERE latest.enrollment_id = checked_enrollment
+               )
+       )
     THEN
         RAISE EXCEPTION 'runner registration inventory is incomplete'
             USING ERRCODE = '23514';
@@ -1332,6 +1407,17 @@ BEGIN
                     placement.registration_revision
             )
        )
+       OR NOT EXISTS (
+            SELECT 1
+              FROM runner_current_session_placement AS current_placement
+             WHERE current_placement.session_id = checked_session
+               AND current_placement.event_ordinal = checked_event
+               AND checked_event = (
+                    SELECT max(latest.event_ordinal)
+                      FROM runner_session_placement_record AS latest
+                     WHERE latest.session_id = checked_session
+               )
+       )
     THEN
         RAISE EXCEPTION 'runner placement tool inventory is not canonical'
             USING ERRCODE = '23514';
@@ -1553,6 +1639,11 @@ BEFORE UPDATE OR DELETE ON runner_credential_grant_audit
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_credential_grant_audit_rejects_truncate
+BEFORE TRUNCATE ON runner_credential_grant_audit
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE FUNCTION assert_runner_grant_complete(
     checked_session uuid,
     checked_runner uuid,
@@ -1590,7 +1681,6 @@ BEGIN
        AND policy.credential_profile_name =
             grant_row.credential_profile_name
        AND policy.tool_name = granted.tool_name
-       AND policy.approval_kind = granted.approval_kind
       LEFT JOIN runner_registration_tool AS available
         ON available.enrollment_id =
             grant_row.registration_enrollment_id
@@ -1605,6 +1695,10 @@ BEGIN
             OR (
                 policy.tool_name IS NULL
                 AND granted.approval_kind <> 'session_policy'
+            )
+            OR (
+                policy.tool_name IS NOT NULL
+                AND policy.approval_kind <> granted.approval_kind
             )
        );
     SELECT count(*) INTO initial_audit
@@ -2039,6 +2133,34 @@ AFTER INSERT OR UPDATE OR DELETE ON runner_tool_request_lease_binding
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_tool_request_lease_binding_complete();
+
+CREATE FUNCTION require_runner_physical_attempt_lease_binding_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    binding runner_physical_attempt_lease_binding%ROWTYPE :=
+        COALESCE(NEW, OLD);
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS generation
+         WHERE generation.lease_id = binding.lease_id
+           AND generation.attempt_id = binding.attempt_id
+    )
+    THEN
+        RAISE EXCEPTION 'runner physical attempt binding lacks its lease lineage'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_physical_attempt_lease_binding_requires_lineage
+AFTER INSERT OR UPDATE OR DELETE ON runner_physical_attempt_lease_binding
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_physical_attempt_lease_binding_complete();
 
 CREATE VIEW runner_current_tool_attempt AS
 SELECT attempt.*
