@@ -6100,6 +6100,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
     );
     assert!(second_restart.is_complete());
 
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xB222));
     let reconciled = SubmitInputRepository::new(restarted_pool.clone())
         .handle(
             input_with_delivery(
@@ -6112,7 +6113,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
                 },
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(0xB221)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xB222))),
+            Some(successor),
         )
         .await?;
     assert!(matches!(
@@ -6201,7 +6202,7 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
     .await?;
     assert_eq!(
         activated.turn(),
-        TurnId::from_uuid(Uuid::from_u128(0xB222)),
+        successor,
         "the session activates the successor accepted by the reconciliation decision"
     );
 

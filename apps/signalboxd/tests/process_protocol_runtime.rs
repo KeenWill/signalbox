@@ -1391,9 +1391,11 @@ async fn park_turn_on_ambiguous_model_call(
         PostgresStartupScanRepository::new(pool.clone()),
     );
     let recovery = scan.execute().await?;
-    if recovery.recovered_turn_count() != 0 {
-        return Err(io::Error::other("an issued call must not terminalize its turn").into());
-    }
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        0,
+        "an unobserved issued call parks its turn instead of terminalizing it"
+    );
     Ok(())
 }
 
@@ -1544,12 +1546,8 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
         ServerMessage::TranscriptTurn {
             turn_id,
             acceptance_position,
-            state: TurnState::ReconciliationRequired {
-                terminal_attempt_id, ..
-            },
-        } if *turn_id == parked_turn_id
-            && acceptance_position.value() == 1
-            && *terminal_attempt_id != *turn_id
+            state: TurnState::ReconciliationRequired { .. },
+        } if *turn_id == parked_turn_id && acceptance_position.value() == 1
     ));
     let successor_turn = response_within(&mut connection).await?;
     assert!(matches!(

@@ -12,11 +12,15 @@ for paginated metadata listing, single-session metadata reads, and durable
 complete-snapshot replacement; versions one through three retain their closed
 request and message vocabularies unchanged. The one-file conversation-import
 surface adds protocol version five; versions one through four remain unchanged,
-verified through PR #252 (`agent/import-surfaces`). The implementation in this
-stack speaks versions one through five, and its terminal client selects version
-five. This page is the normative boundary between a local client process and
-`signalboxd`; domain values, PostgreSQL records, and wire messages remain
-distinct representations.
+verified through PR #252 (`agent/import-surfaces`). The owner
+turn-reconciliation stack adds protocol version six for the single
+`reconcile_turn` request; versions one through five retain their closed request
+and message vocabularies unchanged, verified through PR #281
+(`agent/turn-reconciliation-recovery`). The implementation in this stack speaks
+versions one through six, and its terminal client selects version six. This page
+is the normative boundary between a local client process and `signalboxd`;
+domain values, PostgreSQL records, and wire messages remain distinct
+representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -127,7 +131,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`, `2`, `3`, `4`, or `5`;
+- `version`: JSON integer `1`, `2`, `3`, `4`, `5`, or `6`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -139,13 +143,13 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through five
-produces an `unsupported_version` error naming the supported versions, then the
-server closes the connection. Every response uses the request's admitted
-version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A client speaking version two through five admits
-that version-one fallback only for `malformed_frame` or `unsupported_version`,
-then applies the ordinary request-identity check; every other response-version
+spellings decode to the same name. A version other than one through six produces
+an `unsupported_version` error naming the supported versions, then the server
+closes the connection. Every response uses the request's admitted version; when
+no version can be admitted, the server error uses version one as the
+pre-admission fallback. A client speaking version two through six admits that
+version-one fallback only for `malformed_frame` or `unsupported_version`, then
+applies the ordinary request-identity check; every other response-version
 mismatch fails locally. A server error uses `request_id = "0"` only when the
 incoming frame prevents recovery of a valid nonzero identity; zero is never a
 valid client identity or success-response identity. Leading zeroes, a plus sign,
@@ -174,6 +178,7 @@ that variant.
 | `read_session_metadata`    | 4       | `session_id` (canonical UUID string)                                                                                                                                                        | Read one complete current metadata snapshot.                                                                                                                       |
 | `replace_session_metadata` | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                     | Durably replace one complete metadata snapshot as the owner actor.                                                                                                 |
 | `import_conversation`      | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                            | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                            |
+| `reconcile_turn`           | 6       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                              | Supply the owner reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.              |
 
 A selection object is exactly one of:
 
@@ -223,17 +228,31 @@ value cannot construct the corresponding application input; no currently valid
 metadata frame is intended to reach that mapping error.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in all five versions. If a turn is already active, the normal typed
+treatment in all six versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
+
+`reconcile_turn` is the one request that names a treatment explicitly, and it is
+narrow by construction. The daemon reads whether the named turn is the session's
+active turn parked in the `awaiting_model_call_recovery` phase and refuses
+anything else with `rejected` and a `turn_not_awaiting_reconciliation` detail,
+before any durable command is recorded. Only an admitted request reaches the
+authoritative transaction, which applies the accepted `Interrupt` delivery in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
+and revalidates the expected active turn under the scheduler lock; a caller that
+loses a race there receives the recorded `active_turn_mismatch` rejection. The
+verb therefore supplies the interrupt authority a reconciliation-required
+terminal already requires and never becomes a standalone active-turn stop.
 
 Versions two and three admit the same request vocabulary as version one and add
 no new mutation authority. Version four retains that vocabulary and adds only
 the three metadata requests. Version five retains all earlier requests and adds
-only `import_conversation`. A metadata request carried under version one, two,
-or three, or an import request carried under version one through four, is
-classified as `malformed_frame` because its supported version does not admit
-that request variant; it never reaches application construction. A version-one
+only `import_conversation`. Version six retains all earlier requests and adds
+only `reconcile_turn`. A metadata request carried under version one, two, or
+three, an import request carried under version one through four, or a
+reconciliation request carried under version one through five, is classified as
+`malformed_frame` because its supported version does not admit that request
+variant; it never reaches application construction. A version-one
 `submit_input`, `read_transcript`, or `follow_session` request that selects
 imported ancestry returns a version-one `unsupported_version` error naming
 version two before mutation or snapshot construction.
@@ -355,10 +374,19 @@ admits `session_not_found { session_id }`,
 `unknown_model_alias { session_id, alias_id }`, and
 `acceptance_position_exhausted { session_id, last }`. A version-four
 `replace_session_metadata` rejection admits exactly
-`session_not_found { session_id }`. Other error codes have no `detail`. An equal
+`session_not_found { session_id }`. A version-six `reconcile_turn` rejection
+admits `session_not_found`, `defaults_version_mismatch`, `unknown_model_alias`,
+and `acceptance_position_exhausted` as above, plus
+`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`
+for a decision that lost its race and
+`turn_not_awaiting_reconciliation { session_id, turn_id }` for the refused
+precondition. That one detail reports a refusal made before command recording,
+so unlike every other `rejected` detail it names no durable command result and
+has no replay projection; a caller that repeats the request observes the current
+state, not a recorded outcome. Other error codes have no `detail`. An equal
 replay returns the same success or rejection projection as the first handling.
 
-The error-code set in all five versions is:
+The error-code set in all six versions is:
 
 | Code                  | Meaning                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -690,7 +718,7 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version five; version four's metadata
+The `signalbox` binary in this stack uses version six; version four's metadata
 operations remain core protocol and daemon capabilities without new
 terminal-client UX. Older clients remain supported for representations admitted
 by their declared version as described above. The client accepts a global
@@ -701,11 +729,18 @@ by their declared version as described above. The client accepts a global
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
-- `import --format <claude-code|codex> <file>`.
+- `import --format <claude-code|codex> <file>`;
+- `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
 fails before socket I/O.
+
+`reconcile` reads its successor content the same way and names the parked turn
+the operator observed in the session transcript. It prints the same recovery
+values as `send`, then follows the accepted successor turn to its own terminal,
+so one invocation both records the reconciliation decision and continues the
+conversation.
 
 `import` reads one bounded file snapshot before socket I/O, sends its exact
 bytes rather than its path, and prints either `inserted` or `already_imported`
