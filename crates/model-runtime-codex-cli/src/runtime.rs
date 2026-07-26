@@ -50,6 +50,17 @@ const CODEX_ENVIRONMENT_ALLOWLIST: &[&str] = &[
     "no_proxy",
 ];
 
+const PROCESS_GROUP_SUPERVISION_SUPPORTED: bool = cfg!(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+));
+
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// Composition must select this executable version before wiring the adapter;
@@ -205,7 +216,7 @@ impl CodexCliRuntime {
     /// Validates adapter configuration without invoking Codex or inspecting
     /// its login store.
     pub fn new(config: CodexCliConfig) -> Result<Self, CodexCliConstructionError> {
-        if !cfg!(unix) {
+        if !PROCESS_GROUP_SUPERVISION_SUPPORTED {
             return Err(CodexCliConstructionError::UnsupportedPlatform);
         }
         if config.executable.as_os_str().is_empty() {
@@ -601,32 +612,57 @@ async fn execute_process<C: Clone + Send + Sync>(
     };
     let status = match reaped_status {
         Some(status) => status,
-        None => tokio::select! {
-            biased;
-            status = child.wait() => status,
-            () = &mut *cancellation, if !terminal_observed => {
-                interrupt_then_kill(
-                    &mut child,
-                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                )
-                .await;
-                redacting_sink.finish();
-                return decoder.boundary_loss(LossCause::CancellationRequested);
-            },
-            () = tokio::time::sleep_until(deadline) => {
+        None => {
+            let exit_wait = wait_for_exit_without_reaping(child.id());
+            tokio::pin!(exit_wait);
+            let exit_ready = tokio::select! {
+                biased;
+                result = &mut exit_wait => result,
+                () = &mut *cancellation, if !terminal_observed => {
+                    interrupt_then_kill(
+                        &mut child,
+                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                    )
+                    .await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(LossCause::CancellationRequested);
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    force_kill(&mut child).await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(timeout_cause());
+                },
+            };
+            if let Err(error) = exit_ready {
                 force_kill(&mut child).await;
                 redacting_sink.finish();
-                return decoder.boundary_loss(timeout_cause());
-            },
-        },
+                return decoder.boundary_loss(LossCause::TransportFailed(TransportFacts::new(
+                    format!("could not observe Codex CLI process exit safely: {error}"),
+                )));
+            }
+            // The exited leader remains waitable, so its process identity
+            // cannot be reused while the original process group is signaled.
+            // Reap it only after every surviving descendant has been killed.
+            kill_process_group(child.id());
+            let status = child.wait().await;
+            if status.is_ok() {
+                child.disarm();
+            }
+            status
+        }
     };
-    if status.is_ok() {
-        child.disarm();
-    }
 
     match status {
         Ok(status) if status.success() => {
-            let evidence = decoder.finish(&mut redacting_sink);
+            let evidence = if let Some(error) = input_error {
+                decoder.boundary_loss_unless_provider_failure(LossCause::TransportFailed(
+                    TransportFacts::new(format!(
+                        "Codex stdin closed before the full request upload completed: {error}"
+                    )),
+                ))
+            } else {
+                decoder.finish(&mut redacting_sink)
+            };
             redacting_sink.finish();
             evidence
         }
@@ -781,6 +817,54 @@ fn was_killed_by_group_cleanup(status: &std::process::ExitStatus) -> bool {
         let _ = status;
         false
     }
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+))]
+async fn wait_for_exit_without_reaping(process_group_id: Option<u32>) -> std::io::Result<()> {
+    let raw_pid = process_group_id.ok_or_else(|| {
+        std::io::Error::other("spawned Codex process has no process-group identity")
+    })?;
+    let pid = rustix::process::Pid::from_raw(raw_pid as i32).ok_or_else(|| {
+        std::io::Error::other("spawned Codex process has an invalid process-group identity")
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let status = rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+        )
+        .map_err(std::io::Error::from)?;
+        status
+            .map(drop)
+            .ok_or_else(|| std::io::Error::other("Codex process exit was not observable"))
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("Codex exit waiter failed: {error}")))?
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+)))]
+async fn wait_for_exit_without_reaping(_process_group_id: Option<u32>) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "non-reaping process wait is unavailable",
+    ))
 }
 
 async fn abort_stderr_task(stderr_task: tokio::task::JoinHandle<std::io::Result<String>>) {

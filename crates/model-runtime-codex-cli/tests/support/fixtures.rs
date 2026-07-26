@@ -25,6 +25,7 @@ pub const SENSITIVE_SPLIT_STREAM_TOKEN: &str = "sk-sensitive-stream-token";
 pub const SENSITIVE_SPLIT_AUTHORIZATION: &str = "sensitive-split-authorization";
 pub const SENSITIVE_COMPOSITE_SECRET: &str = "sensitive-composite-secret";
 pub const EARLY_STDIN_EXIT_MARKER: &str = "fake-codex-exit-before-stdin";
+pub const EARLY_STDIN_COMPLETION_MARKER: &str = "fake-codex-complete-before-stdin";
 pub const EARLY_STDIN_FAILURE: &str = "unexpected status 400 Bad Request: context_length_exceeded";
 #[allow(
     dead_code,

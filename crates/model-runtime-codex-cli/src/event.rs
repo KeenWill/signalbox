@@ -204,6 +204,18 @@ impl<C: Clone> EventDecoder<C> {
         boundary_loss(self.exchange, self.usage, cause)
     }
 
+    pub(crate) fn boundary_loss_unless_provider_failure(
+        self,
+        cause: LossCause,
+    ) -> TerminalEvidence {
+        match self.terminal {
+            Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
+                provider_error(self.exchange, self.usage, &message)
+            }
+            Some(CliTerminal::Completed) | None => boundary_loss(self.exchange, self.usage, cause),
+        }
+    }
+
     pub(crate) fn terminal_observed(&self) -> bool {
         self.terminal.is_some()
     }

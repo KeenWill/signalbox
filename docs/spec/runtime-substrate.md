@@ -466,16 +466,20 @@ kills the still-owned original process group before the direct child drops. A
 stdin write failure continues draining and decoding bounded JSONL stdout
 alongside bounded stderr, then observes process status under the same controls,
 preserving definitive CLI evidence instead of discarding it as transport loss or
-blocking on a full stdout pipe. Ready stdout is polled before simultaneous
-control signals, then the decoder drains only the current bounded reader batch
-before synchronously rechecking control, so continuously ready stdout cannot
-starve it. Once a provider terminal marker is observed, a later cancellation
-cannot replace that definitive evidence, but the process deadline continues to
-govern exit and cleanup. The adapter also bounds stderr cleanup before reaping
-the direct child and terminates the original process group when an inherited
-stderr handle outlives the deadline, so cleanup never signals through a reusable
-process identity. The offline test binary exercises all process and evidence
-paths without a live CLI or network.
+blocking on a full stdout pipe. A provider failure remains definitive after such
+a write failure, but a nominal completion is boundary loss because the adapter
+cannot prove the full authorized frontier reached the CLI. Ready stdout is
+polled before simultaneous control signals, then the decoder drains only the
+current bounded reader batch before synchronously rechecking control, so
+continuously ready stdout cannot starve it. Once a provider terminal marker is
+observed, a later cancellation cannot replace that definitive evidence, but the
+process deadline continues to govern exit and cleanup. The adapter also bounds
+stderr cleanup before reaping the direct child and terminates the original
+process group when an inherited stderr handle outlives the deadline. On every
+ordinary exit it likewise keeps the leader waitable until it has killed
+remaining group descendants, then reaps the leader, so cleanup never signals
+through a reusable process identity. The offline test binary exercises all
+process and evidence paths without a live CLI or network.
 
 ## Credential-access boundary
 

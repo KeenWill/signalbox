@@ -979,6 +979,33 @@ async fn nonzero_exit_while_writing_stdin_preserves_provider_error() {
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
+#[tokio::test]
+async fn completion_after_an_incomplete_stdin_upload_is_boundary_loss() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(
+        temporary
+            .path()
+            .join(fixtures::EARLY_STDIN_COMPLETION_MARKER),
+        "complete",
+    )
+    .expect("the early-completion marker is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let failure = transport_failed(&boundary_loss(&report.evidence).cause);
+
+    assert!(
+        failure
+            .detail
+            .contains("before the full request upload completed")
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn cancellation_kills_descendants_after_the_group_leader_exits() {
@@ -1000,7 +1027,9 @@ async fn cancellation_kills_descendants_after_the_group_leader_exits() {
         ),
     )
     .await;
-    let descendant_path = temporary.path().join("fake-codex-interrupt-descendant-pid");
+    let descendant_path = temporary
+        .path()
+        .join("fake-codex-interrupt-descendant-process-group");
     let cancellation = cancel_after_record(descendant_path.clone());
     let mut observations = Vec::new();
 
@@ -1012,7 +1041,7 @@ async fn cancellation_kills_descendants_after_the_group_leader_exits() {
         boundary_loss(&report.evidence).cause,
         LossCause::CancellationRequested
     );
-    assert_recorded_process_exited(descendant_path);
+    assert_recorded_process_group_exited(descendant_path);
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
@@ -1030,7 +1059,9 @@ async fn dropping_execution_kills_the_spawned_process_group() {
         ),
     )
     .await;
-    let descendant_path = temporary.path().join("fake-codex-interrupt-descendant-pid");
+    let descendant_path = temporary
+        .path()
+        .join("fake-codex-interrupt-descendant-process-group");
     let execution = tokio::spawn(async move {
         let mut observations = Vec::new();
         runtime
@@ -1045,7 +1076,7 @@ async fn dropping_execution_kills_the_spawned_process_group() {
         .expect_err("the execution task was explicitly aborted");
 
     assert!(aborted.is_cancelled());
-    assert_recorded_process_exited(descendant_path);
+    assert_recorded_process_group_exited(descendant_path);
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
@@ -1101,7 +1132,39 @@ async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
         vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
     );
     assert_eq!(result.spawns, 1);
-    assert_recorded_process_exited(temporary.path().join("fake-codex-inherited-stderr-pid"));
+    assert_recorded_process_group_exited(
+        temporary
+            .path()
+            .join("fake-codex-inherited-stderr-process-group"),
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn successful_exit_kills_a_detached_process_group_descendant() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let result = execute_operation_in_directory(
+        temporary.path(),
+        operation(
+            "completed_with_detached_descendant",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+        CancellationSignal::never(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+    assert_recorded_process_group_exited(
+        temporary
+            .path()
+            .join("fake-codex-detached-descendant-process-group"),
+    );
 }
 
 #[cfg(unix)]
@@ -1729,40 +1792,35 @@ fn read_optional(path: std::path::PathBuf) -> String {
 }
 
 #[cfg(unix)]
-fn assert_recorded_process_exited(path: std::path::PathBuf) {
-    let raw_pid = std::fs::read_to_string(path)
-        .expect("the fake CLI records its inherited-stderr descendant")
+fn assert_recorded_process_group_exited(path: std::path::PathBuf) {
+    const PROCESS_EXIT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let record = std::fs::read_to_string(path)
+        .expect("the fake CLI records its process group and descendant identities");
+    let raw_process_group = record
+        .lines()
+        .find_map(|line| line.strip_prefix("process_group="))
+        .expect("the process-group record names the process group")
         .parse::<i32>()
-        .expect("the recorded descendant identity is a process id");
-    let pid =
-        rustix::process::Pid::from_raw(raw_pid).expect("the descendant process id is nonzero");
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
-    while !process_has_exited(pid) && std::time::Instant::now() < deadline {
+        .expect("the recorded process-group identity is a process id");
+    let process_group = rustix::process::Pid::from_raw(raw_process_group)
+        .expect("the process-group identity is nonzero");
+    let deadline = std::time::Instant::now() + PROCESS_EXIT_OBSERVATION_TIMEOUT;
+    while process_group_exists(process_group) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        process_has_exited(pid),
-        "the inherited-stderr descendant remains alive after process-group cleanup"
+        !process_group_exists(process_group),
+        "the recorded process group remains alive after cleanup"
     );
 }
 
 #[cfg(not(unix))]
-fn assert_recorded_process_exited(_path: std::path::PathBuf) {}
+fn assert_recorded_process_group_exited(_path: std::path::PathBuf) {}
 
 #[cfg(unix)]
-fn process_has_exited(pid: rustix::process::Pid) -> bool {
-    rustix::process::test_kill_process(pid).is_err() || process_is_linux_zombie(pid)
-}
-
-#[cfg(target_os = "linux")]
-fn process_is_linux_zombie(pid: rustix::process::Pid) -> bool {
-    std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_pid()))
-        .is_ok_and(|stat| proc_stat_is_zombie(&stat))
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn process_is_linux_zombie(_pid: rustix::process::Pid) -> bool {
-    false
+fn process_group_exists(process_group: rustix::process::Pid) -> bool {
+    rustix::process::test_kill_process_group(process_group).is_ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -1867,6 +1925,13 @@ fn boundary_loss(evidence: &TerminalEvidence) -> &signalbox_model_runtime::Bound
 fn timed_out(cause: &LossCause) -> &signalbox_model_runtime::TransportFacts {
     let LossCause::TimedOut(facts) = cause else {
         panic!("expected timeout loss, got {cause:?}");
+    };
+    facts
+}
+
+fn transport_failed(cause: &LossCause) -> &signalbox_model_runtime::TransportFacts {
+    let LossCause::TransportFailed(facts) = cause else {
+        panic!("expected transport-failure loss, got {cause:?}");
     };
     facts
 }

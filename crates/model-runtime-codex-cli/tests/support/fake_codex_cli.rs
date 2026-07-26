@@ -21,6 +21,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit(r#"{"type":"turn.started"}"#);
         failed(fixtures::EARLY_STDIN_FAILURE);
     }
+    if Path::new(fixtures::EARLY_STDIN_COMPLETION_MARKER).exists() {
+        emit(&format!(
+            r#"{{"type":"thread.started","thread_id":"{}"}}"#,
+            fixtures::THREAD_ID
+        ));
+        emit(r#"{"type":"turn.started"}"#);
+        envelope(&format!(
+            r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+            fixtures::BUFFERED_ANSWER
+        ));
+        completed();
+        return Ok(());
+    }
     if Path::new("fake-codex-block-stdin").exists() {
         std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
         std::thread::sleep(Duration::from_secs(60));
@@ -307,9 +320,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
                 .spawn()?;
-            std::fs::write(
-                "fake-codex-inherited-stderr-pid",
-                descendant.id().to_string(),
+            record_process_group("fake-codex-inherited-stderr-process-group", descendant.id())?;
+        }
+        "completed_with_detached_descendant" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            let descendant = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            record_process_group(
+                "fake-codex-detached-descendant-process-group",
+                descendant.id(),
             )?;
         }
         "interrupt_with_descendant" => {
@@ -320,9 +348,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()?;
-            std::fs::write(
-                "fake-codex-interrupt-descendant-pid",
-                descendant.id().to_string(),
+            record_process_group(
+                "fake-codex-interrupt-descendant-process-group",
+                descendant.id(),
             )?;
             std::thread::sleep(Duration::from_secs(60));
         }
@@ -357,6 +385,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => failed("invalid request: unknown offline fixture"),
     }
     Ok(())
+}
+
+fn record_process_group(path: &str, descendant: u32) -> std::io::Result<()> {
+    std::fs::write(
+        path,
+        format!(
+            "process_group={}\ndescendant={descendant}\n",
+            std::process::id()
+        ),
+    )
 }
 
 fn record_spawn() -> std::io::Result<()> {
