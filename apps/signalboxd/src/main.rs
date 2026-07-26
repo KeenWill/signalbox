@@ -35,8 +35,8 @@ use signalbox_persistence::{
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools,
     FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, SystemCurrentTimeClock,
+    GitHubCodeHostTransport, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,
@@ -390,6 +390,8 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     );
     let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+    let code_host_transport = GitHubCodeHostTransport::try_new()
+        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
@@ -411,6 +413,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         SystemCurrentTimeClock,
         pool.clone(),
         code_host_credentials,
+        code_host_transport,
     ) {
         Ok(tools) => tools.into_parts(),
         Err(_) => {

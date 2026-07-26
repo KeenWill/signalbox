@@ -145,8 +145,7 @@ impl CodeHostFilePath {
         (!value.is_empty()
             && value.len() <= MAX_FILE_PATH_BYTES
             && !value.contains('\0')
-            && !value.starts_with('/')
-            && !value.chars().any(char::is_control))
+            && !value.starts_with('/'))
         .then_some(Self(value))
         .ok_or(InvalidCodeHostArguments)
     }

@@ -772,14 +772,11 @@ fn parse_review_thread_comment(
 }
 
 fn reject_graphql_errors(value: &serde_json::Value) -> Result<(), CodeHostTransportFailure> {
-    if value
-        .get("errors")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|errors| !errors.is_empty())
-    {
-        Err(CodeHostTransportFailure::Rejected)
-    } else {
-        Ok(())
+    match value.get("errors") {
+        None => Ok(()),
+        Some(serde_json::Value::Array(errors)) if errors.is_empty() => Ok(()),
+        Some(serde_json::Value::Array(_errors)) => Err(CodeHostTransportFailure::Rejected),
+        Some(_) => Err(CodeHostTransportFailure::InvalidResponse),
     }
 }
 
@@ -979,6 +976,18 @@ mod tests {
     #[test]
     fn graphql_mutation_error_is_commit_ambiguous() {
         let value = serde_json::json!({"errors": [{"message": "fixture rejection"}]});
+
+        assert_eq!(
+            reject_graphql_mutation_errors(&value),
+            Err(CodeHostTransportFailure::DispatchUnknown)
+        );
+    }
+
+    /// A malformed GraphQL mutation error member cannot authenticate a
+    /// successful acknowledgement.
+    #[test]
+    fn malformed_graphql_mutation_error_is_commit_ambiguous() {
+        let value = serde_json::json!({"errors": "malformed fixture"});
 
         assert_eq!(
             reject_graphql_mutation_errors(&value),

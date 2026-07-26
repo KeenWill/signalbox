@@ -704,6 +704,17 @@ mod tests {
         );
     }
 
+    /// File-patch arguments preserve an exact Git path containing a
+    /// JSON-representable control character.
+    #[test]
+    fn change_request_file_patch_typed_decode_accepts_newline_path() {
+        assert_valid(
+            &catalog(),
+            change_request_file_patch::NAME,
+            r#"{"number":17,"path":"src/line\nbreak.rs","repository":"owner/repository"}"#,
+        );
+    }
+
     /// Check-status arguments require one lowercase forty-hex revision.
     #[test]
     fn change_request_checks_status_typed_decode_accepts_exact_shape() {

@@ -36,19 +36,18 @@ impl<Clock>
         GitHubCodeHostTransport,
     >
 {
-    /// Composes the production catalog, transports, credential source, and
-    /// PostgreSQL metadata writer.
+    /// Composes the production catalog, web transport, credential source,
+    /// preconstructed code-host transport, and PostgreSQL metadata writer.
     pub fn try_new_production(
         clock: Clock,
         pool: PgPool,
         credentials: FileCredentialAccess,
+        code_host_transport: GitHubCodeHostTransport,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let web_fetch = WebFetchTool::try_new_production()
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new_postgres(pool)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let code_host_transport = GitHubCodeHostTransport::try_new()
-            .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let code_host = CodeHostTools::try_new(credentials, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         Self::try_new_with_tools(clock, web_fetch, status, code_host)
