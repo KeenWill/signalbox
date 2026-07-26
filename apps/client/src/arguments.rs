@@ -27,6 +27,13 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
     },
+    Model {
+        session_id: CanonicalUuid,
+        selection: ModelSelection,
+        command_id: Option<CommandId>,
+        defaults_version: Option<CanonicalU64>,
+        dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+    },
     Transcript {
         session_id: CanonicalUuid,
     },
@@ -82,6 +89,8 @@ enum CliCommand {
     List,
     /// Submit standard input and print the reply after completion.
     Send(SendArguments),
+    /// Install a new forward-only session model-defaults epoch.
+    Model(ModelArguments),
     /// Print one authoritative session transcript.
     Transcript(SessionArguments),
     /// Print a snapshot and follow durable session updates.
@@ -133,6 +142,48 @@ struct SendArguments {
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .multiple(false)
+        .args(["model", "alias"])
+))]
+struct ModelArguments {
+    /// Session whose future turns should use the replacement model.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Select a model configuration directly.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    model: Option<CanonicalUuid>,
+    /// Select a configured model alias.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    alias: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(
+        long,
+        value_name = "UUID",
+        requires_all = ["defaults_version", "dangerous_tool_auto_approval"],
+        value_parser = command_id
+    )]
+    command_id: Option<CommandId>,
+    /// Exact defaults epoch paired with a recovery command identity.
+    #[arg(
+        long,
+        value_name = "DECIMAL",
+        requires_all = ["command_id", "dangerous_tool_auto_approval"],
+        value_parser = canonical_u64
+    )]
+    defaults_version: Option<CanonicalU64>,
+    /// Exact copied dangerous-tool posture paired with recovery values.
+    #[arg(
+        long,
+        value_enum,
+        requires_all = ["command_id", "defaults_version"]
+    )]
+    dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+}
+
+#[derive(Debug, ClapArgs)]
 struct SessionArguments {
     /// Selected session.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
@@ -153,6 +204,12 @@ struct ImportArguments {
 enum ImportFormatArgument {
     ClaudeCode,
     Codex,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum DangerousToolAutoApprovalArgument {
+    Disabled,
+    ApproveAll,
 }
 
 pub(crate) fn parse(
@@ -185,6 +242,22 @@ pub(crate) fn parse(
             session_id: arguments.session_id,
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
+        },
+        CliCommand::Model(arguments) => Command::Model {
+            session_id: arguments.session_id,
+            selection: match (arguments.model, arguments.alias) {
+                (Some(selection_id), None) => ModelSelection::Direct { selection_id },
+                (None, Some(alias_id)) => ModelSelection::Alias { alias_id },
+                (None, None) | (Some(_), Some(_)) => {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "model requires exactly one of --model or --alias",
+                    )));
+                }
+            },
+            command_id: arguments.command_id,
+            defaults_version: arguments.defaults_version,
+            dangerous_tool_auto_approval: arguments.dangerous_tool_auto_approval,
         },
         CliCommand::Transcript(arguments) => Command::Transcript {
             session_id: arguments.session_id,
@@ -241,7 +314,7 @@ mod tests {
 
     use signalbox_process_protocol::ConversationImportFormat;
 
-    use super::{Arguments, Command, ParseOutcome, parse};
+    use super::{Arguments, Command, DangerousToolAutoApprovalArgument, ParseOutcome, parse};
 
     #[test]
     fn send_recovery_flags_are_an_exact_pair() {
@@ -262,6 +335,56 @@ mod tests {
             ),
             Ok(ParseOutcome::Run(super::Arguments {
                 command: Command::Send { .. },
+                ..
+            }))
+        ));
+    }
+
+    /// S30: model replacement recovery accepts only the complete set of
+    /// pre-mutation facts printed by the client.
+    #[test]
+    fn s30_model_recovery_flags_are_one_complete_defaults_observation() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let selection = "00000000-0000-0000-0000-000000000002";
+        assert!(
+            parse(
+                [
+                    "model",
+                    session,
+                    "--model",
+                    selection,
+                    "--command-id",
+                    session,
+                    "--defaults-version",
+                    "1",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            parse(
+                [
+                    "model",
+                    session,
+                    "--model",
+                    selection,
+                    "--command-id",
+                    session,
+                    "--defaults-version",
+                    "1",
+                    "--dangerous-tool-auto-approval",
+                    "approve-all",
+                ]
+                .map(Into::into)
+            ),
+            Ok(ParseOutcome::Run(Arguments {
+                command: Command::Model {
+                    dangerous_tool_auto_approval: Some(
+                        DangerousToolAutoApprovalArgument::ApproveAll
+                    ),
+                    ..
+                },
                 ..
             }))
         ));
