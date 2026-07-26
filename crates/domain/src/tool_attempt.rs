@@ -628,12 +628,16 @@ impl AuthorizedToolAttempt {
         attempt: CurrentToolAttempt,
         recorded_correlation: ToolAttemptDispatchCorrelation,
     ) -> Result<Self, ToolAttemptTransitionError> {
-        if attempt.state != CurrentToolAttemptState::InFlight
-            || attempt.correlation() != recorded_correlation
-        {
+        if attempt.state != CurrentToolAttemptState::InFlight {
             return Err(ToolAttemptTransitionError {
                 attempt,
                 failure: ToolAttemptTransitionFailure::InvalidState,
+            });
+        }
+        if attempt.correlation() != recorded_correlation {
+            return Err(ToolAttemptTransitionError {
+                attempt,
+                failure: ToolAttemptTransitionFailure::CorrelationMismatch,
             });
         }
         Ok(Self {
@@ -1047,6 +1051,31 @@ mod tests {
                 .expect_err("prepared work has not crossed authorization")
                 .failure(),
             ToolAttemptTransitionFailure::InvalidState
+        );
+    }
+
+    #[test]
+    fn s12_inv011_inv024_in_flight_reread_reports_cross_wired_fence() {
+        let authorized = prepared(ToolEffectClass::ExternalEffect)
+            .authorize()
+            .expect("prepared work can be authorized");
+        let (in_flight, correlation) = authorized.into_parts();
+        let cross_wired = ToolAttemptDispatchCorrelation::reconstitute(
+            ToolAttemptDispatchCorrelationReconstitutionInput {
+                session: session_id(3),
+                turn: correlation.turn(),
+                issuing_attempt: correlation.issuing_attempt(),
+                request: correlation.request(),
+                attempt: correlation.attempt(),
+                generation: correlation.generation(),
+            },
+        );
+        let error = AuthorizedToolAttempt::reconstitute(in_flight, cross_wired)
+            .expect_err("a foreign session cannot restore exact dispatch authority");
+
+        assert_eq!(
+            error.failure(),
+            ToolAttemptTransitionFailure::CorrelationMismatch
         );
     }
 

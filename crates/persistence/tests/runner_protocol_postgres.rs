@@ -35,11 +35,14 @@ const DATABASE_NAME: &str = "signalbox";
 const ENROLLMENT: u128 = 0x9100;
 const RUNNER: u128 = 0x9200;
 const AUTHENTICATION: u128 = 0x9300;
+const REPLACEMENT_ENROLLMENT: u128 = 0x9101;
+const REPLACEMENT_RUNNER: u128 = 0x9201;
+const REPLACEMENT_AUTHENTICATION: u128 = 0x9301;
 const SESSION: u128 = 0x9400;
 const LEASE: u128 = 0x9500;
 const ATTEMPT: u128 = 0x9600;
 const RETRY_ATTEMPT: u128 = 0x9601;
-const FOREIGN_RUNNER: u128 = 0x9201;
+const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 
 #[derive(Clone, Copy)]
@@ -58,6 +61,11 @@ const RETRY_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
     attempt: RETRY_ATTEMPT,
     request: INITIAL_PHYSICAL_ATTEMPT.request,
     turn: INITIAL_PHYSICAL_ATTEMPT.turn,
+};
+const PROFILELESS_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
+    attempt: 0x9602,
+    request: 0x9701,
+    turn: 0x9801,
 };
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -103,7 +111,7 @@ fn profile() -> CredentialProfileName {
 fn model_definition() -> RunnerToolModelDefinition {
     RunnerToolModelDefinition::try_new(
         "Inspect the fixture workspace".to_owned(),
-        r#"{"type":"object"}"#.to_owned(),
+        format!(r#"{{"{}":0}}"#, "x".repeat(4096)),
     )
     .expect("the fixture model definition is valid")
 }
@@ -150,6 +158,15 @@ fn enrollment() -> RunnerEnrollment {
         RunnerEnrollmentId::from_uuid(uuid(ENROLLMENT)),
         RunnerId::from_uuid(uuid(RUNNER)),
         RunnerAuthenticationId::from_uuid(uuid(AUTHENTICATION)),
+        [class()],
+    )
+}
+
+fn replacement_enrollment() -> RunnerEnrollment {
+    RunnerEnrollment::new(
+        RunnerEnrollmentId::from_uuid(uuid(REPLACEMENT_ENROLLMENT)),
+        RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+        RunnerAuthenticationId::from_uuid(uuid(REPLACEMENT_AUTHENTICATION)),
         [class()],
     )
 }
@@ -428,6 +445,36 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
 
     assert_eq!(loaded.placement(), &pin.placement);
     assert_eq!(loaded.grant(), pin.grant.as_ref());
+    insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
+    let profileless_placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    let profileless_pin = profileless_placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/profileless".to_owned())
+                .expect("the profileless directory is valid"),
+            None,
+            authorized(PROFILELESS_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("the separate profileless aggregate can construct its own lease");
+    let missing_current_grant = store
+        .store_lease(&profileless_pin.lease)
+        .await
+        .expect_err("canonical profile selection requires its exact grant on every lease");
+
+    assert_store_check_violation(missing_current_grant);
     let lost = pin
         .placement
         .clone()
@@ -468,6 +515,81 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("a revoked predecessor cannot authorize its replacement");
 
     assert_store_check_violation(revoked_predecessor);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let first_enrollment = enrollment();
+    store.insert_enrollment(&first_enrollment).await?;
+    let first_registration = store
+        .register(first_enrollment.enrollment(), advertisement(), &catalog())
+        .await?;
+    let request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: Some(profile()),
+        workspace: WorkspaceRequirement::None,
+    };
+    let placement =
+        SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request.clone());
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &first_enrollment,
+            first_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/first".to_owned())
+                .expect("the first runner directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the first runner pins the placement");
+    store.store_pin(&pin, &first_registration).await?;
+    let lost = pin
+        .placement
+        .clone()
+        .mark_runner_lost()
+        .expect("the first runner may be marked lost");
+    store
+        .store_placement(&lost, Some(&first_registration), pin.grant.as_ref())
+        .await?;
+    let second_enrollment = replacement_enrollment();
+    store.insert_enrollment(&second_enrollment).await?;
+    let second_registration = store
+        .register(second_enrollment.enrollment(), advertisement(), &catalog())
+        .await?;
+    let replacement = lost
+        .replace_lost_runner(
+            request,
+            second_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/second".to_owned())
+                .expect("the replacement runner directory is valid"),
+            None,
+            pin.grant.clone(),
+        )
+        .expect("the replacement advances the cross-runner grant lineage");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&second_registration),
+            replacement.grant.as_ref(),
+        )
+        .await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the cross-runner replacement is durable");
+
+    assert_eq!(loaded.placement(), &replacement.placement);
+    assert_eq!(loaded.grant(), replacement.grant.as_ref());
     drop(pool);
     Ok(())
 }

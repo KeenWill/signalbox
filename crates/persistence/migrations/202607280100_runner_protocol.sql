@@ -11,6 +11,11 @@ CHECK (
     octet_length(VALUE) BETWEEN 1 AND 4096
 );
 
+CREATE DOMAIN runner_tool_schema AS text
+CHECK (
+    octet_length(VALUE) BETWEEN 1 AND 1048576
+);
+
 ALTER TABLE tool_attempt
     DROP CONSTRAINT tool_attempt_request_id_key;
 
@@ -350,7 +355,7 @@ CREATE TABLE runner_registration_tool (
     registration_revision numeric(20, 0) NOT NULL,
     tool_name text NOT NULL,
     model_description runner_exact_text NOT NULL,
-    model_input_schema runner_exact_text NOT NULL,
+    model_input_schema runner_tool_schema NOT NULL,
     permission_kind text NOT NULL,
     effect_class text NOT NULL,
     loci_kind text NOT NULL,
@@ -1195,6 +1200,7 @@ CREATE TABLE runner_credential_grant (
     registration_enrollment_id uuid NOT NULL,
     registration_revision numeric(20, 0) NOT NULL,
     placement_event_ordinal numeric(20, 0) NOT NULL,
+    prior_runner_id uuid,
     prior_grant_revision numeric(20, 0),
     tool_count numeric(20, 0) NOT NULL,
 
@@ -1207,13 +1213,22 @@ CREATE TABLE runner_credential_grant (
             grant_revision,
             credential_profile_name
         ),
+    CONSTRAINT runner_credential_grant_session_revision_key
+        UNIQUE (session_id, grant_revision),
     CONSTRAINT runner_credential_grant_revision_shape
         CHECK (
             grant_revision BETWEEN 1 AND 18446744073709551615
             AND tool_count BETWEEN 0 AND 18446744073709551615
             AND (
-                (grant_revision = 1 AND prior_grant_revision IS NULL)
-                OR prior_grant_revision = grant_revision - 1
+                (
+                    grant_revision = 1
+                    AND prior_runner_id IS NULL
+                    AND prior_grant_revision IS NULL
+                )
+                OR (
+                    prior_runner_id IS NOT NULL
+                    AND prior_grant_revision = grant_revision - 1
+                )
             )
         ),
     CONSTRAINT runner_credential_grant_registration_profile_fk
@@ -1243,7 +1258,7 @@ CREATE TABLE runner_credential_grant (
     CONSTRAINT runner_credential_grant_prior_fk
         FOREIGN KEY (
             session_id,
-            runner_id,
+            prior_runner_id,
             prior_grant_revision
         )
         REFERENCES runner_credential_grant (
@@ -1428,7 +1443,7 @@ BEGIN
                 SELECT 1
                   FROM runner_credential_grant_audit AS prior_audit
                  WHERE prior_audit.session_id = grant_row.session_id
-                   AND prior_audit.runner_id = grant_row.runner_id
+                   AND prior_audit.runner_id = grant_row.prior_runner_id
                    AND prior_audit.grant_revision =
                         grant_row.prior_grant_revision
                    AND prior_audit.event_kind = 'revoked'
@@ -1718,6 +1733,10 @@ BEGIN
             NEW.registration_enrollment_id
        OR placement.registration_revision IS DISTINCT FROM
             NEW.registration_revision
+       OR placement.pinned_credential_profile_name IS DISTINCT FROM
+            NEW.credential_profile_name
+       OR placement.credential_grant_revision IS DISTINCT FROM
+            NEW.credential_grant_revision
        OR enrollment_state IS DISTINCT FROM 'active'
        OR attempted_tool IS DISTINCT FROM NEW.tool_name
        OR attempted_state IS DISTINCT FROM 'in_flight'

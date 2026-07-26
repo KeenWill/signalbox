@@ -1493,14 +1493,18 @@ fn stored_placement_is_valid(
     stored: &PinnedRunnerPlacement,
     registration: &ValidatedRunnerRegistration,
 ) -> bool {
+    let exact_runner_required_tools: BTreeSet<_> = registration
+        .tools
+        .iter()
+        .filter(|(tool, _)| stored.tools.contains(*tool))
+        .filter(|(_, declaration)| {
+            matches!(declaration.loci, ToolAdmissibleLoci::RunnerOnly { .. })
+        })
+        .map(|(tool, _)| tool.clone())
+        .collect();
     if !registration_preserves_snapshot(request, stored, registration)
         || stored.credential_profile != request.credential_profile
-        || !stored.runner_required_tools.iter().all(|tool| {
-            stored.tools.contains(tool)
-                && registration.tool(tool).is_some_and(|declaration| {
-                    matches!(declaration.loci, ToolAdmissibleLoci::RunnerOnly { .. })
-                })
-        })
+        || stored.runner_required_tools != exact_runner_required_tools
     {
         return false;
     }
@@ -2057,6 +2061,13 @@ mod tests {
         )
         .expect("the registration and authorized attempt satisfy placement");
         (registration, pin)
+    }
+
+    fn omit_runner_required_tool(placement: &mut SessionRunnerPlacement, omitted: &ToolName) {
+        let SessionRunnerPlacementState::Pinned(stored) = &mut placement.state else {
+            panic!("the fixture placement is pinned")
+        };
+        stored.runner_required_tools.remove(omitted);
     }
 
     fn offered(
@@ -2697,6 +2708,18 @@ mod tests {
         assert_eq!(
             pin.placement
                 .reconstitute(session_id(SESSION + 1), Some(&registration)),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s30_inv044_placement_reconstitution_requires_complete_runner_only_set() {
+        let (registration, mut pin) = pinned("readonly");
+        omit_runner_required_tool(&mut pin.placement, &tool("deploy"));
+
+        assert_eq!(
+            pin.placement
+                .reconstitute(session_id(SESSION), Some(&registration)),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }

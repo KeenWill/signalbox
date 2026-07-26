@@ -1201,13 +1201,28 @@ async fn insert_grant_if_new(
         .checked_sub(1)
         .filter(|value| *value > 0)
         .map(Decimal::from);
+    let prior_runner: Option<Uuid> = match prior {
+        Some(prior) => Some(
+            sqlx::query_scalar(
+                "SELECT runner_id
+                   FROM runner_credential_grant
+                  WHERE session_id = $1 AND grant_revision = $2",
+            )
+            .bind(grant.session().into_uuid())
+            .bind(prior)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
+        ),
+        None => None,
+    };
     sqlx::query(
         "INSERT INTO runner_credential_grant
             (session_id, runner_id, grant_revision,
              credential_profile_name, registration_enrollment_id,
              registration_revision, placement_event_ordinal,
-             prior_grant_revision, tool_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             prior_runner_id, prior_grant_revision, tool_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(grant.session().into_uuid())
     .bind(grant.runner().into_uuid())
@@ -1216,6 +1231,7 @@ async fn insert_grant_if_new(
     .bind(registration.registration.enrollment().into_uuid())
     .bind(Decimal::from(registration.revision.get()))
     .bind(Decimal::from(placement_event))
+    .bind(prior_runner)
     .bind(prior)
     .bind(count_decimal(tools.len())?)
     .execute(&mut **transaction)
