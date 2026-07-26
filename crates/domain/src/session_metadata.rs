@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Actor, DurableCommandId, SessionId};
+use crate::{Actor, DurableCommandId, SessionId, ToolRequestId};
 
 /// One complete replaceable organizational metadata value.
 ///
@@ -307,17 +307,19 @@ impl SessionMetadataSnapshot {
 /// The canonical durable command replacing one complete metadata snapshot.
 ///
 /// Structural equality and hashing exclude `command_id` and cover every other
-/// caller-supplied semantic field. Metadata replacement is owner-only, so the
-/// actor is fixed by construction rather than supplied by callers.
+/// caller-supplied semantic field. Construction admits only the owner boundary
+/// and execution of one exact tool request; callers cannot supply an arbitrary
+/// actor.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionMetadata {
     command_id: DurableCommandId,
     session: SessionId,
+    actor: Actor,
     replacement: SessionMetadataContent,
 }
 
 impl ReplaceSessionMetadata {
-    /// Constructs the complete canonical caller payload.
+    /// Constructs the complete canonical owner payload.
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
@@ -326,6 +328,23 @@ impl ReplaceSessionMetadata {
         Self {
             command_id,
             session,
+            actor: Actor::Owner,
+            replacement,
+        }
+    }
+
+    /// Constructs a replacement initiated by execution of one exact tool
+    /// request.
+    pub const fn new_for_tool(
+        command_id: DurableCommandId,
+        session: SessionId,
+        request: ToolRequestId,
+        replacement: SessionMetadataContent,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            actor: Actor::Tool { request },
             replacement,
         }
     }
@@ -340,9 +359,9 @@ impl ReplaceSessionMetadata {
         self.session
     }
 
-    /// Returns the canonical owner writer.
+    /// Returns the initiating agency carried by this command.
     pub const fn actor(&self) -> Actor {
-        Actor::Owner
+        self.actor
     }
 
     /// Borrows the complete replacement content.
@@ -389,7 +408,9 @@ impl ReplaceSessionMetadata {
 
 impl PartialEq for ReplaceSessionMetadata {
     fn eq(&self, other: &Self) -> bool {
-        self.session == other.session && self.replacement == other.replacement
+        self.session == other.session
+            && self.actor == other.actor
+            && self.replacement == other.replacement
     }
 }
 
@@ -398,6 +419,7 @@ impl Eq for ReplaceSessionMetadata {}
 impl std::hash::Hash for ReplaceSessionMetadata {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.session.hash(state);
+        self.actor.hash(state);
         self.replacement.hash(state);
     }
 }
@@ -666,7 +688,7 @@ mod tests {
         ReplaceSessionMetadataResult, SessionMetadataContent, SessionMetadataContentError,
         SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
     };
-    use crate::{Actor, DurableCommandId, SessionId};
+    use crate::{Actor, DurableCommandId, SessionId, ToolRequestId};
 
     fn command_id(value: u128) -> DurableCommandId {
         DurableCommandId::from_uuid(Uuid::from_u128(value))
@@ -674,6 +696,10 @@ mod tests {
 
     fn session_id(value: u128) -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn tool_request_id(value: u128) -> ToolRequestId {
+        ToolRequestId::from_uuid(Uuid::from_u128(value))
     }
 
     fn metadata(archived: bool) -> SessionMetadataContent {
@@ -1056,6 +1082,76 @@ mod tests {
         assert_eq!(command.actor(), Actor::Owner);
     }
 
+    /// INV-012: tool agency is semantic replay payload rather than an
+    /// interchangeable attribution side channel.
+    #[test]
+    fn inv012_command_equality_includes_tool_actor() {
+        let owner = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
+        let tool = ReplaceSessionMetadata::new_for_tool(
+            command_id(1),
+            session_id(2),
+            tool_request_id(3),
+            metadata(false),
+        );
+        let same_tool_another_identity = ReplaceSessionMetadata::new_for_tool(
+            command_id(5),
+            session_id(2),
+            tool_request_id(3),
+            metadata(false),
+        );
+        let another_tool = ReplaceSessionMetadata::new_for_tool(
+            command_id(1),
+            session_id(2),
+            tool_request_id(4),
+            metadata(false),
+        );
+
+        assert_ne!(owner, tool);
+        assert_eq!(tool, same_tool_another_identity);
+        assert_eq!(
+            command_hash(&tool),
+            command_hash(&same_tool_another_identity)
+        );
+        assert_ne!(tool, another_tool);
+    }
+
+    #[test]
+    fn tool_metadata_command_retains_exact_request_agency() {
+        let request = tool_request_id(3);
+        let command = ReplaceSessionMetadata::new_for_tool(
+            command_id(1),
+            session_id(2),
+            request,
+            metadata(false),
+        );
+
+        assert_eq!(command.actor(), Actor::Tool { request });
+    }
+
+    #[test]
+    fn tool_applied_result_carries_tool_last_writer() {
+        let request = tool_request_id(3);
+        let command = ReplaceSessionMetadata::new_for_tool(
+            command_id(1),
+            session_id(2),
+            request,
+            metadata(true),
+        );
+        let updated_at = SessionMetadataUpdatedAt::from_unix_micros(17);
+        let prepared = command.prepare_applied(updated_at);
+        let ReplaceSessionMetadataResult::Applied(applied) = prepared.result() else {
+            panic!("fixture prepares an applied result")
+        };
+
+        assert_eq!(
+            applied.snapshot().last_writer(),
+            Some(SessionMetadataLastWriter::new(
+                updated_at,
+                Actor::Tool { request },
+            ))
+        );
+    }
+
     #[test]
     fn prepared_applied_result_carries_command_actor_and_clock_evidence() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(true));
@@ -1116,9 +1212,44 @@ mod tests {
         );
     }
 
-    /// INV-012: a recorded applied command cannot attribute a non-owner writer.
+    /// INV-012: matching tool-attributed facts reconstruct the exact command
+    /// and last-writer agency.
     #[test]
-    fn inv012_applied_reconstitution_rejects_non_owner_command_actor() {
+    fn inv012_matching_tool_applied_facts_reconstitute() {
+        let request = tool_request_id(3);
+        let command = ReplaceSessionMetadata::new_for_tool(
+            command_id(1),
+            session_id(2),
+            request,
+            metadata(true),
+        );
+        let updated_at = SessionMetadataUpdatedAt::from_unix_micros(17);
+        let reconstructed = ReplaceSessionMetadataReconstitutionInput::applied(
+            command.clone(),
+            command.actor(),
+            command.session(),
+            updated_at,
+            command.actor(),
+        )
+        .reconstitute()
+        .expect("matching tool-attributed facts are complete");
+        let ReplaceSessionMetadataResult::Applied(applied) = reconstructed.result() else {
+            panic!("matching tool-attributed facts retain their result kind")
+        };
+
+        assert_eq!(reconstructed.command(), &command);
+        assert_eq!(
+            applied.snapshot().last_writer(),
+            Some(SessionMetadataLastWriter::new(
+                updated_at,
+                Actor::Tool { request },
+            ))
+        );
+    }
+
+    /// INV-012: a recorded owner command cannot substitute recovery agency.
+    #[test]
+    fn inv012_applied_reconstitution_rejects_recovery_for_owner_command() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let input = ReplaceSessionMetadataReconstitutionInput::applied(
             command.clone(),
@@ -1130,7 +1261,7 @@ mod tests {
         let error = input
             .clone()
             .reconstitute()
-            .expect_err("a non-owner stored command actor fails closed");
+            .expect_err("recovery cannot replace the canonical owner actor");
 
         assert_eq!(
             error.failure(),
@@ -1140,10 +1271,9 @@ mod tests {
         assert_eq!(error.into_parts().0.command(), &command);
     }
 
-    /// INV-012: a recorded rejected command cannot attribute a non-owner
-    /// writer.
+    /// INV-012: a rejected owner command cannot substitute recovery agency.
     #[test]
-    fn inv012_rejected_reconstitution_rejects_non_owner_command_actor() {
+    fn inv012_rejected_reconstitution_rejects_recovery_for_owner_command() {
         let command = ReplaceSessionMetadata::new(command_id(1), session_id(2), metadata(false));
         let error = ReplaceSessionMetadataReconstitutionInput::rejected_session_not_found(
             command.clone(),
@@ -1151,7 +1281,7 @@ mod tests {
             command.session(),
         )
         .reconstitute()
-        .expect_err("a non-owner rejected command actor fails closed");
+        .expect_err("recovery cannot replace the canonical owner actor");
 
         assert_eq!(
             error.failure(),

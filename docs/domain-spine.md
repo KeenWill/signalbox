@@ -3614,6 +3614,12 @@ impl ReplaceSessionMetadata {
         session: SessionId,
         replacement: SessionMetadataContent,
     ) -> Self;
+    pub const fn new_for_tool(
+        command_id: DurableCommandId,
+        session: SessionId,
+        request: ToolRequestId,
+        replacement: SessionMetadataContent,
+    ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedReplaceSessionMetadata;
     pub fn prepare_applied(
         self,
@@ -4590,7 +4596,13 @@ impl ReplaceSessionMetadataRequest {
         session: SessionId,
         replacement: SessionMetadataContent,
     ) -> Result<Self, InvalidDurableCommandId>;
-    // accessors: command_id(), session(), replacement()
+    pub fn try_new_for_tool(
+        command_id: DurableCommandId,
+        session: SessionId,
+        request: ToolRequestId,
+        replacement: SessionMetadataContent,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), session(), actor(), replacement()
 }
 
 pub enum ReplaceSessionMetadataOutcome {

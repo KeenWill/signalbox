@@ -882,7 +882,19 @@ fn decode_command(
         required(row, "replacement_attribute_values")?,
         required(row, "replacement_archived")?,
     )?;
-    let command = ReplaceSessionMetadata::new(command_id, session, content);
+    let command = match command_actor {
+        Actor::Owner => ReplaceSessionMetadata::new(command_id, session, content),
+        Actor::Tool { request } => {
+            ReplaceSessionMetadata::new_for_tool(command_id, session, request, content)
+        }
+        Actor::Model { .. } | Actor::Recovery => {
+            return Err(SessionMetadataCorruption::Unsupported {
+                field: "command actor",
+                value: String::from("unsupported metadata writer"),
+            }
+            .into());
+        }
+    };
     let result_kind: String = required(row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
     let result_session = session_id_from_uuid(required(row, "result_session_id")?);

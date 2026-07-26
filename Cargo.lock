@@ -2738,8 +2738,11 @@ dependencies = [
 name = "signalboxd"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "jiff",
+ "reqwest",
  "rustix",
+ "rustls",
  "serde_json",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",

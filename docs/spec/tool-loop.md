@@ -3,7 +3,8 @@
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
-verified through PR #258 (`agent/signalboxd-rename`). It owns logical tool
+verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
+extension through `agent/tool-batch-tier0`. It owns logical tool
 requests, approval policy and decisions, physical tool attempts, result
 admission, intra-turn continuation, crash classification, the compiled registry,
 and the first daemon-local tool. Turn and attempt lifecycle law lives in
@@ -436,6 +437,43 @@ known-failure evidence with detail
 `current time is outside the supported range`. IANA lookup and offset conversion
 use the focused `jiff` dependency; Signalbox owns only the port and result
 contract, not a time-zone database implementation.
+
+The same process-lifetime compiled catalog also declares the Tier 0 daemon
+tools:
+
+- `echo` requires exactly one `text` string and returns the same canonical
+  compact `{"text": ...}` object. Its permission default is `Auto` and its
+  effect class is `EffectFree`: execution observes no external state.
+- `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
+  User information and fragments are invalid. Its permission default is `Auto`;
+  its effect class is `ExternalEffect` because the remote server can observe a
+  GET. One dispatch performs at most one credential-free request: ambient
+  proxies, redirects, protocol retries, and idle reuse are disabled, TLS uses
+  rustls with a TLS 1.2 floor, and a 15-second timeout bounds the whole
+  exchange. The executor retains at most 64 KiB of response bytes and at most
+  1,024 bytes of a valid content-type header. Success is compact JSON containing
+  the exact requested `url`, numeric `status`, optional `content_type`, a lossy
+  UTF-8 `body`, and `truncated`; transport failures return only fixed sanitized
+  details. Truncation stops body consumption and never follows or issues another
+  request.
+- `session_status_update` requires one complete existing session-metadata shape:
+  nullable `title`, complete `tags`, complete string-to-string `attributes`, and
+  `archived`. Partial patches are invalid. The invocation's session is the
+  target; no session identity is accepted from model arguments. Its permission
+  default is `Confirm` and its effect class is `ExternalEffect`. Execution
+  derives a durable command identity from the physical tool attempt, attributes
+  the command and last-writer stamp to the exact `ToolRequestId`, and calls the
+  existing metadata replacement application service. Success returns the
+  committed session identity and snapshot content as compact JSON;
+  missing-session rejection is a fixed known failure, and ambiguous commit
+  acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
+  mechanics remain owned by
+  [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
+
+The merged catalog sorts declarations by checked tool name and rejects
+duplicates during construction. Its executor dispatches only those same four
+names; disagreement between the advertised catalog and executor is classified as
+a daemon defect.
 
 ## Persistence boundaries
 

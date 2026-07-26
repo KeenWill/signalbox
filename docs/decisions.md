@@ -10,6 +10,57 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Attribute metadata writes initiated by tools
+
+**Context.** The commissioned session-status tool must replace the existing
+session-metadata satellite snapshot through its durable application seam.
+`Actor::Tool { request }` and its storage columns already exist, but metadata
+command construction admitted only owner agency; using that constructor would
+misattribute an automated write.
+
+**Decision.** Admit a second, purpose-specific metadata command constructor and
+application request for one exact `ToolRequestId`. Include that actor in replay
+equality and the last-writer stamp. Continue to admit owner construction
+separately; model and recovery metadata writers remain unconstructible. Reuse
+the existing command, snapshot, transaction, actor encoding, and foreign keys,
+so no migration or metadata shape changes.
+
+**Rejected alternatives.** Recording the tool write as owner loses initiating
+agency. Adding a status field or reserved attribute key invents a second
+metadata shape. Allowing arbitrary actors broadens the boundary beyond the
+commissioned tool. Bypassing the application service loses durable replay and
+commit-ambiguity handling.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[identity-and-commands](spec/identity-and-commands.md), the domain/application
+metadata command boundary, PostgreSQL reconstitution, and the
+`session_status_update` tool.
+
+## 2026-07-25 — Bound daemon web fetches to one credential-free request
+
+**Context.** The first daemon tool batch needs useful web text without unbounded
+response retention, hidden request replay, ambient credential channels, or
+live-network tests. The existing provider transport already fixes the
+repository's redirect, proxy, retry, TLS, and idle-connection posture.
+
+**Decision.** Accept one absolute HTTP(S) URL of at most 8 KiB, rejecting user
+information and fragments. Issue one GET with no credentials, ambient proxy,
+redirect following, protocol retry, or idle reuse, under a 15-second
+whole-exchange timeout and the existing rustls/TLS 1.2 floor. Retain at most 64
+KiB of response bytes, decode that prefix as lossy UTF-8, and return compact
+JSON with URL, status, bounded content type, body, and truncation metadata.
+Treat a transport or body failure as sanitized known-failure evidence.
+
+**Rejected alternatives.** Following redirects or enabling reqwest defaults can
+issue another physical request. Ambient proxies add an undeclared routing and
+credential channel. Unbounded buffering violates result admission. Returning raw
+bytes would require a result-content variant the tool loop does not implement. A
+new HTTP stack would duplicate the focused reqwest/rustls dependencies already
+in the workspace.
+
+**Affects.** [tool-loop](spec/tool-loop.md), `apps/signalboxd` dependencies, the
+`web_fetch` declaration and executor, and its mocked offline proofs.
+
 ## 2026-07-25 — Ship the server daemon as signalboxd
 
 **Context.** The recorded de-hub naming direction settled the server's name: the
