@@ -36,7 +36,12 @@ pub(crate) struct EventDecoder<C> {
 
 enum CliTerminal {
     Completed,
+    /// The turn lifecycle is fully closed; any further event fails closed.
     Failed(String),
+    /// A stream-level `error` event was recorded. The pinned CLI still
+    /// closes the failed turn with a `turn.failed` lifecycle echo — the
+    /// sequencing the gated compatibility smoke observed live — so exactly
+    /// that one trailer is still admissible.
     Unrecoverable(String),
 }
 
@@ -66,10 +71,13 @@ impl<C: Clone> EventDecoder<C> {
         line: &[u8],
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
-        if self.terminal.is_some() {
-            return Err(DecodeFailure::new(
-                "Codex emitted an event after its terminal marker",
-            ));
+        match &self.terminal {
+            Some(CliTerminal::Completed | CliTerminal::Failed(_)) => {
+                return Err(DecodeFailure::new(
+                    "Codex emitted an event after its terminal marker",
+                ));
+            }
+            Some(CliTerminal::Unrecoverable(_)) | None => {}
         }
         let line = std::str::from_utf8(line)
             .map_err(|error| DecodeFailure::new(format!("event is not UTF-8: {error}")))?;
@@ -81,6 +89,24 @@ impl<C: Clone> EventDecoder<C> {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| DecodeFailure::new("event has no string `type` discriminator"))?;
+        if let Some(CliTerminal::Unrecoverable(stream_error)) = &self.terminal {
+            // The pinned CLI reports a failed exchange as a stream-level
+            // `error` event followed by its `turn.failed` lifecycle echo
+            // (observed live by the gated compatibility smoke). Exactly that
+            // echo closes the turn; the stream-level message, which arrived
+            // first and already classified, is the provider error the caller
+            // receives. Any other trailer contradicts the recorded terminal
+            // and still fails closed.
+            if event_type != "turn.failed" {
+                return Err(DecodeFailure::new(
+                    "Codex emitted an event after its terminal marker",
+                ));
+            }
+            let stream_error = stream_error.clone();
+            let _: TurnFailed = decode(value)?;
+            self.terminal = Some(CliTerminal::Failed(stream_error));
+            return Ok(());
+        }
         match event_type {
             "thread.started" => {
                 let event: ThreadStarted = decode(value)?;

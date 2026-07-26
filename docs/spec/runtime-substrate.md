@@ -383,9 +383,13 @@ additively tolerated within the byte and JSON-depth bounds. Known events with
 invalid shapes, non-UTF-8 or undecodable JSONL, nonzero or signal process exits,
 and `turn.failed` fail closed as provider error evidence; the rendered CLI
 message classifier gives credential rejection first precedence and maps only
-explicit native phrases, with all other material `Unrecognized`. Exit zero
-without `turn.completed` is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`,
-never completion.
+explicit native phrases, with all other material `Unrecognized`. The CLI reports
+a failed exchange as a stream-level `error` event followed by its `turn.failed`
+lifecycle echo; the decoder accepts exactly that one trailer and keeps the
+stream-level message as the typed provider error, while any other post-terminal
+event — including one contradicting the recorded failure — remains a fail-closed
+protocol violation. Exit zero without `turn.completed` is
+`BoundaryLoss(StreamEndedWithoutTerminalMarker)`, never completion.
 
 `turn.completed` is success evidence only when the last completed agent-message
 item decodes as the adapter's response envelope and satisfies the declared tool

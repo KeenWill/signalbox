@@ -144,6 +144,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "error_overloaded" => failed("provider overloaded"),
         "error_provider_internal" => failed("internal server error"),
         "error_unrecognized" => failed("future failure shape"),
+        "error_then_turn_failed" => unrecoverable(fixtures::STREAM_ERROR_MESSAGE),
+        "error_then_turn_completed" => {
+            emit_error(fixtures::STREAM_ERROR_MESSAGE);
+            completed();
+        }
         "no_terminal" => {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }

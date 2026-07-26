@@ -1,6 +1,7 @@
 //! Values shared by the scripted executable and its process-level assertions.
 
 pub const THREAD_ID: &str = "thread-offline-1";
+pub const STREAM_ERROR_MESSAGE: &str = "quota exhausted for the active plan";
 pub const BUFFERED_ANSWER: &str = "buffered answer";
 pub const STREAMED_ANSWER: &str = "streamed answer";
 pub const REASONING_TEXT: &str = "considering";

@@ -439,6 +439,38 @@ async fn unknown_definitive_error_fails_closed() {
     assert_error_scenario("error_unrecognized", ProviderErrorKind::Unrecognized).await;
 }
 
+/// Defect regression (found by the gated compatibility smoke): the pinned
+/// CLI reports a failed exchange as a stream-level `error` event followed by
+/// its `turn.failed` lifecycle echo. The decoder accepts exactly that
+/// trailer and keeps the stream-level message, so the typed provider error
+/// is never downgraded to a post-terminal protocol violation.
+#[tokio::test]
+async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error() {
+    let result = execute_scenario(
+        "error_then_turn_failed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some(fixtures::STREAM_ERROR_MESSAGE)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// A trailer that contradicts the recorded stream-level error — here a
+/// `turn.completed` claiming success — still fails closed instead of being
+/// absorbed as lifecycle closure.
+#[tokio::test]
+async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
+    assert_error_scenario("error_then_turn_completed", ProviderErrorKind::Unrecognized).await;
+}
+
 #[tokio::test]
 async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
