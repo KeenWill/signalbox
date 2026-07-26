@@ -1181,7 +1181,128 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_verification_ref_requires_literal_closing_parenthesis(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
-            "Verified through PR #12 (`agent/example`; details follow).\n\n"
+            "Verified through PR #12 (`agent/example`; details follow.\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_bare_verification_parenthetical_still_parses(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_scoped_verification_parenthetical_parses(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`; "
+            "`production_connection_options` in src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_scoped_verification_tail_may_wrap_across_lines(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`; the refusal path\n"
+            "in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_scoped_verification_tail_may_not_cross_a_blank_line(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`; the refusal path\n\n"
+            "in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_scoped_verification_tail_may_not_cross_a_list_item(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "- Verified through PR #12 (`agent/example`; the refusal path\n"
+            "- in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_scoped_parenthetical_still_requires_a_backticked_branch(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (agent/example; the refusal path in "
+            "src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_scoped_parenthetical_branch_ref_is_still_validated(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/bad branch`; the refusal path "
+            "in src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_scope_tail_requires_its_leading_semicolon(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example` and src/tests.rs).\n\n"
             "## Provider bridge and `current_time`\n\n"
             "## Repeat\n",
             encoding="utf-8",

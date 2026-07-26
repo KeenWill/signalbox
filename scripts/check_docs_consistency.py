@@ -11,7 +11,9 @@ The check is deterministic and offline. It verifies:
 3. every H2 in ``docs/decisions.md`` is a valid dated entry and entry dates are
    non-increasing, and
 4. every subsystem page under ``docs/spec/`` has an offline verification
-   reference whose PR token uses ``PR #N (`branch-ref`)``.
+   reference whose PR token uses ``PR #N (`branch-ref`)``, optionally narrowed
+   to the surface that PR settled by a semicolon tail: ``PR #N (`branch-ref`;
+   <scope>)``. The scope tail is free-form prose and is not validated.
 
 External links, semantic freshness of verification references, and reverse
 discovery of every INV-tagged test are deliberately outside this check. Run
@@ -112,15 +114,24 @@ REFERENCE_DEFINITION = re.compile(
 LIST_ITEM = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
 FENCE_LIST_CONTAINER = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
 DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
+PARAGRAPH_BOUNDARY = r"\n[ \t]*\n"
+LIST_ITEM_BOUNDARY = r"\n[ \t]*(?:[-+*]|\d+[.)])[ \t]"
+# A verification parenthetical may narrow its claim to the surface the PR
+# actually settled, after a semicolon: ``PR #N (`branch-ref`; <scope>)``. The
+# branch ref stays mandatory and is validated exactly as before; the scope tail
+# is free-form prose and is deliberately unvalidated. It may wrap across lines
+# but may not leave its own block, so it stops at a blank line or a sibling
+# list item — and, being ``[^)]``, at the parenthetical's own closer.
+SCOPED_DETAIL_BOUNDARY = rf"{PARAGRAPH_BOUNDARY}|{LIST_ITEM_BOUNDARY}"
 PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
     r"`([^\s`]+)`"
+    rf"(?:;(?:(?!{SCOPED_DETAIL_BOUNDARY})[^)])*)?"
     r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
-LIST_ITEM_BOUNDARY = r"\n[ \t]*(?:[-+*]|\d+[.)])[ \t]"
 CLAUSE_BOUNDARY = (
-    r"\n[ \t]*\n"
+    rf"{PARAGRAPH_BOUNDARY}"
     rf"|{LIST_ITEM_BOUNDARY}"
     rf"|[.!?][ \t\r\n]+{INLINE_MARKUP_OPENERS}(?-i:[A-Z])"
     r"|;"
@@ -1567,8 +1578,9 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     line_number(text, candidate_start),
                     "spec-verification",
                     "verification reference must use "
-                    "`PR #N (`branch-ref`)` with a positive decimal PR "
-                    "number and a non-whitespace branch ref",
+                    "`PR #N (`branch-ref`)`, optionally with a `;` scope "
+                    "tail, and a positive decimal PR number with a "
+                    "non-whitespace branch ref",
                 )
             )
 
