@@ -381,9 +381,14 @@ rather than restated, so the adapter taxonomy and the operator vocabulary cannot
 drift apart. A provider-reported identity retained for diagnostics is
 credential-redacted by the adapter and length-bounded by the bridge before it
 can reach a log line. The bridge emits the cause code for each fail-closed
-defect, each non-completing classification, and each accepted alias concretion;
-the runtime crates themselves remain logging-free
-([runtime-substrate](runtime-substrate.md)).
+defect, each non-completing classification, each accepted alias concretion, and
+each trustworthy capability-preparation failure — the pre-send outcome the
+application commits as `KnownFailed`, whose closed
+`UnsupportedOperation`/`CredentialUnavailable`/`CredentialUnusable` vocabulary
+maps to tokens without its adapter-rendered detail text. A substitution
+additionally carries the bounded identity that actually served, so an operator
+can name the model the provider used. The runtime crates themselves remain
+logging-free ([runtime-substrate](runtime-substrate.md)).
 
 ## Terminal outcomes
 

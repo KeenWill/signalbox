@@ -23,10 +23,11 @@ use signalbox_domain::{
 };
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
-    CredentialReference, LossCause, MessagePart, ModelOperation, ModelRuntime, ModelSettings,
-    Observation, ObservationFact, ObservationSink, PreparationOutcome, ProviderErrorKind,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, ToolCallId,
-    ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
+    CredentialAccessFailure, CredentialReference, LossCause, MessagePart, ModelOperation,
+    ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationFailure,
+    PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName,
+    ToolResultRecord, UnsentCause,
 };
 
 /// The longest provider-reported model identity retained for operator
@@ -324,6 +325,14 @@ pub enum ModelCallCauseCode {
     SendIncompleteProvenUnacceptable,
     /// The exchange was lost after possible provider acceptance.
     BoundaryLoss(BoundaryLossCode),
+    /// Capability preparation reported that the adapter does not support the
+    /// requested operation.
+    UnsupportedOperation,
+    /// The pinned credential reference could not be resolved during
+    /// preparation.
+    CredentialUnavailable(CredentialAccessCode),
+    /// A resolved credential cannot authenticate the constructed request.
+    CredentialUnusable,
     /// The provider served a model from a different lineage than the
     /// configured target.
     ProviderTargetSubstituted,
@@ -364,6 +373,9 @@ impl ModelCallCauseCode {
             Self::ConnectFailed => "connect_failed",
             Self::SendIncompleteProvenUnacceptable => "send_incomplete_proven_unacceptable",
             Self::BoundaryLoss(code) => code.as_str(),
+            Self::UnsupportedOperation => "unsupported_operation",
+            Self::CredentialUnavailable(code) => code.as_str(),
+            Self::CredentialUnusable => "credential_unusable",
             Self::ProviderTargetSubstituted => "provider_target_substituted",
             Self::UnrepresentableToolMaterial => "unrepresentable_tool_material",
             Self::FinishContradictsContent => "finish_contradicts_content",
@@ -377,6 +389,55 @@ impl ModelCallCauseCode {
             Self::InvalidToolSchema => "invalid_tool_schema",
             Self::InvalidToolProposal => "invalid_tool_proposal",
         }
+    }
+}
+
+/// Why a pinned credential reference could not be resolved.
+///
+/// A projection of the runtime's `CredentialAccessFailure` down to a stable
+/// token. The reference itself is deliberately not carried: it is non-secret
+/// but names deployment configuration, and the failure class is what an
+/// operator acts on.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CredentialAccessCode {
+    /// No delivery artifact is mapped to the reference.
+    Unmapped,
+    /// The mapped artifact could not be reached.
+    Unavailable,
+    /// The artifact was present but could not be read as a value.
+    Unreadable,
+}
+
+impl CredentialAccessCode {
+    /// The stable operator-facing token for this access failure.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unmapped => "credential_unmapped",
+            Self::Unavailable => "credential_unavailable",
+            Self::Unreadable => "credential_unreadable",
+        }
+    }
+
+    const fn of(failure: CredentialAccessFailure) -> Self {
+        match failure {
+            CredentialAccessFailure::Unmapped => Self::Unmapped,
+            CredentialAccessFailure::Unavailable => Self::Unavailable,
+            CredentialAccessFailure::Unreadable => Self::Unreadable,
+        }
+    }
+}
+
+/// The sanitized cause of one trustworthy pre-send preparation failure.
+///
+/// The runtime's own closed `PreparationFailure` vocabulary maps here without
+/// its rendered detail strings, which are adapter- and provider-controlled.
+const fn preparation_failure_cause(failure: &PreparationFailure) -> ModelCallCauseCode {
+    match failure {
+        PreparationFailure::UnsupportedOperation { .. } => ModelCallCauseCode::UnsupportedOperation,
+        PreparationFailure::CredentialUnavailable { error } => {
+            ModelCallCauseCode::CredentialUnavailable(CredentialAccessCode::of(error.failure))
+        }
+        PreparationFailure::CredentialUnusable { .. } => ModelCallCauseCode::CredentialUnusable,
     }
 }
 
@@ -687,10 +748,11 @@ where
             }
             PreparationOutcome::Failed {
                 correlation: returned,
-                ..
+                failure,
             } => {
                 require_correlation(correlation, returned)?;
                 tracing::warn!(
+                    cause_code = preparation_failure_cause(&failure).as_str(),
                     model_call_id = %correlation.as_uuid(),
                     "model runtime reported a trustworthy capability-preparation failure"
                 );
@@ -1264,10 +1326,11 @@ mod tests {
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
-        CompletionFinish, ConversationMessage, ExchangeFacts, LossCause, NativeErrorFacts,
-        Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence, ProviderErrorEvidence,
-        ProviderErrorKind, ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+        CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
+        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+        PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
+        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
+        ToolCallProposal, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
@@ -2143,6 +2206,90 @@ mod tests {
             "provider_target_substituted"
         );
         assert_eq!(failure.served_target.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct PreparationRow {
+        failure: &'static str,
+        cause_code: &'static str,
+    }
+
+    /// Renders one cause row per trustworthy pre-send preparation failure, in
+    /// the given order.
+    fn preparation_rows(failures: Vec<(&'static str, PreparationFailure)>) -> Vec<PreparationRow> {
+        failures
+            .into_iter()
+            .map(|(failure_name, failure)| PreparationRow {
+                failure: failure_name,
+                cause_code: super::preparation_failure_cause(&failure).as_str(),
+            })
+            .collect()
+    }
+
+    /// INV-035: a trustworthy pre-send preparation failure — the outcome the
+    /// application commits as `KnownFailed` before any provider traffic —
+    /// carries the same stable, sanitized cause vocabulary as a terminal
+    /// classification, without its adapter-rendered detail text.
+    #[test]
+    fn inv035_preparation_failures_carry_stable_sanitized_cause_codes() {
+        let rows = preparation_rows(vec![
+            (
+                "unsupported_operation",
+                PreparationFailure::UnsupportedOperation {
+                    detail: String::from("safe typed fixture"),
+                },
+            ),
+            (
+                "credential_unavailable(unmapped)",
+                PreparationFailure::CredentialUnavailable {
+                    error: CredentialAccessError::new(
+                        signalbox_model_runtime::CredentialReference::new("scripted-test"),
+                        CredentialAccessFailure::Unmapped,
+                    ),
+                },
+            ),
+            (
+                "credential_unavailable(unavailable)",
+                PreparationFailure::CredentialUnavailable {
+                    error: CredentialAccessError::new(
+                        signalbox_model_runtime::CredentialReference::new("scripted-test"),
+                        CredentialAccessFailure::Unavailable,
+                    ),
+                },
+            ),
+            (
+                "credential_unavailable(unreadable)",
+                PreparationFailure::CredentialUnavailable {
+                    error: CredentialAccessError::new(
+                        signalbox_model_runtime::CredentialReference::new("scripted-test"),
+                        CredentialAccessFailure::Unreadable,
+                    ),
+                },
+            ),
+            (
+                "credential_unusable",
+                PreparationFailure::CredentialUnusable {
+                    detail: String::from("safe typed fixture"),
+                },
+            ),
+        ]);
+
+        expect![[r#"
+            ┌─────────────────────────────────────┬────────────────────────┐
+            │ failure                             │ cause_code             │
+            ├─────────────────────────────────────┼────────────────────────┤
+            │ unsupported_operation               │ unsupported_operation  │
+            │ credential_unavailable(unmapped)    │ credential_unmapped    │
+            │ credential_unavailable(unavailable) │ credential_unavailable │
+            │ credential_unavailable(unreadable)  │ credential_unreadable  │
+            │ credential_unusable                 │ credential_unusable    │
+            └─────────────────────────────────────┴────────────────────────┘
+        "#]]
+        .assert_eq(&table(rows));
     }
 
     /// INV-035: a hostile provider-reported identity is bounded before it can

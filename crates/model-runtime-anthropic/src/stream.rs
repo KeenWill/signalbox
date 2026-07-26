@@ -112,7 +112,7 @@ impl StreamDecoder {
             "ping" => StreamStep::Continue,
             "error" => self.apply_error(record),
             "message_start" => self.apply_message_start(record, correlation, sink),
-            "content_block_start" => self.apply_block_start(record),
+            "content_block_start" => self.apply_block_start(record, correlation, sink),
             "content_block_delta" => self.apply_block_delta(record, correlation, sink),
             "content_block_stop" => self.apply_block_stop(record, correlation, sink),
             "message_delta" => self.apply_message_delta(record, correlation, sink),
@@ -267,7 +267,12 @@ impl StreamDecoder {
         StreamStep::Continue
     }
 
-    fn apply_block_start(&mut self, record: &SseRecord) -> StreamStep {
+    fn apply_block_start<C: Clone>(
+        &mut self,
+        record: &SseRecord,
+        correlation: &C,
+        sink: &mut (dyn ObservationSink<C> + Send),
+    ) -> StreamStep {
         if !self.started {
             return self.violation("content_block_start before message_start");
         }
@@ -322,10 +327,21 @@ impl StreamDecoder {
                 signature,
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },
-            WireResponseBlock::Fallback { .. } => {
+            WireResponseBlock::Fallback { to_model } => {
                 // This adapter never enables server-side fallback, so a
                 // fallback marker mid-stream means the stream is no longer
-                // the resolved target's response.
+                // the resolved target's response. Report the continuing
+                // identity before terminating, so the caller's
+                // provider-target rule sees the same served-target evidence
+                // the buffered path preserves.
+                if let Some(model) = to_model {
+                    sink.observe(Observation {
+                        correlation: correlation.clone(),
+                        fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                            model,
+                        )),
+                    });
+                }
                 return self.violation(format!(
                     "server-side fallback block opened at index {}, but this operation never \
                      enabled provider fallback",
@@ -1206,6 +1222,45 @@ mod tests {
         };
         let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
         assert!(detail.contains(&expected));
+    }
+
+    /// The provider identities the stream reported, in observation order.
+    fn reported_models(observations: &[Observation<String>]) -> Vec<&str> {
+        observations
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::ProviderModelReported(reported) => Some(reported.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// S20: a streamed server-side fallback marker terminates the stream, and
+    /// the continuing identity still reaches the caller — the same served-target
+    /// evidence the buffered path preserves, so the provider-target rule can
+    /// classify the substitution rather than seeing generic ambiguity.
+    #[test]
+    fn s20_streamed_fallback_block_reports_the_substituting_model() {
+        let (terminal, observations) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":\
+              {\"type\":\"fallback\",\"from\":{\"model\":\"model-exact-1\"},\
+              \"to\":{\"model\":\"substitute-model-2\"}}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a streamed fallback marker must terminate the stream");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("an unrequested fallback block is a protocol violation");
+        };
+        assert!(detail.contains("server-side fallback block"));
+        assert_eq!(
+            reported_models(&observations),
+            vec!["model-exact-1", "substitute-model-2"],
+            "both the envelope identity and the substituting identity reach the caller"
+        );
     }
 
     #[test]
