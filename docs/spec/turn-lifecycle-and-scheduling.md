@@ -2,7 +2,9 @@
 
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
-the implementing stack through PR #230 (`agent/frontier-scaling`). Code homes:
+the implementing stack through PR #230 (`agent/frontier-scaling`); the
+parked-approval interrupt delivery outcome was verified through PR #254
+(`agent/fix-parked-approval-interrupt`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -376,7 +378,14 @@ delivery outcomes implemented here are:
   records `SafePointUnavailableWhileStopping`; equal interrupt replay returns
   the original applied result. A distinct later interrupt records
   `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
-  an input or replacing the existing proof.
+  an input or replacing the existing proof. An interrupt delivered while the
+  active turn is parked on a tool-approval wait records
+  `InterruptUnavailableWhileAwaitingApproval { active_turn }` without accepting
+  an input: the wait remains parked until its canonical decision command
+  resolves the approval obligation, and the interrupt is neither a denial nor a
+  bypass of the decision command
+  ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
+  deny-first caller protocol).
 
 ## Context frontier snapshots
 
