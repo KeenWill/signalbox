@@ -4,9 +4,11 @@ This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the
 parked-approval interrupt delivery outcome was verified through PR #254
-(`agent/fix-parked-approval-interrupt`), and model-identity turn-start
-boundaries were verified through PR #272 (`agent/mid-session-model`). Code
-homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+(`agent/fix-parked-approval-interrupt`), model-identity turn-start boundaries
+were verified through PR #272 (`agent/mid-session-model`), and the tool-round
+continuation reconstitution and terminal shapes were verified through PR #292
+(`agent/continuation-reconstitution`). Code homes:
+`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
