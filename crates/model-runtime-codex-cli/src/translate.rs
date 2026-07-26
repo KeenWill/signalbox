@@ -107,10 +107,11 @@ pub(crate) fn translate<C>(
          the JSON below. Return exactly the response envelope required by the supplied \
          output schema. `outcome` is `refused` only for a safety refusal. For ordinary \
          completion put response text in `text`. Propose caller-declared tools only in \
-         `tool_calls`, preserving their argument values as JSON objects. If \
-         `structured_output` is present, return exactly one tool call bearing its name \
-         and the contracted value as `arguments`. Honor `tool_choice` and the stated \
-         generation settings.\n\n{request_json}\n"
+         `tool_calls`; each `arguments` value is a string carrying exactly the tool's \
+         JSON argument object. If `structured_output` is present, return exactly one \
+         tool call bearing its name and the contracted value JSON-encoded in its \
+         `arguments` string. Honor `tool_choice` and the stated generation \
+         settings.\n\n{request_json}\n"
     )
     .into_bytes();
 

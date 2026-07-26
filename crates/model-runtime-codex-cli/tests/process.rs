@@ -26,6 +26,7 @@ mod fixtures;
 
 const CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 const RESOLVED_TARGET: &str = "gpt-offline-exact";
+const OFFLINE_HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 enum OperationShape {
@@ -226,6 +227,73 @@ async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
     );
 }
 
+/// Defect regression (found by the gated compatibility smoke): the envelope
+/// carries each tool call's argument object as JSON text inside a string,
+/// because strict structured output forbids a free-form object member. A
+/// string that does not hold JSON is unintelligible-response boundary loss,
+/// never completion material.
+#[tokio::test]
+async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
+    let result = execute_scenario(
+        "tool_call_bad_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments are not valid JSON")
+    );
+}
+
+/// The provider nesting bound applies to the argument text carried inside
+/// the envelope string, which the line-level and agent-message-level checks
+/// cannot see because string content does not nest the outer JSON.
+#[tokio::test]
+async fn over_deep_string_carried_tool_arguments_are_boundary_loss() {
+    let result = execute_scenario(
+        "tool_call_deep_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments: provider JSON exceeds")
+    );
+}
+
+/// Defect regression (found by the gated compatibility smoke): the live API
+/// rejected the adapter's original output schema as `invalid_json_schema`
+/// because its `arguments` member was a free-form object
+/// (`additionalProperties: true`). The fake CLI validates the output schema
+/// of every spawn with `fixtures::strict_schema_violation`; this pins that
+/// the validator still rejects the retired shape, so the offline corpus can
+/// never again accept a schema the live API refuses.
+#[test]
+fn the_strict_schema_validator_rejects_the_retired_free_form_arguments_object() {
+    let retired_arguments_member = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "arguments": {"type": "object", "additionalProperties": true}
+        },
+        "required": ["arguments"],
+        "additionalProperties": false
+    });
+
+    let violation = fixtures::strict_schema_violation(&retired_arguments_member)
+        .expect("strict validation must reject a free-form arguments object");
+
+    assert!(
+        violation.contains("'additionalProperties' is required to be supplied and to be false")
+    );
+    assert!(violation.contains("'arguments'"));
+}
+
 #[tokio::test]
 async fn structured_output_uses_the_shared_forced_tool_decode() {
     let result = execute_scenario(
@@ -280,7 +348,7 @@ async fn tool_choice_is_ignored_when_no_tools_or_contract_exist() {
     let result = execute_operation_with_timeout(
         operation,
         CancellationSignal::never(),
-        Duration::from_secs(5),
+        OFFLINE_HARNESS_TIMEOUT,
     )
     .await;
 
@@ -389,6 +457,38 @@ async fn provider_internal_error_is_typed() {
 #[tokio::test]
 async fn unknown_definitive_error_fails_closed() {
     assert_error_scenario("error_unrecognized", ProviderErrorKind::Unrecognized).await;
+}
+
+/// Defect regression (found by the gated compatibility smoke): the pinned
+/// CLI reports a failed exchange as a stream-level `error` event followed by
+/// its `turn.failed` lifecycle echo. The decoder accepts exactly that
+/// trailer and keeps the stream-level message, so the typed provider error
+/// is never downgraded to a post-terminal protocol violation.
+#[tokio::test]
+async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error() {
+    let result = execute_scenario(
+        "error_then_turn_failed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some(fixtures::STREAM_ERROR_MESSAGE)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// A trailer that contradicts the recorded stream-level error — here a
+/// `turn.completed` claiming success — still fails closed instead of being
+/// absorbed as lifecycle closure.
+#[tokio::test]
+async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
+    assert_error_scenario("error_then_turn_completed", ProviderErrorKind::Unrecognized).await;
 }
 
 #[tokio::test]
@@ -896,7 +996,7 @@ async fn execute_scenario(
         delivery,
         shape,
         cancellation,
-        Duration::from_secs(5),
+        OFFLINE_HARNESS_TIMEOUT,
     )
     .await
 }
@@ -951,7 +1051,7 @@ async fn execute_operation_in_directory(
 }
 
 fn runtime(working_directory: &Path, executable: impl Into<std::path::PathBuf>) -> CodexCliRuntime {
-    runtime_with_timeout(working_directory, executable, Duration::from_secs(5))
+    runtime_with_timeout(working_directory, executable, OFFLINE_HARNESS_TIMEOUT)
 }
 
 fn runtime_with_timeout(
@@ -1080,7 +1180,7 @@ fn assert_recorded_process_exited(_path: std::path::PathBuf) {}
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
     let watcher = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(OFFLINE_HARNESS_TIMEOUT, async {
             loop {
                 if tokio::fs::read_to_string(&path)
                     .await
