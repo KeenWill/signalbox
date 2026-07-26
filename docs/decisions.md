@@ -1,5 +1,15 @@
 # Decision log
 
+An append-only, dated record of recorded decisions, newest first. Each entry
+states context, the decision, rejected alternatives, and what it affects, in
+roughly ten to twenty lines. Foundation-weight changes — changing normative
+semantics in a `docs/spec/` page beyond recording implemented behavior, moving a
+boundary between domain, storage, wire, or framework representations, weakening
+an invariant, or introducing a technology that constrains several components —
+are proposed as a specification diff at the bottom of the implementing stack and
+recorded here (see `AGENTS.md`). Unresolved questions live in
+[open-questions.md](open-questions.md).
+
 ## 2026-07-25 — Keep runner credentials local and daemon policy authoritative
 
 **Context.** Sessions need to select machine-local credentials without sending
@@ -93,10 +103,10 @@ state daemon fallback or its selector. Per-call model-selected placement permits
 a call to widen the registry. Treating the stream as truth loses claims on
 reconnect.
 
-**Affects.** `ToolEffectClass`, `ToolAdmissibleLoci`, runner leases, INV-021,
-INV-025, INV-026, INV-043, S12, S16 and S31, the [tool-loop](spec/tool-loop.md)
-and [runner-protocol](spec/runner-protocol.md) specifications, and later store
-and wire stacks.
+**Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
+INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
+[tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
+specifications, and later store and wire stacks.
 
 ## 2026-07-25 — Give logical enrollments daemon-validated advertisements
 
@@ -135,16 +145,6 @@ boundaries.
 INV-001 and INV-042, S30, the
 [runner-protocol specification](spec/runner-protocol.md), and later
 configuration, authentication, persistence, and transport stacks.
-
-An append-only, dated record of recorded decisions, newest first. Each entry
-states context, the decision, rejected alternatives, and what it affects, in
-roughly ten to twenty lines. Foundation-weight changes — changing normative
-semantics in a `docs/spec/` page beyond recording implemented behavior, moving a
-boundary between domain, storage, wire, or framework representations, weakening
-an invariant, or introducing a technology that constrains several components —
-are proposed as a specification diff at the bottom of the implementing stack and
-recorded here (see `AGENTS.md`). Unresolved questions live in
-[open-questions.md](open-questions.md).
 
 ## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
 
