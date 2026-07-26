@@ -260,7 +260,7 @@ pub struct ProviderErrorEvidence {
 /// the kinds exist so the caller can apply finer policy — the credential
 /// boundary of docs/spec/runtime-substrate.md, rate-limit accounting —
 /// without string inspection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum ProviderErrorKind {
     /// The provider rejected the request's credential
     /// (docs/spec/configuration-and-credentials.md: always known failure,
