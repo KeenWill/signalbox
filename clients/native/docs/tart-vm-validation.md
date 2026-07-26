@@ -52,7 +52,6 @@ clients/native/scripts/tart/run-shard.sh ios-screenshots
 clients/native/scripts/tart/run-shard.sh ipados-screenshots
 clients/native/scripts/tart/run-shard.sh macos-screenshots
 clients/native/scripts/tart/run-shard.sh bazel
-clients/native/scripts/tart/run-shard.sh real-smoke
 ```
 
 Run the default matrix:
@@ -69,11 +68,8 @@ The default matrix runs:
 - `ipados-screenshots`
 - `privacy`
 
-Add the real server smoke shard with:
-
-```bash
-TART_INCLUDE_REAL_SMOKE=1 clients/native/scripts/tart/run-matrix.sh
-```
+The imported `real-smoke` shard name remains parseable for existing plans but
+stops at the phase-A gate described below.
 
 The `bazel` shard is inert in this repository: the snapshot import deliberately
 left the Bazel build files behind, so the shard's `scripts/build-bazel.sh` and
@@ -95,7 +91,7 @@ that is explicitly licensed and provisioned.
 For larger farms, run the same shard commands on multiple Apple Silicon hosts or
 put these scripts behind Orchard/Cirrus-style orchestration. The shard contract
 is deliberately plain shell so a remote runner only needs the repo, Tart, Xcode,
-and a reachable server URL.
+and the mounted worktree.
 
 ## Screenshots
 
