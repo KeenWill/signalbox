@@ -2472,6 +2472,43 @@ async fn inv040_inv041_schema_enforces_publication_confidence_threshold()
         )
         .await?;
 
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         DISABLE TRIGGER USER",
+    )
+    .execute(&pool)
+    .await?;
+    let missing_association = sqlx::query(
+        "INSERT INTO review_finding_event
+            (finding_id, event_ordinal, finding_run_id, target_id,
+             event_pass_id, event_pass_run_id, event_kind, reason,
+             referenced_finding_id, referenced_finding_status,
+             external_link_id, external_link_association_kind)
+         VALUES ($1, 2, $2, $3, $4, $5, 'posted',
+                 NULL, NULL, NULL, $6, NULL)",
+    )
+    .bind(finding_ref.finding().into_uuid())
+    .bind(finding_ref.run().run().into_uuid())
+    .bind(finding_ref.target().into_uuid())
+    .bind(publish_pass.pass().into_uuid())
+    .bind(publish_pass.run().run().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("linked finding events require their association discriminator");
+    sqlx::query(
+        "ALTER TABLE review_finding_event
+         ENABLE TRIGGER USER",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        missing_association
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("review_finding_event_shape")
+    );
+
     let missing_discriminator = sqlx::query(
         "UPDATE review_pass
             SET result_kind = 'external_link_attachment',
@@ -3044,6 +3081,37 @@ async fn inv041_reservation_insert_requires_pending_state() -> Result<(), Box<dy
             ReviewWorkflowInsertionError::ExternalLinkNotPending
         ))
     ));
+    let claimed_link = ReviewExternalLinkId::from_uuid(uuid(0x308));
+    let claimed_pass = pass_evidence(
+        fixture.pass,
+        ReviewPassKind::Publish,
+        ReviewPolicy::version_one(),
+        ReviewPassState::Blocked {
+            turn: TurnId::from_uuid(uuid(0x203)),
+            result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(
+                ReviewExternalLinkPublicationBlockedResult::new(
+                    claimed_link,
+                    text("provider acknowledgement requires reconciliation"),
+                ),
+            )),
+        },
+    );
+    let claimed = ReviewExternalLink::try_reserve(
+        claimed_link,
+        ReviewExternalLinkAssociation::Target(fixture.target),
+        key("example-code-host"),
+        ReviewExternalObjectKind::ReviewComment,
+        &fixture.target_snapshot,
+    )
+    .expect("reservation matches the target")
+    .block_publication(claimed_pass.clone(), run_evidence_for_pass(claimed_pass))
+    .expect("blocked publication claim belongs to the reservation");
+    assert!(matches!(
+        fixture.store.reserve_external_link(claimed).await,
+        Err(ReviewWorkflowStoreError::InvalidInsertion(
+            ReviewWorkflowInsertionError::ExternalLinkNotPending
+        ))
+    ));
     Ok(())
 }
 
@@ -3199,6 +3267,35 @@ async fn inv041_external_identity_requires_establishing_attachment() -> Result<(
     .await
     .expect_err("identity claims require an establishing attachment");
     assert_sqlstate(&unbacked, "23514");
+    Ok(())
+}
+
+/// INV-040 / INV-041: the canonical pass/finding and external-claim lookup
+/// paths remain indexed by their leading filter columns.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_inv041_review_lookup_indexes_are_pinned() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let external_link_index: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = 'public'
+            AND indexname = 'review_pass_external_link_result_index'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(external_link_index.contains("(result_external_link_id, pass_id)"));
+    assert!(external_link_index.contains("result_external_link_id IS NOT NULL"));
+
+    let producing_pass_index: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = 'public'
+            AND indexname = 'review_finding_producing_pass_index'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(producing_pass_index.contains("(producing_pass_id, target_id, run_id, finding_id)"));
     Ok(())
 }
 

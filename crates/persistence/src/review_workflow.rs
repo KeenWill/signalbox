@@ -959,12 +959,16 @@ impl ReviewWorkflowStore {
         &self,
         requested: ReviewExternalLink,
     ) -> Result<ReserveExternalLinkOutcome, ReviewWorkflowStoreError> {
-        if requested.attachment().is_some() || !requested.observations().is_empty() {
+        if requested.attachment().is_some()
+            || !requested.observations().is_empty()
+            || !requested.claims().is_empty()
+        {
             return Err(ReviewWorkflowStoreError::InvalidInsertion(
                 ReviewWorkflowInsertionError::ExternalLinkNotPending,
             ));
         }
         let association = encode_link_association(requested.association());
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "INSERT INTO review_external_link
                 (external_link_id, target_id, association_kind, run_id,
@@ -981,11 +985,13 @@ impl ReviewWorkflowStore {
         .bind(association.finding_pass.map(ReviewPassId::into_uuid))
         .bind(requested.provider().as_str())
         .bind(encode_external_object_kind(requested.object_kind()))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 1 {
+            commit_mutation(transaction).await?;
             return Ok(ReserveExternalLinkOutcome::Inserted(requested));
         }
+        transaction.commit().await?;
         let existing = self
             .load_external_link(requested.id())
             .await?

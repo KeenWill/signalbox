@@ -575,6 +575,9 @@ CREATE TABLE review_pass (
 
 CREATE INDEX review_pass_run_index
     ON review_pass (run_id, target_id, pass_id);
+CREATE INDEX review_pass_external_link_result_index
+    ON review_pass (result_external_link_id, pass_id)
+    WHERE result_external_link_id IS NOT NULL;
 ALTER TABLE review_run
     ADD CONSTRAINT review_run_state_pass_fk
     FOREIGN KEY (state_pass_id, run_id, target_id)
@@ -1111,6 +1114,13 @@ CREATE TABLE review_finding (
 
 CREATE INDEX review_finding_run_index
     ON review_finding (run_id, target_id, finding_id);
+CREATE INDEX review_finding_producing_pass_index
+    ON review_finding (
+        producing_pass_id,
+        target_id,
+        run_id,
+        finding_id
+    );
 
 ALTER TABLE review_finding
     ADD CONSTRAINT review_finding_complete_ancestry_key
@@ -1972,6 +1982,7 @@ CREATE TABLE review_finding_event (
                     )
                     OR (
                         external_link_id IS NOT NULL
+                        AND external_link_association_kind IS NOT NULL
                         AND external_link_association_kind = 'finding'
                     )
                 )
@@ -1991,6 +2002,7 @@ CREATE TABLE review_finding_event (
                 AND referenced_finding_id IS NULL
                 AND referenced_finding_status IS NULL
                 AND external_link_id IS NOT NULL
+                AND external_link_association_kind IS NOT NULL
                 AND external_link_association_kind = 'finding'
             )
         ),
