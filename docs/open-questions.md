@@ -337,6 +337,15 @@ questions below remain open.
   surfaced and owner decisions are collected across the terminal baseline and
   later client forms remains undesigned. (S10, S11, S24)
 
+## General-purpose artifacts
+
+Artifact identity, ownership, lifecycle, content addressing, and retention have
+no accepted aggregate boundary. The reference-not-copy posture review workflows
+take today is owned by [review-workflows](spec/review-workflows.md). A future
+foundation decision must define the artifact aggregate and its authority before
+a workflow can attach one. This blocks general-purpose workflow artifacts, not
+the implemented session and external-link evidence.
+
 ## Destination features (target model)
 
 These unresolved foundation requirements are authoritative here. The
@@ -348,6 +357,14 @@ and ordering.
 - **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
   cancellation for standing update subscriptions require a future foundation
   decision. Blocks the planned callback surface.
+- **Review-workflow orchestration.** The
+  [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
+  pass, finding, external-link, and store contracts. Exact application commands,
+  durable hold or atomic accepted-input admission and run/pass projection, pass
+  scheduling, code-host/model/workspace adapter seams, workflow-facing protocol,
+  prompts, automatic publication, repair, conflict escalation, and merge-based
+  stack propagation remain to be designed and implemented above that foundation.
+  Blocks only executable review workflows.
 - **Independent session-link relationship.** Links between sessions that
   delegation did not create require their own foundation decision. Blocks
   session linking and visibility authority. (S18, S19)

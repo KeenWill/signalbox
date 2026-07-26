@@ -10,6 +10,547 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Consume passes whose external observation is unchanged
+
+**Context.** Omitting both the observation row and pass result preserves compact
+state history, but leaves the succeeded import pass eligible for later result
+binding. After another pass changes the external state, replaying that old pass
+could turn its formerly unchanged report into a new durable transition.
+
+**Decision.** An unchanged report still appends no observation row. Its
+succeeded external-context-import pass instead binds one immutable
+`ExternalLinkNoChange` result naming the exact reservation and reported state.
+That result consumes the pass exactly once without treating the poll as
+meaning-bearing external history. This supersedes only the earlier
+[unchanged-observation decision's](#2026-07-25--do-not-record-unchanged-external-observations)
+choice to leave that pass result absent.
+
+**Rejected alternatives.** Leaving the result absent permits later reuse.
+Appending every unchanged report makes history grow with polling frequency.
+Rejecting an equal report loses successful orchestration evidence without
+consuming the pass.
+
+**Affects.** Review-pass results, external-link observation admission, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind every blocked publication to its reservation
+
+**Context.** Publication may use target-, run-, or finding-associated
+reservations. A finding-event result can authenticate only the last form, so a
+blocked write through either other association otherwise retains no durable
+connection between its pass and attempted reservation.
+
+**Decision.** Every blocked external-publication pass binds its exact pending
+reservation and nonempty reason. A finding-associated operation that also blocks
+the finding uses the reservation-bearing `FindingEvent` result. Other blocked
+publications use `ExternalLinkPublicationBlocked`, which admits every
+reservation association. Later reconciliation must attach that same reservation.
+
+**Rejected alternatives.** Restricting publication to finding associations
+removes target- and run-level publication already admitted by the external-link
+model. Leaving a blocked result absent cannot authenticate retry or
+reconciliation. Binding two results to one pass defeats result immutability.
+
+**Affects.** Review-pass result shapes, publication reconciliation, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind blocked publication to its attempted reservation
+
+**Context.** A blocked external-publication pass can follow an ambiguous write
+after reserving a link. A reason alone does not identify the attempted write
+when the finding has more than one pending reservation, so later reconciliation
+could attach and post through a different reservation.
+
+**Decision.** An external-publication `BlockedWithReason` event commits the
+exact pending reservation associated with its finding. A later reconciled
+`Posted` transition must attach and consume that reservation. A finding-repair
+block carries no reservation.
+
+**Rejected alternatives.** Inferring the reservation from the finding is
+ambiguous. Selecting any later attachment can attribute the external write to
+the wrong attempt. Requiring reservations for repair blocks invents external
+evidence where no publication occurred.
+
+**Affects.** Review finding-event payloads, pass results, publication
+reconciliation, the [review-workflows specification](spec/review-workflows.md),
+and the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Do not record unchanged external observations
+
+**Context.** Polling a long-lived external review object can repeatedly report
+the same state. Persisting each unchanged report makes complete aggregate loads
+grow with polling frequency rather than with meaning-bearing state changes.
+
+**Decision.** An external state equal to the latest recorded observation is a
+semantic no-op. It appends no observation and binds no pass result. A changed
+state appends the next contiguous ordinal and binds that exact observation.
+
+**Rejected alternatives.** A fixed lifetime count eventually rejects legitimate
+state changes. Paginated or snapshotted history adds a new loading contract not
+needed for the current state vocabulary. Retaining every poll preserves no
+additional domain fact.
+
+**Affects.** External-link observation admission and reconstitution, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Give each review pass one accepted input
+
+**Context.** A session accepted input executes through one canonical turn.
+Allowing several review passes to name that input lets each pass project a
+different workflow result from the same execution even though session evidence
+commits no such pass inventory.
+
+**Decision.** One accepted input is owned by at most one review pass.
+Persistence enforces the global identity claim in addition to checking that the
+input belongs to the pass session. Pass admission additionally requires the
+input's canonical scheduling projection to classify it as the origin of its own
+queued turn. Pending or consumed steering is not pass input; a next-safe-point
+input becomes eligible only after canonical reclassification creates its
+successor origin turn. Executable admission coordination remains owned by the
+review-workflow open question.
+
+**Rejected alternatives.** Treating one turn as implicit evidence for several
+passes attributes results the session aggregate never recorded. Adding a
+pass-identity set to session execution moves the review boundary into the
+session model without an orchestration design. Accepting a pending steering
+input admits a pass that has no canonical turn and may instead be consumed by an
+unrelated active turn.
+
+**Affects.** Review-pass construction and persistence, exact turn evidence, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind review effects to exact pass results
+
+**Context.** A compatible terminal pass does not prove which findings, finding
+event, attachment, or observation it produced. A finding-event discriminator
+alone also omits reasons and referenced identities that change the event's
+meaning. Duplicate and superseded references admit a later reverse edge unless
+classification authenticates the referenced finding's state.
+
+**Decision.** A terminal pass may bind one absent typed result exactly once in
+the same transaction that admits its effect; a bound result is immutable. A
+read-only result is a canonical identity-ordered inventory of at most 32 exact
+finding references, whose immutable canonical rows supply their content. Event,
+attachment, and observation results commit every meaning-bearing identity,
+ordinal, state, or reason. Because a posted event's pass also produces its
+external attachment, the attachment result optionally commits that complete
+posted event and both records are admitted atomically; a separate finding-event
+result cannot claim the same pass. Duplicate and superseded events freeze the
+referenced finding's canonically authenticated `Open` or `Accepted` status.
+Persistence locks both finding roots in identity order before appending that
+durable admission fact; terminal classification prevents a later reverse edge.
+
+**Rejected alternatives.** Pass kind and outcome alone do not identify an
+effect. Copying finding content into the result creates a second content
+authority. An unbounded finding inventory has no defensive admission budget.
+Splitting one posting pass across independently bindable attachment and event
+results defeats one-result immutability. Detecting reference cycles only while
+loading allows invalid history to commit.
+
+**Affects.** Pass outcomes, finding and external-effect admission,
+reconstitution, the [review-workflows specification](spec/review-workflows.md),
+and the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Reassociate canonical external objects across target snapshots
+
+**Context.** A moving change request creates a new immutable review target when
+its head changes. Provider-wide attachment uniqueness prevents that new target
+from importing an existing review, thread, or comment even though the opaque
+object identity remains canonical.
+
+**Decision.** Adapters continue to construct one canonical provider-wide object
+key. Attachment uniqueness is scoped to the exact target snapshot. The first
+attachment establishes that object's logical target identity. Another snapshot
+may attach it only when both snapshots are change requests with the same
+canonical provider, repository, and positive change-request number; their frozen
+revisions may differ. Each snapshot uses its own reservation and canonically
+succeeded publication or import pass. One target cannot attach the object
+through two reservations.
+
+**Rejected alternatives.** Global attachment uniqueness strands external state
+on an old snapshot. Unrestricted per-target uniqueness lets unrelated change
+requests or commits claim one object. Requiring target ancestry confuses review
+stack topology with refresh identity. Reusing the old reservation crosses
+immutable target snapshots. Making the identifier target-relative creates
+multiple identities for one provider object.
+
+**Affects.** External-link attachment persistence, refreshed-target imports, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice. This refines
+[the earlier identity decision](#2026-07-25--canonicalize-external-review-object-identities-provider-wide);
+provider-wide key canonicalization remains unchanged.
+
+## 2026-07-25 — Consume posting attachment evidence once
+
+**Context.** A finding can become blocked after it was posted and later return
+to `Posted`. Reusing the first posting's unchanged attachment would record no
+new reconciliation evidence and could replay that transition indefinitely.
+
+**Decision.** Each posted event consumes one attached external link for that
+finding. A later posted event must name another attachment not consumed by any
+earlier posted event in the finding's ordered history. The event ordinal proves
+that the new reconciliation record follows the blocking event; attachments
+remain immutable and need no adapter-defined timestamps.
+
+**Rejected alternatives.** Reusing an earlier attachment proves only the first
+publication. Comparing provider timestamps would make domain validity depend on
+host-specific clocks and timestamp semantics.
+
+**Affects.** Finding-event admission and reconstitution, external-link
+validation, the [review-workflows specification](spec/review-workflows.md), and
+the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Defer executable review-pass admission coordination
+
+**Context.** The existing session scheduler may activate an accepted input
+independently. A queued review pass records that input but neither holds it nor
+atomically participates in the session command that admitted it, so aggregate
+construction alone cannot guarantee that run/pass projection precedes execution.
+
+**Decision.** This foundation does not schedule or authorize executable review
+work. The remaining design is owned only by the
+[review-workflow orchestration question](open-questions.md#destination-features-target-model).
+
+**Rejected alternatives.** Claiming the current aggregates prevent execution
+would describe behavior they do not implement. Moving session scheduling into
+the review domain would collapse the evidence and coordination boundaries.
+
+**Affects.** Review-pass admission, the
+[review-workflows specification](spec/review-workflows.md), and the
+[review-workflow orchestration question](open-questions.md#destination-features-target-model).
+
+## 2026-07-25 — Limit posted findings to external review content
+
+**Context.** An attached repository object can prove correlation without proving
+that one finding's content was published. Treating every external object kind as
+posting evidence would let unrelated objects derive `Posted`.
+
+**Decision.** A posted finding must use one of the external review-content
+object kinds owned by the
+[finding-machine specification](spec/review-workflows.md#finding-machine). Other
+external-link kinds remain valid correlations but cannot prove posting.
+
+**Rejected alternatives.** Accepting every attached object confuses repository
+identity with published review content. Restricting posting to only one review
+form excludes other publication forms in the specification's closed vocabulary.
+
+**Affects.** Finding-event admission and reconstitution, external-link
+validation, the [review-workflows specification](spec/review-workflows.md), and
+the `2026072604xx` persistence slice.
+
+## 2026-07-25 — Treat review-pass state as the operation outcome
+
+**Context.** A completed session turn proves execution reached a terminal
+frontier, but review output can still be malformed and a workflow operation can
+receive a definitive rejection. Equating turn completion with workflow success
+would authenticate failed work as successful evidence.
+
+**Decision.** The pass terminal state is the durable operation outcome, while
+canonical turn evidence authenticates its execution boundary. `Succeeded`
+requires a completed turn. `Failed` admits a completed, failed, or refused turn;
+`Blocked` remains reserved for reconciliation-required execution.
+
+**Rejected alternatives.** Mapping every completed turn to success loses
+operation validation. Copying parsed output or adapter errors into the pass
+aggregate creates competing content authorities. Adding another outcome record
+duplicates the existing pass state without adding evidence.
+
+**Affects.** Review-pass validation and persistence, effect authentication, and
+the [review-workflows specification](spec/review-workflows.md).
+
+## 2026-07-25 — Authenticate review stack parents by exact revisions
+
+**Context.** Same-provider and same-repository scope prevents cross-repository
+edges but still admits an unrelated target from the repository as an immediate
+parent. The child already freezes its exact comparison revision.
+
+**Decision.** A parented target requires an exact child base revision, and the
+canonical parent target's head revision must equal that base. Construction,
+reconstitution, and persistence validate identity, scope, and revision
+continuity from the canonical parent snapshot. Reconstitution validates the
+complete canonical parent chain and rejects any repeated target identity, so
+parentage always terminates at a root.
+
+**Rejected alternatives.** Scope-only validation admits false stack topology.
+Copying unverified parent scope or revision strings into a detached reference
+does not authenticate the named target. Resolving a moving host branch while
+loading would make old topology time-dependent. Checking only the immediate edge
+admits corrupt cyclic ancestry whose traversal never reaches a stack root.
+
+**Affects.** `ReviewTarget`, stack propagation prerequisites, target persistence
+and reconstitution, and the
+[review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy).
+
+## 2026-07-25 — Bind finding event passes to one frozen policy
+
+**Context.** A run admits one pass of the matching workflow kind, so judgment
+and deduplication for one finding use separate run identities. Merely storing a
+policy on each run permits those event-producing runs to select different policy
+versions, contradicting the recorded requirement that both operations consume
+one frozen policy.
+
+**Decision.** Canonical pass evidence carries the complete policy of its run.
+Every finding event pass must carry the exact policy frozen by the finding's
+producing run. Domain construction, reconstitution, and persistence reject a
+different tuple while retaining separate one-pass run identities.
+
+**Rejected alternatives.** Allowing event runs to select independent policies
+makes one finding's classifications irreproducible. Copying policy into every
+event creates a competing authority. Reopening the run aggregate to multiple
+pass kinds weakens the one-pass projection without an orchestration need.
+
+**Affects.** Review pass evidence, finding-event admission and reconstitution,
+the [review-workflows specification](spec/review-workflows.md), and the
+`2026072602xx` persistence slice.
+
+## 2026-07-25 — Authenticate review effects with canonical pass outcomes
+
+**Context.** A same-target pass identity and compatible kind do not prove that
+the pass completed the claimed operation. External publication also needs to
+attribute a posted event to the pass that produced the attached object, not
+merely another publication pass for the same target.
+
+**Decision.** Finding production, finding events, external attachments, and
+external observations carry canonical pass evidence and admit only the
+successful or blocked outcomes defined by the
+[review-workflows specification](spec/review-workflows.md). A posted event names
+the attachment's exact producing pass. Reconciled publication may advance a
+publication-blocked finding to posted.
+
+**Rejected alternatives.** Kind-only checks admit failed work as evidence.
+Target-only attachment checks misattribute external effects. Leaving a
+publication-blocked finding terminal contradicts a later authoritative
+attachment.
+
+**Affects.** Review finding and external-link domain values, complete
+reconstitution, and the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Gate review passes through their exact run projection
+
+**Context.** Independently advancing a pass can leave durable work that its run
+never selected. Requiring a running pass to observe only an active session turn,
+however, treats the normal interval after the turn commits its terminal outcome
+as corruption.
+
+**Decision.** A run admits at most one pass, whose kind matches the run's
+workflow. Review run/pass lifecycle changes commit together, while a running
+pass may lag its canonical turn's terminal outcome until reconciliation closes
+the pass. Stack parents are distinct targets in the same provider and repository
+topology.
+
+**Rejected alternatives.** Unrestricted child transitions admit unprojected
+work. Cross-context atomicity with session execution would move the session
+boundary. Rejecting monotonic turn lag makes an ordinary crash window
+unloadable.
+
+**Affects.** Review target topology, run/pass construction and transitions,
+relational constraints, and the
+[review-workflows specification](spec/review-workflows.md).
+
+## 2026-07-25 — Bind review claims to exact typed evidence
+
+**Context.** Same-target ancestry alone cannot prove that a finding event came
+from a pass capable of producing that event. A later session frontier can
+contain an earlier pass turn's terminal evidence without being that turn's
+terminal frontier. Leaving external object kind open also permits adapters and
+storage to choose incompatible discriminators.
+
+**Decision.** Finding event kinds admit only their recorded judgment,
+deduplication, external-publication or external-context-import, or repair pass
+kinds. A successful pass carries its turn's exact canonical terminal frontier.
+External review objects use the closed kind vocabulary change request, commit,
+review, review thread, inline review comment, and general change-request
+comment.
+
+**Rejected alternatives.** Target-only pass checks authenticate ancestry but not
+responsibility. A containing frontier includes unrelated later transcript
+evidence. An open object-kind string requires another bounded extension contract
+and cannot guarantee adapter agreement.
+
+**Affects.** The [review-workflows specification](spec/review-workflows.md),
+review-workflow domain reconstitution, and the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Bind review children to their exact aggregate owners
+
+**Context.** A finding identity paired only with its run cannot authenticate the
+pass that produced it. Likewise, an external-link attachment or observation that
+carries only a same-target pass can be cross-wired to another reservation for
+that target during construction or reconstitution.
+
+**Decision.** `ReviewFindingRef` carries the exact producing `ReviewPassRef`.
+Every external-link attachment and observation carries its owning
+`ReviewExternalLinkId`. Domain transitions and complete-projection
+reconstitution reject a different owner even when the run or target matches.
+
+**Rejected alternatives.** Recovering producing-pass ancestry only from storage
+makes the public domain reference incomplete. Trusting the aggregate through
+which a child value happens to be applied leaves detached values transferable
+between same-target aggregates. Target-only checks authenticate scope, not the
+claimed owner.
+
+**Affects.** The [review-workflows specification](spec/review-workflows.md),
+review-workflow domain references and transitions, and the `2026072602xx`
+persistence slice.
+
+## 2026-07-25 — Freeze comparison revisions for diff-relative review
+
+**Context.** A change-request number and head revision do not identify one
+reproducible diff when the host's base advances. Likewise, a finding's old/new
+diff side has no stable meaning unless its target records the comparison
+revision.
+
+**Decision.** Every change-request target snapshot carries an exact base
+revision. A commit target may omit its base only when its findings are
+file-relative; any finding with a diff side requires the target's exact base.
+The target's head and base remain opaque revision keys supplied by the code-host
+adapter.
+
+**Rejected alternatives.** Resolving the current host base while loading old
+workflow state makes findings time-dependent. Requiring a base for every
+standalone commit rejects useful file-relative review. Persisting a derived
+patch duplicates repository content and introduces another authority.
+
+**Affects.** `ReviewTarget`, diff-relative `ReviewFinding` construction and
+reconstitution, the
+[review-workflows specification](spec/review-workflows.md#targets-and-frozen-policy),
+and the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Correlate review lifecycle projections with canonical evidence
+
+**Context.** A review run, pass, and finding-event history each project evidence
+owned by another review or session aggregate. Checking only typed ancestry would
+still permit a terminal run to name a pass with a different outcome, a pass to
+name a turn with a different lifecycle outcome, or one finding's event to be
+replayed into another same-target finding.
+
+**Decision.** Reconstitution authenticates every projected lifecycle state
+against the canonical referenced aggregate. A run's active or concluding pass
+has the corresponding pass outcome; a pass's active or concluding turn has the
+corresponding session-turn outcome; and every finding event carries and
+validates its owning finding reference. The relational adapter loads those
+canonical facts rather than inferring them from workflow projections.
+
+**Rejected alternatives.** Ancestry-only checks admit contradictory outcomes.
+Database foreign keys alone cannot compare closed lifecycle variants across
+aggregate projections. Inferring another aggregate's outcome from a workflow row
+turns copied evidence into a competing authority.
+
+**Affects.** The
+[review-workflow scenario](scenarios.md#s29--complete-a-review-workflow-pass),
+the [review-workflows specification](spec/review-workflows.md), domain
+reconstitution, and the `2026072602xx` persistence slice.
+
+## 2026-07-25 — Canonicalize external review object identities provider-wide
+
+**Context.** Code hosts do not share one identifier scope. Some external object
+identifiers are provider-wide, while others are meaningful only within a
+repository. Storing an unqualified repository-scoped value under a provider-wide
+uniqueness constraint would conflate unrelated objects.
+
+**Decision.** The code-host adapter supplies each external review object as one
+opaque, canonical provider-wide key. When the host's native identifier is
+repository-scoped, the adapter qualifies it with the canonical repository key
+before constructing the domain value. A reservation's provider equals the
+canonical provider of its associated target. Persistence admits the resulting
+provider, object-kind, and object-key tuple at most once per exact target
+snapshot.
+
+**Rejected alternatives.** Global attachment uniqueness strands an object on an
+older target snapshot. Teaching the domain every host's identifier grammar
+couples it to adapter details. Persisting both raw and qualified forms creates
+competing object identities. Trusting a caller-supplied provider independently
+of the target admits cross-provider posting evidence.
+
+**Affects.** External-link adapters, `ReviewExternalObjectKey`, attachment
+persistence, and the
+[review-workflows specification](spec/review-workflows.md#external-links-and-posting-reservations).
+
+## 2026-07-25 — Put review workflows above evidence-bearing sessions
+
+**Context.** Standing review workflows need durable target, run, pass, finding,
+and external-link state. An earlier unmerged prototype of the owner's proved the
+basic aggregate vocabulary, but optional session links, freely mutable status
+rows, copied execution artifacts, and direct external posting left workflow
+progress weaker than Signalbox's evidence and recovery contracts.
+
+**Decision.** Add a bounded context above sessions. Targets freeze exact
+revisions; runs freeze a complete versioned confidence policy; every pass binds
+one exact session and accepted input; finding status is derived from a typed
+append-only event history; and external publication reserves a durable link
+identity before the API call and attaches the external identity afterward.
+Composite ownership references and domain-owned complete-projection
+reconstitution reject cross-wired history.
+
+**Rejected alternatives.** Embedding workflow state in `Session` confuses
+execution with coordination. Optional session ids permit unsupported workflow
+claims. Mutable finding status loses the evidence for judgment, deduplication,
+posting, and repair. Treating an API response as the first durable posting fact
+reopens duplicate effects after a lost acknowledgement. Copying transcripts or
+general artifacts into workflow rows creates competing content authorities.
+
+**Affects.** The new [review-workflows specification](spec/review-workflows.md),
+review-workflow domain aggregates, the `2026072602xx` persistence slice, its
+review-workflow invariants, and the later application/protocol stack.
+
+## 2026-07-25 — Store review confidence as versioned basis-point policy
+
+**Context.** Judgment and unattended publication need reproducible confidence
+gates. Binary-local floating-point defaults would neither reconstruct the policy
+used by an old run nor provide one exact relational representation.
+
+**Decision.** Each run stores a `ReviewPolicy` with an ordinal version and
+integer basis-point thresholds from zero through 10,000. Version one fixes
+exactly 7,000 basis points for judgment and exactly 8,000 for publication; the
+publication threshold may not be lower than the judgment threshold. Version one
+is the only supported version; construction and reconstitution reject every
+other ordinal until a later recorded decision adds its exact tuple. Dedupe and
+judge passes consume the same frozen run policy. An `Accepted` event requires
+the finding's confidence to meet the judgment threshold; a `Posted` event
+requires it to meet the publication threshold. This foundation defines no
+threshold override.
+
+**Rejected alternatives.** Process-wide defaults make old decisions depend on
+current configuration. Binary floating point admits storage/JSON comparison
+drift. A per-finding threshold copies policy and permits one run to judge its
+findings under inconsistent gates. Recording thresholds without enforcing them
+turns policy into unauthenticated metadata. A hidden override makes
+reconstitution depend on evidence the aggregate does not carry. Hard-coding
+policy without storing its version prevents intentional later evolution.
+Admitting unknown versions lets binaries assign different semantics to one
+persisted ordinal.
+
+**Affects.** `ReviewPolicy`, `ReviewConfidence`, run persistence, the
+[review-workflows specification](spec/review-workflows.md), and later judgment,
+deduplication, and publication orchestration.
+
+## 2026-07-25 — Bound exact review-workflow text by UTF-8 bytes
+
+**Context.** Review targets and external links retain opaque code-host keys,
+while findings retain exact generated narrative. Leaving either family unbounded
+would admit disproportionate in-memory and relational values; counting
+characters would not give the domain and PostgreSQL one shared storage measure.
+
+**Decision.** Review-workflow key-like values are nonempty, exclude U+0000, and
+admit at most 1,024 UTF-8 bytes. This family includes provider, repository,
+revision, file-path, category, and external-object keys. Narrative titles,
+bodies, reasons, and recommended fixes use the same exact-content rules with a
+65,536-byte maximum. Both limits are provisional admission budgets enforced by
+domain construction and relational checks.
+
+**Rejected alternatives.** Unbounded strings provide no defensive admission
+budget. Character-count limits diverge from byte-oriented storage checks.
+Different provisional limits for every field add policy surface before usage
+evidence can justify it.
+
+**Affects.** Review-workflow value types, target and finding construction,
+external-link evidence, the
+[review-workflows specification](spec/review-workflows.md), and relational
+checks in the `2026072602xx` persistence slice.
+
 ## 2026-07-25 — Expose one-file conversation import to the owner
 
 **Context.** Conversation conversion and idempotent Postgres ingestion were
