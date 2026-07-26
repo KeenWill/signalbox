@@ -468,7 +468,8 @@ async fn execute_process<C: Clone + Send + Sync>(
         return pre_exchange_transport_loss("spawned Codex process has no stderr");
     };
     let stderr_limit = prepared.stderr_limit;
-    let stderr_task = tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
+    let mut stderr_task =
+        tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
     let mut decoder = EventDecoder::new(
         prepared.correlation,
         prepared.delivery,
@@ -501,12 +502,12 @@ async fn execute_process<C: Clone + Send + Sync>(
                 remaining_interrupt_grace(prepared.interrupt_grace, deadline),
             )
             .await;
-            abort_stderr_task(stderr_task).await;
+            abort_stderr_task(&mut stderr_task).await;
             return pre_exchange_boundary_loss(LossCause::CancellationRequested);
         }
         InputStep::TimedOut => {
             force_kill(&mut child).await;
-            abort_stderr_task(stderr_task).await;
+            abort_stderr_task(&mut stderr_task).await;
             return pre_exchange_boundary_loss(LossCause::TimedOut(TransportFacts::new(
                 "Codex CLI process exceeded its exchange timeout",
             )));
@@ -515,12 +516,14 @@ async fn execute_process<C: Clone + Send + Sync>(
     drop(stdin);
 
     let mut stdout = BufReader::new(stdout);
+    let mut reaped_status = None;
+    let mut deadline_stderr = None;
     loop {
         let terminal_observed = decoder.terminal_observed();
         let next = tokio::select! {
             biased;
             result = read_bounded_line(&mut stdout, prepared.event_limit) => ProcessStep::Line(result),
-            () = &mut *cancellation, if !terminal_observed => ProcessStep::Cancelled,
+            () = &mut *cancellation => ProcessStep::Cancelled,
             () = tokio::time::sleep_until(deadline) => ProcessStep::TimedOut,
         };
         match next {
@@ -528,7 +531,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                 if let Err(error) = decoder.push(&line, &mut redacting_sink) {
                     let detail = format!("undecodable Codex event: {}", error.into_detail());
                     force_kill(&mut child).await;
-                    abort_stderr_task(stderr_task).await;
+                    abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
                     return decoder.provider_error(&detail);
                 }
@@ -541,7 +544,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                         remaining_interrupt_grace(prepared.interrupt_grace, deadline),
                     )
                     .await;
-                    abort_stderr_task(stderr_task).await;
+                    abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
                     return decoder.boundary_loss(LossCause::CancellationRequested);
                 }
@@ -550,7 +553,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                     && tokio::time::Instant::now() >= deadline
                 {
                     force_kill(&mut child).await;
-                    abort_stderr_task(stderr_task).await;
+                    abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
                     return decoder.boundary_loss(LossCause::TimedOut(TransportFacts::new(
                         "Codex CLI process exceeded its exchange timeout",
@@ -560,7 +563,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             ProcessStep::Line(Ok(None)) => break,
             ProcessStep::Line(Err(error)) => {
                 force_kill(&mut child).await;
-                abort_stderr_task(stderr_task).await;
+                abort_stderr_task(&mut stderr_task).await;
                 redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::StreamProtocolViolation {
                     detail: error.to_string(),
@@ -572,25 +575,63 @@ async fn execute_process<C: Clone + Send + Sync>(
                     remaining_interrupt_grace(prepared.interrupt_grace, deadline),
                 )
                 .await;
-                abort_stderr_task(stderr_task).await;
+                abort_stderr_task(&mut stderr_task).await;
+                // A cancellation that arrives after the terminal marker
+                // drives cleanup but cannot replace the definitive evidence,
+                // exactly as on the stderr wait below.
+                if terminal_observed {
+                    let evidence = if let Some(error) = input_error {
+                        decoder.boundary_loss_unless_provider_failure(
+                            incomplete_upload_cause(&error),
+                            &redacting_sink,
+                        )
+                    } else {
+                        decoder.finish(&mut redacting_sink)
+                    };
+                    redacting_sink.finish();
+                    return evidence;
+                }
                 redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
-                force_kill(&mut child).await;
-                abort_stderr_task(stderr_task).await;
-                redacting_sink.finish();
-                return decoder.boundary_loss(LossCause::TimedOut(TransportFacts::new(
-                    "Codex CLI process exceeded its exchange timeout",
-                )));
+                // An inherited stdout handle can outlive a leader that
+                // already exited on its own; that exit stays definitive —
+                // an observed terminal marker or the exit status — and only
+                // a leader that cleanup itself had to kill becomes typed
+                // timeout loss.
+                let process_group_id = child.id();
+                let exited_before_cleanup = leader_exited_without_reaping(process_group_id);
+                kill_process_group(process_group_id);
+                match child.try_wait() {
+                    Ok(Some(status))
+                        if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
+                    {
+                        child.disarm();
+                        abort_stderr_task(&mut stderr_task).await;
+                        reaped_status = Some(Ok(status));
+                        deadline_stderr = Some(
+                            "Codex stderr was unavailable at the process-cleanup deadline"
+                                .to_string(),
+                        );
+                        break;
+                    }
+                    Ok(Some(_)) | Ok(None) | Err(_) => {
+                        force_kill(&mut child).await;
+                        abort_stderr_task(&mut stderr_task).await;
+                        redacting_sink.finish();
+                        return decoder.boundary_loss(timeout_cause());
+                    }
+                }
             }
         }
     }
 
-    let mut stderr_task = stderr_task;
     let terminal_observed = decoder.terminal_observed();
-    let mut reaped_status = None;
-    let stderr = tokio::select! {
+    let stderr = if let Some(stderr) = deadline_stderr {
+        stderr
+    } else {
+        tokio::select! {
         biased;
         result = &mut stderr_task => stderr_result(result),
         () = &mut *cancellation => {
@@ -600,13 +641,13 @@ async fn execute_process<C: Clone + Send + Sync>(
                     remaining_interrupt_grace(prepared.interrupt_grace, deadline),
                 )
                 .await;
-                abort_stderr_task(stderr_task).await;
+                abort_stderr_task(&mut stderr_task).await;
                 redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
             interrupt_then_kill(&mut child, cleanup_grace).await;
-            abort_stderr_task(stderr_task).await;
+            abort_stderr_task(&mut stderr_task).await;
             // Cancellation does not launder an incomplete request upload: a
             // nominal completion still demotes to boundary loss exactly as on
             // the normal exit path below, because the adapter cannot prove the
@@ -624,25 +665,33 @@ async fn execute_process<C: Clone + Send + Sync>(
         },
         () = tokio::time::sleep_until(deadline) => {
             let process_group_id = child.id();
+            // A leader that already exited on its own — even by a kill
+            // signal, as under an out-of-memory kill — is observed on the
+            // still-waitable identity before cleanup signals the group, so a
+            // pre-existing signal exit stays distinguishable from cleanup.
+            let exited_before_cleanup = leader_exited_without_reaping(process_group_id);
             // `try_wait` reaps an exited group leader. Signal while that
             // leader still pins the process-group identity, so a disappearing
             // last descendant cannot make the numeric id reusable first.
             kill_process_group(process_group_id);
             match child.try_wait() {
-                Ok(Some(status)) if !was_killed_by_group_cleanup(&status) => {
+                Ok(Some(status))
+                    if exited_before_cleanup || !was_killed_by_group_cleanup(&status) =>
+                {
                     child.disarm();
-                    abort_stderr_task(stderr_task).await;
+                    abort_stderr_task(&mut stderr_task).await;
                     reaped_status = Some(Ok(status));
                     "Codex stderr was unavailable at the process-cleanup deadline".to_string()
                 }
                 Ok(Some(_)) | Ok(None) | Err(_) => {
                     force_kill(&mut child).await;
-                    abort_stderr_task(stderr_task).await;
+                    abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
                     return decoder.boundary_loss(timeout_cause());
                 }
             }
         },
+        }
     };
     let status = match reaped_status {
         Some(status) => status,
@@ -861,6 +910,52 @@ fn was_killed_by_group_cleanup(status: &std::process::ExitStatus) -> bool {
     }
 }
 
+/// Reports whether the group leader has already exited, without reaping it
+/// and without blocking: a `NOHANG`/`NOWAIT` probe of the still-waitable
+/// identity. `false` on probe failure or on platforms without the probe, so
+/// classification falls back to the conservative cleanup-caused reading.
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+))]
+fn leader_exited_without_reaping(process_group_id: Option<u32>) -> bool {
+    let Some(raw_pid) = process_group_id else {
+        return false;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32) else {
+        return false;
+    };
+    rustix::process::waitid(
+        rustix::process::WaitId::Pid(pid),
+        rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::NOWAIT
+            | rustix::process::WaitIdOptions::NOHANG,
+    )
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+)))]
+fn leader_exited_without_reaping(_process_group_id: Option<u32>) -> bool {
+    false
+}
+
 #[cfg(all(
     unix,
     not(any(
@@ -909,7 +1004,7 @@ async fn wait_for_exit_without_reaping(_process_group_id: Option<u32>) -> std::i
     ))
 }
 
-async fn abort_stderr_task(stderr_task: tokio::task::JoinHandle<std::io::Result<String>>) {
+async fn abort_stderr_task(stderr_task: &mut tokio::task::JoinHandle<std::io::Result<String>>) {
     stderr_task.abort();
     let _ = stderr_task.await;
 }

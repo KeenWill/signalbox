@@ -495,14 +495,20 @@ cannot prove the full authorized frontier reached the CLI. Ready stdout is
 polled before simultaneous control signals, then the decoder drains only the
 current bounded reader batch before synchronously rechecking control, so
 continuously ready stdout cannot starve it. Once a provider terminal marker is
-observed, a later cancellation cannot replace that definitive evidence, but the
+observed, a later cancellation cannot replace that definitive evidence: it
+terminates the group at once and the exchange returns that evidence, while the
 process deadline continues to govern exit and cleanup. The adapter also bounds
 stderr cleanup before reaping the direct child and terminates the original
-process group when an inherited stderr handle outlives the deadline. On every
-ordinary exit it likewise keeps the leader waitable until it has killed
-remaining group descendants, then reaps the leader, so cleanup never signals
-through a reusable process identity. The offline test binary exercises all
-process and evidence paths without a live CLI or network.
+process group when an inherited stdout or stderr handle outlives the deadline;
+at that deadline a leader that already exited on its own keeps its definitive
+evidence — an observed terminal marker or its exit status — and a pre-existing
+kill-signal exit is observed on the still-waitable leader before cleanup signals
+the group, so it stays distinguishable from a cleanup kill, while a leader
+cleanup itself must kill remains typed timeout loss. On every ordinary exit it
+likewise keeps the leader waitable until it has killed remaining group
+descendants, then reaps the leader, so cleanup never signals through a reusable
+process identity. The offline test binary exercises all process and evidence
+paths without a live CLI or network.
 
 ## Credential-access boundary
 

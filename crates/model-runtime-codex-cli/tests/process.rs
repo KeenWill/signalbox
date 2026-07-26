@@ -1257,6 +1257,148 @@ async fn stderr_cleanup_timeout_preserves_boundary_loss_evidence() {
     );
 }
 
+/// Cancellation that lands after the provider terminal marker, while an open
+/// stdout handle still blocks end-of-stream, drives immediate group cleanup
+/// and returns the definitive completion instead of discarding it.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_after_a_terminal_marker_preserves_completion_evidence() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_holding_completed_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-stdout-hold-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        completed(&report.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-stdout-hold-group"));
+}
+
+/// A leader that already exited zero after its terminal marker keeps its
+/// completion evidence at the exchange deadline even while a surviving
+/// descendant holds the inherited stdout handle open.
+#[cfg(unix)]
+#[tokio::test]
+async fn inherited_stdout_cannot_extend_process_cleanup_past_deadline() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_inheriting_completed_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        completed(&report.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-stdout-inherit-group"));
+}
+
+/// A leader that exited nonzero before any terminal marker keeps its exit
+/// status as provider-error evidence at the exchange deadline even while a
+/// surviving descendant holds the inherited stdout handle open.
+#[cfg(unix)]
+#[tokio::test]
+async fn inherited_stdout_cannot_demote_a_nonzero_exit_to_timeout_loss() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_inheriting_failure_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure names the exit status")
+            .contains("exit status: 7")
+    );
+    assert_recorded_process_group_exited(
+        temporary
+            .path()
+            .join("fake-codex-stdout-inherit-failure-group"),
+    );
+}
+
+/// A leader already dead from a kill signal before the cleanup deadline — as
+/// under an out-of-memory kill — keeps that signal exit as provider-error
+/// evidence instead of being read as a cleanup kill, even while a surviving
+/// descendant holds the inherited stderr handle open.
+#[cfg(unix)]
+#[tokio::test]
+async fn stderr_deadline_preserves_a_pre_existing_kill_signal_exit() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stderr_inheriting_killed_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let error = provider_error(&report.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+    assert!(
+        error
+            .native
+            .message
+            .as_deref()
+            .expect("the failure names the exit signal")
+            .contains("signal: 9")
+    );
+    assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-kill-group"));
+}
+
 /// The retained output-schema argument is absolute, so the child's move to
 /// the configured working root cannot re-root a relative schema path.
 #[tokio::test]
@@ -1924,6 +2066,114 @@ fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
     std::fs::set_permissions(&executable, permissions)
         .expect("the stdout-closing fake CLI is executable");
     executable
+}
+
+/// Writes an executable shell-script fake CLI and returns its path.
+#[cfg(unix)]
+fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = directory.join(name);
+    std::fs::write(&executable, script).expect("the scripted fake CLI is written");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("the scripted fake CLI has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions)
+        .expect("the scripted fake CLI is executable");
+    executable
+}
+
+/// The JSONL lines of one complete buffered exchange, shell-quoted for the
+/// scripted fake CLIs below.
+#[cfg(unix)]
+fn completed_exchange_script_lines() -> String {
+    let envelope_text = format!(
+        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
+        fixtures::BUFFERED_ANSWER
+    );
+    format!(
+        r#"printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+"#,
+        thread_id = fixtures::THREAD_ID,
+        envelope_text = envelope_text,
+        input = fixtures::INPUT_TOKENS,
+        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
+        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
+        output = fixtures::OUTPUT_TOKENS,
+    )
+}
+
+/// Scripts a CLI that finishes a complete exchange, then keeps stdout open
+/// without exiting. The readiness marker is written a settling second after
+/// the terminal marker so a marker-watching cancellation cannot fire before
+/// the adapter has consumed the terminal.
+#[cfg(unix)]
+fn stdout_holding_completed_cli(directory: &Path) -> std::path::PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+{lines}printf 'process_group=%s\ndescendant=%s\n' "$$" "$$" > fake-codex-stdout-hold-group
+sleep 1
+printf 'ready\n' > fake-codex-stdout-hold-ready
+sleep 60
+"#,
+        lines = completed_exchange_script_lines()
+    );
+    script_cli(directory, "stdout-holding-codex", &script)
+}
+
+/// Scripts a CLI that finishes a complete exchange, hands its stdout and
+/// stderr handles to a surviving descendant, and exits successfully.
+#[cfg(unix)]
+fn stdout_inheriting_completed_cli(directory: &Path) -> std::path::PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+{lines}sleep 60 &
+printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-stdout-inherit-group
+exit 0
+"#,
+        lines = completed_exchange_script_lines()
+    );
+    script_cli(directory, "stdout-inheriting-codex", &script)
+}
+
+/// Scripts a CLI that hands its stdout and stderr handles to a surviving
+/// descendant and exits nonzero before any terminal marker.
+#[cfg(unix)]
+fn stdout_inheriting_failure_cli(directory: &Path) -> std::path::PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"type":"turn.started"}}'
+sleep 60 &
+printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-stdout-inherit-failure-group
+exit 7
+"#,
+        thread_id = fixtures::THREAD_ID
+    );
+    script_cli(directory, "stdout-failing-codex", &script)
+}
+
+/// Scripts a CLI that hands only its stderr handle to a surviving
+/// descendant, closes stdout, and dies from an externally shaped kill signal
+/// before cleanup begins.
+#[cfg(unix)]
+fn stderr_inheriting_killed_cli(directory: &Path) -> std::path::PathBuf {
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"type":"turn.started"}}'
+sleep 60 >/dev/null &
+printf 'process_group=%s\ndescendant=%s\n' "$$" "$!" > fake-codex-stderr-kill-group
+exec 1>&-
+kill -KILL $$
+"#,
+        thread_id = fixtures::THREAD_ID
+    );
+    script_cli(directory, "stderr-killed-codex", &script)
 }
 
 fn rendered_request(prompt: &str) -> serde_json::Value {
