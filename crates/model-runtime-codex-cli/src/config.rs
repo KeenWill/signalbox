@@ -18,7 +18,7 @@ pub struct CodexCliConfig {
     /// Codex login. Operations prepared by this runtime must carry this exact
     /// reference.
     pub credential_reference: signalbox_model_runtime::CredentialReference,
-    /// Positive whole-process timeout.
+    /// Positive whole-process timeout representable by the runtime clock.
     pub exchange_timeout: Duration,
     /// Grace after a cancellation interrupt before force-killing the process.
     pub interrupt_grace: Duration,

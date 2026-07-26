@@ -110,8 +110,8 @@ pub(crate) fn translate<C>(
          `tool_calls`; each `arguments` value is a string carrying exactly the tool's \
          JSON argument object. If `structured_output` is present, return exactly one \
          tool call bearing its name and the contracted value JSON-encoded in its \
-         `arguments` string. Honor `tool_choice` and the stated generation \
-         settings.\n\n{request_json}\n"
+         `arguments` string. Honor `tool_choice`. Treat the stated generation settings \
+         as advisory intent.\n\n{request_json}\n"
     )
     .into_bytes();
 

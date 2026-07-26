@@ -47,13 +47,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             completed();
         }
         "streamed_completed" => {
-            emit(&format!(
-                r#"{{"type":"item.completed","item":{{"id":"reason-1","type":"reasoning","text":"{}"}}}}"#,
-                fixtures::REASONING_TEXT
-            ));
+            reasoning("reason-1", fixtures::REASONING_TEXT);
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
                 fixtures::STREAMED_ANSWER
+            ));
+            completed();
+        }
+        "split_stream_credential_between_reasoning_items" => {
+            reasoning("reason-split-1", "s");
+            reasoning(
+                "reason-split-2",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[1..],
+            );
+            envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
+            completed();
+        }
+        "split_stream_credential_before_final_text" => {
+            reasoning("reason-split-final", "s");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[1..]
             ));
             completed();
         }
@@ -166,6 +180,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
                 fixtures::BUFFERED_ANSWER
             ));
+            completed();
+        }
+        "empty_completed_item_identity" => {
+            agent_message(
+                "",
+                &format!(
+                    r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                    fixtures::BUFFERED_ANSWER
+                ),
+            );
             completed();
         }
         "redaction" => {
@@ -301,6 +325,13 @@ fn agent_message(id: &str, value: &str) {
     let escaped = json_escape(value);
     emit(&format!(
         r#"{{"type":"item.completed","item":{{"id":"{id}","type":"agent_message","text":"{escaped}"}}}}"#
+    ));
+}
+
+fn reasoning(id: &str, text: &str) {
+    emit(&format!(
+        r#"{{"type":"item.completed","item":{{"id":"{id}","type":"reasoning","text":"{}"}}}}"#,
+        json_escape(text)
     ));
 }
 

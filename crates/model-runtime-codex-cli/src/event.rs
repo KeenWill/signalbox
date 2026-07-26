@@ -16,8 +16,8 @@ use crate::redaction::{redact_json, redact_text};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
-    EnvelopeOutcome, ItemDetails, ItemEvent, ItemLifecycleEvent, ModelEnvelope, ThreadError,
-    ThreadStarted, TurnCompleted, TurnFailed,
+    EnvelopeOutcome, ItemDetails, ItemEvent, ItemIdentity, ItemLifecycleEvent, ModelEnvelope,
+    ThreadError, ThreadStarted, TurnCompleted, TurnFailed,
 };
 
 pub(crate) struct EventDecoder<C> {
@@ -125,13 +125,11 @@ impl<C: Clone> EventDecoder<C> {
             "turn.started" => {}
             "item.started" | "item.updated" => {
                 let event: ItemLifecycleEvent = decode(value)?;
-                if event.item.id.is_empty() || event.item.item_type.is_empty() {
-                    return Err(DecodeFailure::new(
-                        "item lifecycle event carries an empty item identity or type",
-                    ));
-                }
+                validate_item_identity(&event.item)?;
             }
             "item.completed" => {
+                let identity: ItemLifecycleEvent = decode(value.clone())?;
+                validate_item_identity(&identity.item)?;
                 let event: ItemEvent = decode(value)?;
                 match event.item.details {
                     ItemDetails::AgentMessage { text } => {
@@ -443,6 +441,15 @@ impl<C: Clone> EventDecoder<C> {
             .ok_or_else(|| DecodeFailure::new("response has too many ordered parts"))?;
         Ok(index)
     }
+}
+
+fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
+    if item.id.is_empty() || item.item_type.is_empty() {
+        return Err(DecodeFailure::new(
+            "item lifecycle event carries an empty item identity or type",
+        ));
+    }
+    Ok(())
 }
 
 /// Requires a string-carried tool-argument payload to hold one JSON object

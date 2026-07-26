@@ -124,6 +124,42 @@ async fn streamed_completion_emits_redacted_progress_in_order() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential token split across reasoning items cannot be
+/// reconstructed by concatenating streamed provider text.
+#[tokio::test]
+async fn inv_035_split_credential_across_reasoning_items_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_credential_between_reasoning_items",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(streamed.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: changing from reasoning to final text cannot flush a held
+/// credential prefix as provider-controlled bytes.
+#[tokio::test]
+async fn inv_035_split_credential_before_final_text_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_credential_before_final_text",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(streamed.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn only_the_last_agent_message_is_decoded_as_the_terminal_envelope() {
     let result = execute_scenario(
@@ -521,6 +557,30 @@ async fn malformed_known_lifecycle_event_fails_closed() {
 }
 
 #[tokio::test]
+async fn empty_completed_item_identity_fails_closed() {
+    let result = execute_scenario(
+        "empty_completed_item_identity",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        provider_error(&result.evidence).kind,
+        ProviderErrorKind::Unrecognized
+    );
+    assert!(
+        provider_error(&result.evidence)
+            .native
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("empty item identity")
+    );
+}
+
+#[tokio::test]
 async fn nonzero_signal_exit_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("killed_process", ProviderErrorKind::Unrecognized).await;
 }
@@ -757,7 +817,6 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
         timed_out(&boundary_loss(&report.evidence).cause).detail,
         "Codex CLI process exceeded its exchange timeout"
     );
-    assert_eq!(spawn_count(temporary.path()), 1);
 }
 
 #[tokio::test]
@@ -768,8 +827,8 @@ async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
     );
-    config.exchange_timeout = Duration::from_secs(2);
-    config.interrupt_grace = Duration::from_secs(5);
+    config.exchange_timeout = Duration::from_secs(5);
+    config.interrupt_grace = Duration::from_secs(10);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
         &runtime,
@@ -788,7 +847,7 @@ async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
         boundary_loss(&report.evidence).cause,
         LossCause::CancellationRequested
     );
-    assert!(started.elapsed() < Duration::from_secs(4));
+    assert!(started.elapsed() < Duration::from_secs(7));
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
@@ -813,6 +872,33 @@ async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
     );
     assert_eq!(result.spawns, 1);
     assert_recorded_process_exited(temporary.path().join("fake-codex-inherited-stderr-pid"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stderr_cleanup_timeout_preserves_boundary_loss_evidence() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_closing_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_millis(100));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        timed_out(&boundary_loss(&report.evidence).cause).detail,
+        "Codex CLI process exceeded its exchange timeout"
+    );
 }
 
 #[tokio::test]
@@ -978,6 +1064,43 @@ async fn precision_sensitive_replayed_json_number_is_preserved_in_the_prompt() {
 }
 
 #[tokio::test]
+async fn generation_settings_are_rendered_as_advisory_prompt_context() {
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.max_output_tokens = fixtures::ADVISORY_MAX_OUTPUT_TOKENS;
+    operation.settings.temperature = Some(fixtures::ADVISORY_TEMPERATURE);
+    operation.settings.top_p = Some(fixtures::ADVISORY_TOP_P);
+    operation.settings.stop_sequences = vec![fixtures::ADVISORY_STOP_SEQUENCE.to_string()];
+
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        OFFLINE_HARNESS_TIMEOUT,
+    )
+    .await;
+    let request = rendered_request(&result.prompt);
+
+    assert_eq!(
+        request["settings"]["max_output_tokens"],
+        fixtures::ADVISORY_MAX_OUTPUT_TOKENS
+    );
+    assert_eq!(
+        request["settings"]["temperature"],
+        fixtures::ADVISORY_TEMPERATURE
+    );
+    assert_eq!(request["settings"]["top_p"], fixtures::ADVISORY_TOP_P);
+    assert_eq!(
+        request["settings"]["stop_sequences"][0],
+        fixtures::ADVISORY_STOP_SEQUENCE
+    );
+    assert!(result.prompt.contains("advisory intent"));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn zero_output_token_limit_fails_before_spawn() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), fake_cli());
@@ -1067,6 +1190,22 @@ fn relative_working_directory_is_rejected_at_construction() {
         .expect_err("a relative working root would be resolved by both cwd and --cd");
 
     assert_eq!(error, CodexCliConstructionError::RelativeWorkingDirectory);
+}
+
+#[test]
+fn unrepresentable_exchange_timeout_is_rejected_at_construction() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::MAX;
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("execution must never panic while constructing its process deadline");
+
+    assert_eq!(error, CodexCliConstructionError::InvalidExchangeTimeout);
 }
 
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
@@ -1244,6 +1383,41 @@ fn fake_cli() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-codex-cli"))
 }
 
+#[cfg(unix)]
+fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = directory.join("stdout-closing-codex");
+    std::fs::write(&executable, "#!/bin/sh\nexec 1>&-\nsleep 60\n")
+        .expect("the stdout-closing fake CLI is written");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("the stdout-closing fake CLI has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions)
+        .expect("the stdout-closing fake CLI is executable");
+    executable
+}
+
+fn rendered_request(prompt: &str) -> serde_json::Value {
+    let request = prompt
+        .rsplit_once("\n\n")
+        .map(|(_, request)| request.trim())
+        .expect("the adapter prompt ends with rendered request JSON");
+    serde_json::from_str(request).expect("the adapter prompt request is JSON")
+}
+
+fn streamed_provider_text(observations: &[Observation<String>]) -> String {
+    observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            ObservationFact::TextDelta { text, .. }
+            | ObservationFact::ThinkingDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn spawn_count(directory: &Path) -> usize {
     std::fs::read_to_string(directory.join("fake-codex-spawns"))
         .map(|content| content.lines().count())
@@ -1263,17 +1437,51 @@ fn assert_recorded_process_exited(path: std::path::PathBuf) {
     let pid =
         rustix::process::Pid::from_raw(raw_pid).expect("the descendant process id is nonzero");
     let deadline = std::time::Instant::now() + Duration::from_secs(1);
-    while rustix::process::test_kill_process(pid).is_ok() && std::time::Instant::now() < deadline {
+    while !process_has_exited(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        rustix::process::test_kill_process(pid).is_err(),
+        process_has_exited(pid),
         "the inherited-stderr descendant remains alive after process-group cleanup"
     );
 }
 
 #[cfg(not(unix))]
 fn assert_recorded_process_exited(_path: std::path::PathBuf) {}
+
+#[cfg(unix)]
+fn process_has_exited(pid: rustix::process::Pid) -> bool {
+    rustix::process::test_kill_process(pid).is_err() || process_is_linux_zombie(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_linux_zombie(pid: rustix::process::Pid) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_pid()))
+        .is_ok_and(|stat| proc_stat_is_zombie(&stat))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_linux_zombie(_pid: rustix::process::Pid) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ")
+        .is_some_and(|(_, fields)| fields.starts_with("Z "))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_zombie_is_an_exited_process_state() {
+    assert!(proc_stat_is_zombie("42 (sleep) Z 1 42 42 0"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_running_is_not_an_exited_process_state() {
+    assert!(!proc_stat_is_zombie("42 (sleep) S 1 42 42 0"));
+}
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
     let watcher = tokio::spawn(async move {

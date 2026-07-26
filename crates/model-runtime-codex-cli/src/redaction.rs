@@ -1,53 +1,60 @@
 //! Credential-shape redaction for CLI-controlled output.
 
 use serde_json::Value;
+use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
 const REDACTED: &str = "[redacted]";
+const LINE_CREDENTIAL_MARKERS: &[&str] =
+    &["authorization=", "authorization:", "cookie=", "cookie:"];
+const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
+    "bearer ",
+    "\"authorization\":",
+    "api_key=",
+    "api-key=",
+    "api_key:",
+    "api-key:",
+    "\"api_key\":",
+    "\"api-key\":",
+    "\"apiKey\":",
+    "access_token=",
+    "access_token:",
+    "\"access_token\":",
+    "\"accessToken\":",
+    "refresh_token=",
+    "refresh_token:",
+    "\"refresh_token\":",
+    "\"refreshToken\":",
+    "password=",
+    "password:",
+    "\"password\":",
+    "secret=",
+    "secret:",
+    "\"secret\":",
+    "credential=",
+    "credential:",
+    "\"credential\":",
+    "\"cookie\":",
+    "id_token=",
+    "id_token:",
+    "\"id_token\":",
+    "session_token=",
+    "session_token:",
+    "\"session_token\":",
+];
+const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
 
 pub(crate) fn redact_text(text: &str) -> String {
     let mut sanitized = text.to_string();
-    for marker in ["authorization=", "authorization:", "cookie=", "cookie:"] {
+    for marker in LINE_CREDENTIAL_MARKERS {
         sanitized = redact_line_value(&sanitized, marker);
     }
-    for marker in [
-        "bearer ",
-        "\"authorization\":",
-        "api_key=",
-        "api-key=",
-        "api_key:",
-        "api-key:",
-        "\"api_key\":",
-        "\"api-key\":",
-        "\"apiKey\":",
-        "access_token=",
-        "access_token:",
-        "\"access_token\":",
-        "\"accessToken\":",
-        "refresh_token=",
-        "refresh_token:",
-        "\"refresh_token\":",
-        "\"refreshToken\":",
-        "password=",
-        "password:",
-        "\"password\":",
-        "secret=",
-        "secret:",
-        "\"secret\":",
-        "credential=",
-        "credential:",
-        "\"credential\":",
-        "\"cookie\":",
-        "id_token=",
-        "id_token:",
-        "\"id_token\":",
-        "session_token=",
-        "session_token:",
-        "\"session_token\":",
-    ] {
+    for marker in VALUE_CREDENTIAL_MARKERS {
         sanitized = redact_after_marker(&sanitized, marker);
     }
-    let sanitized = redact_prefixed_token(&sanitized, "sk-");
-    redact_prefixed_token(&sanitized, "eyJ")
+    for prefix in TOKEN_PREFIXES {
+        sanitized = redact_prefixed_token(&sanitized, prefix);
+    }
+    sanitized
 }
 
 pub(crate) fn redact_json(raw: &str) -> String {
@@ -213,9 +220,170 @@ fn redact_prefixed_token(text: &str, prefix: &str) -> String {
     output
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamField {
+    Text,
+    Thinking,
+}
+
+struct PendingStreamText<C> {
+    field: StreamField,
+    index: u32,
+    correlation: C,
+    text: String,
+}
+
+/// Holds a possible trailing credential-shape prefix between streamed facts.
+///
+/// A fact-boundary change forces the held prefix to cross the boundary as a
+/// redaction marker, never as its provider-controlled bytes.
+pub(crate) struct RedactingSink<'a, C> {
+    inner: &'a mut (dyn ObservationSink<C> + Send),
+    pending: Option<PendingStreamText<C>>,
+}
+
+impl<'a, C: Clone> RedactingSink<'a, C> {
+    pub(crate) fn new(inner: &'a mut (dyn ObservationSink<C> + Send)) -> Self {
+        Self {
+            inner,
+            pending: None,
+        }
+    }
+
+    pub(crate) fn flush(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            let (emitted, held) = redact_complete_shapes_and_hold_prefix(pending.text);
+            self.emit(
+                pending.field,
+                pending.index,
+                pending.correlation.clone(),
+                emitted,
+            );
+            if !held.is_empty() {
+                self.emit(
+                    pending.field,
+                    pending.index,
+                    pending.correlation,
+                    REDACTED.to_string(),
+                );
+            }
+        }
+    }
+
+    fn flush_at_stream_end(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.emit(
+                pending.field,
+                pending.index,
+                pending.correlation,
+                redact_text(&pending.text),
+            );
+        }
+    }
+
+    fn emit(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let fact = match field {
+            StreamField::Text => ObservationFact::TextDelta { index, text },
+            StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
+        };
+        self.inner.observe(Observation { correlation, fact });
+    }
+
+    fn redact_delta(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.field != field || pending.index != index)
+        {
+            self.flush();
+        }
+        match &mut self.pending {
+            Some(pending) => pending.text.push_str(&text),
+            None => {
+                self.pending = Some(PendingStreamText {
+                    field,
+                    index,
+                    correlation,
+                    text,
+                });
+            }
+        }
+    }
+}
+
+impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
+    fn observe(&mut self, observation: Observation<C>) {
+        match observation.fact {
+            ObservationFact::TextDelta { index, text } => {
+                self.redact_delta(StreamField::Text, index, observation.correlation, text);
+            }
+            ObservationFact::ThinkingDelta { index, text } => {
+                self.redact_delta(StreamField::Thinking, index, observation.correlation, text);
+            }
+            ObservationFact::UsageReported(usage) => {
+                // No later provider text can follow the completion's usage
+                // barrier, so a held proper prefix is harmless and may be
+                // emitted without destroying clean output.
+                self.flush_at_stream_end();
+                self.inner.observe(Observation {
+                    correlation: observation.correlation,
+                    fact: ObservationFact::UsageReported(usage),
+                });
+            }
+            fact => {
+                self.flush();
+                self.inner.observe(Observation {
+                    correlation: observation.correlation,
+                    fact,
+                });
+            }
+        }
+    }
+}
+
+fn redact_complete_shapes_and_hold_prefix(text: String) -> (String, String) {
+    let mut redacted = redact_text(&text);
+    let held_length = longest_trailing_credential_prefix(&redacted);
+    let pending = redacted.split_off(redacted.len() - held_length);
+    (redacted, pending)
+}
+
+fn longest_trailing_credential_prefix(text: &str) -> usize {
+    let mut longest = 0;
+    for marker in LINE_CREDENTIAL_MARKERS
+        .iter()
+        .chain(VALUE_CREDENTIAL_MARKERS)
+    {
+        longest = longest.max(trailing_marker_prefix(text, marker, true));
+    }
+    for marker in TOKEN_PREFIXES {
+        longest = longest.max(trailing_marker_prefix(text, marker, false));
+    }
+    longest
+}
+
+fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool) -> usize {
+    let maximum = text.len().min(marker.len().saturating_sub(1));
+    (1..=maximum)
+        .rev()
+        .find(|length| {
+            let tail = &text.as_bytes()[text.len() - length..];
+            let prefix = &marker.as_bytes()[..*length];
+            if ascii_case_insensitive {
+                tail.eq_ignore_ascii_case(prefix)
+            } else {
+                tail == prefix
+            }
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{redact_json, redact_text};
+    use super::{redact_complete_shapes_and_hold_prefix, redact_json, redact_text};
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
     const QUOTED_CREDENTIAL_VALUE: &str = "another-sensitive-value";
@@ -294,5 +462,21 @@ mod tests {
         let input = r#"{ "city" : "Oslo", "limit": 3 }"#;
 
         assert_eq!(redact_json(input), input);
+    }
+
+    #[test]
+    fn inv_035_stream_redaction_holds_a_split_token_prefix() {
+        let (emitted, pending) = redact_complete_shapes_and_hold_prefix("safe s".to_string());
+
+        assert_eq!(emitted, "safe ");
+        assert_eq!(pending, "s");
+    }
+
+    #[test]
+    fn inv_035_stream_redaction_completes_and_redacts_a_held_token() {
+        let (emitted, pending) = redact_complete_shapes_and_hold_prefix("sk-sensitive".to_string());
+
+        assert_eq!(emitted, "[redacted]");
+        assert_eq!(pending, "");
     }
 }

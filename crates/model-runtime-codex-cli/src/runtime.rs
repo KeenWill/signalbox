@@ -18,6 +18,7 @@ use tokio::process::{Child, Command};
 
 use crate::config::CodexCliConfig;
 use crate::event::EventDecoder;
+use crate::redaction::RedactingSink;
 use crate::translate::{TranslationError, translate};
 use crate::wire::OUTPUT_SCHEMA;
 
@@ -99,7 +100,8 @@ pub enum CodexCliConstructionError {
     /// The working directory is relative and would be resolved twice by the
     /// child process and its `--cd` argument.
     RelativeWorkingDirectory,
-    /// Whole-process timeout is zero.
+    /// Whole-process timeout is zero or cannot be represented by the runtime
+    /// clock.
     InvalidExchangeTimeout,
     /// Interrupt grace is zero.
     InvalidInterruptGrace,
@@ -121,7 +123,7 @@ impl std::fmt::Display for CodexCliConstructionError {
                 formatter.write_str("Codex working directory must be absolute")
             }
             Self::InvalidExchangeTimeout => {
-                formatter.write_str("exchange timeout must be greater than zero")
+                formatter.write_str("exchange timeout must be positive and representable")
             }
             Self::InvalidInterruptGrace => {
                 formatter.write_str("interrupt grace must be greater than zero")
@@ -166,7 +168,11 @@ impl CodexCliRuntime {
         if !config.working_directory.is_dir() {
             return Err(CodexCliConstructionError::InvalidWorkingDirectory);
         }
-        if config.exchange_timeout.is_zero() {
+        if config.exchange_timeout.is_zero()
+            || tokio::time::Instant::now()
+                .checked_add(config.exchange_timeout)
+                .is_none()
+        {
             return Err(CodexCliConstructionError::InvalidExchangeTimeout);
         }
         if config.interrupt_grace.is_zero() {
@@ -360,7 +366,12 @@ async fn execute_process<C: Clone + Send + Sync>(
             });
         }
     };
-    let deadline = tokio::time::Instant::now() + prepared.exchange_timeout;
+    let Some(deadline) = tokio::time::Instant::now().checked_add(prepared.exchange_timeout) else {
+        force_kill(&mut child).await;
+        return pre_exchange_transport_loss(
+            "Codex CLI exchange timeout cannot be represented by the runtime clock",
+        );
+    };
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.start_kill();
         let _ = child.wait().await;
@@ -423,6 +434,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         prepared.delivery,
         &prepared.translated,
     );
+    let mut redacting_sink = RedactingSink::new(sink);
 
     loop {
         let terminal_observed = decoder.terminal_observed();
@@ -434,7 +446,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         };
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
-                if let Err(error) = decoder.push(&line, sink) {
+                if let Err(error) = decoder.push(&line, &mut redacting_sink) {
                     let detail = format!("undecodable Codex event: {}", error.into_detail());
                     force_kill(&mut child).await;
                     abort_stderr_task(stderr_task).await;
@@ -492,6 +504,7 @@ async fn execute_process<C: Clone + Send + Sync>(
 
     let mut stderr_task = stderr_task;
     let terminal_observed = decoder.terminal_observed();
+    let mut reaped_status = None;
     let stderr = tokio::select! {
         biased;
         result = &mut stderr_task => stderr_result(result),
@@ -508,35 +521,51 @@ async fn execute_process<C: Clone + Send + Sync>(
             let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
             interrupt_then_kill(&mut child, cleanup_grace).await;
             abort_stderr_task(stderr_task).await;
-            "Codex stderr was unavailable after cancellation during process cleanup".to_string()
+            return decoder.finish(&mut redacting_sink);
         },
         () = tokio::time::sleep_until(deadline) => {
-            force_kill(&mut child).await;
-            abort_stderr_task(stderr_task).await;
-            "Codex stderr was unavailable at the process-cleanup deadline".to_string()
+            let process_group_id = child.id();
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    kill_process_group(process_group_id);
+                    abort_stderr_task(stderr_task).await;
+                    reaped_status = Some(Ok(status));
+                    "Codex stderr was unavailable at the process-cleanup deadline".to_string()
+                }
+                Ok(None) | Err(_) => {
+                    force_kill(&mut child).await;
+                    abort_stderr_task(stderr_task).await;
+                    return decoder.boundary_loss(timeout_cause());
+                }
+            }
         },
     };
-    let status = tokio::select! {
-        biased;
-        status = child.wait() => status,
-        () = &mut *cancellation, if !terminal_observed => {
-            interrupt_then_kill(
-                &mut child,
-                remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-            )
-            .await;
-            return decoder.boundary_loss(LossCause::CancellationRequested);
-        },
-        () = tokio::time::sleep_until(deadline) => {
-            force_kill(&mut child).await;
-            return decoder.boundary_loss(LossCause::TimedOut(TransportFacts::new(
-                "Codex CLI process exceeded its exchange timeout",
-            )));
+    let status = match reaped_status {
+        Some(status) => status,
+        None => tokio::select! {
+            biased;
+            status = child.wait() => status,
+            () = &mut *cancellation, if !terminal_observed => {
+                interrupt_then_kill(
+                    &mut child,
+                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                )
+                .await;
+                return decoder.boundary_loss(LossCause::CancellationRequested);
+            },
+            () = tokio::time::sleep_until(deadline) => {
+                force_kill(&mut child).await;
+                return decoder.boundary_loss(timeout_cause());
+            },
         },
     };
 
     match status {
-        Ok(status) if status.success() => decoder.finish(sink),
+        Ok(status) if status.success() => {
+            let evidence = decoder.finish(&mut redacting_sink);
+            redacting_sink.flush();
+            evidence
+        }
         Ok(status) => {
             let message = if stderr.trim().is_empty() {
                 format!("Codex CLI exited with status {status}")
@@ -634,7 +663,11 @@ async fn interrupt_then_kill(child: &mut Child, grace: Duration) {
             && let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32)
         {
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::INT);
-            tokio::time::sleep(grace).await;
+            tokio::select! {
+                biased;
+                _ = child.wait() => return,
+                () = tokio::time::sleep(grace) => {}
+            }
         }
     }
     force_kill(child).await;
@@ -668,6 +701,12 @@ async fn abort_stderr_task(stderr_task: tokio::task::JoinHandle<std::io::Result<
 
 fn pre_exchange_transport_loss(detail: impl Into<String>) -> TerminalEvidence {
     pre_exchange_boundary_loss(LossCause::TransportFailed(TransportFacts::new(detail)))
+}
+
+fn timeout_cause() -> LossCause {
+    LossCause::TimedOut(TransportFacts::new(
+        "Codex CLI process exceeded its exchange timeout",
+    ))
 }
 
 fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {

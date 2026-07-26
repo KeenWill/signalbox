@@ -55,7 +55,10 @@ no durable state, makes no lifecycle decisions, and performs no logging.
 or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
 optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
 `ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
-a `DeliveryMode` (buffered or streamed).
+a `DeliveryMode` (buffered or streamed). Settings are provider-enforced request
+controls unless an adapter's owning section records a capability-limited
+advisory exception; an adapter never silently presents prompt instructions as
+hard transport controls.
 
 `ModelOperation::validate` rejects, before any send: duplicate ordinary tool
 names, a named tool choice matching no declared tool, and an ordinary tool
@@ -417,17 +420,26 @@ never changes a numeric lexeme through an `f64` round trip. Buffered delivery
 retains its content without deltas; streamed delivery emits bounded CLI
 reasoning items and the final envelope content as ordered deltas before the same
 terminal evidence. Usage comes only from `turn.completed`; an omitted cache
-counter remains unreported rather than becoming a reported zero. Preparation
-rejects a zero output-token limit, malformed replayed tool-call JSON, non-finite
-sampling values, temperature outside zero through two, and top-p outside zero
-through one as unsupported caller input. The offline fake CLI applies the same
-strict-schema validation to every spawned exchange, so a schema shape the live
-API refuses cannot pass the fixture corpus.
+counter remains unreported rather than becoming a reported zero.
+
+The pinned CLI exposes no argv, configuration, or subscription request controls
+for output-token ceiling, temperature, top-p, or stop sequences. This adapter is
+therefore the narrow exception to the provider-enforced settings rule: it
+renders all four values into the model-visible operation prompt as advisory
+context, and neither claims nor supplies hard enforcement. A caller that
+requires provider-enforced generation settings must not select this adapter.
+Preparation still rejects a zero output-token limit, malformed replayed
+tool-call JSON, non-finite sampling values, temperature outside zero through
+two, and top-p outside zero through one as unsupported caller input. The offline
+fake CLI verifies the advisory rendering and applies the same strict-schema
+validation to every spawned exchange, so a schema shape the live API refuses
+cannot pass the fixture corpus.
 
 The adapter bounds every stdout event while copying and drains stderr while
-retaining only a bounded prefix. Cancellation before spawn is proven unsent.
-After spawn it sends an interrupt to the dedicated process group, waits a
-positive grace, and force-kills only as fallback; either path is
+retaining only a bounded prefix. Construction rejects a zero or
+runtime-clock-unrepresentable process timeout. Cancellation before spawn is
+proven unsent. After spawn it sends an interrupt to the dedicated process group,
+waits a positive grace, and force-kills only as fallback; either path is
 `BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
 starts immediately after successful spawn, governs stdin transfer, stdout
 decoding, and process exit, then force-kills the original process as typed

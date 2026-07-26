@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Codex CLI generation settings are advisory
+
+**Context.** `ModelSettings` normally names provider-enforced request controls,
+including a required output-token ceiling. The pinned Codex CLI subscription
+surface exposes no argv, configuration, or request fields for that ceiling,
+temperature, top-p, or stop sequences. Prompt text can communicate intent but
+cannot enforce sampling or budget semantics. Rejecting the required ceiling
+would make every operation unsupported and leave the commissioned wrapper
+unusable.
+
+**Decision.** Record one capability-limited exception for the Codex CLI adapter:
+validate all four settings, render them into the complete model-visible
+operation prompt, and describe them as advisory rather than provider-enforced.
+Callers that require hard generation controls must not select this adapter. No
+other adapter inherits the exception.
+
+**Rejected alternatives.** Claiming prompt instructions as hard controls is
+false. Rejecting every operation preserves the generic rule but defeats the
+wrapped subscription runtime. Reimplementing the provider transport would
+reverse the recorded wrap direction.
+
+**Affects.** `ModelSettings` contract comments, the Codex CLI section of
+[runtime-substrate](spec/runtime-substrate.md), and
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-25 — Allowlist the Codex subprocess environment
 
 **Context.** A subprocess inherits its parent's complete environment by default.

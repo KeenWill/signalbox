@@ -19,6 +19,27 @@ pub const SENSITIVE_STDERR_TOKEN: &str = "sensitive-stderr";
 pub const SENSITIVE_TOOL_ID_ONE: &str = "sk-sensitive-call-one";
 pub const SENSITIVE_TOOL_ID_TWO: &str = "API_KEY=sensitive-call-two";
 pub const SENSITIVE_ENVELOPE_TOKEN: &str = "authorization=Bearer sensitive-envelope-token";
+pub const SENSITIVE_SPLIT_STREAM_TOKEN: &str = "sk-sensitive-stream-token";
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_MAX_OUTPUT_TOKENS: u32 = 17;
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_TEMPERATURE: f64 = 0.25;
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_TOP_P: f64 = 0.75;
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_STOP_SEQUENCE: &str = "offline-stop";
 #[allow(
     dead_code,
     reason = "process-only expected values share this module with the fake executable"
