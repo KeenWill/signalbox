@@ -2774,18 +2774,15 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
     runtime.stop().await
 }
 
-/// S10 / INV-012: every decision refusal is exact, the session-correlation
-/// precondition refuses without recording a command, and a recorded decision
-/// replays equally while a conflicting reuse is refused.
+/// S10: a decision naming a later request while an earlier one is undecided
+/// records the exact proposal-order rejection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
--> Result<(), Box<dyn Error>> {
+async fn s10_decide_tool_request_refuses_a_later_request_first() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
-    let (_, decided_turn_id) =
-        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
     let first_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
     let second_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE2));
     park_turn_on_tool_approval(
@@ -2815,11 +2812,26 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
         }
     );
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: an unknown logical request records the exact absent-request rejection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_reports_an_unknown_request() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
     let unknown_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE3));
     connection
         .request_version(
             ProtocolVersion::Eight,
-            4,
+            3,
             ClientRequest::DecideToolRequest {
                 command_id: command()?,
                 session_id,
@@ -2835,6 +2847,24 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
         }
     );
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: the session-correlation precondition refuses a decision whose named
+/// session does not own the named request, before any durable command is
+/// recorded.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_a_misrouted_session_without_recording()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
     let mut foreign = Connection::connect(runtime.socket()).await?;
     let foreign_session_id = create_alias_session(&mut foreign).await?;
     let misrouted_command = command()?;
@@ -2845,7 +2875,7 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
             ClientRequest::DecideToolRequest {
                 command_id: misrouted_command,
                 session_id: foreign_session_id,
-                tool_request_id: first_request_id,
+                tool_request_id: pending_request_id,
                 decision: ToolDecision::Approve {},
             },
         )
@@ -2854,7 +2884,7 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
         rejected_detail(response_within(&mut foreign).await?.message()),
         RejectionDetail::ToolRequestNotInSession {
             session_id: foreign_session_id,
-            tool_request_id: first_request_id,
+            tool_request_id: pending_request_id,
         }
     );
     let misrouted_claim_count: i64 =
@@ -2866,17 +2896,34 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
         misrouted_claim_count, 0,
         "the session-correlation refusal must record no durable command"
     );
+
     drop(foreign);
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: a denial reason outside the domain contract is refused as an invalid
+/// request before any durable command is recorded.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_an_unsafe_denial_reason_before_recording()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
 
     let unsafe_reason_command = command()?;
     connection
         .request_version(
             ProtocolVersion::Eight,
-            5,
+            3,
             ClientRequest::DecideToolRequest {
                 command_id: unsafe_reason_command,
                 session_id,
-                tool_request_id: first_request_id,
+                tool_request_id: pending_request_id,
                 decision: ToolDecision::Deny {
                     reason: String::from(" padded "),
                 },
@@ -2897,22 +2944,43 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
             .await?;
     assert_eq!(unsafe_claim_count, 0);
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012: one durable decision identity has one recorded meaning — an equal
+/// replay returns the exact recorded receipt, a different payload under the
+/// same identity is conflicting reuse, and reusing an identity claimed by
+/// another command kind is conflicting reuse too. The steps share one recorded
+/// command, so they are asserted against the same durable state in one
+/// execution.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reuse()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
     let denial_command = command()?;
     let denial = ClientRequest::DecideToolRequest {
         command_id: denial_command,
         session_id,
-        tool_request_id: first_request_id,
+        tool_request_id: pending_request_id,
         decision: ToolDecision::Deny {
             reason: String::from("writes outside the workspace"),
         },
     };
     connection
-        .request_version(ProtocolVersion::Eight, 6, denial.clone())
+        .request_version(ProtocolVersion::Eight, 3, denial.clone())
         .await?;
     assert_eq!(
         decided_receipt(response_within(&mut connection).await?.message()),
         (
-            first_request_id,
+            pending_request_id,
             ToolDecision::Deny {
                 reason: String::from("writes outside the workspace"),
             }
@@ -2920,12 +2988,12 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
     );
 
     connection
-        .request_version(ProtocolVersion::Eight, 7, denial)
+        .request_version(ProtocolVersion::Eight, 4, denial)
         .await?;
     assert_eq!(
         decided_receipt(response_within(&mut connection).await?.message()),
         (
-            first_request_id,
+            pending_request_id,
             ToolDecision::Deny {
                 reason: String::from("writes outside the workspace"),
             }
@@ -2936,11 +3004,11 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
     connection
         .request_version(
             ProtocolVersion::Eight,
-            8,
+            5,
             ClientRequest::DecideToolRequest {
                 command_id: denial_command,
                 session_id,
-                tool_request_id: first_request_id,
+                tool_request_id: pending_request_id,
                 decision: ToolDecision::Approve {},
             },
         )
@@ -2953,14 +3021,131 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
         }
     ));
 
+    let submit_command = command()?;
     connection
         .request_version(
             ProtocolVersion::Eight,
-            9,
+            6,
+            ClientRequest::SubmitInput {
+                command_id: submit_command,
+                session_id,
+                content: InputContent::new(String::from("claims a submit identity")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ActiveTurnPresent { .. }
+    ));
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            7,
+            ClientRequest::DecideToolRequest {
+                command_id: submit_command,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert!(
+        matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::ConflictingReuse,
+                ..
+            }
+        ),
+        "an identity claimed by another command kind is conflicting reuse"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: the final approval opens the executing phase.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_final_approval_opens_the_executing_phase()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, decided_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
             ClientRequest::DecideToolRequest {
                 command_id: command()?,
                 session_id,
-                tool_request_id: first_request_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (pending_request_id, ToolDecision::Approve {})
+    );
+
+    let decided = read_transcript_messages(&mut connection, 4, session_id).await?;
+    assert!(
+        matches!(
+            turn_state_of(&decided, decided_turn_id),
+            TurnState::ActiveRunning { .. }
+        ),
+        "the final approval opens the executing phase"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S10: a request that already has a terminal resolution records the exact
+/// already-resolved rejection for a later distinct decision.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s10_decide_tool_request_refuses_an_already_resolved_request() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    let pending_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xE1));
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending_request_id]).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (pending_request_id, ToolDecision::Approve {})
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Eight,
+            4,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending_request_id,
                 decision: ToolDecision::Approve {},
             },
         )
@@ -2968,34 +3153,8 @@ async fn s10_inv012_decide_tool_request_rejections_and_replay_are_exact()
     assert_eq!(
         rejected_detail(response_within(&mut connection).await?.message()),
         RejectionDetail::ToolRequestAlreadyResolved {
-            tool_request_id: first_request_id,
+            tool_request_id: pending_request_id,
         }
-    );
-
-    connection
-        .request_version(
-            ProtocolVersion::Eight,
-            10,
-            ClientRequest::DecideToolRequest {
-                command_id: command()?,
-                session_id,
-                tool_request_id: second_request_id,
-                decision: ToolDecision::Approve {},
-            },
-        )
-        .await?;
-    assert_eq!(
-        decided_receipt(response_within(&mut connection).await?.message()),
-        (second_request_id, ToolDecision::Approve {})
-    );
-
-    let decided = read_transcript_messages(&mut connection, 11, session_id).await?;
-    assert!(
-        matches!(
-            turn_state_of(&decided, decided_turn_id),
-            TurnState::ActiveRunning { .. }
-        ),
-        "the final approval opens the executing phase"
     );
 
     drop(connection);

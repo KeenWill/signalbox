@@ -2242,12 +2242,15 @@ where
         ToolLoopRepositoryError::Database {
             commit_ambiguous, ..
         } => ProtocolError::mutation_unavailable(commit_ambiguous),
-        ToolLoopRepositoryError::ConflictingCommandReuse => {
+        // Any difference under a claimed identity — including a different
+        // command kind — is conflicting reuse, per the identity-and-commands
+        // registry contract.
+        ToolLoopRepositoryError::ConflictingCommandReuse
+        | ToolLoopRepositoryError::DifferentCommandKind => {
             ProtocolError::without_detail(ErrorCode::ConflictingReuse)
         }
         ToolLoopRepositoryError::IdentityCollision
         | ToolLoopRepositoryError::Corruption(_)
-        | ToolLoopRepositoryError::DifferentCommandKind
         | ToolLoopRepositoryError::InvalidTransition(_) => {
             ProtocolError::without_detail(ErrorCode::Internal)
         }
