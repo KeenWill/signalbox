@@ -6,8 +6,8 @@ format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, and the owner-operated
 one-file and directory-scan import surfaces. The one-file surface was verified
 against the implementing stack through PR #252 (`agent/import-surfaces`); the
-directory scan is verified against `agent/import-directory-scan`. Later session
-creation from one imported frontier is owned by
+directory scan is verified through PR #284 (`agent/import-directory-scan`).
+Later session creation from one imported frontier is owned by
 [sessions-and-transcript](sessions-and-transcript.md); native turn activation
 and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
@@ -287,12 +287,16 @@ home-directory convention.
 
 The single-file form reads exactly the named file and performs no neighboring
 file inspection. Scan mode first traverses the complete tree rooted at the named
-directory without following symbolic links. It selects only regular files whose
-extension is exactly lowercase `.jsonl`, sorts their full paths, and imposes no
-candidate-count cap. A traversal failure aborts before any request rather than
-hiding an unread subtree. Each candidate is then read and sent through the
-existing version-five `import_conversation` request, one file per request and in
-that sorted order; scan mode adds no protocol request or server-side batching.
+directory without following symbolic links. Traversal opens the root and each
+descendant directory through no-follow descriptors; later candidate reads reopen
+every relative path component from the retained root descriptor with no-follow
+semantics, so replacing a queued path with a symbolic link cannot redirect the
+read outside that tree. It selects only regular files whose extension is exactly
+lowercase `.jsonl`, sorts their full paths, and imposes no candidate-count cap.
+A traversal failure aborts before any request rather than hiding an unread
+subtree. Each candidate is then read and sent through the existing version-five
+`import_conversation` request, one file per request and in that sorted order;
+scan mode adds no protocol request or server-side batching.
 
 For every candidate, the terminal prints an escaped, quoted local path and one
 `imported`, `already_imported`, or `skipped` outcome. Successful outcomes name

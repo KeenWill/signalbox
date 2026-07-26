@@ -249,7 +249,8 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
 /// digest-idempotent replay per file.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn terminal_client_scan_reports_each_exact_import_outcome() -> Result<(), Box<dyn Error>> {
+async fn s28_inv038_terminal_client_scan_reports_each_exact_import_outcome()
+-> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
     let source_directory = tempfile::tempdir()?;

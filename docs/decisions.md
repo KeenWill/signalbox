@@ -22,10 +22,12 @@ therefore needs orchestration at the client boundary, not a batch wire shape.
 exclusive `--scan <dir>` form under the existing explicit `--format` selection.
 A scan recursively selects regular files with the exact lowercase `.jsonl`
 extension, does not follow symbolic links, sorts complete paths, and has no
-candidate-count cap. It sends one existing import request at a time. Every file
-gets an imported, already-imported, or skipped-with-reason line followed by
-uncapped totals; processing continues after a skip, and any skipped file makes
-the invocation fail after the scan completes.
+candidate-count cap. Descriptor-relative no-follow traversal and candidate opens
+use the repository’s existing `rustix` version so a path replacement cannot
+redirect a queued read through a symbolic link. The scan sends one existing
+import request at a time. Every file gets an imported, already-imported, or
+skipped-with-reason line followed by uncapped totals; processing continues after
+a skip, and any skipped file makes the invocation fail after the scan completes.
 
 **Rejected alternatives.** Treating a directory passed in the positional file
 slot as an implicit scan would make the existing form type-dependent and less
@@ -33,8 +35,8 @@ legible. Inferring source directories or formats would embed deployment layout
 in repository behavior. A batch protocol request would duplicate existing digest
 idempotency, complicate the frame bound, and expand the daemon surface.
 Following symbolic links risks cycles and imports outside the named tree;
-concurrent requests would discard the existing serial operational shape without
-a demonstrated need.
+path-only metadata checks retain a check/open race. Concurrent requests would
+discard the existing serial operational shape without a demonstrated need.
 
 **Affects.** The terminal client argument, traversal, outcome-presentation, and
 end-to-end test surfaces, plus the conversation-import specification. The
