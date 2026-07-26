@@ -1,0 +1,109 @@
+# Compatibility smoke for the Codex CLI wrapped by
+# crates/model-runtime-codex-cli. It installs the exact version pinned in
+# tooling/codex-cli/package.json and spends one real, cheapest-model exchange
+# through the adapter, so a Renovate pin bump is proven against the live CLI
+# rather than assumed. The discipline it implements is specified in the Codex
+# CLI provider adapter section of docs/spec/runtime-substrate.md.
+#
+# Security shape. There is deliberately no `pull_request` trigger: a fork pull
+# request must never be able to reach the credential, and no path in this file
+# runs fork-authored code. The two triggers are `workflow_dispatch`, which
+# GitHub restricts to accounts with write access, and `push` to `main` limited
+# to the pin manifest and this workflow. The credential lives only in the
+# `codex-smoke` environment below, so it is unavailable to any other workflow
+# and to any run this environment's protection rules have not admitted; it is
+# read once, from `secrets.*`, into the single step that pipes it to the CLI's
+# own login command, and it is never echoed, written to the log, or passed to
+# the Rust process.
+#
+# Verifying a bump before it lands: dispatch this workflow against the Renovate
+# branch (`gh workflow run codex-smoke.yml --ref <renovate-branch>`). Renovate
+# branches live in this repository, not in a fork, so a dispatch reaches them
+# while the fork exclusion above still holds.
+name: Codex CLI smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tooling/codex-cli/package.json"
+      - "tooling/codex-cli/package-lock.json"
+      - ".github/workflows/codex-smoke.yml"
+
+permissions:
+  contents: read
+
+# One live exchange at a time. Never cancel in progress: a half-killed run
+# would leave no compatibility evidence for the bump that triggered it.
+concurrency:
+  group: codex-smoke
+  cancel-in-progress: false
+
+jobs:
+  codex-smoke:
+    # Repository → Settings → Environments → codex-smoke holds
+    # CODEX_SMOKE_API_KEY and should carry the deployment-branch and
+    # required-reviewer rules the owner wants around real spend. Binding the
+    # secret to the environment rather than the repository is what keeps it out
+    # of every other workflow.
+    environment: codex-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Keeps the CLI's credential store inside the job's workspace instead of
+      # the runner home directory, so the cleanup step below can remove it and
+      # nothing survives into a later step.
+      CODEX_HOME: ${{ github.workspace }}/.codex-smoke-home
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner image ships Node, and the pinned package is a thin launcher
+      # around a prebuilt native binary, so no Node toolchain setup is needed.
+      # `npm ci` installs the lockfile's integrity-checked artifact exactly.
+      - name: Install the pinned Codex CLI
+        run: npm ci --prefix tooling/codex-cli
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: codex-smoke
+      # The CLI reads the key from stdin and writes its own credential store
+      # under CODEX_HOME. The value is never an argument (process listings),
+      # never echoed, and never exported to the smoke step: the adapter's
+      # contract is that the CLI owns its login, and this reproduces that.
+      - name: Authenticate the pinned Codex CLI
+        env:
+          CODEX_SMOKE_API_KEY: ${{ secrets.CODEX_SMOKE_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${CODEX_SMOKE_API_KEY}" \
+            || { echo "the codex-smoke environment provides no API key"; exit 1; }
+          mkdir -p "${CODEX_HOME}"
+          chmod 700 "${CODEX_HOME}"
+          printenv CODEX_SMOKE_API_KEY \
+            | tooling/codex-cli/node_modules/.bin/codex login --with-api-key
+      # The test asserts the executable's reported version against the
+      # adapter's supported-version constant before spending anything, so a
+      # drifted binary fails closed instead of producing compatibility evidence
+      # for a version it never ran.
+      - name: Run one live exchange through the adapter
+        env:
+          SIGNALBOX_CODEX_SMOKE_EXECUTABLE: >-
+            ${{ github.workspace }}/tooling/codex-cli/node_modules/.bin/codex
+          # Optional, and a plain variable rather than a secret because a model
+          # name is not sensitive. The test's built-in default is the cheapest
+          # model the CLI advertises, but which models a credential may address
+          # is account-scoped — a ChatGPT-account login and an API key do not
+          # offer the same set — and only the account holder knows. Set
+          # CODEX_SMOKE_MODEL on the codex-smoke environment to override.
+          SIGNALBOX_CODEX_SMOKE_MODEL: ${{ vars.CODEX_SMOKE_MODEL }}
+        run: >-
+          cargo test -p signalbox-model-runtime-codex-cli
+          --test live_smoke --
+          --ignored --exact the_pinned_codex_cli_completes_one_exchange
+      - name: Remove the credential store
+        if: ${{ always() }}
+        run: rm -rf "${CODEX_HOME}"
