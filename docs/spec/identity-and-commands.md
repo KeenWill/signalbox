@@ -321,11 +321,14 @@ the recorded actor is also the applied last-writer provenance.
 Storage follows the closed-discriminator convention: `actor_kind`
 (`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
-in `submit_input_command` and `replace_session_metadata_command`. Unknown or
-malformed stored spellings fail decoding as corruption. A well-formed `model` or
-`recovery` actor on a metadata command fails earlier as unsupported
-metadata-writer corruption. Metadata domain reconstitution independently
-compares supported stored actors against the canonical command actor
+in `submit_input_command` and `replace_session_metadata_command`. Metadata
+receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
+and `issuer_tool_request_id` columns, sealed separately from the actor
+projection. Unknown or malformed stored spellings fail decoding as corruption. A
+well-formed `model` or `recovery` actor on a metadata command fails earlier as
+unsupported metadata-writer corruption. Metadata loading constructs the
+canonical command from the independent issuer proof, then domain reconstitution
+compares the separately decoded supported actor against that command
 (`CommandActorMismatch`) for both applied and rejected receipts, so a
 cross-wired owner/tool actor fails closed.
 

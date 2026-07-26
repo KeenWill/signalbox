@@ -12,10 +12,10 @@ use std::{error::Error, sync::Arc};
 
 use signalbox_domain::{
     Actor, CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionMetadataContent, ToolRequestId,
-    TranscriptAncestry,
+    PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataReconstitutionFailure,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionMetadataContent, ToolRequestId, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -274,6 +274,60 @@ async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
     };
     assert_eq!(field, "command actor");
     assert_eq!(value, UNSUPPORTED_COMMAND_ACTOR);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: changing both stored actor projections to another supported actor
+/// cannot change the constructor-selected command issuer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_metadata_receipt_rejects_supported_actor_reattribution()
+-> Result<(), Box<dyn Error>> {
+    const TARGET_SESSION: u128 = 0x701;
+    const REPLACEMENT_COMMAND: u128 = 0x902;
+    const CORRUPT_TOOL_REQUEST: u128 = 0xA01;
+
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, TARGET_SESSION))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            REPLACEMENT_COMMAND,
+            TARGET_SESSION,
+            metadata(Some("applied"), &[], &[], false),
+        ))
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE replace_session_metadata_command
+         DISABLE TRIGGER replace_session_metadata_command_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE replace_session_metadata_command
+            SET actor_kind = 'tool',
+                actor_tool_request_id = $1,
+                result_actor_kind = 'tool',
+                result_actor_tool_request_id = $1
+          WHERE command_id = $2",
+    )
+    .bind(Uuid::from_u128(CORRUPT_TOOL_REQUEST))
+    .bind(Uuid::from_u128(REPLACEMENT_COMMAND))
+    .execute(&pool)
+    .await?;
+
+    let Err(SessionMetadataRepositoryError::Corruption(SessionMetadataCorruption::Domain(
+        ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch,
+    ))) = repository.load_command(command(REPLACEMENT_COMMAND)).await
+    else {
+        panic!("supported actor reattribution must fail closed")
+    };
 
     pool.close().await;
     drop(container);
@@ -819,12 +873,12 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
     let unauthenticated = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_title, replacement_archived,
+             issuer_kind, actor_kind, replacement_title, replacement_archived,
              result_kind, result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', 'receipt title', false,
+             'owner', 'owner', 'receipt title', false,
              'applied', $2, $2, to_timestamp(1), 'owner')",
     )
     .bind(Uuid::from_u128(0x905))
@@ -1127,12 +1181,12 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
     let missing_applied_actor = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind,
+             issuer_kind, actor_kind, replacement_archived, result_kind,
              result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, $2,
+             'owner', 'owner', false, 'applied', $2, $2,
              statement_timestamp(), NULL)",
     )
     .bind(Uuid::from_u128(0x907))
@@ -1189,12 +1243,12 @@ async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dy
     let infinite = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind,
+             issuer_kind, actor_kind, replacement_archived, result_kind,
              result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, $2,
+             'owner', 'owner', false, 'applied', $2, $2,
              '-infinity'::timestamptz, 'owner')",
     )
     .bind(Uuid::from_u128(0x908))
@@ -1230,12 +1284,12 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     let missing_root = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind,
+             issuer_kind, actor_kind, replacement_archived, result_kind,
              result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, $2,
+             'owner', 'owner', false, 'applied', $2, $2,
              statement_timestamp(), 'owner')",
     )
     .bind(Uuid::from_u128(0x908))
