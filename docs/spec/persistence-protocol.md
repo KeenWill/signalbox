@@ -4,15 +4,17 @@ The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
 through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
-in PR #227 (`agent/review-workflow-persistence`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+in PR #227 (`agent/review-workflow-persistence`); the `apps/signalboxd`
+migration-invocation home was verified through PR #258
+(`agent/signalboxd-rename`). This page covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -59,9 +61,9 @@ directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
 re-embeds the set whenever a file changes. The production binary holds the
-singleton hub guard and fences the prior pool generation, then runs `migrate` as
-its first schema phase, followed by the startup scan and runtime (INV-034). The
-fence migration's first installation is the sole case without a prior fenced
+singleton daemon guard and fences the prior pool generation, then runs `migrate`
+as its first schema phase, followed by the startup scan and runtime (INV-034).
+The fence migration's first installation is the sole case without a prior fenced
 pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
@@ -118,7 +120,7 @@ Implemented table families (across the forward-only migrations):
   plus the resolved `context_frontier_member` compatibility projection;
 - `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
-  hub-owned session advisory pool fences;
+  daemon-owned session advisory pool fences;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -362,22 +364,22 @@ Locks per transaction, in acquisition order:
   exactly `delivered_through + 1` and its typed record are read. Only an
   accepted synchronous offer advances that same singleton inside the
   transaction.
-- **Hub-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then the
-  transaction takes the exclusive transaction-level advisory lock for the prior
-  generation, updates the singleton to its successor, and also obtains the same
-  exclusive session-level advisory lock before commit. Commit releases the
+- **Daemon-generation advance**: `hub_fence_state` is locked `FOR UPDATE`, then
+  the transaction takes the exclusive transaction-level advisory lock for the
+  prior generation, updates the singleton to its successor, and also obtains the
+  same exclusive session-level advisory lock before commit. Commit releases the
   transaction-level lock and retains the session-level lock. The advisory key is
   the exact unsigned bit pattern
   `generation XOR ((1396852273 << 32) OR 1396852273)`, where `1396852273` is
   ASCII `SBF1`, reinterpreted unchanged as a two's-complement signed `i64` for
   PostgreSQL.
 
-The guarded hub database keeps its fenced application pool and singleton guard
-behind one shutdown boundary. Graceful shutdown globally closes the pool and
-waits for every outstanding checkout before closing the guard session. If that
-explicit shutdown is omitted, or cancelled before the pool drain completes, the
-guard session remains retained until process exit rather than releasing while an
-escaped pool clone may still write.
+The guarded daemon database keeps its fenced application pool and singleton
+guard behind one shutdown boundary. Graceful shutdown globally closes the pool
+and waits for every outstanding checkout before closing the guard session. If
+that explicit shutdown is omitted, or cancelled before the pool drain completes,
+the guard session remains retained until process exit rather than releasing
+while an escaped pool clone may still write.
 
 Two standing constraints (recorded beside the code):
 
@@ -489,7 +491,7 @@ the failure struck at the commit boundary and the transaction may or may not
 have won, so the caller must reread durable state instead of assuming either
 outcome — see Commit-ambiguity handling), `FailClosedCorruption` (committed rows
 cannot construct the accepted domain value; nothing proceeds),
-`IdentityCollision` (a fresh hub-minted identity collided with a durable one;
+`IdentityCollision` (a fresh daemon-minted identity collided with a durable one;
 detected either by the domain seam or by mapping the violated unique constraint
 out of the database error), and `CallerOrHubBug`. The command-handling error
 families draw the same corruption/infrastructure distinctions in their variants
@@ -599,13 +601,13 @@ their terminal marker after the earlier producing model call and ended physical
 attempts rather than requiring an otherwise empty call history. Historical
 Prepared and InFlight transition records remain dispatchable after their call
 advances. Exhausted delivery still validates the allocator singleton and cursor.
-Hub task ownership, polling, fan-out, and client observation semantics are owned
-by [process-protocol](process-protocol.md).
+Daemon task ownership, polling, fan-out, and client observation semantics are
+owned by [process-protocol](process-protocol.md).
 
 ## Open edges
 
-- Deferred outbox retention, pruning, and multiple-hub fan-out are cataloged in
-  [open questions](../open-questions.md#protocols-and-persistence).
+- Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
+  in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is admitted only for the tool-loop yield/approval path;
   no other producer can construct a predecessor-linked attempt.
 - Frontier lineage checks admit `none` and checked imported-frontier ancestry;
@@ -617,4 +619,4 @@ by [process-protocol](process-protocol.md).
   operator classification covers only startup scan, turn activation, the
   eligibility sweep, and the model-call repository.
 - Database-role separation remains a deployment choice; migration invocation
-  itself is wired in `apps/hubd`.
+  itself is wired in `apps/signalboxd`.

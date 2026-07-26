@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Renumber the review-workflow migration after main advanced
+
+**Context.** The review-workflow foundation reserved the `2026072602xx` block
+when its specification stack opened. Before the persistence pull request merged,
+its ultimate `main` parent acquired migrations `202607270001` and
+`202607280001`. Retaining the lower reserved version would make a database
+upgraded through that parent apply a newly introduced migration out of ledger
+order.
+
+**Decision.** The merged review-workflow persistence artifact is
+`202607280002_review_workflow.sql`, strictly after the highest migration on its
+ultimate `main` parent. References to `2026072602xx` in earlier decision entries
+record the stack's original reservation; this entry records the required
+renumber, and the
+[persistence protocol](spec/persistence-protocol.md#migrations) owns the current
+implemented inventory.
+
+**Rejected alternatives.** Keeping `2026072602xx` preserves the initial
+reservation but violates strictly increasing migration history. Renumbering or
+editing migrations already on `main` violates forward-only migration discipline.
+Rewriting the earlier decisions would erase the sequence that explains why the
+reservation and merged filename differ.
+
+**Affects.** The review-workflow migration filename, the provenance of PR #227,
+and interpretation of the earlier review-workflow decision entries' affected
+slice.
+
 ## 2026-07-26 — Select execution locus before authorization
 
 **Context.** A combined-locus tool can use a runner-resident credential profile
@@ -265,6 +292,40 @@ boundaries.
 INV-001 and INV-042, S30, the
 [runner-protocol specification](spec/runner-protocol.md), and later
 configuration, authentication, persistence, and transport stacks.
+
+## 2026-07-25 — Ship the server daemon as signalboxd
+
+**Context.** The recorded de-hub naming direction settled the server's name: the
+daemon ships as `signalboxd`, and future runner processes are a separate
+`signalbox-runner` binary. The crate still built as `signalbox-hubd` in
+`apps/hubd`, and the living documents still named the server process "the hub".
+This entry records that rename's execution.
+
+**Decision.** Rename the crate directory to `apps/signalboxd` and the package
+and binary target to `signalboxd`; rename `config/hubd.example.toml` to
+`config/signalboxd.example.toml`; update the CI integration-matrix label and
+package flags; and move the living surface — specification pages, architecture,
+vision, glossary, scenarios, invariant text, README, and config comments — to
+`signalboxd`/"the daemon" vocabulary, with "hub-local" tool placement becoming
+"daemon-local". Historical decision entries are append-only and keep their hubd
+vocabulary. Hub-named code identifiers (`SingleHubGuard`, `run_hub`, the
+persistence `hub_fence` module) and migration-committed SQL names stay for the
+recorded follow-on vocabulary pass, so cited code homes keep matching source.
+The native client's stored keychain-account and defaults-key literals
+(`hub-api-key`, `hub-url`) stay permanently on PR #238's recorded ground:
+renaming a stored-state identifier orphans already-saved settings and buys
+nothing, so only the Swift constants naming them carry the new vocabulary.
+
+**Rejected alternatives.** Keeping the package name `signalbox-hubd` with only a
+binary-target rename would preserve dependency-graph continuity but leave the
+legacy name on the Cargo surface every reference spells. Renaming code
+identifiers in the same pass would mix a mechanical move with the broad
+vocabulary sweep the backlog scopes separately.
+
+**Affects.** `apps/signalboxd`, `apps/client` imports, the workspace member list
+and `Cargo.lock`, `.github/workflows/rust.yml`,
+`config/signalboxd.example.toml`, and the living documents naming the server
+process.
 
 ## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
 
