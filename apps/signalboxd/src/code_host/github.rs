@@ -368,8 +368,10 @@ impl GitHubCodeHostTransport {
                 credential,
             )
             .await?;
-        let value = self.json_response(response, StatusCode::OK).await?;
-        reject_graphql_errors(&value)?;
+        let value = self
+            .mutation_json_response(response, StatusCode::OK)
+            .await?;
+        reject_graphql_mutation_errors(&value)?;
         let result = (|| {
             let thread = nested(&value, &["data", "resolveReviewThread", "thread"])?;
             let object = required_object(thread)?;

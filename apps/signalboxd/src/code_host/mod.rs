@@ -481,19 +481,10 @@ where
         let result = match self.transport.execute(operation, &credential).await {
             Ok(result) if kind.accepts_result(&result) => result,
             Ok(_) => return Err(caller_bug()),
-            Err(CodeHostTransportFailure::DispatchUnknown) => {
-                return Err(CodeHostExecutorError {
-                    class: OperatorFailureClass::Infrastructure {
-                        commit_ambiguous: kind.mutates(),
-                    },
-                });
-            }
-            Err(
-                CodeHostTransportFailure::InvalidCredential
-                | CodeHostTransportFailure::Rejected
-                | CodeHostTransportFailure::InvalidResponse
-                | CodeHostTransportFailure::ResponseTooLarge,
-            ) => {
+            Err(failure) => {
+                if let Some(class) = transport_failure_class(kind, failure) {
+                    return Err(CodeHostExecutorError { class });
+                }
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: Some(self.code_host_rejected_detail.clone()),
                 }));
@@ -503,11 +494,37 @@ where
         scrubber.redact_value(&mut value);
         let content = serde_json::to_string(&value).map_err(|_| caller_bug())?;
         if content.len() > result::MAX_ENCODED_RESULT_BYTES {
+            if kind.mutates() {
+                return Err(CodeHostExecutorError {
+                    class: OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: true,
+                    },
+                });
+            }
             return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.code_host_rejected_detail.clone()),
             }));
         }
         Ok(invocation.bind(ToolExecutorEvidence::CompletedText(content)))
+    }
+}
+
+const fn transport_failure_class(
+    kind: CodeHostToolKind,
+    failure: CodeHostTransportFailure,
+) -> Option<OperatorFailureClass> {
+    match failure {
+        CodeHostTransportFailure::InvalidCredential | CodeHostTransportFailure::Rejected => None,
+        CodeHostTransportFailure::InvalidResponse | CodeHostTransportFailure::ResponseTooLarge
+            if !kind.mutates() =>
+        {
+            None
+        }
+        CodeHostTransportFailure::InvalidResponse
+        | CodeHostTransportFailure::ResponseTooLarge
+        | CodeHostTransportFailure::DispatchUnknown => Some(OperatorFailureClass::Infrastructure {
+            commit_ambiguous: kind.mutates(),
+        }),
     }
 }
 
@@ -779,6 +796,33 @@ mod tests {
                 "escaped": "prefix [redacted] suffix",
                 "nested": ["[redacted]"],
             })
+        );
+    }
+
+    /// A malformed acknowledgement after a mutation is fail-closed as
+    /// commit-ambiguous rather than durable known-failure evidence.
+    #[test]
+    fn mutation_invalid_response_is_commit_ambiguous() {
+        assert_eq!(
+            transport_failure_class(
+                CodeHostToolKind::ThreadResolve,
+                CodeHostTransportFailure::InvalidResponse,
+            ),
+            Some(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            })
+        );
+    }
+
+    /// A malformed read response cannot imply a durable remote mutation.
+    #[test]
+    fn read_invalid_response_is_known_failure() {
+        assert_eq!(
+            transport_failure_class(
+                CodeHostToolKind::ReviewThreads,
+                CodeHostTransportFailure::InvalidResponse,
+            ),
+            None
         );
     }
 }

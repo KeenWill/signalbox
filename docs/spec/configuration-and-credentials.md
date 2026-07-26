@@ -90,9 +90,10 @@ migration behavior is [persistence-protocol](persistence-protocol.md) scope, and
 the socket boundary and single-daemon guard are
 [process-protocol](process-protocol.md) material.
 
-The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` plus
-the same two file variables in its `--anthropic` mode; it is a development
-driver, not the client protocol.
+The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL`,
+`SIGNALBOX_CONFIG_FILE`, and `ANTHROPIC_API_KEY_FILE` in its `--anthropic` mode.
+It does not compose the daemon tool catalog and does not read
+`GITHUB_TOKEN_FILE`; it is a development driver, not the client protocol.
 
 ## The static model and alias catalog
 
