@@ -533,8 +533,9 @@ rustls with a TLS 1.2 floor; sends the fixed GitHub REST version `2026-03-10`;
 applies a 30-second whole-exchange timeout; and retains at most 512 KiB from any
 JSON response. The authenticated job-log endpoint is the sole redirect-shaped
 exchange: after exactly one 302 response, the adapter validates its bounded
-HTTPS location and performs one credential-free download with redirect following
-still disabled. Credential delivery and redaction are owned by
+HTTPS location, resolves and pins a wholly public destination set, and performs
+one credential-free download with redirect following still disabled. Credential
+delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
 A missing or unusable credential and a definitive rejection produce only fixed

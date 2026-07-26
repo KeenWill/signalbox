@@ -10,6 +10,8 @@ use reqwest::{
 };
 use signalbox_model_runtime::CredentialValue;
 
+use crate::web_fetch::public_destination_client;
+
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, CiJobLogResult,
@@ -287,10 +289,8 @@ impl GitHubCodeHostTransport {
                 credential,
             )
             .await?;
-        let value = self
-            .mutation_json_response(response, StatusCode::OK)
-            .await?;
-        reject_graphql_mutation_errors(&value)?;
+        let value = self.json_response(response, StatusCode::OK).await?;
+        reject_graphql_errors(&value)?;
         let threads = nested(
             &value,
             &["data", "repository", "pullRequest", "reviewThreads"],
@@ -427,8 +427,10 @@ impl GitHubCodeHostTransport {
         {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
-        let response = self
-            .client
+        let redirect_client = public_destination_client(&redirect, DEFAULT_TIMEOUT)
+            .await
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        let response = redirect_client
             .get(redirect)
             .header(USER_AGENT, USER_AGENT_VALUE)
             .send()
@@ -920,6 +922,18 @@ mod tests {
         assert_eq!(
             reject_graphql_mutation_errors(&value),
             Err(CodeHostTransportFailure::DispatchUnknown)
+        );
+    }
+
+    /// A GraphQL error from a read is a definitive rejection that can return
+    /// ordinary known-failure evidence.
+    #[test]
+    fn graphql_read_error_is_rejected() {
+        let value = serde_json::json!({"errors": [{"message": "fixture rejection"}]});
+
+        assert_eq!(
+            reject_graphql_errors(&value),
+            Err(CodeHostTransportFailure::Rejected)
         );
     }
 }

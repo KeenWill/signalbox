@@ -255,14 +255,8 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
         &mut self,
         request: WebFetchRequest,
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
-        let started = tokio::time::Instant::now();
-        let destination = resolve_public_destination(&request, self.exchange_timeout).await?;
-        let remaining = self
-            .exchange_timeout
-            .checked_sub(started.elapsed())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or(WebFetchTransportFailure::RequestFailed)?;
-        let client = build_web_fetch_client(remaining, Some(&destination))
+        let client = public_destination_client(request.url(), self.exchange_timeout)
+            .await
             .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
         fetch_with_client(client, request).await
     }
@@ -324,26 +318,42 @@ struct ResolvedPublicDestination {
     addresses: Vec<SocketAddr>,
 }
 
-async fn resolve_public_destination(
-    request: &WebFetchRequest,
+/// Builds one credential-free client pinned to a URL's complete admitted
+/// public DNS result.
+pub(crate) async fn public_destination_client(
+    url: &Url,
     exchange_timeout: Duration,
-) -> Result<ResolvedPublicDestination, WebFetchTransportFailure> {
-    let host = request
-        .url
-        .host_str()
-        .ok_or(WebFetchTransportFailure::RequestFailed)?;
-    let port = request
-        .url
+) -> Result<Client, PublicDestinationClientError> {
+    let started = tokio::time::Instant::now();
+    let destination = resolve_public_destination(url, exchange_timeout).await?;
+    let remaining = exchange_timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(PublicDestinationClientError)?;
+    build_web_fetch_client(remaining, Some(&destination)).map_err(|_| PublicDestinationClientError)
+}
+
+/// A URL could not be resolved and pinned as a public-only destination before
+/// dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PublicDestinationClientError;
+
+async fn resolve_public_destination(
+    url: &Url,
+    exchange_timeout: Duration,
+) -> Result<ResolvedPublicDestination, PublicDestinationClientError> {
+    let host = url.host_str().ok_or(PublicDestinationClientError)?;
+    let port = url
         .port_or_known_default()
-        .ok_or(WebFetchTransportFailure::RequestFailed)?;
+        .ok_or(PublicDestinationClientError)?;
     let addresses = if let Some(address) = parse_url_host_ip(host) {
         vec![SocketAddr::new(address, port)]
     } else {
         let resolved =
             tokio::time::timeout(exchange_timeout, tokio::net::lookup_host((host, port)))
                 .await
-                .map_err(|_| WebFetchTransportFailure::RequestFailed)?
-                .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
+                .map_err(|_| PublicDestinationClientError)?
+                .map_err(|_| PublicDestinationClientError)?;
         resolved
             .take(MAX_RESOLVED_ADDRESSES + 1)
             .collect::<Vec<_>>()
@@ -354,7 +364,7 @@ async fn resolve_public_destination(
             .iter()
             .any(|address| !is_public_destination_address(address.ip()))
     {
-        return Err(WebFetchTransportFailure::RequestFailed);
+        return Err(PublicDestinationClientError);
     }
     Ok(ResolvedPublicDestination {
         host: host.to_owned(),
@@ -715,9 +725,9 @@ mod tests {
             url: Url::parse("http://localhost/private").expect("fixture URL is valid"),
         };
 
-        let resolution = resolve_public_destination(&request, Duration::from_secs(2)).await;
+        let resolution = public_destination_client(request.url(), Duration::from_secs(2)).await;
 
-        assert_eq!(resolution, Err(WebFetchTransportFailure::RequestFailed));
+        assert!(matches!(resolution, Err(PublicDestinationClientError)));
     }
 
     /// Bounded binary input becomes deterministic lossy text plus metadata.

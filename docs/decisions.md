@@ -25,7 +25,8 @@ header to `2026-03-10`, require TLS 1.2 or later, and bound each exchange to 30
 seconds. Bound JSON responses to 512 KiB, returned text fields and job-log
 prefixes to 64 KiB, and collection pages to 100 items. The job-log endpoint may
 follow its one authenticated 302 response with one credential-free HTTPS
-download. Definitive client rejection is known failure; a lost or malformed
+download only after resolving and pinning a wholly public destination set.
+Definitive client rejection is known failure; a lost or malformed
 acknowledgement after a mutation is commit-ambiguous.
 
 **Rejected alternatives.** A provider-neutral plugin surface invents a boundary
