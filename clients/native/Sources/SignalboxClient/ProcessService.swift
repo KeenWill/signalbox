@@ -316,8 +316,18 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
               "The metadata page count did not match its admitted summaries."
             )
           }
-          if let next = end.nextAfterSessionID, cursorValidationIsComplete {
-            guard next.rawValue == priorSessionID else {
+          if let next = end.nextAfterSessionID {
+            guard cursor.map({ $0.rawValue < next.rawValue }) ?? true else {
+              throw SignalboxProcessServiceError.invalidPage(
+                "The metadata page cursor did not advance beyond its request cursor."
+              )
+            }
+            guard priorSessionID.map({ $0 <= next.rawValue }) ?? true else {
+              throw SignalboxProcessServiceError.invalidPage(
+                "The metadata page cursor regressed behind an admitted summary."
+              )
+            }
+            if cursorValidationIsComplete, next.rawValue != priorSessionID {
               throw SignalboxProcessServiceError.invalidPage(
                 "The metadata page cursor did not match its last emitted identity."
               )
@@ -420,8 +430,21 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   ) async throws -> Success {
     var retryIndex = 0
     while true {
-      let frame = try await withExchange(request: request) { exchange in
-        try await exchange.next()
+      let frame: SignalboxProcessServerFrame?
+      do {
+        frame = try await withExchange(request: request) { exchange in
+          try await exchange.next()
+        }
+      } catch let error as CancellationError {
+        throw error
+      } catch {
+        let delay = try ambiguousMutationRetryDelay(
+          at: retryIndex,
+          message: error.localizedDescription
+        )
+        retryIndex += 1
+        try await wait(delay)
+        continue
       }
       guard let frame else {
         let delay = try ambiguousMutationRetryDelay(

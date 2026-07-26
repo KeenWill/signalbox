@@ -95,8 +95,9 @@ final class AppCoordinator: ObservableObject {
         }
         let candidate = Self.makeProcessService(socketPath: socketPath)
         processService = nil
-        await processSettings.test(using: candidate)
-        if processSettings.connectionStatus == .connected {
+        await processSettings.test(using: candidate, expectedSocketPath: socketPath)
+        if processSettings.connectionStatus == .connected,
+           processSettings.validatedSocketPath == socketPath {
             processService = candidate
             NotificationCenter.default.post(name: .refreshRequested, object: nil)
         }

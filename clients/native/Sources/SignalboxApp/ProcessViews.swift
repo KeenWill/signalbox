@@ -17,6 +17,7 @@ final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var isLoading = false
 
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
+  private var activeRefreshID = UUID()
 
   init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
     self.serviceProvider = serviceProvider
@@ -46,16 +47,30 @@ final class ProcessSessionListViewModel: ObservableObject {
   }
 
   func refresh() async {
+    let refreshID = UUID()
+    activeRefreshID = refreshID
     guard let service = serviceProvider() else {
+      isLoading = false
       errorMessage = remoteTransportGateMessage
       return
     }
     isLoading = true
-    defer { isLoading = false }
+    defer {
+      if activeRefreshID == refreshID {
+        isLoading = false
+      }
+    }
     do {
-      sessions = try await service.listSessions(includeArchived: true)
+      let refreshedSessions = try await service.listSessions(includeArchived: true)
+      guard activeRefreshID == refreshID else {
+        return
+      }
+      sessions = refreshedSessions
       errorMessage = nil
     } catch {
+      guard activeRefreshID == refreshID else {
+        return
+      }
       errorMessage = error.localizedDescription
     }
   }
@@ -364,6 +379,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
+        if projection.activity.state == .waitingForToolDecision {
+          activity = projection.activity
+        }
         pendingInputs.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
         }
@@ -406,10 +424,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .toolBatchTransition(_, _, let state):
       switch state {
       case .proposed:
-        activity = .init(
-          state: .waitingForToolDecision,
-          label: "Tool decision unavailable"
-        )
+        activity = .init(state: .running, label: "Running")
       case .resultsProjected:
         activity = .init(state: .running, label: "Running")
       case .recoveryRequired:

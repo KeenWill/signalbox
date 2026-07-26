@@ -49,18 +49,29 @@ final class SignalboxProcessSettingsViewModel: ObservableObject {
     connectionStatus = .unknown
   }
 
-  func test(using service: (any SignalboxProcessServiceProtocol)?) async {
+  func test(
+    using service: (any SignalboxProcessServiceProtocol)?,
+    expectedSocketPath: String? = nil
+  ) async {
     guard let service else {
       connectionStatus = .failed(remoteTransportGateMessage)
       return
     }
     do {
       try await service.testConnection()
+      guard expectedSocketPath.map({ validatedSocketPath == $0 }) ?? true else {
+        connectionStatus = .unknown
+        return
+      }
       connectionStatus = .connected
-      if let path = validatedSocketPath {
+      if let path = expectedSocketPath ?? validatedSocketPath {
         userDefaults.set(path, forKey: NativeProcessConstants.socketDefaultsKey)
       }
     } catch {
+      guard expectedSocketPath.map({ validatedSocketPath == $0 }) ?? true else {
+        connectionStatus = .unknown
+        return
+      }
       connectionStatus = .failed(error.localizedDescription)
     }
   }

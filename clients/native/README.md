@@ -18,9 +18,9 @@ WebSocket, or OpenAI-compatible surfaces.
 - Preserve queued input separately until matching transcript content appears.
 - Submit one exact, nonblank composer draft at a time with the session's
   defaults version and retry the exact prepared command after `commit_ambiguous`
-  or receipt loss, with a finite schedule; if that schedule is exhausted, retain
-  the prepared command identity while its exact UTF-8 composer draft is
-  unchanged and prepare a new identity after an edit.
+  receipt loss, or a receive failure, with a finite schedule; if that schedule
+  is exhausted, retain the prepared command identity while its exact UTF-8
+  composer draft is unchanged and prepare a new identity after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
@@ -62,7 +62,8 @@ selected with `--mock-server`.
 ## Screenshots
 
 Golden screenshots live under `Screenshots/iOS`, `Screenshots/iPadOS`, and
-`Screenshots/macOS`. Regenerate and verify them with:
+`Screenshots/macOS`. The 136-image matrix includes pending, completed, and
+failed tool states. Regenerate and verify it with:
 
 ```bash
 scripts/capture-screenshots.sh
@@ -95,15 +96,16 @@ none in a URL or log.
 ## Rewire inventory
 
 Phase A closes the imported transport and synchronization findings: settings now
-install the tested socket client; every reconnect path is capped; deadlines are
-typed separately from heartbeat concerns; snapshot/stream ordering is owned by
-the synchronization machine; fallbacks preserve diagnostics; failed submission
-preserves the exact composer text; one submission is in flight at a time; an
-unresolved ambiguous submission, including a lost receipt, preserves its
-prepared command identity while the exact UTF-8 draft is unchanged; process
-results remain neutral unless the wire reports a failure; internal wire details
-do not become legacy `visible_to_user` failures; and no credential crosses a
-plaintext URL.
+install only the client for the tested socket path, and stale connection or
+session-list probes cannot publish; every reconnect path is capped; deadlines
+are typed separately from heartbeat concerns; snapshot/stream ordering is owned
+by the synchronization machine; fallbacks preserve diagnostics; failed
+submission preserves the exact composer text; one submission is in flight at a
+time; an unresolved ambiguous submission, including a lost receipt or receive
+failure, preserves its prepared command identity while the exact UTF-8 draft is
+unchanged; process results remain neutral unless the wire reports a failure;
+internal wire details do not become legacy `visible_to_user` failures; and no
+credential crosses a plaintext URL.
 
 The following work remains:
 

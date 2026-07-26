@@ -71,6 +71,7 @@ enum MacScreenshotExporter {
             rootSpecification(name: "markdown-code", scenario: .markdownCode, windowSize: windowSize),
             rootSpecification(name: "markdown-message", scenario: .markdownMessage, windowSize: windowSize),
             rootSpecification(name: "pending-approval", scenario: .pendingApproval, windowSize: windowSize),
+            rootSpecification(name: "completed-tool", scenario: .completedTool, windowSize: windowSize),
             rootSpecification(name: "failed-tool", scenario: .failedTool, windowSize: windowSize),
             rootSpecification(name: "artifact-preview", scenario: .artifactPreview, windowSize: windowSize),
             rootSpecification(name: "runners", scenario: .runners, windowSize: windowSize),
