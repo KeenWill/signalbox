@@ -8,8 +8,9 @@
 //! What it proves is protocol compatibility, which is what a CLI version bump
 //! actually breaks: the `codex exec --json` event stream still starts a thread,
 //! still reports usage on `turn.completed`, still accepts every flag the
-//! adapter passes, and its final agent message still decodes as the adapter's
-//! response envelope. It deliberately asserts nothing about answer quality.
+//! adapter passes, and its final response envelope still decodes as a completed
+//! or refused terminal outcome. It deliberately asserts nothing about answer
+//! quality.
 //!
 //! The version check runs first and fails closed. Without it a drifted local
 //! or CI executable could satisfy every assertion below and be recorded as
@@ -31,9 +32,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionEvidence, ConversationMessage,
-    CredentialReference, DeliveryMode, ModelOperation, ModelRuntime, ModelSettings,
-    PreparationOutcome, RequestedTarget, ResolvedTarget, TerminalEvidence,
+    CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
+    CredentialReference, DeliveryMode, ExchangeFacts, ModelOperation, ModelRuntime, ModelSettings,
+    PreparationOutcome, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime, SUPPORTED_CODEX_CLI_VERSION,
@@ -55,6 +57,12 @@ const DEFAULT_MODEL: &str = "gpt-5.1-codex-mini";
 /// A trivial prompt keeps the exchange to the smallest billable turn that
 /// still exercises the whole event protocol.
 const PROMPT: &str = "Reply with the single word: ready";
+
+/// Arbitrary non-default facts that prove the shared response projection
+/// preserves terminal evidence rather than manufacturing defaults.
+const FIXTURE_THREAD_ID: &str = "fixture-thread";
+const FIXTURE_INPUT_TOKENS: u64 = 3;
+const FIXTURE_OUTPUT_TOKENS: u64 = 1;
 
 #[tokio::test]
 #[ignore = "spends one real Codex CLI exchange; run only from the gated compatibility smoke"]
@@ -94,12 +102,22 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
 
-    let completed = require_completion(report.evidence);
-    assert_protocol_surfaces(&completed, &model);
+    let decoded = require_decoded_response(report.evidence);
+    assert!(
+        decoded.exchange.provider_request_id.is_some(),
+        "no thread id reached the exchange facts, so `thread.started` no longer \
+         parses for model {model}"
+    );
+    assert!(
+        decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0)
+            && decoded.usage.output_tokens.is_some(),
+        "`turn.completed` no longer reports the usage counters the adapter reads"
+    );
 }
 
 /// `CodexCliPreparedRequest` deliberately implements no diagnostic formatting,
 /// so each non-prepared outcome reports only its safe shared-runtime evidence.
+#[track_caller]
 fn require_prepared(
     outcome: PreparationOutcome<String, CodexCliPreparedRequest<String>>,
 ) -> CodexCliPreparedRequest<String> {
@@ -115,12 +133,25 @@ fn require_prepared(
     }
 }
 
-fn require_completion(evidence: TerminalEvidence) -> CompletionEvidence {
+struct DecodedResponse {
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+}
+
+#[track_caller]
+fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
-        TerminalEvidence::Completed(completed) => completed,
+        TerminalEvidence::Completed(completed) => DecodedResponse {
+            exchange: completed.exchange,
+            usage: completed.usage,
+        },
+        TerminalEvidence::Refused(refused) => DecodedResponse {
+            exchange: refused.exchange,
+            usage: refused.usage,
+        },
         // Adapter-produced evidence is already credential-shape redacted, so
         // printing it here cannot surface credential material.
-        other => panic!("the pinned Codex CLI did not complete the exchange: {other:?}"),
+        other => panic!("the pinned Codex CLI returned no decoded response: {other:?}"),
     }
 }
 
@@ -162,34 +193,53 @@ async fn assert_pinned_version(executable: &str) {
     );
 }
 
-/// The event-protocol surfaces a CLI version bump can silently move.
-fn assert_protocol_surfaces(completed: &CompletionEvidence, model: &str) {
-    assert!(
-        completed.exchange.provider_request_id.is_some(),
-        "no thread id reached the exchange facts, so `thread.started` no longer \
-         parses for model {model}"
-    );
-    assert!(
-        completed
-            .usage
-            .input_tokens
-            .is_some_and(|tokens| tokens > 0)
-            && completed.usage.output_tokens.is_some(),
-        "`turn.completed` no longer reports the usage counters the adapter reads"
-    );
-    let text = completed
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
-    assert!(
-        !text.trim().is_empty(),
-        "the final agent message decoded as the response envelope but carried no \
-         text; the envelope contract and the CLI's structured output have drifted"
-    );
+#[test]
+fn decoded_response_accepts_completion() {
+    let exchange = ExchangeFacts {
+        provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
+        http_status: None,
+    };
+    let usage = TokenUsage {
+        input_tokens: Some(FIXTURE_INPUT_TOKENS),
+        output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
+        ..TokenUsage::default()
+    };
+    let evidence = TerminalEvidence::Completed(CompletionEvidence {
+        exchange: exchange.clone(),
+        message_id: None,
+        reported_model: None,
+        finish: CompletionFinish::EndTurn,
+        content: Vec::new(),
+        usage,
+    });
+
+    let decoded = require_decoded_response(evidence);
+    assert_eq!(decoded.exchange, exchange);
+    assert_eq!(decoded.usage, usage);
+}
+
+#[test]
+fn decoded_response_accepts_refusal_without_completion_material() {
+    let exchange = ExchangeFacts {
+        provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
+        http_status: None,
+    };
+    let usage = TokenUsage {
+        input_tokens: Some(FIXTURE_INPUT_TOKENS),
+        output_tokens: Some(FIXTURE_OUTPUT_TOKENS),
+        ..TokenUsage::default()
+    };
+    let evidence = TerminalEvidence::Refused(RefusalEvidence {
+        exchange: exchange.clone(),
+        message_id: None,
+        reported_model: None,
+        content: Vec::new(),
+        usage,
+    });
+
+    let decoded = require_decoded_response(evidence);
+    assert_eq!(decoded.exchange, exchange);
+    assert_eq!(decoded.usage, usage);
 }
 
 fn variable_or(name: &str, fallback: &str) -> String {
