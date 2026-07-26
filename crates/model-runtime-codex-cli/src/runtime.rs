@@ -398,6 +398,12 @@ async fn execute_process<C: Clone + Send + Sync>(
     };
     let stderr_limit = prepared.stderr_limit;
     let stderr_task = tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
+    let mut decoder = EventDecoder::new(
+        prepared.correlation,
+        prepared.delivery,
+        &prepared.translated,
+    );
+    let mut redacting_sink = RedactingSink::new(sink);
     let input_step = {
         let send_prompt = async {
             stdin.write_all(&prepared.prompt).await?;
@@ -414,9 +420,70 @@ async fn execute_process<C: Clone + Send + Sync>(
     match input_step {
         InputStep::Written(Ok(())) => {}
         InputStep::Written(Err(error)) => {
-            force_kill(&mut child).await;
-            abort_stderr_task(stderr_task).await;
-            return pre_exchange_transport_loss(format!("Codex stdin write failed: {error}"));
+            drop(stdin);
+            let mut stderr_task = stderr_task;
+            let stderr = tokio::select! {
+                biased;
+                result = &mut stderr_task => stderr_result(result),
+                () = &mut *cancellation => {
+                    interrupt_then_kill(
+                        &mut child,
+                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                    )
+                    .await;
+                    abort_stderr_task(stderr_task).await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(LossCause::CancellationRequested);
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    force_kill(&mut child).await;
+                    abort_stderr_task(stderr_task).await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(timeout_cause());
+                },
+            };
+            let status = tokio::select! {
+                biased;
+                status = child.wait() => status,
+                () = &mut *cancellation => {
+                    interrupt_then_kill(
+                        &mut child,
+                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                    )
+                    .await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(LossCause::CancellationRequested);
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    force_kill(&mut child).await;
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(timeout_cause());
+                },
+            };
+            match status {
+                Ok(status) if !status.success() => {
+                    let message = if stderr.trim().is_empty() {
+                        format!("Codex CLI exited with status {status} after stdin failed: {error}")
+                    } else {
+                        format!("Codex CLI exited with status {status}: {stderr}")
+                    };
+                    redacting_sink.finish();
+                    return decoder.provider_error_after_exit(&message);
+                }
+                Ok(_) => {
+                    let evidence = decoder.finish(&mut redacting_sink);
+                    redacting_sink.finish();
+                    return evidence;
+                }
+                Err(wait_error) => {
+                    redacting_sink.finish();
+                    return decoder.boundary_loss(LossCause::TransportFailed(
+                        TransportFacts::new(format!(
+                            "Codex stdin write failed ({error}) and process wait failed: {wait_error}"
+                        )),
+                    ));
+                }
+            }
         }
         InputStep::Cancelled => {
             interrupt_then_kill(
@@ -438,13 +505,6 @@ async fn execute_process<C: Clone + Send + Sync>(
     drop(stdin);
 
     let mut stdout = BufReader::new(stdout);
-    let mut decoder = EventDecoder::new(
-        prepared.correlation,
-        prepared.delivery,
-        &prepared.translated,
-    );
-    let mut redacting_sink = RedactingSink::new(sink);
-
     loop {
         let terminal_observed = decoder.terminal_observed();
         let next = tokio::select! {
@@ -687,15 +747,16 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
 async fn interrupt_then_kill(child: &mut Child, grace: Duration) {
     #[cfg(unix)]
     {
-        if let Some(raw_pid) = child.id()
+        let process_group_id = child.id();
+        if let Some(raw_pid) = process_group_id
             && let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32)
         {
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::INT);
-            tokio::select! {
-                biased;
-                _ = child.wait() => return,
-                () = tokio::time::sleep(grace) => {}
-            }
+            tokio::time::sleep(grace).await;
+            kill_process_group(process_group_id);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return;
         }
     }
     force_kill(child).await;

@@ -871,6 +871,71 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
 }
 
 #[tokio::test]
+async fn nonzero_exit_while_writing_stdin_preserves_provider_error() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(
+        temporary.path().join(fixtures::EARLY_STDIN_EXIT_MARKER),
+        "exit",
+    )
+    .expect("the early-exit marker is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let failure = provider_error(&report.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert!(
+        failure
+            .native
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(fixtures::EARLY_STDIN_FAILURE))
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_kills_descendants_after_the_group_leader_exits() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::from_secs(5);
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "interrupt_with_descendant",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let descendant_path = temporary.path().join("fake-codex-interrupt-descendant-pid");
+    let cancellation = cancel_after_record(descendant_path.clone());
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::CancellationRequested
+    );
+    assert_recorded_process_exited(descendant_path);
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
 async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let mut config = CodexCliConfig::new(

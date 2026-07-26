@@ -4,6 +4,7 @@ use serde_json::Value;
 use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
 
 const REDACTED: &str = "[redacted]";
+const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
 const LINE_CREDENTIAL_MARKERS: &[&str] =
     &["authorization=", "authorization:", "cookie=", "cookie:"];
 const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
@@ -309,6 +310,7 @@ struct PendingStreamText<C> {
 pub(crate) struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     pending: Option<PendingStreamText<C>>,
+    suppressing: bool,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -316,6 +318,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         Self {
             inner,
             pending: None,
+            suppressing: false,
         }
     }
 
@@ -336,6 +339,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
 
     /// Flushes already-decoded text when no later provider text can extend it.
     pub(crate) fn finish(&mut self) {
+        self.suppressing = false;
         if let Some(pending) = self.pending.take() {
             if redact_text(&pending.text) == pending.text {
                 self.emit_original(pending.fragments);
@@ -367,6 +371,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
     }
 
+    fn hold_or_suppress(&mut self, pending: PendingStreamText<C>) {
+        if pending.text.len() > MAX_PENDING_STREAM_BYTES {
+            self.emit_redacted(pending.fragments);
+            self.suppressing = true;
+        } else {
+            self.pending = Some(pending);
+        }
+    }
+
     fn emit(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
         if text.is_empty() {
             return;
@@ -379,6 +392,10 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     }
 
     fn redact_delta(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
+        if self.suppressing {
+            self.emit(field, index, correlation, REDACTED.to_string());
+            return;
+        }
         if let Some(mut pending) = self.pending.take() {
             if !stream_candidate_starts_at_zero(&pending.text)
                 && let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text)
@@ -401,13 +418,13 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 if let Some(unsafe_start) = unsafe_stream_suffix_start(&combined) {
                     if unsafe_start == 0 {
                         pending.text = combined;
-                        self.pending = Some(pending);
+                        self.hold_or_suppress(pending);
                         return;
                     }
                     let (redacted, unsafe_fragments) =
                         split_stream_fragments(pending.fragments, unsafe_start);
                     self.emit_redacted(redacted);
-                    self.pending = Some(PendingStreamText {
+                    self.hold_or_suppress(PendingStreamText {
                         fragments: unsafe_fragments,
                         text: combined[unsafe_start..].to_string(),
                     });
@@ -419,15 +436,25 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.emit_original(pending.fragments);
         }
 
-        if unsafe_stream_suffix_start(&text).is_some() {
-            self.pending = Some(PendingStreamText {
-                fragments: vec![StreamFragment {
-                    field,
-                    index,
-                    correlation,
-                    text: text.clone(),
-                }],
-                text,
+        if let Some(unsafe_start) = unsafe_stream_suffix_start(&text) {
+            let fragment = StreamFragment {
+                field,
+                index,
+                correlation,
+                text: text.clone(),
+            };
+            if text.len() <= MAX_PENDING_STREAM_BYTES {
+                self.hold_or_suppress(PendingStreamText {
+                    fragments: vec![fragment],
+                    text,
+                });
+                return;
+            }
+            let (safe, unsafe_fragments) = split_stream_fragments(vec![fragment], unsafe_start);
+            self.emit_original(safe);
+            self.hold_or_suppress(PendingStreamText {
+                fragments: unsafe_fragments,
+                text: text[unsafe_start..].to_string(),
             });
         } else {
             self.emit(field, index, correlation, redact_text(&text));
@@ -645,8 +672,11 @@ fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool
 
 #[cfg(test)]
 mod tests {
+    use signalbox_model_runtime::{Observation, ObservationFact, ObservationSink};
+
     use super::{
-        redact_json, redact_text, stream_candidate_starts_at_zero, unsafe_stream_suffix_start,
+        MAX_PENDING_STREAM_BYTES, REDACTED, RedactingSink, redact_json, redact_text,
+        stream_candidate_starts_at_zero, unsafe_stream_suffix_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -761,5 +791,52 @@ mod tests {
     fn inv_035_stream_redaction_holds_a_split_composite_json_key() {
         assert_eq!(unsafe_stream_suffix_start(r#"safe {"client_sec"#), Some(6));
         assert!(stream_candidate_starts_at_zero(r#""client_secret":"#));
+    }
+
+    /// INV-035: an unterminated streamed credential cannot grow retained
+    /// redaction state without bound.
+    #[test]
+    fn inv_035_stream_redaction_bounds_an_unterminated_credential() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ThinkingDelta {
+                    index: 0,
+                    text: format!("sk-{}", "x".repeat(MAX_PENDING_STREAM_BYTES)),
+                },
+            });
+            assert!(sink.pending.is_none());
+            assert!(sink.suppressing);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: "continued".to_string(),
+                },
+            });
+            sink.finish();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::ThinkingDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
+        );
     }
 }

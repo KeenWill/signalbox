@@ -441,24 +441,29 @@ validation to every spawned exchange, so a schema shape the live API refuses
 cannot pass the fixture corpus.
 
 The adapter bounds every stdout event while copying and drains stderr while
-retaining only a bounded prefix. Construction rejects a zero or
-runtime-clock-unrepresentable process timeout. Cancellation before spawn is
-proven unsent. After spawn it sends an interrupt to the dedicated process group,
-waits a positive grace, and force-kills only as fallback; either path is
+retaining only a bounded prefix. Streamed credential lookbehind retains at most
+64 KiB; exceeding that bound emits redaction under each held observation's
+original metadata and suppresses later text through the terminal flush.
+Construction rejects a zero or runtime-clock-unrepresentable process timeout.
+Cancellation before spawn is proven unsent. After spawn it sends an interrupt to
+the dedicated process group, retains the unreaped leader through a positive
+grace, and kills the group before reaping the leader; cancellation is
 `BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
 starts immediately after successful spawn, governs stdin transfer, stdout
 decoding, and process exit, then force-kills the original process as typed
 boundary loss; interrupt grace is capped at the time remaining before that
-deadline. Ready stdout is polled before simultaneous control signals, then the
-decoder drains only the current bounded reader batch before synchronously
-rechecking control, so continuously ready stdout cannot starve it. Once a
-provider terminal marker is observed, a later cancellation cannot replace that
-definitive evidence, but the process deadline continues to govern exit and
-cleanup. The adapter also bounds stderr cleanup before reaping the direct child
-and terminates the original process group when an inherited stderr handle
-outlives the deadline, so cleanup never signals through a reusable process
-identity. The offline test binary exercises all process and evidence paths
-without a live CLI or network.
+deadline. A stdin write failure first drains bounded stderr and observes process
+status under the same controls, preserving a definitive nonzero CLI failure
+instead of discarding it as transport loss. Ready stdout is polled before
+simultaneous control signals, then the decoder drains only the current bounded
+reader batch before synchronously rechecking control, so continuously ready
+stdout cannot starve it. Once a provider terminal marker is observed, a later
+cancellation cannot replace that definitive evidence, but the process deadline
+continues to govern exit and cleanup. The adapter also bounds stderr cleanup
+before reaping the direct child and terminates the original process group when
+an inherited stderr handle outlives the deadline, so cleanup never signals
+through a reusable process identity. The offline test binary exercises all
+process and evidence paths without a live CLI or network.
 
 ## Credential-access boundary
 

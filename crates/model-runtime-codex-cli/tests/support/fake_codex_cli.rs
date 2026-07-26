@@ -12,6 +12,10 @@ mod fixtures;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
     let output_schema = validate_argv()?;
+    if Path::new(fixtures::EARLY_STDIN_EXIT_MARKER).exists() {
+        eprintln!("{}", fixtures::EARLY_STDIN_FAILURE);
+        std::process::exit(7);
+    }
     if Path::new("fake-codex-block-stdin").exists() {
         std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
         std::thread::sleep(Duration::from_secs(60));
@@ -263,6 +267,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "fake-codex-inherited-stderr-pid",
                 descendant.id().to_string(),
             )?;
+        }
+        "interrupt_with_descendant" => {
+            let descendant = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("trap '' INT; sleep 60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            std::fs::write(
+                "fake-codex-interrupt-descendant-pid",
+                descendant.id().to_string(),
+            )?;
+            std::thread::sleep(Duration::from_secs(60));
         }
         "filtered_environment" => {
             if std::env::var_os("PWD").is_some() || std::env::var_os("PATH").is_none() {

@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Bound Codex streamed redaction lookbehind
+
+**Context.** Credential-shape redaction must retain an incomplete marker or
+value across streamed observations, but an unterminated value can otherwise grow
+that retained suffix for the lifetime of the process. Per-event bounds do not
+bound accumulation across many valid events.
+
+**Decision.** Retain at most 64 KiB of incomplete Codex credential-shaped stream
+text. When that bound is exceeded, emit redaction markers with the original
+observation metadata and suppress later streamed text through the terminal
+flush. This may redact benign continuation text but never releases the possible
+credential.
+
+**Rejected alternatives.** Retaining through the process deadline leaves memory
+unbounded. Truncating and resuming ordinary output could release the remainder
+of the same credential. Raising the per-event limit does not address cumulative
+growth.
+
+**Affects.** INV-035, the Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md), and the streaming redactor in
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-26 — Make runner lease authority single-use and tool-bound
 
 **Context.** An authorized physical attempt identifies its request, session,
