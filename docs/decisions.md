@@ -91,14 +91,15 @@ boundary and the model's available tools without extending conversation context.
 
 **Decision.** Session placement begins with a class-or-identity selector,
 working-directory selection, optional credential profile, and workspace
-requirement. The first eligible execution pins the exact runner and its
-validated capability snapshot. Ordinary dispatch cannot move the session. Runner
-loss is explicit and disables future leasing. Owner-directed replacement checks
-one complete new placement, advances a positive revision, and emits complete
-before-and-after change facts for mandatory later frontier injection. A
-repository workspace requires the runner-advertised `WorktreePerSession`
-capability; its provisioned path is runner-owned and a replacement cannot
-inherit it across runners.
+requirement. The first eligible execution consumes its exact authorized
+tool-attempt fence and atomically pins the exact runner, its validated
+capability snapshot, and the initial runner lease; mere attachment cannot pin.
+Ordinary dispatch cannot move the session. Runner loss is explicit and disables
+future leasing. Owner-directed replacement checks one complete new placement,
+advances a positive revision, and emits complete before-and-after change facts
+for mandatory later frontier injection. A repository workspace requires the
+runner-advertised `WorktreePerSession` capability; its provisioned path is
+runner-owned and a replacement cannot inherit it across runners.
 
 **Rejected alternatives.** Re-evaluating a class before every call permits
 silent migration. Pinning only a working-directory string treats paths on
@@ -123,17 +124,19 @@ duplicates unsafe work.
 `Pure`, `Idempotent`, or `SideEffecting`; pure implies idempotent. Tool
 placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
 or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
-the combined case. Runner leases bind an exact pinned runner, tool, physical
-attempt, and positive dispatch generation; active enrollment, current placement,
-registration, and grant jointly authorize the lease, and effect is derived from
-the validated declaration. Loss before claim may advance every class while
-retaining the never-executed attempt. Loss after claim produces re-lease
-authority only for pure or idempotent work and requires a fresh physical attempt
-identity; the lease-lineage generation advances while that new physical
-attempt's own dispatch generation starts at its required first value.
-Side-effecting loss produces exact crash-classification authority and cannot
-produce re-lease authority. Undeclared advertised tools are rejected; an
-untrusted pre-validation boundary classifies an absent effect declaration as
+the combined case and daemon fallback retained if that runner later omits the
+combined tool. Runner leases consume the tool loop's exact authorized
+physical-attempt dispatch correlation and bind it to an exact pinned runner,
+tool, and positive lease-lineage generation; active enrollment, current
+placement, registration, and grant jointly authorize the lease, and effect is
+derived from the validated declaration. Loss before claim may advance every
+class while retaining the never-executed attempt. Loss after claim produces
+re-lease authority only for pure or idempotent work and requires a fresh
+authorized physical attempt identity; the lease-lineage generation advances
+while that new physical attempt's own dispatch generation starts at its required
+first value. Side-effecting loss produces exact crash-classification authority
+and cannot produce re-lease authority. Undeclared advertised tools are rejected;
+an untrusted pre-validation boundary classifies an absent effect declaration as
 side-effecting.
 
 The later runner transport uses one runner-initiated held outbound streaming
@@ -179,9 +182,11 @@ authoritative for runner dispatch, including runner-only tools; a later adapter
 must compile its schema and reject any shared daemon-local definition whose
 description, schema, permission, or mapped effect disagrees. Re-registration can
 change availability but carries no field capable of changing policy. It cannot
-widen an established session snapshot; narrowing that snapshot disables lease
-creation and is reconciled as explicit runner loss. Enrollment revocation also
-disables later lease creation through a registration it previously validated.
+widen an established session snapshot; narrowing a runner-required capability
+disables lease creation and is reconciled as explicit runner loss, while
+omission of a combined-locus tool retains placement and daemon fallback.
+Enrollment revocation also disables later lease creation through a registration
+it previously validated.
 
 Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
 letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
