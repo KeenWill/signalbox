@@ -459,6 +459,7 @@ fn attachment(
     let pass = pass_evidence(pass.reference(), pass.kind(), pass.policy(), state);
     ReviewExternalLinkAttachment::new(
         link,
+        pass.reference(),
         pass.clone(),
         run_evidence_for_pass(pass),
         external_object,
@@ -497,6 +498,7 @@ fn posted_attachment(
     let pass = pass_evidence(pass.reference(), pass.kind(), pass.policy(), state);
     ReviewExternalLinkAttachment::new(
         link,
+        pass.reference(),
         pass.clone(),
         run_evidence_for_pass(pass),
         external_object,
@@ -527,6 +529,7 @@ fn observation(
     ReviewExternalLinkObservation::new(
         link,
         ordinal,
+        pass.reference(),
         pass.clone(),
         run_evidence_for_pass(pass),
         state,
@@ -1354,6 +1357,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
                 result: Some(ReviewPassResult::ExternalLinkNoChange(result)),
                 ..
             } if result.link() == link_id
+                && result.observed_through() == ReviewEventOrdinal::one()
                 && result.state() == ReviewExternalObjectState::Current
         ),
         "unchanged observation consumes the pass with exact durable evidence",
@@ -1373,6 +1377,34 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .await
             .expect("no-change claim reloads"),
         Some(expected_unchanged)
+    );
+
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_change_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_event_ordinal = 2
+          WHERE pass_id = $1",
+    )
+    .bind(unchanged_import_pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = store
+        .load_external_link(link_id)
+        .await
+        .expect_err("a no-change claim cannot consume a stale observation frontier");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed external-link corruption");
+    };
+    assert_eq!(error.aggregate(), "review_external_link");
+    assert!(
+        error.detail().contains("IncompatibleObservationPass"),
+        "unexpected corruption detail: {}",
+        error.detail(),
     );
 
     Ok(())

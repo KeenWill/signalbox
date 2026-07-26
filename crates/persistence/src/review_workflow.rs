@@ -1132,8 +1132,8 @@ impl ReviewWorkflowStore {
             .bind(link.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
-        let latest_state = sqlx::query_scalar::<_, String>(
-            "SELECT object_state
+        let latest_observation = sqlx::query_as::<_, (i64, String)>(
+            "SELECT observation_ordinal, object_state
                FROM review_external_link_observation
               WHERE external_link_id = $1
               ORDER BY observation_ordinal DESC
@@ -1142,7 +1142,19 @@ impl ReviewWorkflowStore {
         .bind(link.into_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
-        if latest_state.as_deref() == Some(encode_external_object_state(observation.state())) {
+        if latest_observation
+            .as_ref()
+            .is_some_and(|(_, state)| state == encode_external_object_state(observation.state()))
+        {
+            let latest_ordinal = latest_observation
+                .as_ref()
+                .map(|(ordinal, _)| *ordinal)
+                .ok_or_else(|| {
+                    corruption(
+                        "review_external_link_observation",
+                        String::from("matching latest observation disappeared"),
+                    )
+                })?;
             let canonical_pass =
                 load_pass_on_connection(&mut transaction, observation.pass().pass())
                     .await?
@@ -1175,7 +1187,20 @@ impl ReviewWorkflowStore {
             };
             let no_change_pass = canonical_pass
                 .project_result(ReviewPassResult::ExternalLinkNoChange(
-                    ReviewExternalLinkNoChangeResult::new(link, observation.state()),
+                    ReviewExternalLinkNoChangeResult::new(
+                        link,
+                        ReviewEventOrdinal::try_new(positive_u32(
+                            latest_ordinal,
+                            "review_external_link_observation",
+                        )?)
+                        .map_err(|_| {
+                            corruption(
+                                "review_external_link_observation",
+                                String::from("zero ordinal"),
+                            )
+                        })?,
+                        observation.state(),
+                    ),
                 ))
                 .ok_or_else(|| {
                     corruption(
@@ -3220,6 +3245,7 @@ fn decode_finding_external_link_aggregate(
             }
             Some(ReviewExternalLinkAttachment::new(
                 external_link_id(link),
+                reference,
                 pass.clone(),
                 ReviewRunEvidence::new(
                     reference.run(),
@@ -3319,6 +3345,7 @@ fn decode_external_link_attachment(
     }
     Ok(ReviewExternalLinkAttachment::new(
         external_link_id(row.try_get("external_link_id")?),
+        reference,
         pass.clone(),
         ReviewRunEvidence::new(
             reference.run(),
@@ -3366,6 +3393,7 @@ fn decode_external_link_observation(
                 String::from("zero ordinal"),
             )
         })?,
+        reference,
         pass.clone(),
         ReviewRunEvidence::new(
             reference.run(),
@@ -3553,6 +3581,7 @@ fn encode_pass_result(result: &ReviewPassResult) -> EncodedPassResult<'_> {
             ..empty("external_link_observation")
         },
         ReviewPassResult::ExternalLinkNoChange(no_change) => EncodedPassResult {
+            ordinal: Some(no_change.observed_through()),
             external_link: Some(no_change.link()),
             observation_state: Some(no_change.state()),
             ..empty("external_link_no_change")
@@ -3776,7 +3805,7 @@ fn decode_pass_result(
         }
         Some("external_link_no_change")
             if stored.finding.is_none()
-                && stored.ordinal.is_none()
+                && stored.ordinal.is_some()
                 && stored.event_kind.is_none()
                 && stored.reason.is_none()
                 && stored.referenced_finding.is_none()
@@ -3791,8 +3820,20 @@ fn decode_pass_result(
                     String::from("unchanged result omitted state"),
                 )
             })?;
+            let ordinal = stored.ordinal.ok_or_else(|| {
+                corruption(
+                    "review_pass",
+                    String::from("unchanged result omitted observation frontier"),
+                )
+            })?;
             Ok(Some(ReviewPassResult::ExternalLinkNoChange(
-                ReviewExternalLinkNoChangeResult::new(link, decode_external_object_state(state)?),
+                ReviewExternalLinkNoChangeResult::new(
+                    link,
+                    ReviewEventOrdinal::try_new(positive_u32(ordinal, "review_pass")?).map_err(
+                        |_| corruption("review_pass", String::from("zero observation frontier")),
+                    )?,
+                    decode_external_object_state(state)?,
+                ),
             )))
         }
         Some("external_link_publication_blocked")

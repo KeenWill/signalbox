@@ -497,7 +497,7 @@ CREATE TABLE review_pass (
                 AND result_finding_id IS NULL
                 AND result_finding_run_id IS NULL
                 AND result_finding_pass_id IS NULL
-                AND result_event_ordinal IS NULL
+                AND result_event_ordinal IS NOT NULL
                 AND result_event_kind IS NULL
                 AND result_reason IS NULL
                 AND result_referenced_finding_id IS NULL
@@ -2651,6 +2651,13 @@ BEGIN
            )
            OR NEW.result_observation_state IS DISTINCT FROM (
                SELECT object_state
+                 FROM review_external_link_observation
+                WHERE external_link_id = NEW.result_external_link_id
+                ORDER BY observation_ordinal DESC
+                LIMIT 1
+           )
+           OR NEW.result_event_ordinal IS DISTINCT FROM (
+               SELECT observation_ordinal
                  FROM review_external_link_observation
                 WHERE external_link_id = NEW.result_external_link_id
                 ORDER BY observation_ordinal DESC
