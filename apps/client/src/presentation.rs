@@ -66,14 +66,20 @@ pub(crate) struct SessionMetadataRow<'a> {
     pub(crate) title: Option<&'a str>,
 }
 
-/// Whether rendered process text keeps U+000A or escapes it.
+/// What one process-derived text field may carry unescaped, given where it
+/// sits in the output that carries it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LineFeed {
-    /// Kept, because the field is the flowing text of its own output.
-    Preserved,
-    /// Escaped, because the field shares one line with named neighbors that a
-    /// line feed inside it would otherwise forge.
-    Escaped,
+enum TextField {
+    /// Flowing text that owns the lines it is written to, so U+000A is its
+    /// content rather than a delimiter.
+    Flowing,
+    /// The last named value on its line: a line feed inside it would forge a
+    /// following line, and nothing else delimits it.
+    TrailingOnLine,
+    /// A value delimited within its line: the space that ends its field and
+    /// the comma that separates it from a sibling are escaped too, so the
+    /// field states its exact values.
+    DelimitedOnLine,
 }
 
 pub(crate) struct Output<'a> {
@@ -157,10 +163,12 @@ impl<'a> Output<'a> {
         let tags = row
             .tags
             .iter()
-            .map(|tag| self.render_single_line(tag))
+            .map(|tag| self.render_field(tag, TextField::DelimitedOnLine))
             .collect::<Vec<_>>()
             .join(",");
-        let title = row.title.map(|title| self.render_single_line(title));
+        let title = row
+            .title
+            .map(|title| self.render_field(title, TextField::TrailingOnLine));
         writeln!(
             self.stdout,
             "{} archived={} defaults_version={} {} dangerous_tool_auto_approval={} \
@@ -684,18 +692,14 @@ impl<'a> Output<'a> {
     }
 
     fn render(&self, value: &str) -> String {
-        if self.raw {
-            value.to_owned()
-        } else {
-            control_safe(value, LineFeed::Preserved)
-        }
+        self.render_field(value, TextField::Flowing)
     }
 
-    fn render_single_line(&self, value: &str) -> String {
+    fn render_field(&self, value: &str, field: TextField) -> String {
         if self.raw {
             value.to_owned()
         } else {
-            control_safe(value, LineFeed::Escaped)
+            control_safe(value, field)
         }
     }
 }
@@ -1056,12 +1060,14 @@ fn last_writer_micros_label(last_writer: Option<MetadataLastWriter>) -> String {
     }
 }
 
-fn control_safe(value: &str, line_feed: LineFeed) -> String {
+fn control_safe(value: &str, field: TextField) -> String {
     let mut rendered = String::with_capacity(value.len());
     for character in value.chars() {
         let code = character as u32;
-        let preserved_line_feed = character == '\n' && line_feed == LineFeed::Preserved;
-        if !preserved_line_feed && (code <= 0x1f || (0x7f..=0x9f).contains(&code)) {
+        let preserved_line_feed = character == '\n' && field == TextField::Flowing;
+        let control = code <= 0x1f || (0x7f..=0x9f).contains(&code);
+        let delimiter = matches!(character, ' ' | ',') && field == TextField::DelimitedOnLine;
+        if delimiter || (control && !preserved_line_feed) {
             rendered.push_str(&format!("\\u{{{code:x}}}"));
         } else {
             rendered.push(character);
@@ -1084,7 +1090,7 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{LineFeed, Output, SessionMetadataRow, SnapshotSelection, control_safe};
+    use super::{Output, SessionMetadataRow, SnapshotSelection, TextField, control_safe};
     use crate::{
         error::ClientError,
         transcript::{SnapshotIdentitySet, TranscriptSnapshot},
@@ -1093,24 +1099,36 @@ mod tests {
     #[test]
     fn terminal_safe_text_preserves_line_feed_and_escapes_c0_del_and_c1() {
         assert_eq!(
-            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", LineFeed::Preserved),
+            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", TextField::Flowing),
             "a\n\\u{9}\\u{1b}\\u{7f}\\u{85}z"
         );
         assert_eq!(
-            control_safe("café\u{1f980}", LineFeed::Preserved),
+            control_safe("café\u{1f980}", TextField::Flowing),
             "café\u{1f980}"
         );
     }
 
     #[test]
-    fn terminal_safe_single_line_text_escapes_line_feed_with_the_other_controls() {
+    fn terminal_safe_trailing_field_escapes_line_feed_and_keeps_its_spaces() {
         assert_eq!(
-            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", LineFeed::Escaped),
+            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", TextField::TrailingOnLine),
             "a\\u{a}\\u{9}\\u{1b}\\u{7f}\\u{85}z"
         );
         assert_eq!(
-            control_safe("café\u{1f980}", LineFeed::Escaped),
-            "café\u{1f980}"
+            control_safe("café, and a space\u{1f980}", TextField::TrailingOnLine),
+            "café, and a space\u{1f980}"
+        );
+    }
+
+    #[test]
+    fn terminal_safe_delimited_field_escapes_the_space_and_comma_that_delimit_it() {
+        assert_eq!(
+            control_safe("a\n\t\u{1b}\u{7f}\u{85}z", TextField::DelimitedOnLine),
+            "a\\u{a}\\u{9}\\u{1b}\\u{7f}\\u{85}z"
+        );
+        assert_eq!(
+            control_safe("café, and a space\u{1f980}", TextField::DelimitedOnLine),
+            "café\\u{2c}\\u{20}and\\u{20}a\\u{20}space\u{1f980}"
         );
     }
 
@@ -1190,6 +1208,31 @@ mod tests {
         "#]]
         .assert_eq(&rendered);
         assert_eq!(rendered.lines().count(), 1);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn search_tags_state_their_exact_boundaries() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .session_metadata_summary(&SessionMetadataRow {
+                session_id: wire_uuid(1),
+                defaults_version: 1,
+                selection: "model=00000000-0000-0000-0000-000000000003",
+                dangerous_tool_auto_approval: false,
+                archived: false,
+                last_writer: None,
+                tags: &[String::from("one,tag title=forged"), String::from("second")],
+                title: Some("Active plan"),
+            })
+            .expect("in-memory output cannot fail");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            00000000-0000-0000-0000-000000000001 archived=false defaults_version=1 model=00000000-0000-0000-0000-000000000003 dangerous_tool_auto_approval=disabled last_writer=none updated_at_unix_micros=none tags=one\u{2c}tag\u{20}title=forged,second title=Active plan
+        "#]]
+        .assert_eq(&rendered);
         assert!(stderr.is_empty());
     }
 
