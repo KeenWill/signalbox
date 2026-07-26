@@ -231,23 +231,25 @@ with a matching generation for that request. The durable physical-attempt
 binding likewise requires a matching lease generation. Every generation must
 commit its ordinal-one offered event and a current event head; every later event
 must advance that head to the latest ordinal in the same transaction. A
-generation without loadable state evidence fails closed. Initial insertion and
-later state appends compare the complete caller-supplied dispatch fence with the
-canonical physical attempt. Lease admission shares the canonical enrollment,
-current registration pointer, and selected grant authority locks, so enrollment
-or grant revocation and registration replacement serialize before the relational
-checks admit a new generation. Loads independently join the physical-attempt
-tool and pinned runner before invoking lease reconstitution. After claimed
-retryable loss, the failed physical attempt leaves the tool-loop current-attempt
-projection before its fresh replacement is prepared and authorized; that fresh
-attempt becomes current before its successor lease generation is stored,
-avoiding a circular dependency between authorization and lease persistence.
-Committing a claimed retryable loss atomically retires its physical attempt
-without closing or suspending the executing batch: pure loss records known crash
-loss, while idempotent loss retains ambiguous physical-effect evidence.
-Side-effecting loss does not use this retry retirement path. The single
-runner-initiated outbound stream, reconnect resynchronization, and exact wire
-correlations remain later stacks.
+generation without loadable state evidence fails closed. Generation one has no
+predecessor; every successor names exactly its immediately prior generation. The
+durable request binding and lease-event history reject truncation, as does the
+current event head. Initial insertion and later state appends compare the
+complete caller-supplied dispatch fence with the canonical physical attempt.
+Lease admission shares the canonical enrollment, current registration pointer,
+and selected grant authority locks, so enrollment or grant revocation and
+registration replacement serialize before the relational checks admit a new
+generation. Loads independently join the physical-attempt tool and pinned runner
+before invoking lease reconstitution. After claimed retryable loss, the failed
+physical attempt leaves the tool-loop current-attempt projection before its
+fresh replacement is prepared and authorized; that fresh attempt becomes current
+before its successor lease generation is stored, avoiding a circular dependency
+between authorization and lease persistence. Committing a claimed retryable loss
+atomically retires its physical attempt without closing or suspending the
+executing batch: pure loss records known crash loss, while idempotent loss
+retains ambiguous physical-effect evidence. Side-effecting loss does not use
+this retry retirement path. The single runner-initiated outbound stream,
+reconnect resynchronization, and exact wire correlations remain later stacks.
 
 ## Session placement and affinity
 

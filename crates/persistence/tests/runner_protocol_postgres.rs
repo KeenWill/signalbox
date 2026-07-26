@@ -1337,6 +1337,21 @@ async fn s31_inv004_inv043_orphan_request_lease_binding_cannot_commit() -> Resul
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s31_inv004_inv043_request_lease_binding_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_tool_request_lease_binding")
+        .execute(&pool)
+        .await
+        .expect_err("durable request lineage cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s31_inv004_inv043_orphan_physical_attempt_binding_cannot_commit()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -2280,6 +2295,51 @@ async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<d
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s31_inv043_current_lease_event_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_current_lease_event")
+        .execute(&pool)
+        .await
+        .expect_err("the lease event head cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_lease_event_history_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    stored_pin_fixture(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_current_lease_event
+         DISABLE TRIGGER runner_current_lease_event_rejects_truncate",
+    )
+    .execute(&pool)
+    .await?;
+    let truncated = sqlx::query(
+        "TRUNCATE runner_lease_event,
+                  runner_current_lease_event",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("durable lease state history cannot be truncated");
+    sqlx::query(
+        "ALTER TABLE runner_current_lease_event
+         ENABLE TRIGGER runner_current_lease_event_rejects_truncate",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s31_inv043_appended_lease_event_must_advance_current_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -3093,6 +3153,50 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
     );
     assert_eq!(reconstituted, retry);
     assert_eq!(batch_attempts, vec![retry.attempt().into_uuid()]);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let malformed = sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         SELECT $2, 1, attempt_id, session_id, runner_id,
+                tool_name, effect_class, placement_event_ordinal,
+                registration_enrollment_id, registration_revision,
+                credential_profile_name, credential_grant_revision,
+                credential_approval_kind, 0
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .bind(uuid(LEASE + 99))
+    .execute(&pool)
+    .await
+    .expect_err("the first lease generation cannot name a predecessor");
+    sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let database_error = malformed
+        .as_database_error()
+        .expect("PostgreSQL reports the predecessor constraint");
+
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("runner_lease_predecessor_shape")
+    );
     drop(pool);
     Ok(())
 }
