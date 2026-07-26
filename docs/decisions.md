@@ -86,12 +86,13 @@ duplicates unsafe work.
 placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
 or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
 the combined case. Runner leases bind an exact pinned runner, tool, physical
-attempt, and positive dispatch generation; effect is derived from the validated
-declaration. Loss before claim may advance every class while retaining the
-never-executed attempt. Loss after claim produces re-lease authority only for
-pure or idempotent work and requires a fresh physical attempt identity;
-side-effecting loss produces exact crash-classification authority and cannot
-produce re-lease authority. Undeclared advertised tools are rejected; an
+attempt, and positive dispatch generation; active enrollment, current placement,
+registration, and grant jointly authorize the lease, and effect is derived from
+the validated declaration. Loss before claim may advance every class while
+retaining the never-executed attempt. Loss after claim produces re-lease
+authority only for pure or idempotent work and requires a fresh physical attempt
+identity; side-effecting loss produces exact crash-classification authority and
+cannot produce re-lease authority. Undeclared advertised tools are rejected; an
 untrusted pre-validation boundary classifies an absent effect declaration as
 side-effecting.
 
@@ -129,17 +130,22 @@ availability names only. The complete advertisement is validated against the
 active enrollment and one daemon-side owner-editable catalog parsed into typed
 domain, including its allowed capability classes. Unknown or disallowed claims
 reject registration. The validated result attaches daemon declarations for
-permission, placement, effect, credential-pair approval, and workspace
-capability; re-registration can change availability but carries no field capable
-of changing that policy. The runner declaration is authoritative for runner
-dispatch; a later adapter must reject any shared daemon-local definition whose
-permission or mapped effect disagrees.
+model-facing description and argument schema, permission, placement, effect,
+credential-pair approval, and workspace capability. The runner declaration is
+authoritative for runner dispatch, including runner-only tools; a later adapter
+must compile its schema and reject any shared daemon-local definition whose
+description, schema, permission, or mapped effect disagrees. Re-registration can
+change availability but carries no field capable of changing policy. It cannot
+widen an established session snapshot; narrowing that snapshot disables lease
+creation and is reconciled as explicit runner loss. Enrollment revocation also
+disables later lease creation through a registration it previously validated.
 
 Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
 letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
-Working-directory and repository keys retain exact bounded UTF-8 without
-host-platform parsing in the domain. Catalog file syntax, authentication
-exchange, rotation, and durable registration storage are later boundaries.
+Working-directory and repository keys retain exact nonempty, U+0000-free UTF-8
+up to 4,096 bytes without host-platform parsing in the domain. Catalog file
+syntax, authentication exchange, rotation, and durable registration storage are
+later boundaries.
 
 **Rejected alternatives.** Hardware fingerprints exclude ephemeral runners and
 silently change identity when machines are replaced. Hostnames and network
