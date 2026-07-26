@@ -660,6 +660,7 @@ impl ModelCallExecution {
                     .get(accepted_input)
                     .map(|content| (*accepted_input, content.clone())),
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3083,6 +3084,7 @@ fn reconstitute(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
@@ -3455,6 +3457,7 @@ fn frontier_closes_latest_tool_round(
         .filter_map(|entry| match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
             SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
@@ -3490,6 +3493,7 @@ fn frontier_closes_latest_tool_round(
             } => result_request == request && tool_denial_correlations.contains(result_request),
             SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3517,6 +3521,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
             Some(*producing_call)
         }
         SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+        | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
         | SemanticTranscriptEntryPayload::Imported { .. }
@@ -4357,12 +4362,17 @@ mod tests {
         .reconstitute()
         .expect("queued scheduling projection is complete")
         .prepare_earliest_queued_activation(AcceptedInputTurnActivationIdentities::new(
+            semantic_transcript_entry_id(99),
             semantic_transcript_entry_id(5),
             context_frontier_id(6),
             turn_attempt_id(7),
         ))
         .expect("first turn is eligible");
-        let (turn, origin, snapshot) = activation.into_parts();
+        let (turn, entries, snapshot) = activation.into_parts();
+        let origin = entries
+            .last()
+            .expect("activation carries its origin")
+            .clone();
         ModelCallExecutionReconstitutionInput::new(
             turn,
             targets(),

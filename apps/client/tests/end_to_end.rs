@@ -63,6 +63,13 @@ target_id = "00000000-0000-0000-0000-000000000002"
 provider = "anthropic"
 provider_model = "import-fixture"
 max_output_tokens = 64
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000003"
+target_id = "00000000-0000-0000-0000-000000000004"
+provider = "anthropic"
+provider_model = "import-fixture-next"
+max_output_tokens = 64
 "#;
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -225,6 +232,101 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     assert_eq!(
         String::from_utf8(already_imported.stdout)?,
         format!("already_imported imported_conversation_id={inserted_identity}\n")
+    );
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+/// S33 / INV-008 / INV-046: the terminal model verb observes the complete current
+/// defaults facts before sending one recoverable replacement command.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s33_inv008_inv046_terminal_client_installs_a_forward_only_model_defaults_epoch()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+    let first_selection = Uuid::from_u128(1).hyphenated().to_string();
+    let second_selection_id = Uuid::from_u128(3);
+    let second_selection = second_selection_id.hyphenated().to_string();
+
+    let created = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("create"),
+            String::from("--model"),
+            first_selection,
+        ],
+        None,
+    )
+    .await?;
+    assert!(created.status.success());
+    let session_id = String::from_utf8(created.stdout)?.trim().to_owned();
+    Uuid::parse_str(&session_id)?;
+
+    let replaced = run_client(
+        socket_directory.socket().to_owned(),
+        vec![
+            String::from("model"),
+            session_id.clone(),
+            String::from("--model"),
+            second_selection.clone(),
+        ],
+        None,
+    )
+    .await?;
+    assert!(replaced.status.success());
+    assert_eq!(
+        String::from_utf8(replaced.stdout)?,
+        format!("session={session_id} defaults_version=2 model={second_selection}\n")
+    );
+    let recovery = String::from_utf8(replaced.stderr)?;
+    assert!(recovery.contains("command_id="));
+    assert!(recovery.contains("defaults_version=1\n"));
+    assert!(recovery.contains("dangerous_tool_auto_approval=disabled\n"));
+
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct CurrentDefaultsFacts {
+        current_version: i64,
+        direct_model_selection_id: Uuid,
+        dangerous_tool_auto_approval: String,
+    }
+    let current: CurrentDefaultsFacts = sqlx::query_as(
+        "SELECT current.current_version::bigint,
+                defaults.direct_model_selection_id,
+                defaults.dangerous_tool_auto_approval
+           FROM session_current_defaults AS current
+           JOIN session_defaults_version AS defaults
+             ON defaults.session_id = current.session_id
+            AND defaults.version = current.current_version
+          WHERE current.session_id = $1",
+    )
+    .bind(Uuid::parse_str(&session_id)?)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        current,
+        CurrentDefaultsFacts {
+            current_version: 2,
+            direct_model_selection_id: second_selection_id,
+            dangerous_tool_auto_approval: String::from("disabled"),
+        }
     );
 
     shutdown.send(true)?;

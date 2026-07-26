@@ -218,6 +218,15 @@ binaries: a plugin-less mdformat silently corrupts GFM tables. The environment
 installs the pinned toolchain CI uses from `tooling/requirements-mdformat.txt`;
 drop `--check` to rewrap in place. Wrapping rules live in `.mdformat.toml`.
 
+Cargo invocations inside the devenv environment use sccache as a shared compiler
+cache (`devenv.nix` sets `RUSTC_WRAPPER`): dependency compilation is cached once
+per machine, in sccache's per-user default cache directory (override with
+`SCCACHE_DIR`), and reused across checkouts and worktrees, while workspace
+crates keep incremental compilation. Continuous integration does not enter this
+environment and does not use sccache; its caching is configured in
+`.github/workflows/rust.yml`. To bypass the cache for a single command, clear
+the wrapper: `RUSTC_WRAPPER= cargo <args>`.
+
 For documentation changes, also check repository-relative links and review the
 rendered Markdown. Put future path-specific instructions in the nearest
 descendant `AGENTS.md`, scoped only to that subtree.

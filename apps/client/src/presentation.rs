@@ -69,7 +69,8 @@ impl<'a> Output<'a> {
     }
 
     pub(crate) fn recovery_value(&mut self, name: &str, value: &str) -> io::Result<()> {
-        writeln!(self.stderr, "{name}={value}")
+        writeln!(self.stderr, "{name}={value}")?;
+        self.stderr.flush()
     }
 
     pub(crate) fn error(&mut self, error: &ClientError) -> io::Result<()> {
@@ -80,6 +81,18 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_created(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
         writeln!(self.stdout, "{session_id}")
+    }
+
+    pub(crate) fn session_defaults_replaced(
+        &mut self,
+        session_id: CanonicalUuid,
+        defaults_version: u64,
+        model_selection: &str,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} defaults_version={defaults_version} {model_selection}"
+        )
     }
 
     pub(crate) fn conversation_import_inserted(
@@ -537,6 +550,18 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::ModelIdentityChanged {
+                turn_id,
+                defaults_version,
+                selected_model_id,
+            }) => writeln!(
+                self.stdout,
+                "model_identity_changed turn={turn_id} defaults_version={} model={selected_model_id} \
+                 source={} entry={}",
+                defaults_version.value(),
+                entry.source_session_id,
+                entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
                 turn_id,
                 model_call_id,
@@ -870,7 +895,8 @@ impl SnapshotSelection {
                 | Self::ToolReconciliation { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
-                    TranscriptEntry::AssistantToolUse { .. }
+                    TranscriptEntry::ModelIdentityChanged { .. }
+                    | TranscriptEntry::AssistantToolUse { .. }
                     | TranscriptEntry::ToolExecutionResult { .. }
                     | TranscriptEntry::ToolDenied { .. }
                     | TranscriptEntry::ToolClosed { .. }
