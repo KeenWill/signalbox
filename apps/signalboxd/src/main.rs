@@ -33,10 +33,10 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, DaemonTools, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SystemCurrentTimeClock,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools,
+    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,
@@ -48,6 +48,7 @@ use tokio::{
 const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
+const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -125,6 +126,7 @@ struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
     anthropic_api_key_file: PathBuf,
+    github_token_file: PathBuf,
     process_socket_path: PathBuf,
 }
 
@@ -134,6 +136,7 @@ impl HubConfiguration {
             env::var_os("DATABASE_URL"),
             env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
+            env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
         )
     }
@@ -142,6 +145,7 @@ impl HubConfiguration {
         database_url: Option<OsString>,
         model_configuration_file: Option<OsString>,
         anthropic_api_key_file: Option<OsString>,
+        github_token_file: Option<OsString>,
         process_socket_path: Option<OsString>,
     ) -> Result<Self, HubRuntimeError> {
         let database_url = database_url
@@ -153,12 +157,14 @@ impl HubConfiguration {
         }
         let model_configuration_file = required_path(model_configuration_file)?;
         let anthropic_api_key_file = required_path(anthropic_api_key_file)?;
+        let github_token_file = required_path(github_token_file)?;
         let process_socket_path = required_path(process_socket_path)?;
 
         Ok(Self {
             database_url,
             model_configuration_file,
             anthropic_api_key_file,
+            github_token_file,
             process_socket_path,
         })
     }
@@ -173,6 +179,10 @@ impl HubConfiguration {
 
     fn anthropic_api_key_file(&self) -> PathBuf {
         self.anthropic_api_key_file.clone()
+    }
+
+    fn github_token_file(&self) -> PathBuf {
+        self.github_token_file.clone()
     }
 
     fn process_socket_path(&self) -> &Path {
@@ -374,6 +384,10 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     );
     let credential_reference =
         ModelCallCredentialReference::new(credential_access.credential_reference().as_str());
+    let code_host_credentials = FileCredentialAccess::new(
+        configuration.github_token_file(),
+        CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
+    );
     let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
     let provider =
@@ -393,10 +407,13 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             HubRuntimeError::infrastructure(phase)
         })?;
     let pool = database.pool().clone();
-    let (tool_catalog, tool_executor) =
-        DaemonTools::try_new_production(SystemCurrentTimeClock, pool.clone())
-            .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
-            .into_parts();
+    let (tool_catalog, tool_executor) = DaemonTools::try_new_production(
+        SystemCurrentTimeClock,
+        pool.clone(),
+        code_host_credentials,
+    )
+    .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
+    .into_parts();
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
@@ -764,6 +781,7 @@ mod tests {
                 None,
                 Some(OsString::from("models.toml")),
                 Some(OsString::from("key")),
+                Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
@@ -774,6 +792,7 @@ mod tests {
                 Some(OsString::from("postgres://secret")),
                 Some(OsString::from("")),
                 Some(OsString::from("key")),
+                Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
@@ -785,6 +804,18 @@ mod tests {
                 Some(OsString::from("models.toml")),
                 Some(OsString::from("key")),
                 None,
+                Some(OsString::from("/tmp/signalbox.sock")),
+            )
+            .err(),
+            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+        );
+        assert_eq!(
+            HubConfiguration::from_values(
+                Some(OsString::from("postgres://secret")),
+                Some(OsString::from("models.toml")),
+                Some(OsString::from("key")),
+                Some(OsString::from("github-token")),
+                None,
             )
             .err(),
             Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
@@ -794,6 +825,7 @@ mod tests {
             Some(OsString::from("postgres://secret")),
             Some(OsString::from("models.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from("github-token")),
             Some(OsString::from("/tmp/signalbox.sock")),
         )
         .expect("nonempty deployment values are accepted before I/O");
@@ -805,6 +837,10 @@ mod tests {
         assert_eq!(
             configuration.anthropic_api_key_file(),
             std::path::PathBuf::from("key")
+        );
+        assert_eq!(
+            configuration.github_token_file(),
+            std::path::PathBuf::from("github-token")
         );
         assert_eq!(
             configuration.process_socket_path(),

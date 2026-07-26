@@ -13,12 +13,14 @@ in [process configuration](#process-configuration) were verified through PR #237
 `crates/persistence/src/lib.rs`); the `signalboxd` binary name, its
 `apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
 checked-in example path were verified through PR #258
-(`agent/signalboxd-rename`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag.
+(`agent/signalboxd-rename`). The daemon-held GitHub credential channel and its
+code-host result redaction are verified against `agent/tool-batch-tier1`.
+Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
+tag.
 
 ## Process configuration
 
-`signalboxd` reads exactly four deployment values from the process environment
+`signalboxd` reads exactly five deployment values from the process environment
 at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -28,6 +30,8 @@ at startup:
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `ANTHROPIC_API_KEY_FILE` — path to the file whose bytes are the current
   Anthropic API key value.
+- `GITHUB_TOKEN_FILE` — path to the file whose bytes are the current GitHub
+  code-host token value.
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
@@ -63,18 +67,18 @@ what stand between a production cluster and ambient configuration, not that
 path's name.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
-Anthropic runtime construction fails startup at the `Configuration` phase,
-before any database contact. Startup and shutdown logs carry the phase, an
-operator failure class, and small typed fields where present (blocker count,
+Anthropic or GitHub transport construction fails startup at the `Configuration`
+phase, before any database contact. Startup and shutdown logs carry the phase,
+an operator failure class, and small typed fields where present (blocker count,
 session and turn ids, recovered-turn count, grace-window seconds) — never
 configuration values, paths, or URLs. The typed configuration error does not
 survive to the log: `run_hub` collapses every catalog-parse and
-Anthropic-construction variant (and likewise connection and migration errors)
-into a generic `Infrastructure` class carrying only its phase, so an operator
-cannot distinguish an unreadable catalog from an unknown field, bad version, or
-invalid limit (see Open edges). The two file paths are accepted without I/O at
-configuration time; only the catalog file is actually read during startup. The
-key file is never read at startup (see credential lifecycle below).
+adapter-construction variant (and likewise connection and migration errors) into
+a generic `Infrastructure` class carrying only its phase, so an operator cannot
+distinguish an unreadable catalog from an unknown field, bad version, or invalid
+limit (see Open edges). The three file paths are accepted without I/O at
+configuration time; only the catalog file is actually read during startup.
+Neither credential file is read at startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -178,29 +182,33 @@ The daemon-side credential contract is implemented as follows, and the
 deployment-side rules that code cannot enforce are stated in
 [Credential operations policy](#credential-operations-policy) below.
 
-- **Reference/value split.** A `CredentialReference` is the non-secret durable
-  name of one credential; a `CredentialValue` carries the secret bytes.
-  References are safe in configuration, errors, logs, and durable records;
-  values are safe only at the adapter boundary. Why: rotation preserves the
-  durable name so no record or log ever needs the secret (INV-035). One
-  reference exists today: the composition constant `anthropic-primary`.
+- **Reference/value split.** A `CredentialReference` is the non-secret name of
+  one credential; a `CredentialValue` carries the secret bytes. References are
+  safe in configuration, errors, logs, and durable records; values are safe only
+  at the adapter boundary. Why: rotation preserves the stable name so no record
+  or log ever needs the secret (INV-035). Two references exist today: the
+  composition constants `anthropic-primary` and `github-primary`.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  the reference to the `ANTHROPIC_API_KEY_FILE` path and reads the file for
-  every request preparation; nothing is cached. Why: atomic file replacement
-  rotates the key without restarting signalboxd, and an in-flight call keeps the
-  value it authenticated with. Resolution is reference-scoped: a foreign
-  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
-  unreadable file is `Unreadable` — all reference-only errors.
-- **No startup preflight.** signalboxd never reads the key file at boot, so a
-  missing or unsynced credential cannot block startup or the recovery scan. Why:
-  recovery of acknowledged work must not depend on any provider's credential
-  (INV-034).
-- **Resolution timing.** The adapter resolves the pinned reference during send
-  preparation of exactly one physical request — after the durable `Prepared`
-  record, before send authorization — and the resulting value is scoped to that
-  request (INV-002 boundary type). The shared cancellation contract for
-  preparation and execution is owned by
-  [model-call-execution](model-call-execution.md#staged-execution).
+  each reference to its corresponding deployment path and reads the file for
+  every model-call or code-host operation preparation; nothing is cached. Why:
+  atomic file replacement rotates either credential without restarting
+  signalboxd, and an in-flight operation keeps the value it authenticated with.
+  Resolution is reference-scoped: a foreign reference fails typed `Unmapped`; a
+  missing file is `Unavailable`; an unreadable file is `Unreadable` — all
+  reference-only errors.
+- **No startup preflight.** signalboxd never reads either credential file at
+  boot, so a missing or unsynced credential cannot block startup or the recovery
+  scan. Why: recovery of acknowledged work must not depend on any provider or
+  integration credential (INV-034).
+- **Resolution timing.** A model adapter resolves the durably pinned reference
+  during send preparation — after the durable `Prepared` record, before send
+  authorization — and scopes the resulting value to that request (INV-002
+  boundary type). The shared cancellation contract for preparation and execution
+  is owned by [model-call-execution](model-call-execution.md#staged-execution).
+  A code-host tool resolves its fixed `github-primary` reference only after the
+  durable tool attempt is authorized `InFlight` and immediately before its typed
+  transport call; no model argument, client, or runner can select or receive the
+  credential.
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
@@ -208,18 +216,25 @@ deployment-side rules that code cannot enforce are stated in
   Why: a missing credential is deployment misconfiguration, and retry or
   substitution would hide it. A provider rejecting the credential after send is
   ordinary outcome evidence ([model-call-execution](model-call-execution.md)).
+  For a code-host tool, resolution or header failure is fixed known-failure
+  evidence; definitive code-host rejection is likewise fixed, while an uncertain
+  mutation acknowledgement follows the tool loop's external-effect ambiguity
+  contract.
 - **Durable references, never values.** Postgres never stores a credential
   value. Each model call durably pins its non-secret credential reference at the
   `Prepared` insert (`model_call.credential_reference`), immutable thereafter
   under the authorization-facts trigger; the column is total (`NOT NULL` and
   non-empty), because every insert writes it and no database predates the stack.
-  Resuming a stored `Prepared` call re-supplies the stored reference.
+  Resuming a stored `Prepared` call re-supplies the stored reference. Tool
+  attempts store neither integration references nor values: the immutable
+  compiled code-host declaration selects `github-primary` again when execution
+  resumes.
 
 ## Redaction and logs
 
 The following never appear in logs, error text, or durable records: credential
-values, the key file path, `DATABASE_URL`, and raw catalog file content. Full
-user content never appears in logs: every tracing site logs phase, failure
+values, credential file paths, `DATABASE_URL`, and raw catalog file content.
+Full user content never appears in logs: every tracing site logs phase, failure
 class, counts, and daemon-minted aggregate identifiers, never conversation
 content (which identifiers may appear is
 [identity-and-commands](identity-and-commands.md) material). For
@@ -231,7 +246,8 @@ Enforcement as implemented:
   form is always `[REDACTED]`; the outbound `x-api-key` header is marked
   sensitive. `FileCredentialAccess`'s `Debug` redacts its path;
   `AnthropicRuntime`'s `Debug` redacts its credential source and version header.
-  Access errors carry reference and typed failure class only.
+  The GitHub adapter marks its `Authorization` header sensitive and retains no
+  credential value. Access errors carry reference and typed failure class only.
 - signalboxd logging is a compact INFO tracing subscriber; startup and runtime
   errors log phase, failure class, counts, and aggregate ids only. The
   `crates/application` tracing sites emit the same typed fields; no call site in
@@ -252,6 +268,13 @@ Enforcement as implemented:
   `crates/model-runtime/src/credential.rs`,
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
   `apps/signalboxd/src/configuration.rs` enforce this boundary.
+- Every checked string in a successful code-host result is scrubbed of the exact
+  request-scoped token and its JSON-string-escaped form before the result can
+  cross into tool evidence. Code-host transport failures and malformed responses
+  expose only fixed details, never response bodies. INV-035-tagged tests in
+  `apps/signalboxd/src/code_host/mod.rs` and
+  `apps/signalboxd/tests/offline_tool_loop.rs` enforce the executor and durable
+  transcript boundaries.
 
 ## Credential operations policy
 

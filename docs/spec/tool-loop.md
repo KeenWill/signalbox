@@ -4,8 +4,9 @@ This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
-extension through PR #265 (`agent/tool-batch-tier0`). It owns logical tool
-requests, approval policy and decisions, physical tool attempts, result
+extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
+catalog extension is verified against `agent/tool-batch-tier1`. It owns logical
+tool requests, approval policy and decisions, physical tool attempts, result
 admission, intra-turn continuation, crash classification, the compiled registry,
 and the daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
@@ -385,7 +386,7 @@ next-attempt or atomic result-projection-and-continuation transaction instead of
 failing the turn or waiting for process-local wake state. Restart never requires
 the current continuation attempt to disappear.
 
-## Provider bridge and `current_time`
+## Provider bridge and daemon catalog
 
 The provider-neutral application operation carries ordered conversation messages
 plus catalog declarations. The runtime bridge projects declarations to runtime
@@ -470,10 +471,76 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
+The Tier 1 catalog adds ten GitHub change-request tools. Every operation is
+`ExternalEffect` because GitHub observes its authenticated request. The six
+read-only declarations — `change_request_summary`,
+`change_request_changed_files`, `change_request_file_patch`,
+`change_request_checks_status`, `change_request_review_threads`, and
+`change_request_ci_job_log` — default to `Auto`. The four mutations —
+`change_request_comment`, `change_request_thread_reply`,
+`change_request_thread_resolve`, and `change_request_rerun_failed_jobs` —
+default to `Confirm`. The normal approval transaction therefore authorizes each
+mutation before the executor can resolve credentials or dispatch.
+
+The declarations and compact result objects are:
+
+- `change_request_summary` accepts checked `repository` (`owner/name`) and a
+  positive `number`; it returns the number, title, optional body, state, draft
+  posture, optional author, base and head refs, exact head revision, and browser
+  URL.
+- `change_request_changed_files` accepts `repository` and `number`; it returns
+  the first page of at most 100 files, each with path, code-host status,
+  additions, and deletions, plus `truncated`.
+- `change_request_file_patch` accepts `repository`, `number`, and one
+  repository-relative `path`; it searches that same first 100-file page and
+  returns its file summary plus the optional code-host patch. A path outside the
+  bounded page is a known failure rather than an unbounded pagination request.
+- `change_request_checks_status` accepts `repository` and one exact lowercase
+  40-hex `revision`; it returns that revision and the first page of at most 100
+  check runs, each with id, name, status, optional conclusion, and URL, plus
+  `truncated`.
+- `change_request_comment` accepts `repository`, `number`, and one nonempty
+  `body`; it returns the created comment id and URL.
+- `change_request_review_threads` accepts `repository` and `number`; it returns
+  the first 100 threads and, within each, the first 100 comments. A thread
+  carries opaque id, resolution and outdated posture, path, optional line,
+  comments, and `comments_truncated`; the outer result carries `truncated`.
+- `change_request_thread_reply` accepts an opaque `thread_id` and nonempty
+  `body`; it returns the created comment node id and URL.
+- `change_request_thread_resolve` accepts one opaque `thread_id`; it returns
+  that identity and the acknowledged resolution posture.
+- `change_request_ci_job_log` accepts `repository` and a positive `job_id`; it
+  returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
+- `change_request_rerun_failed_jobs` accepts `repository` and a positive
+  workflow `run_id`; it returns the acknowledged run id.
+
+Shared typed admission rejects extra object members; repositories are at most
+256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
+opaque node ids 512 bytes. No result has more than 100 collection members or
+more than 512 KiB of encoded JSON.
+
+The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
+ambient proxies, automatic redirects, protocol retries, and idle reuse; uses
+rustls with a TLS 1.2 floor; sends the fixed GitHub REST version `2026-03-10`;
+applies a 30-second whole-exchange timeout; and retains at most 512 KiB from any
+JSON response. The authenticated job-log endpoint is the sole redirect-shaped
+exchange: after exactly one 302 response, the adapter validates its bounded
+HTTPS location and performs one credential-free download with redirect following
+still disabled. Credential delivery and redaction are owned by
+[configuration-and-credentials](configuration-and-credentials.md).
+
+A missing or unusable credential and a definitive rejection produce only fixed
+known-failure detail. A read transport loss is an executor infrastructure
+failure. A mutation transport loss, server failure, oversized or malformed
+success response, or malformed GraphQL acknowledgement is commit-ambiguous; the
+durable tool attempt's `ExternalEffect` classification parks crash-lost
+execution for recovery rather than silently retrying it. The adapter never
+returns code-host response bodies as error detail.
+
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
-names; disagreement between the advertised catalog and executor is classified as
-a daemon defect.
+preexisting names and the ten code-host names; disagreement between the
+advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
 

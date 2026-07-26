@@ -8,56 +8,79 @@ use signalbox_application::{
     ToolExecutionInvocation, ToolExecutor,
 };
 use signalbox_domain::{NormalizedToolArguments, ToolName};
+use signalbox_model_runtime::CredentialAccess;
 use sqlx::PgPool;
 
 use crate::{
-    CurrentTimeClock, CurrentTimeExecutor, CurrentTimeTool, EchoExecutor, EchoTool,
+    CodeHostExecutor, CodeHostTools, CodeHostTransport, CurrentTimeClock, CurrentTimeExecutor,
+    CurrentTimeTool, EchoExecutor, EchoTool, FileCredentialAccess, GitHubCodeHostTransport,
     PostgresSessionStatusWriter, ReqwestWebFetchTransport, SessionStatusExecutor,
     SessionStatusTool, SessionStatusWriter, WebFetchExecutor, WebFetchTool, WebFetchTransport,
     current_time::CURRENT_TIME_NAME, echo::ECHO_NAME, session_status::SESSION_STATUS_UPDATE_NAME,
     web_fetch::WEB_FETCH_NAME,
 };
 
-/// The four daemon-local declarations and their matching dispatch executor.
+/// The complete daemon-local declarations and their matching dispatch executor.
 #[derive(Clone, Debug)]
-pub struct DaemonTools<Clock, Transport, Writer> {
+pub struct DaemonTools<Clock, Transport, Writer, Credentials, HostTransport> {
     catalog: DaemonToolCatalog,
-    executor: DaemonToolExecutor<Clock, Transport, Writer>,
+    executor: DaemonToolExecutor<Clock, Transport, Writer, Credentials, HostTransport>,
 }
 
-impl<Clock> DaemonTools<Clock, ReqwestWebFetchTransport, PostgresSessionStatusWriter> {
-    /// Composes the production catalog, credential-free web transport, and
+impl<Clock>
+    DaemonTools<
+        Clock,
+        ReqwestWebFetchTransport,
+        PostgresSessionStatusWriter,
+        FileCredentialAccess,
+        GitHubCodeHostTransport,
+    >
+{
+    /// Composes the production catalog, transports, credential source, and
     /// PostgreSQL metadata writer.
     pub fn try_new_production(
         clock: Clock,
         pool: PgPool,
+        credentials: FileCredentialAccess,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let web_fetch = WebFetchTool::try_new_production()
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new_postgres(pool)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        Self::try_new_with_tools(clock, web_fetch, status)
+        let code_host_transport = GitHubCodeHostTransport::try_new()
+            .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        let code_host = CodeHostTools::try_new(credentials, code_host_transport)
+            .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        Self::try_new_with_tools(clock, web_fetch, status, code_host)
     }
 }
 
-impl<Clock, Transport, Writer> DaemonTools<Clock, Transport, Writer> {
-    /// Composes the catalog around injected web and metadata boundaries.
+impl<Clock, Transport, Writer, Credentials, HostTransport>
+    DaemonTools<Clock, Transport, Writer, Credentials, HostTransport>
+{
+    /// Composes the catalog around injected web, metadata, credential, and
+    /// code-host boundaries.
     pub fn try_new(
         clock: Clock,
         transport: Transport,
         writer: Writer,
+        credentials: Credentials,
+        code_host_transport: HostTransport,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let web_fetch =
             WebFetchTool::try_new(transport).map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new(writer)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        Self::try_new_with_tools(clock, web_fetch, status)
+        let code_host = CodeHostTools::try_new(credentials, code_host_transport)
+            .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        Self::try_new_with_tools(clock, web_fetch, status, code_host)
     }
 
     fn try_new_with_tools(
         clock: Clock,
         web_fetch: WebFetchTool<Transport>,
         status: SessionStatusTool<Writer>,
+        code_host: CodeHostTools<Credentials, HostTransport>,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
             .map_err(|_| DaemonToolsConstructionError::CurrentTime)?
@@ -67,11 +90,13 @@ impl<Clock, Transport, Writer> DaemonTools<Clock, Transport, Writer> {
             .into_parts();
         let (web_fetch_catalog, web_fetch) = web_fetch.into_parts();
         let (status_catalog, session_status) = status.into_parts();
+        let (code_host_catalog, code_host) = code_host.into_parts();
         let catalog = DaemonToolCatalog::try_new([
             current_time_catalog,
             echo_catalog,
             web_fetch_catalog,
             status_catalog,
+            code_host_catalog,
         ])
         .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
         Ok(Self {
@@ -81,6 +106,7 @@ impl<Clock, Transport, Writer> DaemonTools<Clock, Transport, Writer> {
                 echo,
                 web_fetch,
                 session_status,
+                code_host,
             },
         })
     }
@@ -90,7 +116,7 @@ impl<Clock, Transport, Writer> DaemonTools<Clock, Transport, Writer> {
         self,
     ) -> (
         DaemonToolCatalog,
-        DaemonToolExecutor<Clock, Transport, Writer>,
+        DaemonToolExecutor<Clock, Transport, Writer, Credentials, HostTransport>,
     ) {
         (self.catalog, self.executor)
     }
@@ -107,6 +133,9 @@ pub enum DaemonToolsConstructionError {
     WebFetch,
     /// The session-status declaration was invalid.
     SessionStatus,
+    /// The code-host declarations, credential boundary, or transport were
+    /// invalid.
+    CodeHost,
     /// Two declarations unexpectedly shared one name.
     Duplicate,
 }
@@ -118,6 +147,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::Echo => "echo tool construction failed",
             Self::WebFetch => "web_fetch tool construction failed",
             Self::SessionStatus => "session_status_update tool construction failed",
+            Self::CodeHost => "code-host tool suite construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
     }
@@ -193,11 +223,12 @@ impl ToolCatalog for DaemonToolCatalog {
 
 /// Name-directed daemon executor matching [`DaemonToolCatalog`].
 #[derive(Clone, Debug)]
-pub struct DaemonToolExecutor<Clock, Transport, Writer> {
+pub struct DaemonToolExecutor<Clock, Transport, Writer, Credentials, HostTransport> {
     current_time: CurrentTimeExecutor<Clock>,
     echo: EchoExecutor,
     web_fetch: WebFetchExecutor<Transport>,
     session_status: SessionStatusExecutor<Writer>,
+    code_host: CodeHostExecutor<Credentials, HostTransport>,
 }
 
 /// Sanitized aggregate executor failure.
@@ -228,11 +259,14 @@ impl ClassifyOperatorFailure for DaemonToolExecutorError {
     }
 }
 
-impl<Clock, Transport, Writer> ToolExecutor for DaemonToolExecutor<Clock, Transport, Writer>
+impl<Clock, Transport, Writer, Credentials, HostTransport> ToolExecutor
+    for DaemonToolExecutor<Clock, Transport, Writer, Credentials, HostTransport>
 where
     Clock: CurrentTimeClock,
     Transport: WebFetchTransport,
     Writer: SessionStatusWriter,
+    Credentials: CredentialAccess,
+    HostTransport: CodeHostTransport,
 {
     type Error = DaemonToolExecutorError;
 
@@ -261,9 +295,11 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            _ => Err(DaemonToolExecutorError {
-                class: OperatorFailureClass::CallerOrHubBug,
-            }),
+            _ => self
+                .code_host
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
         }
     }
 }
@@ -273,11 +309,14 @@ mod tests {
     use std::{fmt, time::SystemTime};
 
     use signalbox_application::ToolCatalog;
+    use signalbox_model_runtime::{
+        CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+    };
 
     use super::*;
     use crate::{
-        SessionStatusWrite, SessionStatusWriteOutcome, WebFetchRequest, WebFetchResponse,
-        WebFetchTransportFailure,
+        CODE_HOST_TOOL_NAMES, SessionStatusWrite, SessionStatusWriteOutcome, WebFetchRequest,
+        WebFetchResponse, WebFetchTransportFailure,
     };
 
     #[derive(Clone, Copy, Debug)]
@@ -323,14 +362,44 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct OfflineCredentials;
+
+    impl CredentialAccess for OfflineCredentials {
+        async fn resolve(
+            &self,
+            _reference: &CredentialReference,
+        ) -> Result<CredentialValue, CredentialAccessError> {
+            Ok(CredentialValue::new(b"offline-token".to_vec()))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct OfflineCodeHostTransport;
+
+    impl CodeHostTransport for OfflineCodeHostTransport {
+        async fn execute(
+            &mut self,
+            _operation: crate::CodeHostOperation,
+            _credential: &CredentialValue,
+        ) -> Result<crate::CodeHostResult, crate::CodeHostTransportFailure> {
+            Err(crate::CodeHostTransportFailure::Rejected)
+        }
+    }
+
     /// The merged process-lifetime catalog exposes every daemon declaration in
     /// deterministic name order.
     #[test]
-    fn daemon_catalog_contains_current_time_and_tier_zero() {
-        let (catalog, _executor) =
-            DaemonTools::try_new(|| SystemTime::UNIX_EPOCH, OfflineTransport, OfflineWriter)
-                .expect("static daemon tools compile")
-                .into_parts();
+    fn daemon_catalog_contains_current_time_and_both_tool_tiers() {
+        let (catalog, _executor) = DaemonTools::try_new(
+            || SystemTime::UNIX_EPOCH,
+            OfflineTransport,
+            OfflineWriter,
+            OfflineCredentials,
+            OfflineCodeHostTransport,
+        )
+        .expect("static daemon tools compile")
+        .into_parts();
 
         let definitions = catalog.definitions();
         let names: Vec<&str> = definitions
@@ -341,6 +410,16 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                CODE_HOST_TOOL_NAMES[0],
+                CODE_HOST_TOOL_NAMES[1],
+                CODE_HOST_TOOL_NAMES[2],
+                CODE_HOST_TOOL_NAMES[3],
+                CODE_HOST_TOOL_NAMES[4],
+                CODE_HOST_TOOL_NAMES[5],
+                CODE_HOST_TOOL_NAMES[6],
+                CODE_HOST_TOOL_NAMES[7],
+                CODE_HOST_TOOL_NAMES[8],
+                CODE_HOST_TOOL_NAMES[9],
                 CURRENT_TIME_NAME,
                 ECHO_NAME,
                 SESSION_STATUS_UPDATE_NAME,
