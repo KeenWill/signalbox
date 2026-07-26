@@ -9,7 +9,7 @@ use signalbox_application::{
     ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
 };
 use signalbox_domain::{
-    DurableCommandId, NormalizedToolArguments, ReplaceSessionMetadataRejectedResult,
+    Actor, DurableCommandId, NormalizedToolArguments, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, SessionId, SessionMetadataContent, SessionMetadataSnapshot,
     ToolEffectClass, ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId,
     ToolResultText,
@@ -404,7 +404,12 @@ where
             .map_err(SessionStatusExecutorError::Writer)?
         {
             SessionStatusWriteOutcome::Applied(snapshot)
-                if snapshot.session() == session && snapshot.content() == &replacement =>
+                if applied_snapshot_authenticates(
+                    &snapshot,
+                    session,
+                    invocation.correlation().request(),
+                    &replacement,
+                ) =>
             {
                 ToolExecutorEvidence::CompletedText(result)
             }
@@ -418,6 +423,19 @@ where
         };
         Ok(invocation.bind(evidence))
     }
+}
+
+fn applied_snapshot_authenticates(
+    snapshot: &SessionMetadataSnapshot,
+    session: SessionId,
+    request: ToolRequestId,
+    replacement: &SessionMetadataContent,
+) -> bool {
+    snapshot.session() == session
+        && snapshot.content() == replacement
+        && snapshot
+            .last_writer()
+            .is_some_and(|writer| writer.actor() == Actor::Tool { request })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -501,6 +519,7 @@ fn session_status_result_text(
 #[cfg(test)]
 mod tests {
     use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
+    use signalbox_domain::{SessionMetadataLastWriter, SessionMetadataUpdatedAt};
     use uuid::Uuid;
 
     use super::*;
@@ -615,6 +634,70 @@ mod tests {
         assert_eq!(write.session(), session);
         assert_eq!(write.request(), request);
         assert_eq!(write.replacement(), &replacement);
+    }
+
+    /// Applied evidence is accepted only when the recorded writer is the exact
+    /// tool request that produced the invocation.
+    #[test]
+    fn session_status_applied_snapshot_authenticates_exact_tool_request() {
+        let session = SessionId::from_uuid(Uuid::from_u128(FIXTURE_SESSION_ID));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_REQUEST_ID));
+        let replacement = SessionMetadataContent::empty();
+        let snapshot = SessionMetadataSnapshot::from_recorded_write(
+            session,
+            replacement.clone(),
+            SessionMetadataLastWriter::new(
+                SessionMetadataUpdatedAt::from_unix_micros(17),
+                Actor::Tool { request },
+            ),
+        );
+
+        assert!(applied_snapshot_authenticates(
+            &snapshot,
+            session,
+            request,
+            &replacement
+        ));
+    }
+
+    /// An initial projection cannot authenticate an applied write even when
+    /// its empty content matches the requested replacement.
+    #[test]
+    fn session_status_initial_snapshot_does_not_authenticate_applied_write() {
+        let session = SessionId::from_uuid(Uuid::from_u128(FIXTURE_SESSION_ID));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_REQUEST_ID));
+        let replacement = SessionMetadataContent::empty();
+        let snapshot = SessionMetadataSnapshot::initial(session);
+
+        assert!(!applied_snapshot_authenticates(
+            &snapshot,
+            session,
+            request,
+            &replacement
+        ));
+    }
+
+    /// Owner attribution cannot authenticate a matching tool replacement.
+    #[test]
+    fn session_status_owner_snapshot_does_not_authenticate_tool_write() {
+        let session = SessionId::from_uuid(Uuid::from_u128(FIXTURE_SESSION_ID));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_REQUEST_ID));
+        let replacement = SessionMetadataContent::empty();
+        let snapshot = SessionMetadataSnapshot::from_recorded_write(
+            session,
+            replacement.clone(),
+            SessionMetadataLastWriter::new(
+                SessionMetadataUpdatedAt::from_unix_micros(17),
+                Actor::Owner,
+            ),
+        );
+
+        assert!(!applied_snapshot_authenticates(
+            &snapshot,
+            session,
+            request,
+            &replacement
+        ));
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
