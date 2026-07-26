@@ -23,6 +23,11 @@ pub const SENSITIVE_ENVELOPE_TOKEN: &str = "authorization=Bearer sensitive-envel
     dead_code,
     reason = "process-only expected values share this module with the fake executable"
 )]
+pub const PRECISE_JSON_NUMBER: &str = "123456789012345678901234567890";
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
 pub const REDACTED_TOOL_ID_ONE: &str = "codex-redacted-call-1";
 #[allow(
     dead_code,

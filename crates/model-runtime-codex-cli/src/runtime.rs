@@ -96,6 +96,9 @@ pub enum CodexCliConstructionError {
     RelativeExecutable,
     /// The working directory does not exist or is not a directory.
     InvalidWorkingDirectory,
+    /// The working directory is relative and would be resolved twice by the
+    /// child process and its `--cd` argument.
+    RelativeWorkingDirectory,
     /// Whole-process timeout is zero.
     InvalidExchangeTimeout,
     /// Interrupt grace is zero.
@@ -113,6 +116,9 @@ impl std::fmt::Display for CodexCliConstructionError {
             }
             Self::InvalidWorkingDirectory => {
                 formatter.write_str("Codex working directory is not an existing directory")
+            }
+            Self::RelativeWorkingDirectory => {
+                formatter.write_str("Codex working directory must be absolute")
             }
             Self::InvalidExchangeTimeout => {
                 formatter.write_str("exchange timeout must be greater than zero")
@@ -153,6 +159,9 @@ impl CodexCliRuntime {
         }
         if !config.executable.is_absolute() {
             return Err(CodexCliConstructionError::RelativeExecutable);
+        }
+        if !config.working_directory.is_absolute() {
+            return Err(CodexCliConstructionError::RelativeWorkingDirectory);
         }
         if !config.working_directory.is_dir() {
             return Err(CodexCliConstructionError::InvalidWorkingDirectory);
@@ -390,7 +399,11 @@ async fn execute_process<C: Clone + Send + Sync>(
             return pre_exchange_transport_loss(format!("Codex stdin write failed: {error}"));
         }
         InputStep::Cancelled => {
-            interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+            interrupt_then_kill(
+                &mut child,
+                remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+            )
+            .await;
             abort_stderr_task(stderr_task).await;
             return pre_exchange_boundary_loss(LossCause::CancellationRequested);
         }
@@ -431,7 +444,11 @@ async fn execute_process<C: Clone + Send + Sync>(
                     && stdout.buffer().is_empty()
                     && already_fired(cancellation)
                 {
-                    interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+                    interrupt_then_kill(
+                        &mut child,
+                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                    )
+                    .await;
                     abort_stderr_task(stderr_task).await;
                     return decoder.boundary_loss(LossCause::CancellationRequested);
                 }
@@ -455,7 +472,11 @@ async fn execute_process<C: Clone + Send + Sync>(
                 });
             }
             ProcessStep::Cancelled => {
-                interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+                interrupt_then_kill(
+                    &mut child,
+                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                )
+                .await;
                 abort_stderr_task(stderr_task).await;
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
@@ -476,13 +497,15 @@ async fn execute_process<C: Clone + Send + Sync>(
         result = &mut stderr_task => stderr_result(result),
         () = &mut *cancellation => {
             if !terminal_observed {
-                interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+                interrupt_then_kill(
+                    &mut child,
+                    remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+                )
+                .await;
                 abort_stderr_task(stderr_task).await;
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
-            let cleanup_grace = prepared
-                .interrupt_grace
-                .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
             interrupt_then_kill(&mut child, cleanup_grace).await;
             abort_stderr_task(stderr_task).await;
             "Codex stderr was unavailable after cancellation during process cleanup".to_string()
@@ -497,7 +520,11 @@ async fn execute_process<C: Clone + Send + Sync>(
         biased;
         status = child.wait() => status,
         () = &mut *cancellation, if !terminal_observed => {
-            interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+            interrupt_then_kill(
+                &mut child,
+                remaining_interrupt_grace(prepared.interrupt_grace, deadline),
+            )
+            .await;
             return decoder.boundary_loss(LossCause::CancellationRequested);
         },
         () = tokio::time::sleep_until(deadline) => {
@@ -611,6 +638,10 @@ async fn interrupt_then_kill(child: &mut Child, grace: Duration) {
         }
     }
     force_kill(child).await;
+}
+
+fn remaining_interrupt_grace(grace: Duration, deadline: tokio::time::Instant) -> Duration {
+    grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
 }
 
 async fn force_kill(child: &mut Child) {

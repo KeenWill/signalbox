@@ -38,6 +38,18 @@ pub(crate) struct ItemEvent {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ItemLifecycleEvent {
+    pub(crate) item: ItemIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ItemIdentity {
+    pub(crate) id: String,
+    #[serde(rename = "type")]
+    pub(crate) item_type: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct Item {
     pub(crate) id: String,
     #[serde(flatten)]

@@ -160,6 +160,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }
         "malformed_event" => emit("{not-json"),
+        "malformed_known_lifecycle" => {
+            emit(r#"{"type":"item.started"}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
         "redaction" => {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"Bearer {}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":"{}"}}]}}"#,
@@ -238,7 +246,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "busy_stdout" => {
             std::fs::write("fake-codex-busy-stdout", "ready\n")?;
             loop {
-                emit(r#"{"type":"item.updated"}"#);
+                emit(
+                    r#"{"type":"item.updated","item":{"id":"busy-progress","type":"future_item"}}"#,
+                );
             }
         }
         _ => failed("invalid request: unknown offline fixture"),

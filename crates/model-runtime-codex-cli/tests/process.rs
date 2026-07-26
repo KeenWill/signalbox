@@ -497,6 +497,30 @@ async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
 }
 
 #[tokio::test]
+async fn malformed_known_lifecycle_event_fails_closed() {
+    let result = execute_scenario(
+        "malformed_known_lifecycle",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        provider_error(&result.evidence).kind,
+        ProviderErrorKind::Unrecognized
+    );
+    assert!(
+        provider_error(&result.evidence)
+            .native
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("known event has invalid shape")
+    );
+}
+
+#[tokio::test]
 async fn nonzero_signal_exit_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("killed_process", ProviderErrorKind::Unrecognized).await;
 }
@@ -737,6 +761,38 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
 }
 
 #[tokio::test]
+async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::from_secs(2);
+    config.interrupt_grace = Duration::from_secs(5);
+    let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation("hang", DeliveryMode::Buffered, OperationShape::Text),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-spawns"));
+    let started = std::time::Instant::now();
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::CancellationRequested
+    );
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
 async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let result = execute_operation_in_directory(
@@ -895,6 +951,33 @@ async fn malformed_replayed_tool_json_is_unsupported_before_spawn() {
 }
 
 #[tokio::test]
+async fn precision_sensitive_replayed_json_number_is_preserved_in_the_prompt() {
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+    );
+    operation.messages.push(ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: vec![MessagePart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("call-precise-json"),
+            name: ToolName::new(fixtures::TOOL_NAME),
+            arguments_json: format!(r#"{{"value":{}}}"#, fixtures::PRECISE_JSON_NUMBER),
+        })],
+    });
+
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        OFFLINE_HARNESS_TIMEOUT,
+    )
+    .await;
+
+    assert!(result.prompt.contains(fixtures::PRECISE_JSON_NUMBER));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn zero_output_token_limit_fails_before_spawn() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), fake_cli());
@@ -970,6 +1053,20 @@ fn relative_executable_is_rejected_at_construction() {
         .expect_err("relative executable meaning would change under the child directory");
 
     assert_eq!(error, CodexCliConstructionError::RelativeExecutable);
+}
+
+#[test]
+fn relative_working_directory_is_rejected_at_construction() {
+    let config = CodexCliConfig::new(
+        fake_cli(),
+        ".",
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("a relative working root would be resolved by both cwd and --cd");
+
+    assert_eq!(error, CodexCliConstructionError::RelativeWorkingDirectory);
 }
 
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {

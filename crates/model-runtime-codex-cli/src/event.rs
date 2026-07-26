@@ -16,8 +16,8 @@ use crate::redaction::{redact_json, redact_text};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
-    EnvelopeOutcome, ItemDetails, ItemEvent, ModelEnvelope, ThreadError, ThreadStarted,
-    TurnCompleted, TurnFailed,
+    EnvelopeOutcome, ItemDetails, ItemEvent, ItemLifecycleEvent, ModelEnvelope, ThreadError,
+    ThreadStarted, TurnCompleted, TurnFailed,
 };
 
 pub(crate) struct EventDecoder<C> {
@@ -122,7 +122,15 @@ impl<C: Clone> EventDecoder<C> {
                     fact: ObservationFact::ExchangeEstablished(self.exchange.clone()),
                 });
             }
-            "turn.started" | "item.started" | "item.updated" => {}
+            "turn.started" => {}
+            "item.started" | "item.updated" => {
+                let event: ItemLifecycleEvent = decode(value)?;
+                if event.item.id.is_empty() || event.item.item_type.is_empty() {
+                    return Err(DecodeFailure::new(
+                        "item lifecycle event carries an empty item identity or type",
+                    ));
+                }
+            }
             "item.completed" => {
                 let event: ItemEvent = decode(value)?;
                 match event.item.details {

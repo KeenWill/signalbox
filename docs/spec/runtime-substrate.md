@@ -369,9 +369,9 @@ probe. Preparation validates and renders the complete operation, writes the
 non-secret response-envelope schema to a private temporary file, and returns a
 one-shot capability without starting a process. Execution consumes it as exactly
 one `codex exec --json --ephemeral` spawn, passes the full rendered frontier on
-stdin, requires an absolute configured executable path, selects the exact
-resolved model, ignores user configuration and rule files, and uses the
-read-only CLI sandbox. Before spawn it clears the parent environment, then
+stdin, requires absolute configured executable and working-root paths, selects
+the exact resolved model, ignores user configuration and rule files, and uses
+the read-only CLI sandbox. Before spawn it clears the parent environment, then
 copies only its explicit home/Codex-home, executable and temporary path, XDG,
 locale/terminal, certificate, and proxy allowlist; unrelated service variables
 do not reach the CLI. It neither resumes nor persists a Codex thread. Why: a
@@ -385,16 +385,18 @@ adapter claim.
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
 The first `thread.started` establishes the exchange and its thread id becomes
 the provider request id. Unknown top-level events and unsupported item kinds are
-additively tolerated within the byte and JSON-depth bounds. Known events with
-invalid shapes, non-UTF-8 or undecodable JSONL, nonzero or signal process exits,
-and `turn.failed` fail closed as provider error evidence; the rendered CLI
-message classifier gives credential rejection first precedence and maps only
-explicit native phrases, with all other material `Unrecognized`. The CLI reports
-a failed exchange as a stream-level `error` event followed by its `turn.failed`
-lifecycle echo; the decoder accepts exactly that one trailer and keeps the
-stream-level message as the typed provider error, while any other post-terminal
-event — including one contradicting the recorded failure — remains a fail-closed
-protocol violation. Exit zero without `turn.completed` is
+additively tolerated within the byte and JSON-depth bounds. Known item lifecycle
+events must carry a nonempty item identity and type even when the adapter does
+not otherwise interpret them. Known events with invalid shapes, non-UTF-8 or
+undecodable JSONL, nonzero or signal process exits, and `turn.failed` fail
+closed as provider error evidence; the rendered CLI message classifier gives
+credential rejection first precedence and maps only explicit native phrases,
+with all other material `Unrecognized`. The CLI reports a failed exchange as a
+stream-level `error` event followed by its `turn.failed` lifecycle echo; the
+decoder accepts exactly that one trailer and keeps the stream-level message as
+the typed provider error, while any other post-terminal event — including one
+contradicting the recorded failure — remains a fail-closed protocol violation.
+Exit zero without `turn.completed` is
 `BoundaryLoss(StreamEndedWithoutTerminalMarker)`, never completion.
 
 `turn.completed` is success evidence only when the last completed agent-message
@@ -409,7 +411,9 @@ properties, so a free-form argument object is not expressible in the output
 schema and the live API rejects one as `invalid_json_schema`. The adapter parses
 the string, requires exactly one JSON object within the provider nesting bound,
 and passes the contained text onward, so tool argument JSON still reaches the
-caller byte-verbatim when it is credential-shape clean. Buffered delivery
+caller byte-verbatim when it is credential-shape clean. Caller JSON is rendered
+with arbitrary-precision number preservation, so a schema or replayed argument
+never changes a numeric lexeme through an `f64` round trip. Buffered delivery
 retains its content without deltas; streamed delivery emits bounded CLI
 reasoning items and the final envelope content as ordered deltas before the same
 terminal evidence. Usage comes only from `turn.completed`; an omitted cache
@@ -427,8 +431,9 @@ positive grace, and force-kills only as fallback; either path is
 `BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
 starts immediately after successful spawn, governs stdin transfer, stdout
 decoding, and process exit, then force-kills the original process as typed
-boundary loss. Ready stdout is polled before simultaneous control signals, then
-the decoder drains only the current bounded reader batch before synchronously
+boundary loss; interrupt grace is capped at the time remaining before that
+deadline. Ready stdout is polled before simultaneous control signals, then the
+decoder drains only the current bounded reader batch before synchronously
 rechecking control, so continuously ready stdout cannot starve it. Once a
 provider terminal marker is observed, a later cancellation cannot replace that
 definitive evidence, but the process deadline continues to govern exit and

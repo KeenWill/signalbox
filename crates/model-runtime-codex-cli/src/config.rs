@@ -12,7 +12,7 @@ use std::time::Duration;
 pub struct CodexCliConfig {
     /// Absolute path to the locally installed Codex executable.
     pub executable: PathBuf,
-    /// Existing directory used as the CLI's working root.
+    /// Absolute existing directory used as the CLI's working root.
     pub working_directory: PathBuf,
     /// Non-secret durable reference that names the operator-selected ambient
     /// Codex login. Operations prepared by this runtime must carry this exact
