@@ -17,7 +17,7 @@ use signalbox_domain::{
     ToolPermissionDefault,
 };
 
-const CURRENT_TIME_NAME: &str = "current_time";
+pub(crate) const CURRENT_TIME_NAME: &str = "current_time";
 const CURRENT_TIME_DESCRIPTION: &str =
     "Returns the current time in UTC or an optional IANA time zone.";
 const CURRENT_TIME_SCHEMA: &str = r#"{
@@ -88,6 +88,9 @@ impl fmt::Display for CurrentTimeToolConstructionError {
 impl Error for CurrentTimeToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `current_time`.
+///
+/// Effect posture: `EffectFree`. Execution observes the injected clock and
+/// time-zone database only and performs no externally visible write.
 #[derive(Clone, Debug)]
 pub struct CurrentTimeTool<Clock> {
     catalog: CompiledToolCatalog,
@@ -157,7 +160,10 @@ impl ToolArgumentValidator for CurrentTimeArgumentValidator {
     }
 }
 
-/// Hub-local executor backed by an injected clock.
+/// Daemon-local executor backed by an injected clock.
+///
+/// Effect posture: `EffectFree`. Execution observes the injected clock and
+/// time-zone database only and performs no externally visible write.
 #[derive(Clone, Debug)]
 pub struct CurrentTimeExecutor<Clock> {
     clock: Clock,

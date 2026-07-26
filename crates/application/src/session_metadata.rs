@@ -8,22 +8,30 @@
 use std::{collections::BTreeSet, future::Future};
 
 use signalbox_domain::{
-    DurableCommandId, ReplaceSessionMetadata as DomainReplaceSessionMetadata,
+    Actor, DurableCommandId, ReplaceSessionMetadata as DomainReplaceSessionMetadata,
     ReplaceSessionMetadataResult, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot,
+    SessionMetadataLastWriter, SessionMetadataSnapshot, ToolRequestId,
 };
 
 use crate::InvalidDurableCommandId;
 
 /// The complete validated application request for metadata replacement.
 ///
-/// The request omits actor because the implemented boundary fixes owner agency.
+/// Construction admits either the owner boundary or execution of one exact
+/// tool request; callers cannot supply an arbitrary actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplaceSessionMetadataRequest {
     command_id: DurableCommandId,
     session: SessionId,
+    issuer: SessionMetadataReplacementIssuer,
     replacement: SessionMetadataContent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionMetadataReplacementIssuer {
+    Owner,
+    Tool(ToolRequestId),
 }
 
 impl ReplaceSessionMetadataRequest {
@@ -43,6 +51,30 @@ impl ReplaceSessionMetadataRequest {
         Ok(Self {
             command_id,
             session,
+            issuer: SessionMetadataReplacementIssuer::Owner,
+            replacement,
+        })
+    }
+
+    /// Validates a tool-attributed command identity before canonical command
+    /// construction.
+    pub fn try_new_for_tool(
+        command_id: DurableCommandId,
+        session: SessionId,
+        request: ToolRequestId,
+        replacement: SessionMetadataContent,
+    ) -> Result<Self, InvalidDurableCommandId> {
+        if command_id.as_uuid().is_nil() {
+            return Err(InvalidDurableCommandId::Nil);
+        }
+        if command_id.as_uuid().is_max() {
+            return Err(InvalidDurableCommandId::Max);
+        }
+
+        Ok(Self {
+            command_id,
+            session,
+            issuer: SessionMetadataReplacementIssuer::Tool(request),
             replacement,
         })
     }
@@ -55,6 +87,14 @@ impl ReplaceSessionMetadataRequest {
     /// Returns the target session.
     pub const fn session(&self) -> SessionId {
         self.session
+    }
+
+    /// Returns the exact initiating agency.
+    pub const fn actor(&self) -> Actor {
+        match self.issuer {
+            SessionMetadataReplacementIssuer::Owner => Actor::Owner,
+            SessionMetadataReplacementIssuer::Tool(request) => Actor::Tool { request },
+        }
     }
 
     /// Borrows the complete replacement metadata.
@@ -109,16 +149,26 @@ impl<Transaction> ReplaceSessionMetadataService<Transaction>
 where
     Transaction: ReplaceSessionMetadataTransaction,
 {
-    /// Constructs one owner-attributed command and delegates exactly once.
+    /// Constructs one exactly attributed command and delegates exactly once.
     pub async fn execute(
         &mut self,
         request: ReplaceSessionMetadataRequest,
     ) -> Result<ReplaceSessionMetadataOutcome, Transaction::Error> {
-        let command = DomainReplaceSessionMetadata::new(
-            request.command_id,
-            request.session,
-            request.replacement,
-        );
+        let command = match request.issuer {
+            SessionMetadataReplacementIssuer::Owner => DomainReplaceSessionMetadata::new(
+                request.command_id,
+                request.session,
+                request.replacement,
+            ),
+            SessionMetadataReplacementIssuer::Tool(tool_request) => {
+                DomainReplaceSessionMetadata::new_for_tool(
+                    request.command_id,
+                    request.session,
+                    tool_request,
+                    request.replacement,
+                )
+            }
+        };
         self.transaction.handle(command).await
     }
 }
@@ -438,7 +488,7 @@ mod tests {
 
     use signalbox_domain::{
         Actor, DirectModelSelection, ModelSelectionRequest, ReplaceSessionMetadataRejectedResult,
-        SessionMetadataUpdatedAt,
+        SessionMetadataUpdatedAt, ToolRequestId,
     };
     use uuid::Uuid;
 
@@ -458,6 +508,10 @@ mod tests {
 
     fn session_id(value: u128) -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn tool_request_id(value: u128) -> ToolRequestId {
+        ToolRequestId::from_uuid(Uuid::from_u128(value))
     }
 
     fn metadata(archived: bool) -> SessionMetadataContent {
@@ -563,6 +617,51 @@ mod tests {
         assert_eq!(observed[0].session(), request.session());
         assert_eq!(observed[0].actor(), Actor::Owner);
         assert_eq!(observed[0].replacement(), request.replacement());
+    }
+
+    #[test]
+    fn replacement_orchestration_retains_tool_actor() {
+        let tool_request = tool_request_id(3);
+        let request = ReplaceSessionMetadataRequest::try_new_for_tool(
+            command_id(1),
+            session_id(2),
+            tool_request,
+            metadata(true),
+        )
+        .expect("ordinary command identity is admitted");
+        let recorded = DomainReplaceSessionMetadata::new_for_tool(
+            request.command_id(),
+            request.session(),
+            tool_request,
+            request.replacement().clone(),
+        )
+        .prepare_session_not_found()
+        .into_parts()
+        .1;
+        let expected = ReplaceSessionMetadataOutcome::Recorded(recorded);
+        let mut service = ReplaceSessionMetadataService::new(FakeTransaction {
+            observed: Vec::new(),
+            response: Ok(expected.clone()),
+        });
+
+        let outcome = run_ready(service.execute(request.clone()))
+            .expect("fake transaction returns its exact result");
+
+        assert_eq!(outcome, expected);
+        let observed = service.into_transaction().observed;
+        let [command] = observed.as_slice() else {
+            panic!("one tool metadata command crosses the transaction")
+        };
+        assert_eq!(command.command_id(), request.command_id());
+        assert_eq!(command.session(), request.session());
+        assert_eq!(command.actor(), request.actor());
+        assert_eq!(
+            command.actor(),
+            Actor::Tool {
+                request: tool_request
+            }
+        );
+        assert_eq!(command.replacement(), request.replacement());
     }
 
     #[test]
