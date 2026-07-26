@@ -27,9 +27,9 @@ Milestone selection rules for autonomous runs live in
 
 Signalbox's standing purpose, deployment shape, and first-version non-goals are
 owned by the [vision](vision.md): a personal, single-owner, always-on platform
-for durable LLM-assisted work — one central hub with Postgres as the canonical
-store, outbound-connected runners for tool execution, and terminal, web, macOS,
-and iOS clients.
+for durable LLM-assisted work — one central daemon with Postgres as the
+canonical store, outbound-connected runners for tool execution, and terminal,
+web, macOS, and iOS clients.
 
 The product target sharpens that into a destination: a session platform that
 absorbs the best interaction features of contemporary agent products — durable
@@ -140,8 +140,8 @@ an authorized physical attempt (INV-027); terminal outcomes never reopen
 request so nothing can dispatch it after the slot is released, and an interrupt
 that closes an approval wait terminally cancels the owned request. The request
 belongs to its turn, not to one attempt, so it survives approval pauses, client
-reconnects, hub restarts, and replacement turn attempts. Changed arguments or a
-changed tool revision are a new request, never a mutation. Request-level
+reconnects, daemon restarts, and replacement turn attempts. Changed arguments or
+a changed tool revision are a new request, never a mutation. Request-level
 `Ambiguous` derives from attempt evidence: physical ambiguity is recorded on the
 attempt (INV-025) and effect policy decides whether another attempt is ever
 permitted (INV-026).
@@ -222,13 +222,13 @@ into failure or silently retried.
 ## Execution isolation target
 
 Tool execution should not inherit the owner's ambient authority. The target
-restricted-executor profile, for both hub-local executors and restricted
+restricted-executor profile, for both daemon-local executors and restricted
 runners:
 
 - a dedicated restricted execution identity, never the owner's account;
 - no ambient owner credentials — no SSH agent, browser profile, credential-store
   socket, cloud metadata, or provider key is inherited; any credential a tool
-  needs is injected per attempt under the hub-controlled boundary (INV-035;
+  needs is injected per attempt under the daemon-controlled boundary (INV-035;
   [configuration-and-credentials](spec/configuration-and-credentials.md));
 - explicit mounts — read-only workspace by default, allowlisted writable paths,
   symlink and mount escapes rejected;
@@ -253,7 +253,7 @@ The target reconnect semantics: a client reconstructs authoritative durable
 state from a snapshot with an observation cursor, resumes strictly ordered
 durable-transition events after that cursor, and treats streamed drafts as
 replaceable transient content (INV-032). The publication mechanism inside the
-hub is the transactional outbox; its implemented storage foundation and
+daemon is the transactional outbox; its implemented storage foundation and
 same-transaction appends are owned by
 [persistence-protocol](spec/persistence-protocol.md). The local version-one
 publisher and client boundary are owned by
@@ -307,15 +307,15 @@ a decision defining their standing subscription and delivery lifecycle.
 An orchestrator session coordinates linked sub-sessions — created by it, or
 created separately and linked on request — with results and messages flowing
 between orchestrator and sub-sessions. Sessions and their durable messages
-remain hub-owned when work spans worktrees, pull requests, or machines; runners
-only execute dispatched tools, and the hub applies every resulting message
-through the same durable messaging surface. The grounding is future delegation
-and the rule it builds on — a child is a real session, independently browsable,
-with an explicit typed relationship to the exact parent work (INV-031), per the
-[delegation sketch](#delegation-target) above. Linking a session that delegation
-did not create requires its own foundation decision for the typed
-related-session relationship. Cross-machine tool placement remains owned by the
-future runner-protocol decision.
+remain daemon-owned when work spans worktrees, pull requests, or machines;
+runners only execute dispatched tools, and the daemon applies every resulting
+message through the same durable messaging surface. The grounding is future
+delegation and the rule it builds on — a child is a real session, independently
+browsable, with an explicit typed relationship to the exact parent work
+(INV-031), per the [delegation sketch](#delegation-target) above. Linking a
+session that delegation did not create requires its own foundation decision for
+the typed related-session relationship. Cross-machine tool placement remains
+owned by the future runner-protocol decision.
 
 ### Session linking and visibility authority (target)
 
@@ -372,7 +372,7 @@ this document first:
 
 - **Multi-user ACLs, teams, and shared quotas.** Single-owner scope is fixed; a
   future multi-owner model is a foundation decision.
-- **Distributed schedulers and cross-host workers.** The single-hub,
+- **Distributed schedulers and cross-host workers.** The single-daemon,
   Postgres-coordinated baseline
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md))
   stands with explicit adapter seams; no broker or worker fleet is in the
@@ -405,9 +405,9 @@ shape; their implemented behavior is owned by the [living spec](spec/README.md).
    security posture for outbound provider calls. This was the gate before
    destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
-   trusted risk registry, approval consumption, and a first harmless hub-local
-   tool. Blocked on the tool-policy and approval decisions, which do not yet
-   exist.
+   trusted risk registry, approval consumption, and a first harmless
+   daemon-local tool. Blocked on the tool-policy and approval decisions, which
+   do not yet exist.
 6. **The restricted executor.** The
    [execution isolation target](#execution-isolation-target) applied to a first
    restricted placement. Blocked on the sandbox-minimum and execution-identity

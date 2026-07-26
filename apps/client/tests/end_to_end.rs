@@ -25,11 +25,6 @@ use signalbox_domain::{
     DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity,
     ResolvedProviderTarget,
 };
-use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
-    FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime,
-};
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
@@ -41,6 +36,11 @@ use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+};
+use signalboxd::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
+    FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, ProcessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{

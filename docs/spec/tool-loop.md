@@ -1,17 +1,17 @@
 # Tool loop
 
-This page specifies the implemented hub-owned tool subsystem as verified against
-the implementing stack rooted at PR #193 (`agent/tool-loop-spec`). It owns
-logical tool requests, approval policy and decisions, physical tool attempts,
-result admission, intra-turn continuation, crash classification, the compiled
-registry, and the first hub-local tool. Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
-model-call staging and provider translation in
-[model-call-execution](model-call-execution.md); durable-command identity in
-[identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant catalog](../invariants.md).
+This page specifies the implemented daemon-owned tool subsystem as verified
+against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`). It
+owns logical tool requests, approval policy and decisions, physical tool
+attempts, result admission, intra-turn continuation, crash classification, the
+compiled registry, and the first daemon-local tool. Turn and attempt lifecycle
+law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entry vocabulary in
+[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
+provider translation in [model-call-execution](model-call-execution.md);
+durable-command identity in [identity-and-commands](identity-and-commands.md);
+and relational mechanics in [persistence-protocol](persistence-protocol.md).
+Invariant tags cite [the invariant catalog](../invariants.md).
 
 ## Intra-turn rounds and request batches
 
@@ -204,10 +204,10 @@ fabricating a new physical attempt.
 
 ## Serialized staged execution
 
-Tool execution is hub-local and in-process behind the application `ToolExecutor`
-port. The executor receives checked request content and returns evidence; it
-cannot write transcript, request, attempt, approval, or turn state (INV-024).
-Execution is serialized in this slice:
+Tool execution is daemon-local and in-process behind the application
+`ToolExecutor` port. The executor receives checked request content and returns
+evidence; it cannot write transcript, request, attempt, approval, or turn state
+(INV-024). Execution is serialized in this slice:
 
 - approval visits requests in proposal order;
 - a turn has at most one live tool attempt;

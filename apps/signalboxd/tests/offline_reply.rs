@@ -22,7 +22,6 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
@@ -35,6 +34,7 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
+use signalboxd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -43,7 +43,7 @@ use testcontainers_modules::{
 use tokio::time::timeout;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalbox_hubd_e2e";
+const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 

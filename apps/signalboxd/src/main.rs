@@ -1,4 +1,4 @@
-//! Signalbox hub composition root.
+//! Signalbox daemon composition root.
 //!
 //! docs/spec/turn-lifecycle-and-scheduling.md owns startup ordering
 //! (migrate, scan, then schedule), graceful shutdown, and composition-root
@@ -25,18 +25,18 @@ use signalbox_application::{
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
 use signalbox_domain::{SessionId, TurnId};
-use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SystemCurrentTimeClock,
-};
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     migrate, model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+};
+use signalboxd::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,
@@ -404,7 +404,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             migrate(&migration_pool)
                 .await
                 .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Migration))?;
-            tracing::info!(phase = ?RuntimePhase::Migration, "hub startup phase completed");
+            tracing::info!(phase = ?RuntimePhase::Migration, "daemon startup phase completed");
             Ok(())
         },
         async move {
@@ -423,7 +423,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                 tracing::info!(
                     phase = ?RuntimePhase::StartupScan,
                     recovered_turn_count = outcome.recovered_turn_count(),
-                    "hub startup phase completed"
+                    "daemon startup phase completed"
                 );
                 Ok(())
             } else {
@@ -454,7 +454,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
-        "hub startup phase completed"
+        "daemon startup phase completed"
     );
 
     let scheduler_pool = pool.clone();
@@ -503,7 +503,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
     });
-    tracing::info!(phase = ?RuntimePhase::Scheduling, "hub runtime started");
+    tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let outcome = {
         let guard_loss = wait_for_guard_loss(&mut database);
@@ -593,13 +593,13 @@ async fn main() -> ExitCode {
 
     match run_hub().await {
         Ok(ShutdownOutcome::Clean) => {
-            tracing::info!("hub shutdown completed");
+            tracing::info!("daemon shutdown completed");
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::GraceWindowExpired) => {
             tracing::warn!(
                 grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
-                "hub shutdown grace window expired; abandoning in-flight work"
+                "daemon shutdown grace window expired; abandoning in-flight work"
             );
             ExitCode::SUCCESS
         }
@@ -608,7 +608,7 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                "hub runtime failed"
+                "daemon runtime failed"
             );
             ExitCode::FAILURE
         }
@@ -645,7 +645,7 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                "hub runtime component failed"
+                "daemon runtime component failed"
             );
             ExitCode::FAILURE
         }
@@ -655,7 +655,7 @@ async fn main() -> ExitCode {
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
                 grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
-                "hub runtime component failed and shutdown grace expired; abandoning in-flight work"
+                "daemon runtime component failed and shutdown grace expired; abandoning in-flight work"
             );
             ExitCode::FAILURE
         }
@@ -666,7 +666,7 @@ async fn main() -> ExitCode {
                 blocker_count = error.blocker_count,
                 session_id = ?error.session,
                 turn_id = ?error.turn,
-                "hub startup failed"
+                "daemon startup failed"
             );
             ExitCode::FAILURE
         }
