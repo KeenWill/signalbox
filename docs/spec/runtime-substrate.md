@@ -87,9 +87,8 @@ under the provider-target identity rule of
 [model-call-execution](model-call-execution.md#provider-target-identity).
 
 Neither HTTP adapter ever requests server-side model fallback, so a provider
-marker
-announcing that another model continued the turn is evidence that the resolved
-target did not serve it. The Anthropic adapter therefore recognizes the
+marker announcing that another model continued the turn is evidence that the
+resolved target did not serve it. The Anthropic adapter therefore recognizes the
 `fallback` content block explicitly rather than leaving it in the tolerated
 additive-evolution branch: the buffered decoder reports the model the block
 names as continuing the turn through the ordinary `ProviderModelReported` fact
