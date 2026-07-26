@@ -33,6 +33,7 @@ mod local_socket;
 mod process_runtime;
 mod session_status;
 mod single_hub;
+mod tool_contract;
 mod web_fetch;
 
 pub use code_host::{
