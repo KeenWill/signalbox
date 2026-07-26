@@ -241,9 +241,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   private var generation: UInt64 = 0
   private var failureCount = 0
   private var accumulator: SignalboxSnapshotAccumulator?
-  private var replayBuffer: [SignalboxBufferedFollowedEvent] = []
-  private var replayBufferHead = 0
+  private var replayBuffer: [UInt64: SignalboxBufferedFollowedEvent] = [:]
+  private var replayBufferNextInsertionID: UInt64 = 0
+  private var replayBufferNextRemovalID: UInt64 = 0
+  private var replayBufferLastCursor: SignalboxCanonicalUInt64?
   private var replayBufferUTF8Bytes: UInt = 0
+  private var publishedCursor: UInt64 = 0
   private var activeRefresh: SignalboxSideSnapshotRefresh?
   private var nextRefreshID: UInt64 = 1
 
@@ -414,6 +417,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       )
     case .completed(let snapshot):
       accumulator = nil
+      publishedCursor = snapshot.cursor.rawValue
       phase = .replay(generation: currentGeneration, cursor: snapshot.cursor)
       return [
         .cancelDeadline(.history(generation: currentGeneration)),
@@ -436,6 +440,15 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   ) -> [SignalboxSessionSynchronizationEffect] {
     switch message {
     case .sessionEvent(let followed):
+      guard
+        case .replay(_, let snapshotCursor) = phase,
+        followed.sessionID == sessionID
+      else {
+        return protocolFailure(
+          stage: .replay,
+          message: "A replayed event named a different session."
+        )
+      }
       guard followed.event.decodingDiagnostic == nil else {
         return protocolFailure(
           stage: .replay,
@@ -443,9 +456,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
             ?? "A malformed followed event could not be decoded."
         )
       }
+      let observedCursor = replayBufferLastCursor ?? snapshotCursor
+      guard followed.cursor > observedCursor else {
+        return diagnosticEffects(for: followed, stage: .replay)
+      }
       return buffer(
         followed,
-        observation: .pendingPublication,
         stage: .replay,
         reportDiagnostics: true
       )
@@ -475,7 +491,11 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       return staleCompletion(stage: .replay)
     }
     failureCount = 0
-    phase = .steady(generation: currentGeneration, cursor: cursor, refreshID: nil)
+    phase = .steady(
+      generation: currentGeneration,
+      cursor: replayBufferLastCursor ?? cursor,
+      refreshID: nil
+    )
     var effects: [SignalboxSessionSynchronizationEffect] = [
       .cancelDeadline(.replay(generation: currentGeneration))
     ]
@@ -533,7 +553,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     if activeRefresh != nil {
       let effects = buffer(
         followed,
-        observation: .alreadyPublished,
         stage: .steady,
         reportDiagnostics: reportDiagnostics
       )
@@ -552,6 +571,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       cursor: followed.cursor,
       refreshID: refreshID
     )
+    publishedCursor = followed.cursor.rawValue
     var effects =
       reportDiagnostics
       ? diagnosticEffects(for: followed, stage: .steady)
@@ -680,7 +700,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
 
   private mutating func buffer(
     _ followed: SignalboxFollowedSessionEvent,
-    observation: SignalboxBufferedEventObservation,
     stage currentStage: SignalboxSynchronizationStage,
     reportDiagnostics: Bool
   ) -> [SignalboxSessionSynchronizationEffect] {
@@ -688,9 +707,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     let (nextBytes, overflowed) = replayBufferUTF8Bytes.addingReportingOverflow(
       retainedBytes
     )
+    let (nextInsertionID, insertionIDOverflowed) =
+      replayBufferNextInsertionID.addingReportingOverflow(1)
     guard
-      UInt(replayBuffer.count - replayBufferHead) < policy.eventBufferCapacity.maximumEvents,
+      UInt(replayBuffer.count) < policy.eventBufferCapacity.maximumEvents,
       !overflowed,
+      !insertionIDOverflowed,
       nextBytes <= policy.eventBufferCapacity.maximumUTF8Bytes
     else {
       return protocolFailure(
@@ -698,12 +720,11 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         message: "Buffered followed events exceeded the configured native-client capacity."
       )
     }
-    replayBuffer.append(
-      SignalboxBufferedFollowedEvent(
-        followed: followed,
-        observation: observation
-      )
+    replayBuffer[replayBufferNextInsertionID] = SignalboxBufferedFollowedEvent(
+      followed: followed
     )
+    replayBufferNextInsertionID = nextInsertionID
+    replayBufferLastCursor = followed.cursor
     replayBufferUTF8Bytes = nextBytes
     return reportDiagnostics ? diagnosticEffects(for: followed, stage: currentStage) : []
   }
@@ -712,33 +733,41 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     generation currentGeneration: UInt64
   ) -> [SignalboxSessionSynchronizationEffect] {
     var effects: [SignalboxSessionSynchronizationEffect] = []
-    while activeRefresh == nil, replayBufferHead < replayBuffer.count {
-      let buffered = replayBuffer[replayBufferHead]
-      replayBufferHead += 1
+    while activeRefresh == nil,
+      replayBufferNextRemovalID < replayBufferNextInsertionID
+    {
+      guard
+        let buffered = replayBuffer.removeValue(
+          forKey: replayBufferNextRemovalID
+        )
+      else {
+        return protocolFailure(
+          stage: .steady,
+          message: "Buffered followed-event queue state was inconsistent."
+        )
+      }
+      replayBufferNextRemovalID += 1
       replayBufferUTF8Bytes -= buffered.followed.event.retainedUTF8Bytes
-      let nextEffects =
-        buffered.observation == .alreadyPublished
-        ? publishPreviouslyObservedEvent(
-          buffered.followed,
-          generation: currentGeneration
-        )
-        : receiveFollowedEvent(
-          buffered.followed,
-          generation: currentGeneration,
-          reportDiagnostics: false
-        )
+      let nextEffects = publishBufferedEvent(
+        buffered.followed,
+        generation: currentGeneration
+      )
       effects.append(contentsOf: nextEffects)
     }
-    if replayBufferHead == replayBuffer.count {
+    if replayBuffer.isEmpty {
       clearReplayBuffer()
     }
     return effects
   }
 
-  private mutating func publishPreviouslyObservedEvent(
+  private mutating func publishBufferedEvent(
     _ followed: SignalboxFollowedSessionEvent,
     generation currentGeneration: UInt64
   ) -> [SignalboxSessionSynchronizationEffect] {
+    guard followed.cursor.rawValue > publishedCursor else {
+      return []
+    }
+    publishedCursor = followed.cursor.rawValue
     var effects: [SignalboxSessionSynchronizationEffect] = [.publishEvent(followed)]
     if eventRequiresSideSnapshot(followed.event) {
       effects.append(
@@ -1012,7 +1041,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
 
   private mutating func clearReplayBuffer() {
     replayBuffer.removeAll(keepingCapacity: false)
-    replayBufferHead = 0
+    replayBufferNextInsertionID = 0
+    replayBufferNextRemovalID = 0
+    replayBufferLastCursor = nil
     replayBufferUTF8Bytes = 0
   }
 
@@ -1129,12 +1160,6 @@ private struct SignalboxSideSnapshotRefresh: Sendable {
 
 private struct SignalboxBufferedFollowedEvent: Sendable {
   let followed: SignalboxFollowedSessionEvent
-  let observation: SignalboxBufferedEventObservation
-}
-
-private enum SignalboxBufferedEventObservation: Sendable {
-  case pendingPublication
-  case alreadyPublished
 }
 
 private enum SignalboxSnapshotAccumulatorOutcome {

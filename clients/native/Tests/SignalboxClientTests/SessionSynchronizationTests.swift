@@ -522,6 +522,76 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testNewerLiveEventCannotSuppressReplayQueuedBehindSideSnapshot() throws {
+    let triggerCursor = SynchronizationFixture.sideRefreshTriggerCursor
+    let firstReplayCursor = SynchronizationFixture.sideBufferedCursor
+    let secondReplayCursor = SynchronizationFixture.secondSideBufferedCursor
+    let liveCursor = SynchronizationFixture.liveDuringReplaySideRefreshCursor
+    var transport = try SynchronizationFixture.transportAtReplay(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedEvent(cursor: triggerCursor)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.inputAcceptedEvent(cursor: firstReplayCursor)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.inputAcceptedEvent(cursor: secondReplayCursor)
+      )
+    )
+    let replayEffects = transport.send(
+      .replayCompleted(generation: SynchronizationFixture.initialGeneration)
+    )
+    let liveEffects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.inputAcceptedEvent(cursor: liveCursor)
+      )
+    )
+    _ = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.snapshotStart(cursor: liveCursor)
+      )
+    )
+    let sideEndEffects = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: liveCursor,
+          turnCount: 0,
+          entryCount: 0
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.publishedEventCursors(in: replayEffects),
+      [triggerCursor]
+    )
+    XCTAssertTrue(liveEffects.isEmpty)
+    XCTAssertEqual(
+      SynchronizationFixture.publishedEventCursors(in: sideEndEffects),
+      [firstReplayCursor, secondReplayCursor, liveCursor]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(cursor: liveCursor)
+    )
+  }
+
   func testBufferedEventCountCapacityEntersBoundedRecovery() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor,
@@ -1105,12 +1175,15 @@ private struct ScriptedSynchronizationTransport {
 }
 
 private enum SynchronizationFixture {
+  static let initialGeneration: UInt64 = 1
+  static let firstRefreshID: UInt64 = 1
   static let initialCursor: UInt64 = 10
   static let unknownCursor: UInt64 = 11
   static let laterCursor: UInt64 = 13
   static let sideRefreshTriggerCursor: UInt64 = 20
   static let sideBufferedCursor: UInt64 = 21
   static let secondSideBufferedCursor: UInt64 = 22
+  static let liveDuringReplaySideRefreshCursor: UInt64 = 23
   static let recoveredCursor: UInt64 = 30
   static let session = "11111111-1111-4111-8111-111111111111"
   static let turn = "22222222-2222-4222-8222-222222222222"
@@ -1142,6 +1215,16 @@ private enum SynchronizationFixture {
     failedStage: SignalboxSynchronizationStage
   ) -> SignalboxSessionSynchronizationPhase {
     .recovery(failedStage: failedStage, failureCount: 1, nextGeneration: 2)
+  }
+
+  static func steady(
+    cursor: UInt64
+  ) -> SignalboxSessionSynchronizationPhase {
+    .steady(
+      generation: initialGeneration,
+      cursor: SignalboxCanonicalUInt64(rawValue: cursor),
+      refreshID: nil
+    )
   }
 
   static func eventCountCapacity(
