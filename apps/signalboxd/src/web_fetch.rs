@@ -329,31 +329,39 @@ pub(crate) async fn public_destination_client(
     let remaining = exchange_timeout
         .checked_sub(started.elapsed())
         .filter(|remaining| !remaining.is_zero())
-        .ok_or(PublicDestinationClientError)?;
-    build_web_fetch_client(remaining, Some(&destination)).map_err(|_| PublicDestinationClientError)
+        .ok_or(PublicDestinationClientError::Infrastructure)?;
+    build_web_fetch_client(remaining, Some(&destination))
+        .map_err(|_| PublicDestinationClientError::Infrastructure)
 }
 
 /// A URL could not be resolved and pinned as a public-only destination before
 /// dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PublicDestinationClientError;
+pub(crate) enum PublicDestinationClientError {
+    /// The destination shape or resolved address set was not public-only.
+    DestinationRejected,
+    /// DNS resolution or client construction failed before dispatch.
+    Infrastructure,
+}
 
 async fn resolve_public_destination(
     url: &Url,
     exchange_timeout: Duration,
 ) -> Result<ResolvedPublicDestination, PublicDestinationClientError> {
-    let host = url.host_str().ok_or(PublicDestinationClientError)?;
+    let host = url
+        .host_str()
+        .ok_or(PublicDestinationClientError::DestinationRejected)?;
     let port = url
         .port_or_known_default()
-        .ok_or(PublicDestinationClientError)?;
+        .ok_or(PublicDestinationClientError::DestinationRejected)?;
     let addresses = if let Some(address) = parse_url_host_ip(host) {
         vec![SocketAddr::new(address, port)]
     } else {
         let resolved =
             tokio::time::timeout(exchange_timeout, tokio::net::lookup_host((host, port)))
                 .await
-                .map_err(|_| PublicDestinationClientError)?
-                .map_err(|_| PublicDestinationClientError)?;
+                .map_err(|_| PublicDestinationClientError::Infrastructure)?
+                .map_err(|_| PublicDestinationClientError::Infrastructure)?;
         resolved
             .take(MAX_RESOLVED_ADDRESSES + 1)
             .collect::<Vec<_>>()
@@ -364,7 +372,7 @@ async fn resolve_public_destination(
             .iter()
             .any(|address| !is_public_destination_address(address.ip()))
     {
-        return Err(PublicDestinationClientError);
+        return Err(PublicDestinationClientError::DestinationRejected);
     }
     Ok(ResolvedPublicDestination {
         host: host.to_owned(),
@@ -727,7 +735,10 @@ mod tests {
 
         let resolution = public_destination_client(request.url(), Duration::from_secs(2)).await;
 
-        assert!(matches!(resolution, Err(PublicDestinationClientError)));
+        assert!(matches!(
+            resolution,
+            Err(PublicDestinationClientError::DestinationRejected)
+        ));
     }
 
     /// Bounded binary input becomes deterministic lossy text plus metadata.

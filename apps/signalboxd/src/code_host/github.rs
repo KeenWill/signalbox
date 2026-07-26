@@ -10,7 +10,7 @@ use reqwest::{
 };
 use signalbox_model_runtime::CredentialValue;
 
-use crate::web_fetch::public_destination_client;
+use crate::web_fetch::{PublicDestinationClientError, public_destination_client};
 
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
@@ -427,7 +427,7 @@ impl GitHubCodeHostTransport {
         }
         let redirect_client = public_destination_client(&redirect, DEFAULT_TIMEOUT)
             .await
-            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+            .map_err(classify_public_destination_error)?;
         let response = redirect_client
             .get(redirect)
             .header(USER_AGENT, USER_AGENT_VALUE)
@@ -670,6 +670,17 @@ fn ensure_expected_status(
     }
 }
 
+const fn classify_public_destination_error(
+    failure: PublicDestinationClientError,
+) -> CodeHostTransportFailure {
+    match failure {
+        PublicDestinationClientError::DestinationRejected => {
+            CodeHostTransportFailure::InvalidResponse
+        }
+        PublicDestinationClientError::Infrastructure => CodeHostTransportFailure::DispatchUnknown,
+    }
+}
+
 fn bounded_lossy_text(
     bytes: &[u8],
     completeness: CodeHostResultCompleteness,
@@ -697,7 +708,7 @@ fn parse_changed_file(
         required_u64(object, "deletions")?,
     )
     .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-    let patch = optional_string(object, "patch")?;
+    let patch = omitted_optional_string(object, "patch")?;
     Ok((file, patch))
 }
 
@@ -837,6 +848,17 @@ fn optional_string(
     }
 }
 
+fn omitted_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    member: &str,
+) -> Result<Option<String>, CodeHostTransportFailure> {
+    match object.get(member) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(CodeHostTransportFailure::InvalidResponse),
+    }
+}
+
 fn optional_object_string(
     object: &serde_json::Map<String, serde_json::Value>,
     object_member: &str,
@@ -931,6 +953,27 @@ mod tests {
         );
     }
 
+    /// GitHub may omit patch text for a binary file while retaining its
+    /// complete changed-file summary.
+    #[test]
+    fn changed_file_parser_accepts_omitted_patch() {
+        let value = serde_json::json!({
+            "additions": 0,
+            "deletions": 0,
+            "filename": "assets/image.png",
+            "status": "modified",
+        });
+        let expected_file = ChangedFile::try_new(
+            String::from("assets/image.png"),
+            String::from("modified"),
+            0,
+            0,
+        )
+        .expect("fixture changed file is bounded");
+
+        assert_eq!(parse_changed_file(&value), Ok((expected_file, None)));
+    }
+
     /// A GraphQL mutation error cannot be mistaken for a definitive
     /// no-mutation acknowledgement.
     #[test]
@@ -962,6 +1005,16 @@ mod tests {
         assert_eq!(
             ensure_expected_status(StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK),
             Err(CodeHostTransportFailure::DispatchUnknown)
+        );
+    }
+
+    /// A job-log redirect DNS failure remains read-side infrastructure
+    /// failure rather than becoming definitive rejection evidence.
+    #[test]
+    fn redirect_dns_failure_is_dispatch_unknown() {
+        assert_eq!(
+            classify_public_destination_error(PublicDestinationClientError::Infrastructure),
+            CodeHostTransportFailure::DispatchUnknown
         );
     }
 
