@@ -16,9 +16,10 @@ are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The
 tool-attributed metadata command and reconstitution surface was verified through
-PR #265 (`agent/tool-batch-tier0`). The current identity-generation,
-command-family, and ambiguity-ownership inventory was verified through PR #288
-(`agent/audit-fix-docs-coherence`).
+PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
+were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
+current identity-generation, command-family, and ambiguity-ownership inventory
+was verified through PR #288 (`agent/audit-fix-docs-coherence`).
 
 ## Identity model
 
@@ -196,7 +197,7 @@ at every transaction boundary. The original
 migration `202607180003`, revised for occupied-slot pending steering in
 `202607180005`, and rewired in `202607220005` to the renamed
 `require_submit_input_legacy_effect_correlation` function. It covers every row
-except an applied interrupt and the two interrupt-evidence rejections. An
+except an applied interrupt and the three interrupt-path rejections. An
 `applied` ordinary turn-origin row must agree field-by-field with exactly one
 committed `accepted_input` plus `queued_input_origin` effect, including the
 frozen model configuration; an applied `next_safe_point` row instead initially
@@ -208,14 +209,18 @@ rejection must match real alias evidence in `session_defaults_version`.
 Migration `202607220005` adds `submit_input_command_requires_interrupt_effect`.
 Its guarded trigger exclusively checks applied interrupts plus
 `safe_point_unavailable_while_stopping` and `interrupt_already_applied`
-rejections. An applied interrupt must correlate its accepted input and immediate
-successor with the stopped predecessor attempt; one of those rejections must
-instead correlate with exactly one already-applied interrupt for the actual
-active turn and must create no accepted-input effect of its own. The
-next-safe-point receipt remains immutable when its accepted input later becomes
-consumed steering or a reclassified origin. Equal replay returns its original
-`Applied(PendingSteering)` result only after the accepted input's current
-lifecycle passes the correlation checks owned by
+rejections, and migration `202607280001` extends that trigger to
+`interrupt_unavailable_while_awaiting_approval`. An applied interrupt must
+correlate its accepted input and immediate successor with the stopped
+predecessor attempt. A stopping or already-applied rejection must instead
+correlate with exactly one already-applied interrupt for the actual active turn
+and create no accepted-input effect of its own. The parked-approval rejection
+must create no accepted-input effect and must name a turn whose durable
+lifecycle is active in the `awaiting_tool_approval` phase; it does not name an
+earlier interrupt. The next-safe-point receipt remains immutable when its
+accepted input later becomes consumed steering or a reclassified origin. Equal
+replay returns its original `Applied(PendingSteering)` result only after the
+accepted input's current lifecycle passes the correlation checks owned by
 [persistence-protocol](persistence-protocol.md). Why: replay returns recorded
 results as truth, so an applied record without its exact committed effect must
 be unable to commit.
@@ -363,7 +368,10 @@ and installation live only in `apps/signalboxd` (see
 [runtime-substrate](runtime-substrate.md) for the runtime and the operator
 failure taxonomy). Telemetry events correlate durable failures with
 daemon-minted aggregate identifiers — `session_id`, turn identities, phase, and
-failure-class fields — in the two render forms described under Encoding.
+failure-class fields — in the two render forms described under Encoding. The
+same events may carry closed classification tokens that name no aggregate: the
+tool-loop failed-attempt event adds the dispatched catalog tool name and the
+closed tool error kind ([tool-loop](tool-loop.md#serialized-staged-execution)).
 
 No telemetry site emits a caller-supplied `DurableCommandId` in any form: no raw
 UUID, prefix, digest, or token appears in any `tracing` call in the codebase.
