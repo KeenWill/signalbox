@@ -86,6 +86,69 @@ consumed by the domain crate's tests. Before finishing any change, run the
 repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
 list of required commands and their setup notes — from the repository root.
 
+### Dev instance
+
+`devenv up` starts a dev instance under devenv's native process manager: a
+PostgreSQL 18 cluster on loopback port 54341, and one `signalbox-hubd` built
+from the working tree that starts once the cluster reports ready. This is a
+development convenience only. It is not how tests get a database — the
+integration and end-to-end suites still provision their own disposable
+containers through testcontainers, and nothing here changes that.
+
+State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
+and everything the daemon needs in `dev-instance/` — a locally generated
+certificate authority and server certificate under `tls/`, a process-scoped home
+under `home/`, and `hubd.toml`, seeded on first run from
+[`config/hubd.example.toml`](config/hubd.example.toml) and left alone afterwards
+so local edits survive. Wipe the whole instance with `rm -rf .devenv/state`, or
+reseed just the catalog by deleting `.devenv/state/dev-instance/hubd.toml`.
+
+Two things about the seeded catalog are worth preserving when you edit it.
+`provider_model` must be the exact canonical identity the provider echoes back —
+the dated `claude-haiku-4-5-20251001`, not an undated alias, which makes a model
+call commit ambiguously, stops the daemon, and wedges the session it was
+serving. And the process socket lives at `$DEVENV_RUNTIME/signalbox/hubd.sock`
+rather than directly in the runtime directory: the daemon requires the socket's
+parent to be owned by you and mode exactly 0700, with no group- or
+other-writable ancestor except a sticky one holding a directory you own, and it
+creates neither that directory nor those permissions itself. The daemon process
+makes it before binding. Point the terminal client there with `--socket`.
+
+The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`,
+overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE`. No key material is
+committed or generated. That file is read per model call and never at startup,
+so the daemon boots, migrates, runs its startup scan, and serves the process
+socket with the file absent; only model calls fail, as an unavailable
+credential.
+
+Most of the dev instance exists to satisfy the ambient-configuration refusals
+that
+[configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
+specifies, so that experiments stop re-deriving them:
+
+- **`PG*` and `SSL_CERT_*` variables.** The daemon refuses to parse its database
+  URL when any of the thirteen libpq-style `PG*` variables or either
+  certificate-store variable is present, whatever its value — and devenv's
+  PostgreSQL service exports `PGHOST` and `PGPORT` into the shared environment
+  for its own tooling. The daemon therefore runs behind an `env -u` scrub of
+  exactly that set. `cargo build` runs first, unscrubbed, because it needs the
+  real home and the ambient certificate variables.
+- **`~/.pgpass`.** The same path refuses when a default password file exists
+  under the process home, which it resolves with `std::env::home_dir()` — on
+  Unix, `$HOME` whenever that is set and nonempty. The daemon runs with `HOME`
+  pointed at `.devenv/state/dev-instance/home`, so your real `~/.pgpass` is
+  irrelevant to the dev instance; a `.pgpass` placed inside that directory fails
+  provisioning loudly rather than being deleted.
+- **Full TLS verification.** Production connections force `sslmode=verify-full`
+  regardless of URL parameters, so the dev cluster serves TLS with a generated
+  `localhost` certificate and the URL names the generated authority through
+  `sslrootcert`. SQLx adds that root to the platform trust store rather than
+  replacing it, which is why the dev instance never sets `SSL_CERT_FILE`.
+- **A complete URL.** Every connection parameter, including the user name and
+  host the driver would otherwise take from the process account and the host
+  filesystem, is stated in the `DATABASE_URL` that `devenv.nix` exports to the
+  daemon process alone, never into the shell.
+
 ### Terminal client
 
 The `signalbox` binary is the supported local terminal surface for the

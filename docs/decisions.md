@@ -10,6 +10,39 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Dev instance under devenv's native process manager
+
+**Context.** Running the daemon locally means satisfying the
+ambient-configuration refusals in `production_connection_options`: thirteen
+libpq-style `PG*` variables and two certificate-store variables must all be
+absent, no `~/.pgpass` may exist under the process home, the URL must state its
+user name and host, and the connection is `verify-full` whatever the URL says.
+Every experiment re-derived that setup by hand. Inheriting the developer
+environment cannot work, because devenv's PostgreSQL service exports `PGHOST`
+and `PGPORT` into it for its own tooling.
+
+**Decision.** `devenv up` starts the dev instance: a PostgreSQL cluster on the
+major version the integration suites already pin, serving TLS on loopback under
+a generated local authority, and one `signalbox-hubd` that starts after the
+cluster reports ready. The daemon runs behind an `env -u` scrub of exactly the
+refused variable set, with `HOME` pointed at devenv state so the passfile check
+is deterministic, and with a complete `DATABASE_URL` — user, host, port,
+database, and `sslrootcert` — exported to that process alone. A provisioning
+task materialises the TLS material, the process-scoped home, and a dev catalog
+seeded from `config/hubd.example.toml`. No credential material is committed, and
+none is embedded in the environment definition.
+
+**Rejected alternatives.** docker-compose would stand a second orchestration
+stack beside the devenv adoption this repository already made, and would put the
+dev database behind a Docker dependency the rest of the developer environment
+does not have. Keeping ad-hoc manual setup leaves every experiment to re-derive
+the refusals, which is how they come to be worked around rather than satisfied.
+
+**Affects.** `devenv.nix` and the dev-instance section of the README. Test
+database provisioning is deliberately outside this scope: the integration and
+end-to-end suites keep getting their databases from testcontainers, and no test
+or testcontainers usage changes.
+
 ## 2026-07-26 — Make runner lease authority single-use and tool-bound
 
 **Context.** An authorized physical attempt identifies its request, session,
