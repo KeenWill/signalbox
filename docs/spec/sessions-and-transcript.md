@@ -265,6 +265,11 @@ model identity actually crossed by executed conversation history rather than
 unused or redundant replacement epochs (INV-040). The exact provider-message
 projection is recorded by the
 [model-identity injection decision](../decisions.md#2026-07-25--render-model-identity-boundaries-as-injected-user-role-events).
+Started frontiers committed before this boundary existed retain their exact
+historical membership: an immutable per-turn compatibility fact grandfathers
+only those already-active or terminal starts. Turns still queued at migration
+and every newly accepted turn require the boundary normally, as recorded by the
+[legacy-frontier decision](../decisions.md#2026-07-25--grandfather-pre-boundary-started-frontiers).
 
 ## Session metadata and list projection
 

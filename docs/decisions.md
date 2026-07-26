@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Grandfather pre-boundary started frontiers
+
+**Context.** Before durable model-identity boundaries existed, per-input model
+replacement could start adjacent turns with different frozen direct selections.
+Those immutable historical frontiers contain no boundary entry. The new law must
+apply to work that can still start without fabricating or rewriting
+already-executed history.
+
+**Decision.** Give each turn lifecycle an immutable boundary-requirement bit.
+The migration marks existing active and terminal turns false, existing queued
+turns true, and defaults every new turn to true. Reconstitution permits a
+marker-free changed-model start only when that durable bit is false and rejects
+a boundary entry on such a grandfathered start.
+
+**Rejected alternatives.** Rewriting immutable prefix frontiers would invent
+historical conversation events and alter every descendant snapshot. Treating all
+pre-migration turns alike would let queued work start after deployment without
+the newly implemented boundary.
+
+**Affects.** Turn-lifecycle storage, scheduling reconstitution, the
+model-identity boundary constraint, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
 ## 2026-07-25 — Render model-identity boundaries as injected user-role events
 
 **Context.** The recorded mid-session model-selection direction fixes

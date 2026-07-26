@@ -1926,6 +1926,7 @@ impl AcceptedInputTurnSchedulingRecord {
         source_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
+    pub fn without_legacy_model_identity_boundary(self) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
     // origin_delivery(), origin_configuration(), configuration_provenance(), state()

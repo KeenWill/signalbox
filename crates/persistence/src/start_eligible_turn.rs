@@ -402,7 +402,13 @@ async fn insert_prepared_activation(
                 .bind(defaults_version_to_numeric(*defaults_version))
                 .bind(selected.into_uuid())
                 .execute(&mut *connection)
-                .await?;
+                .await
+                .map_err(|error| {
+                    semantic_entry_insert_error(
+                        error,
+                        StartEligibleTurnIdentityCollision::ModelIdentityEntry,
+                    )
+                })?;
             }
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                 accepted_input: entry_accepted_input,
@@ -417,7 +423,13 @@ async fn insert_prepared_activation(
                 .bind(entry.identity().into_uuid())
                 .bind(entry_accepted_input.into_uuid())
                 .execute(&mut *connection)
-                .await?;
+                .await
+                .map_err(|error| {
+                    semantic_entry_insert_error(
+                        error,
+                        StartEligibleTurnIdentityCollision::OriginEntry,
+                    )
+                })?;
             }
             InitialSemanticTranscriptEntryPayload::Imported { .. }
             | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
@@ -640,6 +652,21 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartEligibleTurnIdentityCo
     }
 }
 
+fn semantic_entry_insert_error(
+    error: sqlx::Error,
+    candidate: StartEligibleTurnIdentityCollision,
+) -> StartEligibleTurnRepositoryError {
+    match error
+        .as_database_error()
+        .and_then(|database| database.constraint())
+    {
+        Some("semantic_transcript_entry_pk" | "semantic_transcript_entry_id_global") => {
+            StartEligibleTurnRepositoryError::IdentityCollision(candidate)
+        }
+        _ => error.into(),
+    }
+}
+
 fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(database) => {
@@ -656,11 +683,15 @@ mod tests {
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use sqlx::error::{DatabaseError, ErrorKind};
 
-    use super::{StartEligibleTurnRepositoryError, commit_failure_is_ambiguous};
+    use super::{
+        StartEligibleTurnIdentityCollision, StartEligibleTurnRepositoryError,
+        commit_failure_is_ambiguous, semantic_entry_insert_error,
+    };
 
     #[derive(Debug)]
     struct ServerCommitFailure {
         code: &'static str,
+        constraint: Option<&'static str>,
     }
 
     impl fmt::Display for ServerCommitFailure {
@@ -694,6 +725,10 @@ mod tests {
 
         fn code(&self) -> Option<Cow<'_, str>> {
             Some(Cow::Borrowed(self.code))
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
         }
     }
 
@@ -739,7 +774,10 @@ mod tests {
 
     #[test]
     fn server_rejected_commit_is_not_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "23514" }));
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
+            code: "23514",
+            constraint: None,
+        }));
         let commit_ambiguous = commit_failure_is_ambiguous(&error);
 
         assert!(!commit_ambiguous);
@@ -758,9 +796,30 @@ mod tests {
         assert_server_reported_unknown_commit_outcome_is_ambiguous("40003");
     }
 
+    #[test]
+    fn model_identity_entry_collision_retains_its_candidate_kind() {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
+            code: "23505",
+            constraint: Some("semantic_transcript_entry_id_global"),
+        }));
+
+        assert!(matches!(
+            semantic_entry_insert_error(
+                error,
+                StartEligibleTurnIdentityCollision::ModelIdentityEntry,
+            ),
+            StartEligibleTurnRepositoryError::IdentityCollision(
+                StartEligibleTurnIdentityCollision::ModelIdentityEntry
+            )
+        ));
+    }
+
     #[track_caller]
     fn assert_server_reported_unknown_commit_outcome_is_ambiguous(code: &'static str) {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
+            code,
+            constraint: None,
+        }));
         let commit_ambiguous = commit_failure_is_ambiguous(&error);
 
         assert!(commit_ambiguous);

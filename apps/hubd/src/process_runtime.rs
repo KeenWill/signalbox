@@ -859,6 +859,7 @@ enum SessionListSpoolError {
 #[derive(Debug)]
 enum SnapshotSpoolError {
     Io(io::Error),
+    MessageRequiresVersion(u64),
     Encode(FrameEncodeError),
     EncodeInvariant,
 }
@@ -906,6 +907,15 @@ where
                 version,
                 request_id,
                 ProtocolError::unsupported_version(3),
+            )
+            .await
+        }
+        SnapshotSpoolError::MessageRequiresVersion(required) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::unsupported_version(required),
             )
             .await
         }
@@ -1316,21 +1326,6 @@ where
         .await;
     };
     let replacement_model = domain_model_selection(model_selection);
-    let model_exists = match replacement_model {
-        ModelSelectionRequest::Direct(selection) => {
-            model_configuration.contains_selection(selection)
-        }
-        ModelSelectionRequest::Alias(alias) => model_configuration.resolve_alias(alias).is_some(),
-    };
-    if !model_exists {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    }
     let replacement = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
         replacement_model,
         if dangerous_tool_auto_approval {
@@ -1339,8 +1334,9 @@ where
             DangerousToolAutoApproval::Disabled
         },
     );
+    let durable_command_id = DurableCommandId::from_uuid(command_id);
     let request = ReplaceSessionDefaultsRequest::try_new(
-        DurableCommandId::from_uuid(command_id),
+        durable_command_id,
         SessionId::from_uuid(session_id.into_uuid()),
         expected_version,
         replacement,
@@ -1354,8 +1350,41 @@ where
         )
         .await;
     };
-    let mut service =
-        ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
+    let repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let command_is_claimed = match repository.load(durable_command_id).await {
+        Ok(Some(_)) | Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }) => {
+            true
+        }
+        Ok(None) => false,
+        Err(ReplaceSessionDefaultsRepositoryError::Database { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(ReplaceSessionDefaultsRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    if !replacement_model_is_admitted(command_is_claimed, replacement_model, model_configuration) {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
+    let mut service = ReplaceSessionDefaultsService::new(repository);
     match service.execute(request).await {
         Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
             applied,
@@ -1435,6 +1464,22 @@ where
             .await
         }
     }
+}
+
+fn replacement_model_is_admitted(
+    command_is_claimed: bool,
+    replacement_model: ModelSelectionRequest,
+    model_configuration: &HubModelConfiguration,
+) -> bool {
+    command_is_claimed
+        || match replacement_model {
+            ModelSelectionRequest::Direct(selection) => {
+                model_configuration.contains_selection(selection)
+            }
+            ModelSelectionRequest::Alias(alias) => {
+                model_configuration.resolve_alias(alias).is_some()
+            }
+        }
 }
 
 async fn write_session_metadata_read_error<Writer>(
@@ -2780,6 +2825,12 @@ async fn write_spool_message(
     request_id: RequestId,
     message: ServerMessage,
 ) -> Result<(), SnapshotSpoolError> {
+    let minimum_protocol_version = message.minimum_protocol_version();
+    if version.as_u64() < minimum_protocol_version {
+        return Err(SnapshotSpoolError::MessageRequiresVersion(
+            minimum_protocol_version,
+        ));
+    }
     let frame = ServerFrame::try_new_for_version(version, request_id, message)
         .map_err(FrameEncodeError::Validation)
         .map_err(SnapshotSpoolError::Encode)?;
@@ -3378,9 +3429,9 @@ mod tests {
 
     use signalbox_application::ImportedConversationConverter;
     use signalbox_domain::{
-        ContextFrontierId, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, SemanticTranscriptEntryId,
-        SessionId, ToolAttemptId, TurnAttemptId, TurnId,
+        ContextFrontierId, DirectModelSelection, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
@@ -3405,9 +3456,9 @@ mod tests {
         SnapshotSpoolError, acquire_import_permit, acquire_inbound_frame_permit,
         acquire_inbound_frame_permit_after_input, acquire_snapshot_reader_permit,
         admitted_user_content, execute_import, inspect_connection_completion, read_frame_line,
-        required_protocol_version_for_selected_session, run_until_shutdown,
-        snapshot_reader_capacity, wire_model_call_state, wire_turn_state, write_content,
-        write_snapshot_spool_error, write_transcript_entry,
+        replacement_model_is_admitted, required_protocol_version_for_selected_session,
+        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_turn_state,
+        write_content, write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -3421,6 +3472,13 @@ mod tests {
         },
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
+
+    fn server_error_code_and_message(message: &ServerMessage) -> (ErrorCode, &str) {
+        match message {
+            ServerMessage::Error { code, message, .. } => (*code, message),
+            other => panic!("expected server error, observed {other:?}"),
+        }
+    }
 
     #[test]
     fn commit_ambiguity_selects_the_stable_process_error_code() {
@@ -3560,6 +3618,37 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn recorded_defaults_replay_does_not_depend_on_the_current_catalog()
+    -> Result<(), Box<dyn Error>> {
+        let current_catalog = crate::HubModelConfiguration::parse(
+            r#"
+version = 1
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000002"
+provider = "anthropic"
+provider_model = "still-current"
+max_output_tokens = 256
+"#,
+        )?;
+        let removed_selection =
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(4)));
+
+        assert!(replacement_model_is_admitted(
+            true,
+            removed_selection,
+            &current_catalog,
+        ));
+        assert!(!replacement_model_is_admitted(
+            false,
+            removed_selection,
+            &current_catalog,
+        ));
+        Ok(())
     }
 
     #[tokio::test]
@@ -3911,6 +4000,31 @@ mod tests {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spool_version_race_reports_the_exact_required_version() -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(10)?;
+        let (mut writer, mut reader) = duplex(1_024);
+
+        write_snapshot_spool_error(
+            &mut writer,
+            ProtocolVersion::Five,
+            request_id,
+            SnapshotSpoolError::MessageRequiresVersion(6),
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        let frame = decode_server_line(&encoded)?;
+        let expected = ProtocolError::unsupported_version(6);
+        assert_eq!(
+            server_error_code_and_message(frame.message()),
+            (expected.code, expected.message)
+        );
         Ok(())
     }
 

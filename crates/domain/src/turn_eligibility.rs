@@ -982,6 +982,7 @@ pub struct AcceptedInputTurnSchedulingRecord {
     origin_delivery: DeliveryRequest,
     origin_configuration: OriginConfiguration,
     configuration_provenance: TurnConfigurationProvenance,
+    model_identity_boundary_required: bool,
     state: AcceptedInputTurnSchedulingRecordState,
 }
 
@@ -1013,6 +1014,7 @@ impl AcceptedInputTurnSchedulingRecord {
                 origin_configuration.clone(),
             ),
             origin_configuration,
+            model_identity_boundary_required: true,
             state,
         }
     }
@@ -1046,8 +1048,18 @@ impl AcceptedInputTurnSchedulingRecord {
             configuration_provenance: TurnConfigurationProvenance::InheritedForReclassifiedSteering(
                 binding,
             ),
+            model_identity_boundary_required: true,
             state,
         }
+    }
+
+    /// Marks a started record as predating durable model-identity boundaries.
+    ///
+    /// This is only for reconstituting frontiers committed before the boundary
+    /// law existed. Newly accepted queued work remains subject to the law.
+    pub fn without_legacy_model_identity_boundary(mut self) -> Self {
+        self.model_identity_boundary_required = false;
+        self
     }
 
     /// Returns the session identity on the stored turn record.
@@ -3462,7 +3474,14 @@ fn reconstitute_inner(
             &record.state,
             AcceptedInputTurnSchedulingRecordState::Queued
         );
-        let model_identity_entry = if is_queued {
+        let model_identity_entry = if !record.model_identity_boundary_required {
+            if model_identity_by_turn.contains_key(&turn) {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch { turn },
+                );
+            }
+            None
+        } else if is_queued {
             None
         } else {
             match previous_selected {
@@ -9649,6 +9668,75 @@ mod tests {
                 activation.origin_entry().reference(&session),
             ]
         );
+    }
+
+    /// INV-015 / INV-040: a durable legacy marker admits only a start whose
+    /// frontier was committed before model-identity boundaries existed.
+    #[test]
+    fn inv015_inv040_legacy_start_grandfathers_its_historical_frontier() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let active = accepted_origin(2);
+        let queued = accepted_origin(3);
+        let predecessor_selection = direct(2);
+        let predecessor_choices = PerInputConfigurationChoices::new(
+            SessionConfigurationDefaultsVersion::first(),
+            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                predecessor_selection,
+            )),
+        );
+        let predecessor_configuration = OriginConfiguration::freeze(
+            session
+                .current_configuration_defaults()
+                .derive_request(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                        predecessor_selection,
+                    )),
+                )
+                .expect("the legacy override is derived from current defaults"),
+            |_| None,
+        )
+        .expect("the direct selection needs no alias resolution");
+        let mut input = active_input_after_failed_predecessor_with_post_anchor_origin(
+            &session,
+            FailedPredecessorPostAnchorOrigins {
+                predecessor,
+                active,
+                queued,
+            },
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: active.turn(),
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        );
+        input.turns[0].origin_delivery = DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: predecessor_choices,
+        };
+        input.turns[0].origin_configuration = predecessor_configuration.clone();
+        input.turns[0].configuration_provenance =
+            TurnConfigurationProvenance::ExplicitOrigin(predecessor_configuration);
+
+        let strict = input
+            .clone()
+            .reconstitute()
+            .expect_err("a post-migration start cannot omit its changed-model boundary");
+        assert_eq!(
+            strict.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch {
+                turn: active.turn(),
+            }
+        );
+
+        input.turns[1] = input.turns[1]
+            .clone()
+            .without_legacy_model_identity_boundary();
+        input
+            .reconstitute()
+            .expect("the durable legacy bit retains the historical marker-free frontier");
     }
 
     /// S08 / S09 / INV-008 / INV-009 / INV-016: terminally reclassified

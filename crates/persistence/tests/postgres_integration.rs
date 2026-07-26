@@ -1153,6 +1153,7 @@ impl SubmitInputIdGenerator for FixedSubmitInputIds {
 
 #[derive(Debug)]
 struct FixedStartEligibleTurnIds {
+    model_identity_entries: VecDeque<SemanticTranscriptEntryId>,
     origin_entries: VecDeque<SemanticTranscriptEntryId>,
     starting_frontiers: VecDeque<ContextFrontierId>,
     initial_attempts: VecDeque<TurnAttemptId>,
@@ -1165,16 +1166,27 @@ impl FixedStartEligibleTurnIds {
         initial_attempts: impl IntoIterator<Item = TurnAttemptId>,
     ) -> Self {
         Self {
+            model_identity_entries: VecDeque::new(),
             origin_entries: origin_entries.into_iter().collect(),
             starting_frontiers: starting_frontiers.into_iter().collect(),
             initial_attempts: initial_attempts.into_iter().collect(),
         }
     }
+
+    fn with_model_identity_entries(
+        mut self,
+        entries: impl IntoIterator<Item = SemanticTranscriptEntryId>,
+    ) -> Self {
+        self.model_identity_entries = entries.into_iter().collect();
+        self
+    }
 }
 
 impl StartEligibleTurnIdGenerator for FixedStartEligibleTurnIds {
     fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
-        SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid())
+        self.model_identity_entries
+            .pop_front()
+            .unwrap_or_else(|| SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()))
     }
 
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
@@ -8509,6 +8521,26 @@ async fn s30_inv008_inv015_inv040_mid_session_model_switch_is_forward_only()
             },
         )?)
         .await?;
+    let mut colliding_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd33))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe33))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb33))],
+        )
+        .with_model_identity_entries([SemanticTranscriptEntryId::from_uuid(
+            Uuid::from_u128(0xd31),
+        )]),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        colliding_activation
+            .execute(session)
+            .await
+            .expect_err("the reused model-boundary identity must fail before activation"),
+        StartEligibleTurnRepositoryError::IdentityCollision(
+            StartEligibleTurnIdentityCollision::ModelIdentityEntry
+        )
+    ));
     activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
@@ -8589,6 +8621,41 @@ async fn s30_inv008_inv015_inv040_mid_session_model_switch_is_forward_only()
             credential_reference: second_credential.as_str().to_owned(),
         }
     );
+
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+            DROP CONSTRAINT semantic_transcript_entry_payload_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry
+            SET failed_turn_id = $1
+          WHERE model_identity_turn_id = $1",
+    )
+    .bind(second_turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    let mut corrupt_read = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd34))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe34))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb34))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        corrupt_read
+            .execute(session)
+            .await
+            .expect_err("a mixed model-boundary payload must fail closed"),
+        StartEligibleTurnRepositoryError::Corruption(StartEligibleTurnCorruption::Scheduling(
+            SubmitInputCorruption::Inconsistent("semantic entry payload")
+        ))
+    ));
 
     pool.close().await;
     drop(container);

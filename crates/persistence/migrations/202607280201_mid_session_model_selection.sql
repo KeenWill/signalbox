@@ -5,6 +5,52 @@
 -- the semantic boundary that records an actual model-identity transition in
 -- the next started turn's frontier.
 
+ALTER TABLE turn_lifecycle
+    ADD COLUMN model_identity_boundary_required boolean NOT NULL DEFAULT false;
+
+-- Existing started turns predate the boundary law and retain their historical
+-- frontiers. Existing queued turns can still start after this migration, so
+-- they and every newly inserted turn require the boundary.
+UPDATE turn_lifecycle
+   SET model_identity_boundary_required = true
+ WHERE state_kind = 'queued';
+
+-- Drain the backfill's deferred lifecycle checks before the next ALTER TABLE.
+SET CONSTRAINTS ALL IMMEDIATE;
+SET CONSTRAINTS ALL DEFERRED;
+
+ALTER TABLE turn_lifecycle
+    ALTER COLUMN model_identity_boundary_required SET DEFAULT true;
+
+DO $$
+DECLARE
+    definition text;
+    revised text;
+BEGIN
+    definition := pg_get_functiondef(
+        'reject_turn_lifecycle_invalid_change()'::regprocedure
+    );
+    revised := replace(
+        definition,
+        'IF OLD.state_kind = ''terminal'' THEN',
+        'IF OLD.model_identity_boundary_required IS DISTINCT FROM
+              NEW.model_identity_boundary_required
+        THEN
+            RAISE EXCEPTION
+                ''turn model-identity boundary requirement is write-once''
+                USING ERRCODE = ''23514'';
+        END IF;
+
+        IF OLD.state_kind = ''terminal'' THEN'
+    );
+    IF revised = definition THEN
+        RAISE EXCEPTION
+            'unable to make the model-identity boundary requirement immutable';
+    END IF;
+    EXECUTE revised;
+END;
+$$;
+
 ALTER TABLE semantic_transcript_entry
     ADD COLUMN model_identity_turn_id uuid,
     ADD COLUMN model_identity_defaults_version numeric(20, 0),
@@ -183,6 +229,7 @@ DECLARE
     checked_session uuid;
     checked_defaults_version numeric(20, 0);
     checked_selection uuid;
+    boundary_required boolean;
     predecessor_turn uuid;
     predecessor_selection uuid;
     starting_member_count numeric(20, 0);
@@ -190,10 +237,12 @@ DECLARE
     boundary_member_count bigint;
     boundary_member_position numeric(20, 0);
 BEGIN
-    SELECT
-        origin.session_id
-      INTO checked_session
+    SELECT origin.session_id, lifecycle.model_identity_boundary_required
+      INTO checked_session, boundary_required
       FROM queued_input_origin AS origin
+      JOIN turn_lifecycle AS lifecycle
+        ON lifecycle.turn_id = origin.turn_id
+       AND lifecycle.session_id = origin.session_id
      WHERE origin.turn_id = checked_turn_id;
 
     IF NOT FOUND THEN
@@ -237,6 +286,10 @@ BEGIN
        AND entry.model_identity_turn_id = checked_turn_id
        AND entry.model_identity_defaults_version = checked_defaults_version
        AND entry.model_identity_direct_selection_id = checked_selection;
+
+    IF NOT boundary_required THEN
+        RETURN boundary_entry_count = 0;
+    END IF;
 
     IF predecessor_turn IS NULL
        OR predecessor_selection IS NOT DISTINCT FROM checked_selection
