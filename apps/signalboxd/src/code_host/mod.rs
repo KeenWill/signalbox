@@ -837,6 +837,41 @@ mod tests {
         );
     }
 
+    /// A returned node identity the argument side would refuse never enters
+    /// durable evidence, so every identity a result offers can be passed back.
+    #[test]
+    fn returned_node_ids_reject_identities_the_argument_side_refuses() {
+        let oversized = "N".repeat(arguments::MAX_OPAQUE_ID_BYTES + 1);
+
+        let comment = ReviewThreadComment::try_new(
+            oversized.clone(),
+            Some(String::from("reviewer")),
+            String::from("please adjust"),
+            String::from("https://github.example/comment/7001"),
+        );
+        let thread = ReviewThread::try_new(ReviewThreadFields {
+            id: oversized.clone(),
+            resolved: false,
+            outdated: false,
+            path: String::from("src/lib.rs"),
+            line: Some(12),
+            comments: Vec::new(),
+            comments_truncated: false,
+        });
+        let reply = ThreadReplyResult::try_new(
+            oversized.clone(),
+            String::from("https://github.example/comment/7002"),
+        );
+
+        assert!(
+            CodeHostOpaqueId::try_new(oversized).is_err(),
+            "the argument side must refuse the identity these results are checked against"
+        );
+        assert_eq!(comment, None);
+        assert_eq!(thread, None);
+        assert_eq!(reply, None);
+    }
+
     /// A resolve result exists only for an acknowledgement that establishes
     /// the requested terminal posture.
     #[test]

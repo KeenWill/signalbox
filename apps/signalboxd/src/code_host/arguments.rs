@@ -173,17 +173,22 @@ impl CodeHostCommentBody {
     }
 }
 
+/// Whether a value is one bounded opaque GraphQL node identity. Returned node
+/// identities are admitted by this same predicate so a result can always be
+/// passed back as an opaque identity argument.
+pub(super) fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_OPAQUE_ID_BYTES && !value.chars().any(char::is_control)
+}
+
 /// One bounded opaque GraphQL node identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeHostOpaqueId(String);
 
 impl CodeHostOpaqueId {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
-        (!value.is_empty()
-            && value.len() <= MAX_OPAQUE_ID_BYTES
-            && !value.chars().any(char::is_control))
-        .then_some(Self(value))
-        .ok_or(InvalidCodeHostArguments)
+        valid_opaque_id(&value)
+            .then_some(Self(value))
+            .ok_or(InvalidCodeHostArguments)
     }
 
     /// Borrows the opaque identity.

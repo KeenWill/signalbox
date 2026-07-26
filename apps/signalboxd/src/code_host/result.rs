@@ -2,6 +2,8 @@
 
 use serde_json::{Value, json};
 
+use super::arguments::valid_opaque_id;
+
 const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
 const MAX_RESULT_PATH_BYTES: usize = 4 * 1024;
@@ -330,7 +332,7 @@ pub struct ReviewThreadComment {
 impl ReviewThreadComment {
     /// Validates one review-thread comment.
     pub fn try_new(id: String, author: Option<String>, body: String, url: String) -> Option<Self> {
-        (valid_required_text(&id)
+        (valid_opaque_id(&id)
             && author.as_deref().is_none_or(valid_required_text)
             && valid_text(&body)
             && valid_url(&url))
@@ -386,7 +388,7 @@ pub struct ReviewThreadFields {
 impl ReviewThread {
     /// Validates one review thread.
     pub fn try_new(fields: ReviewThreadFields) -> Option<Self> {
-        (valid_required_text(&fields.id)
+        (valid_opaque_id(&fields.id)
             && valid_path(&fields.path)
             && fields.comments.len() <= MAX_RESULT_ITEMS)
             .then_some(Self {
@@ -450,7 +452,7 @@ pub struct ThreadReplyResult {
 impl ThreadReplyResult {
     /// Validates the created reply identity and URL.
     pub fn try_new(id: String, url: String) -> Option<Self> {
-        (valid_required_text(&id) && valid_url(&url)).then_some(Self { id, url })
+        (valid_opaque_id(&id) && valid_url(&url)).then_some(Self { id, url })
     }
 
     fn into_value(self) -> Value {
