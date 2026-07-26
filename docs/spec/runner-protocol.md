@@ -139,15 +139,26 @@ authorize the offer. The effect class is derived from the validated tool
 declaration. Revoked enrollment, lost placement, or a mismatched runner, tool,
 profile, or grant cannot create a lease.
 
+When a credential profile is selected, the lease also retains the exact
+immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
+revision, tool, and resolved pair posture. Grant replacement or revocation
+therefore cannot erase which snapshot authorized an already offered lease.
+
 A lease begins `Offered`. Only the bound runner and generation may claim it,
 producing `Claimed`; only that same correlation may complete it. Completion is
 terminal. A stale runner, generation, tool name, tool attempt, or lease identity
 cannot advance the aggregate. Complete reconstitution accepts only the closed
 state shapes and exact correlations.
 
-Loss before claim proves that no runner effect was authorized, so every effect
-class may be re-leased at the checked successor generation. Loss after claim
-follows the required retry law:
+`LostUnclaimed` means authoritative proof that no execution capability was
+issued, not merely absence of a claim frame after an offer was sent. A future
+transport must durably commit the exact claim and acknowledge it before the
+runner may execute. Channel loss after delivery but before that acknowledgement
+cannot be interpreted as proof either way by transport alone.
+
+With that proof, loss before claim permits every effect class to be re-leased at
+the checked successor lease-lineage generation. Loss after claim follows the
+required retry law:
 
 - `Pure` and `Idempotent` produce typed re-lease authority at the checked
   successor generation; authority after claim requires a fresh physical
@@ -157,11 +168,13 @@ follows the required retry law:
   physical attempt and never produces re-lease authority.
 
 Generation exhaustion and claimed-attempt identity reuse fail closed. Re-leasing
-continues one logical tool request and lease lineage, but every repeated
-physical execution has its own attempt identity and record as required by
-INV-004. Side-effecting loss composes with the existing physical-attempt
-ambiguity machinery; this domain slice does not duplicate or overwrite that
-attempt's outcome (INV-004, INV-025, INV-026, INV-043).
+continues one logical tool request and lease lineage. Its successor
+`RunnerGeneration` is distinct from the fresh physical attempt's
+`ToolDispatchGeneration`, which starts at `first()` under the tool-loop law.
+Every repeated physical execution therefore has its own attempt identity and
+record as required by INV-004. Side-effecting loss composes with the existing
+physical-attempt ambiguity machinery; this domain slice does not duplicate or
+overwrite that attempt's outcome (INV-004, INV-025, INV-026, INV-043).
 
 The lease aggregate contains no channel handle or process-local connection
 state. A reconnecting registration cannot recreate, complete, or discard a lease
@@ -195,6 +208,11 @@ cannot construct a runner-bound grant while class-targeted placement is still
 unpinned. Once pinned, ordinary attachment and lease creation accept only that
 exact runner. There is no automatic migration or class-based rescheduling to a
 different runner (INV-044).
+
+For `RepositoryWorktree`, the provisioned workspace's working directory is the
+selected execution directory. Attachment and reconstitution reject a provisioned
+directory that differs from either the recorded selected directory or an exact
+requested directory.
 
 Re-registration never mutates this snapshot. Additions remain unavailable to the
 pinned session until an explicit replacement; omission of the pinned selector
@@ -281,8 +299,9 @@ the later runner workspace stack.
 ## Open edges
 
 - Runner transport, authentication exchange, durable registration and lease
-  storage, reconnect recovery, compatibility, and result envelopes are recorded
-  in [Protocols and persistence](../open-questions.md#protocols-and-persistence)
+  storage, durable-claim acknowledgement before runner execution, reconnect
+  recovery, compatibility, and result envelopes are recorded in
+  [Protocols and persistence](../open-questions.md#protocols-and-persistence)
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Frontier injection, runner-loss recovery beyond explicit replacement, and

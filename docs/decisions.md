@@ -91,8 +91,10 @@ registration, and grant jointly authorize the lease, and effect is derived from
 the validated declaration. Loss before claim may advance every class while
 retaining the never-executed attempt. Loss after claim produces re-lease
 authority only for pure or idempotent work and requires a fresh physical attempt
-identity; side-effecting loss produces exact crash-classification authority and
-cannot produce re-lease authority. Undeclared advertised tools are rejected; an
+identity; the lease-lineage generation advances while that new physical
+attempt's own dispatch generation starts at its required first value.
+Side-effecting loss produces exact crash-classification authority and cannot
+produce re-lease authority. Undeclared advertised tools are rejected; an
 untrusted pre-validation boundary classifies an absent effect declaration as
 side-effecting.
 
@@ -100,7 +102,10 @@ The later runner transport uses one runner-initiated held outbound streaming
 connection and runners accept no inbound connection. The channel carries offers,
 claims, and results but is never their authority: registration and lease
 aggregates are independent of connection state, and later persistence must
-reconstitute them before reconnect synchronization.
+reconstitute them before reconnect synchronization. The later transport must
+durably commit and acknowledge an exact claim before that acknowledgement
+becomes the runner's execution capability; absence of a claim frame alone never
+proves that an offered operation did not execute.
 
 **Rejected alternatives.** A default effect class hides missing policy. Treating
 all state-changing work as ambiguous throws away idempotency. Re-leasing side
@@ -110,7 +115,7 @@ a call to widen the registry. Treating the stream as truth loses claims on
 reconnect.
 
 **Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
-INV-004, INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
+INV-004, INV-021, INV-025, INV-026, INV-043, S16 and S31, the
 [tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
 specifications, and later store and wire stacks.
 
