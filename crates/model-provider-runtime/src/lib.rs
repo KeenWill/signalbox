@@ -29,6 +29,8 @@ use signalbox_model_runtime::{
     ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
 };
 
+const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
+
 /// One exact provider-model spelling and baseline request limit for a durable
 /// domain target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -439,6 +441,19 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
     let mut collecting_tool_results = false;
     for message in messages {
         match message {
+            ModelConversationMessage::ModelIdentityChanged {
+                defaults_version,
+                selected,
+                ..
+            } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "{MODEL_IDENTITY_CHANGE_MESSAGE} {} (session defaults epoch {}).",
+                    selected.into_uuid(),
+                    defaults_version.as_u64()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::User { content, .. } => {
                 rendered.push(ConversationMessage::user_text(content.text().as_str()));
                 assistant_call = None;
@@ -731,11 +746,11 @@ mod tests {
 
     use signalbox_application::ModelConversationMessage;
     use signalbox_domain::{
-        AssistantText, ImportedText, ImportedTranscriptEntryId, ModelCallId,
+        AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
         ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelIdentity,
-        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolExecutionError,
-        ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
-        ToolRequestReconstitutionInput, TurnId,
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion,
+        SessionId, ToolExecutionError, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
     };
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
@@ -813,6 +828,31 @@ mod tests {
                 ConversationMessage::user_text(user_text.as_str()),
                 ConversationMessage::assistant_text(assistant_text.as_str()),
             ]
+        );
+    }
+
+    /// S30 / INV-040: the provider bridge renders the durable identity boundary
+    /// as the exact injected user-role session event selected by the recorded
+    /// context-lifecycle decision.
+    #[test]
+    fn s30_inv040_model_identity_boundary_is_an_injected_user_message() {
+        let source = source(12);
+        let defaults_version = SessionConfigurationDefaultsVersion::try_from_u64(3)
+            .expect("the fixture epoch is positive");
+        let selected = DirectModelSelection::from_uuid(Uuid::from_u128(13));
+        let expected = format!(
+            "Signalbox session event: your model identity is now {} (session defaults epoch {}).",
+            selected.into_uuid(),
+            defaults_version.as_u64()
+        );
+
+        assert_eq!(
+            render_runtime_messages(&[ModelConversationMessage::ModelIdentityChanged {
+                source,
+                defaults_version,
+                selected,
+            }]),
+            vec![ConversationMessage::user_text(expected)]
         );
     }
 

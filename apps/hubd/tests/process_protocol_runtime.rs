@@ -74,6 +74,13 @@ provider = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 256
 
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000004"
+target_id = "00000000-0000-0000-0000-000000000005"
+provider = "anthropic"
+provider_model = "fixture-model-next"
+max_output_tokens = 256
+
 [[aliases]]
 alias_id = "00000000-0000-0000-0000-000000000002"
 selection_id = "00000000-0000-0000-0000-000000000001"
@@ -556,6 +563,92 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
         end.message(),
         ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
     ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S30 / INV-008 / INV-012 / INV-040: version six maps one complete replacement
+/// request through the durable command boundary and validates catalog input
+/// before claiming a new command identity.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s30_inv008_inv012_inv040_process_runtime_replaces_session_model_defaults()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let replacement_command = command()?;
+    let replacement_selection = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+    let replacement = ClientRequest::ReplaceSessionDefaults {
+        command_id: replacement_command,
+        session_id,
+        expected_defaults_version: CanonicalU64::new(1),
+        model_selection: ModelSelection::Direct {
+            selection_id: replacement_selection,
+        },
+        dangerous_tool_auto_approval: false,
+    };
+
+    connection
+        .request_version(ProtocolVersion::Six, 2, replacement.clone())
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaultsReplaced {
+            session_id,
+            defaults_version: CanonicalU64::new(2),
+            model_selection: ModelSelection::Direct {
+                selection_id: replacement_selection,
+            },
+            dangerous_tool_auto_approval: false,
+        }
+    );
+
+    connection
+        .request_version(ProtocolVersion::Six, 3, replacement)
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaultsReplaced {
+            session_id,
+            defaults_version: CanonicalU64::new(2),
+            model_selection: ModelSelection::Direct {
+                selection_id: replacement_selection,
+            },
+            dangerous_tool_auto_approval: false,
+        }
+    );
+
+    let unknown_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            4,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: unknown_command,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(2),
+                model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(999)),
+                },
+                dangerous_tool_auto_approval: false,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    let unknown_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(unknown_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(unknown_claim_count, 0);
 
     drop(connection);
     runtime.stop().await

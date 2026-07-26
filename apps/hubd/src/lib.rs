@@ -1024,6 +1024,10 @@ mod tests {
     }
 
     impl StartEligibleTurnIdGenerator for AdvancingIds {
+        fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
+            SemanticTranscriptEntryId::from_uuid(self.take())
+        }
+
         fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
             SemanticTranscriptEntryId::from_uuid(self.take())
         }

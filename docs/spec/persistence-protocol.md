@@ -3,7 +3,8 @@
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
-through PR #254 (`agent/fix-parked-approval-interrupt`). This page covers the
+through PR #254 (`agent/fix-parked-approval-interrupt`) and the model-identity
+frontier shape was verified on `agent/mid-session-model`. This page covers the
 Postgres representation in `crates/persistence` (source and migrations),
 migration discipline, durable command storage and replay equality, the
 fail-closed reconstitution boundary, the lock protocol, pending-steering durable
@@ -50,8 +51,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-seven files, `202607180001` through
-`202607280001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-eight files, `202607180001` through
+`202607280201` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -122,6 +123,14 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
+- Migration `202607280201` adds the closed `model_identity_changed`
+  semantic-entry payload, whose turn, positive defaults epoch, and direct
+  selection are total only for that kind. Deferred checks bind it to the named
+  turn's frozen epoch and direct selection, require exactly one such entry iff a
+  started turn's immediate predecessor froze a different selection, and require
+  the turn-start frontier to end with that entry immediately followed by the
+  turn origin. The lifecycle insertion trigger admits that two-entry suffix
+  atomically while preserving the predecessor prefix and exact count.
 - A `context_frontier` header records its immutable total member count and an
   optional same-session prefix frontier. `context_frontier_delta` stores only
   the absolute-position suffix beyond that prefix; roots store their complete

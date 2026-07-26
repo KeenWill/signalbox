@@ -4,7 +4,8 @@ This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the
 parked-approval interrupt delivery outcome was verified through PR #254
-(`agent/fix-parked-approval-interrupt`). Code homes:
+(`agent/fix-parked-approval-interrupt`), and model-identity turn-start
+boundaries were verified on `agent/mid-session-model`. Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -154,11 +155,13 @@ queued turn, and constructs atomically-committable state:
 - lineage `FirstInSession` iff the session has no earlier turn, else
   `After { immediate_predecessor }` naming the exact terminal turn ordered
   immediately before it;
-- the starting context frontier: the predecessor's terminal frontier with the
-  fresh origin semantic entry appended (prefix-preserving); for a
-  first-in-session turn, the exact frontier identity stored by the session's
-  `ImportedSessionSeed` followed by the origin entry when ancestry is
-  `ImportedConversation`, or only the origin entry when ancestry is `None`;
+- the starting context frontier: the predecessor's terminal frontier followed by
+  a `ModelIdentityChanged` entry exactly when this turn's acceptance-frozen
+  direct model differs from the predecessor's, then the fresh origin semantic
+  entry (prefix-preserving); for a first-in-session turn, the exact frontier
+  identity stored by the session's `ImportedSessionSeed` followed by the origin
+  entry when ancestry is `ImportedConversation`, or only the origin entry when
+  ancestry is `None`;
 - the opaque `AcceptedInputTurnStart` binding lineage and frontier, whose
   constructor is private to validated eligibility (INV-009 — a raw identifier or
   list supplied by a caller is not start authority); and
@@ -192,23 +195,24 @@ remain shared.
 2. Load the current session and the complete scheduling projection under that
    lock, through the checked domain seams.
 3. Let the domain prepare the activation (previous section). The application
-   layer supplies three fresh UUIDv7 identity candidates (origin entry, starting
-   frontier, initial attempt) per pass and never selects a target turn.
-4. Commit atomically: insert the origin semantic entry, the starting snapshot
-   with complete materialized membership, and the prepared attempt row, then run
-   the guarded lifecycle `UPDATE` that binds the exact lineage, frontier, and
-   attempt and flips `queued` to `active`. The update re-asserts queued state,
-   no active turn, every earlier turn under the interrupt-aware total order
-   terminal, and the exact derived predecessor. An `interrupt_immediately_after`
-   origin proves its named predecessor and may precede ordinary queued inputs
-   with lower raw acceptance positions. Commit only when the update affects
-   exactly one row; zero rows after in-lock validation is fail-closed
-   corruption, and identity-key conflicts map to typed identity-collision errors
-   after full rollback.
+   layer supplies four fresh UUIDv7 identity candidates (optional model-identity
+   entry, origin entry, starting frontier, initial attempt) per pass and never
+   selects a target turn.
+4. Commit atomically: insert the optional model-identity entry and origin
+   semantic entry, the starting snapshot with complete materialized membership,
+   and the prepared attempt row, then run the guarded lifecycle `UPDATE` that
+   binds the exact lineage, frontier, and attempt and flips `queued` to
+   `active`. The update re-asserts queued state, no active turn, every earlier
+   turn under the interrupt-aware total order terminal, and the exact derived
+   predecessor. An `interrupt_immediately_after` origin proves its named
+   predecessor and may precede ordinary queued inputs with lower raw acceptance
+   positions. Commit only when the update affects exactly one row; zero rows
+   after in-lock validation is fail-closed corruption, and identity-key
+   conflicts map to typed identity-collision errors after full rollback.
 
-The committed origin entry, snapshot, start, active slot, and attempt are one
-transaction: no durable state exists in which a start references a missing or
-partial snapshot.
+The committed turn-start entries, snapshot, start, active slot, and attempt are
+one transaction: no durable state exists in which a start references a missing
+or partial snapshot (INV-040).
 
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE

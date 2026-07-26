@@ -2059,23 +2059,31 @@ impl AcceptedInputSchedulingProjection {
 /// Fresh identities supplied for one eligibility-time activation candidate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AcceptedInputTurnActivationIdentities {
+    model_identity_entry: SemanticTranscriptEntryId,
     origin_entry: SemanticTranscriptEntryId,
     starting_frontier: ContextFrontierId,
     initial_attempt: TurnAttemptId,
 }
 
 impl AcceptedInputTurnActivationIdentities {
-    /// Supplies the three distinct identities created by the transaction.
+    /// Supplies all four candidates, including the optional injected entry.
     pub const fn new(
+        model_identity_entry: SemanticTranscriptEntryId,
         origin_entry: SemanticTranscriptEntryId,
         starting_frontier: ContextFrontierId,
         initial_attempt: TurnAttemptId,
     ) -> Self {
         Self {
+            model_identity_entry,
             origin_entry,
             starting_frontier,
             initial_attempt,
         }
+    }
+
+    /// Returns the proposed injected model-identity entry.
+    pub const fn model_identity_entry(&self) -> SemanticTranscriptEntryId {
+        self.model_identity_entry
     }
 
     /// Returns the proposed origin semantic-entry identity.
@@ -2306,8 +2314,36 @@ impl ActivatedAcceptedInputTurn {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedAcceptedInputTurnActivation {
     turn: ActivatedAcceptedInputTurn,
-    origin_entry: SemanticTranscriptEntry,
+    starting_entries: AcceptedInputTurnStartingEntries,
     starting_snapshot: ResolvedContextFrontierSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AcceptedInputTurnStartingEntries {
+    Origin([SemanticTranscriptEntry; 1]),
+    ModelIdentityThenOrigin([SemanticTranscriptEntry; 2]),
+}
+
+impl AcceptedInputTurnStartingEntries {
+    fn as_slice(&self) -> &[SemanticTranscriptEntry] {
+        match self {
+            Self::Origin(entries) => entries,
+            Self::ModelIdentityThenOrigin(entries) => entries,
+        }
+    }
+
+    fn origin(&self) -> &SemanticTranscriptEntry {
+        match self {
+            Self::Origin([origin]) | Self::ModelIdentityThenOrigin([_, origin]) => origin,
+        }
+    }
+
+    fn into_boxed_slice(self) -> Box<[SemanticTranscriptEntry]> {
+        match self {
+            Self::Origin(entries) => Box::new(entries),
+            Self::ModelIdentityThenOrigin(entries) => Box::new(entries),
+        }
+    }
 }
 
 impl PreparedAcceptedInputTurnActivation {
@@ -2318,7 +2354,12 @@ impl PreparedAcceptedInputTurnActivation {
 
     /// Returns the newly created origin semantic entry.
     pub fn origin_entry(&self) -> SemanticTranscriptEntry {
-        self.origin_entry.clone()
+        self.starting_entries.origin().clone()
+    }
+
+    /// Borrows the ordered entries appended at the turn-start boundary.
+    pub fn starting_entries(&self) -> &[SemanticTranscriptEntry] {
+        self.starting_entries.as_slice()
     }
 
     /// Borrows the new immutable starting snapshot.
@@ -2336,10 +2377,14 @@ impl PreparedAcceptedInputTurnActivation {
         self,
     ) -> (
         ActivatedAcceptedInputTurn,
-        SemanticTranscriptEntry,
+        Box<[SemanticTranscriptEntry]>,
         ResolvedContextFrontierSnapshot,
     ) {
-        (self.turn, self.origin_entry, self.starting_snapshot)
+        (
+            self.turn,
+            self.starting_entries.into_boxed_slice(),
+            self.starting_snapshot,
+        )
     }
 }
 
@@ -2355,6 +2400,8 @@ pub enum AcceptedInputEligibilityFailure {
     NoQueuedTurn,
     /// The proposed origin entry identity is already present.
     OriginEntryIdentityAlreadyExists,
+    /// The proposed injected model-identity entry is already present.
+    ModelIdentityEntryIdentityAlreadyExists,
     /// The proposed session-scoped snapshot identity is already present.
     StartingFrontierIdentityAlreadyExists,
     /// The proposed initial-attempt identity already appears in the complete
@@ -2720,6 +2767,7 @@ fn reconstitute_inner(
     let mut origin_by_turn = BTreeMap::new();
     let mut failure_by_turn = BTreeMap::new();
     let mut steering_by_input = BTreeMap::new();
+    let mut model_identity_by_turn = BTreeMap::new();
     let mut assistant_by_call = BTreeMap::<crate::ModelCallId, BTreeSet<_>>::new();
     let mut completion_by_turn = BTreeMap::new();
     let mut cancellation_by_turn = BTreeMap::new();
@@ -2787,6 +2835,46 @@ fn reconstitute_inner(
             } => {
                 if steering_by_input
                     .insert(*accepted_input, (entry_reference, *source_turn))
+                    .is_some()
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
+                            entry: candidate.identity(),
+                        },
+                    );
+                }
+            }
+            InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                turn,
+                defaults_version,
+                selected,
+            } => {
+                let Some(record) = records_by_turn.get(turn) else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
+                            entry: candidate.identity(),
+                        },
+                    );
+                };
+                if matches!(
+                    &record.state,
+                    AcceptedInputTurnSchedulingRecordState::Queued
+                ) || record.origin_configuration.session_defaults_version() != *defaults_version
+                    || record
+                        .origin_configuration
+                        .effective()
+                        .model()
+                        .selected_direct()
+                        != *selected
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
+                            entry: candidate.identity(),
+                        },
+                    );
+                }
+                if model_identity_by_turn
+                    .insert(*turn, entry_reference)
                     .is_some()
                 {
                     return Err(
@@ -3353,6 +3441,7 @@ fn reconstitute_inner(
 
     let mut turns = Vec::with_capacity(total_order.len());
     let mut previous_terminal: Option<(TurnId, ResolvedContextFrontierSnapshot)> = None;
+    let mut previous_selected = None;
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
@@ -3364,6 +3453,38 @@ fn reconstitute_inner(
 
     for (index, turn) in total_order.into_iter().enumerate() {
         let record = records_by_turn[&turn];
+        let selected = record
+            .origin_configuration
+            .effective()
+            .model()
+            .selected_direct();
+        let is_queued = matches!(
+            &record.state,
+            AcceptedInputTurnSchedulingRecordState::Queued
+        );
+        let model_identity_entry = if is_queued {
+            None
+        } else {
+            match previous_selected {
+                Some(previous) if previous != selected => {
+                    Some(model_identity_by_turn.get(&turn).copied().ok_or(
+                        AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch {
+                            turn,
+                        },
+                    )?)
+                }
+                _ => {
+                    if model_identity_by_turn.contains_key(&turn) {
+                        return Err(
+                            AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch {
+                                turn,
+                            },
+                        );
+                    }
+                    None
+                }
+            }
+        };
         let state = match &record.state {
             AcceptedInputTurnSchedulingRecordState::Queued => {
                 queued_seen = true;
@@ -3415,6 +3536,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -3755,6 +3877,9 @@ fn reconstitute_inner(
                                         }
                                         SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                                         | SemanticTranscriptEntryPayload::Imported { .. }
+                                        | SemanticTranscriptEntryPayload::ModelIdentityChanged {
+                                            ..
+                                        }
                                         | SemanticTranscriptEntryPayload::OriginAcceptedInput {
                                             ..
                                         }
@@ -3847,6 +3972,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4026,6 +4152,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4147,6 +4274,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4269,6 +4397,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4447,6 +4576,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4581,6 +4711,7 @@ fn reconstitute_inner(
                     initial_seed_frontier.and_then(|frontier| snapshots.get(&frontier)),
                     previous_terminal.as_ref(),
                     &origin_by_turn,
+                    model_identity_entry,
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
@@ -4639,6 +4770,7 @@ fn reconstitute_inner(
             previous_terminal = None;
         }
 
+        previous_selected = Some(selected);
         turns.push(AcceptedInputTurnSchedulingProjection {
             session,
             turn,
@@ -5169,6 +5301,7 @@ fn validate_start(
     initial_seed: Option<&ResolvedContextFrontierSnapshot>,
     previous_terminal: Option<&(TurnId, ResolvedContextFrontierSnapshot)>,
     origin_by_turn: &BTreeMap<TurnId, SemanticTranscriptEntryRef>,
+    model_identity_entry: Option<SemanticTranscriptEntryRef>,
     snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     referenced_snapshots: &mut BTreeSet<ContextFrontierId>,
 ) -> Result<AcceptedInputTurnStart, AcceptedInputSchedulingReconstitutionFailure> {
@@ -5207,9 +5340,15 @@ fn validate_start(
     let prefix = previous_terminal
         .map(|(_, frontier)| frontier)
         .or_else(|| (index == 0).then_some(initial_seed).flatten());
+    let mut suffix = Vec::with_capacity(usize::from(model_identity_entry.is_some()) + 1);
+    suffix.extend(model_identity_entry);
+    suffix.push(origin);
     let membership_matches = prefix.map_or_else(
-        || snapshot.entry_count() == 1 && snapshot.ordered_entries().eq(std::iter::once(origin)),
-        |prefix| snapshot.has_semantic_prefix_and_suffix(prefix, std::iter::once(origin)),
+        || {
+            snapshot.entry_count() == suffix.len()
+                && snapshot.ordered_entries().eq(suffix.iter().copied())
+        },
+        |prefix| snapshot.has_semantic_prefix_and_suffix(prefix, suffix.iter().copied()),
     );
     if !membership_matches {
         return Err(
@@ -5559,6 +5698,56 @@ fn prepare_earliest_queued_activation(
             accepted_input: queued.accepted_input.id(),
         },
     );
+    let selected = queued
+        .origin_configuration
+        .effective()
+        .model()
+        .selected_direct();
+    let previous_selected = index.checked_sub(1).map(|predecessor| {
+        projection.turns[predecessor]
+            .origin_configuration
+            .effective()
+            .model()
+            .selected_direct()
+    });
+    let model_identity_entry = previous_selected
+        .filter(|previous| *previous != selected)
+        .map(|_| {
+            let reference = SemanticTranscriptEntryRef::from_source(
+                source_session,
+                identities.model_identity_entry,
+            );
+            if identities.model_identity_entry == identities.origin_entry
+                || projection.semantic_entries.contains_key(&reference)
+            {
+                return Err(fail(
+                    projection.clone(),
+                    AcceptedInputEligibilityFailure::ModelIdentityEntryIdentityAlreadyExists,
+                ));
+            }
+            Ok(SemanticTranscriptEntry::from_validated_parts(
+                identities.model_identity_entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                    turn: queued.turn,
+                    defaults_version: queued.origin_configuration.session_defaults_version(),
+                    selected,
+                },
+            ))
+        })
+        .transpose()?;
+    let starting_entries = match model_identity_entry {
+        Some(model_identity_entry) => AcceptedInputTurnStartingEntries::ModelIdentityThenOrigin([
+            model_identity_entry,
+            origin_entry,
+        ]),
+        None => AcceptedInputTurnStartingEntries::Origin([origin_entry]),
+    };
+    let starting_references = starting_entries
+        .as_slice()
+        .iter()
+        .map(SemanticTranscriptEntry::reference)
+        .collect::<Vec<_>>();
     let (lineage, starting_snapshot) = if index == 0 {
         let snapshot = if let Some(seed_frontier) = projection.initial_seed_frontier {
             let Some(seed) = projection.snapshots.get(&seed_frontier) else {
@@ -5569,7 +5758,7 @@ fn prepare_earliest_queued_activation(
             };
             match seed.derive_appending_candidate(
                 identities.starting_frontier,
-                vec![origin_entry.reference()],
+                starting_references.clone(),
             ) {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
@@ -5583,7 +5772,7 @@ fn prepare_earliest_queued_activation(
             match ResolvedContextFrontierSnapshot::try_from_candidate(
                 source_session,
                 identities.starting_frontier,
-                vec![origin_entry.reference()],
+                starting_references.clone(),
             ) {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
@@ -5606,10 +5795,9 @@ fn prepare_earliest_queued_activation(
                 },
             ));
         };
-        let snapshot = match terminal_frontier.derive_appending_candidate(
-            identities.starting_frontier,
-            vec![origin_entry.reference()],
-        ) {
+        let snapshot = match terminal_frontier
+            .derive_appending_candidate(identities.starting_frontier, starting_references)
+        {
             Ok(snapshot) => snapshot,
             Err(_) => {
                 return Err(fail(
@@ -5644,7 +5832,7 @@ fn prepare_earliest_queued_activation(
 
     Ok(PreparedAcceptedInputTurnActivation {
         turn,
-        origin_entry,
+        starting_entries,
         starting_snapshot,
     })
 }
@@ -6037,6 +6225,10 @@ mod tests {
     }
 
     impl ActivationFixture {
+        fn model_identity_entry(self) -> SemanticEntryFixture {
+            semantic_entry(50 + self.seed)
+        }
+
         fn origin_entry(self) -> SemanticEntryFixture {
             semantic_entry(100 + self.seed)
         }
@@ -6051,6 +6243,7 @@ mod tests {
 
         fn identities(self) -> AcceptedInputTurnActivationIdentities {
             AcceptedInputTurnActivationIdentities::new(
+                self.model_identity_entry().id(),
                 self.origin_entry().id(),
                 self.starting_frontier().id(),
                 self.initial_attempt(),
@@ -6062,6 +6255,7 @@ mod tests {
             initial_attempt: TurnAttemptId,
         ) -> AcceptedInputTurnActivationIdentities {
             AcceptedInputTurnActivationIdentities::new(
+                self.model_identity_entry().id(),
                 self.origin_entry().id(),
                 self.starting_frontier().id(),
                 initial_attempt,
@@ -6073,6 +6267,7 @@ mod tests {
             origin_entry: SemanticTranscriptEntryId,
         ) -> AcceptedInputTurnActivationIdentities {
             AcceptedInputTurnActivationIdentities::new(
+                self.model_identity_entry().id(),
                 origin_entry,
                 self.starting_frontier().id(),
                 self.initial_attempt(),
@@ -6084,6 +6279,7 @@ mod tests {
             starting_frontier: ContextFrontierId,
         ) -> AcceptedInputTurnActivationIdentities {
             AcceptedInputTurnActivationIdentities::new(
+                self.model_identity_entry().id(),
                 self.origin_entry().id(),
                 starting_frontier,
                 self.initial_attempt(),
@@ -9343,6 +9539,113 @@ mod tests {
             vec![
                 predecessor_origin_entry.reference(&session),
                 predecessor_failure_entry.reference(&session),
+                activation.origin_entry().reference(&session),
+            ]
+        );
+    }
+
+    /// S30 / INV-015 / INV-040: an actual frozen direct-model transition
+    /// inserts exactly one typed identity boundary between the predecessor
+    /// terminal frontier and the successor origin.
+    #[test]
+    fn s30_inv015_inv040_model_transition_extends_frontier_before_origin() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let successor_selection = direct(2);
+        let predecessor_origin_entry = semantic_entry(30);
+        let predecessor_failure_entry = semantic_entry(31);
+        let predecessor_starting_frontier = frontier(40);
+        let predecessor_terminal_frontier = frontier(41);
+        let activation = activation(1);
+        let successor_choices = PerInputConfigurationChoices::new(
+            SessionConfigurationDefaultsVersion::first(),
+            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(successor_selection)),
+        );
+        let successor_configuration = OriginConfiguration::freeze(
+            session
+                .current_configuration_defaults()
+                .derive_request(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                        successor_selection,
+                    )),
+                )
+                .expect("the override is derived from current defaults"),
+            |_| None,
+        )
+        .expect("the direct selection needs no alias resolution");
+        let predecessor_record = predecessor.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: predecessor_starting_frontier.id(),
+                terminal_execution: None,
+                terminal_frontier: predecessor_terminal_frontier.id(),
+            },
+        );
+        let successor_record = AcceptedInputTurnSchedulingRecord::new(
+            session.id(),
+            successor.turn(),
+            session.id(),
+            AcceptedInputLifecycle::new(
+                successor.accepted_input(),
+                AcceptedInputDisposition::OriginOf(successor.turn()),
+            ),
+            session.id(),
+            successor.turn(),
+            successor.ordinary_order(),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: successor_choices,
+            },
+            successor_configuration,
+            AcceptedInputTurnSchedulingRecordState::Queued,
+        );
+        let projection = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![successor_record, predecessor_record],
+            vec![
+                predecessor_failure_entry.failed_turn(&session, predecessor),
+                predecessor.entry(&session, predecessor_origin_entry),
+            ],
+            vec![
+                predecessor_terminal_frontier.snapshot(
+                    &session,
+                    &[predecessor_origin_entry, predecessor_failure_entry],
+                ),
+                predecessor_starting_frontier.snapshot(&session, &[predecessor_origin_entry]),
+            ],
+            None,
+        )
+        .reconstitute()
+        .expect("the predecessor and changed successor are fully correlated");
+
+        let candidate = projection
+            .prepare_earliest_queued_activation(activation.identities())
+            .expect("the changed successor is eligible");
+
+        assert_eq!(candidate.starting_entries().len(), 2);
+        assert_eq!(
+            candidate.starting_entries()[0].identity(),
+            activation.model_identity_entry().id()
+        );
+        assert_eq!(
+            candidate.starting_entries()[0].payload(),
+            &SemanticTranscriptEntryPayload::ModelIdentityChanged {
+                turn: successor.turn(),
+                defaults_version: SessionConfigurationDefaultsVersion::first(),
+                selected: successor_selection,
+            }
+        );
+        assert_eq!(
+            candidate
+                .starting_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                predecessor_origin_entry.reference(&session),
+                predecessor_failure_entry.reference(&session),
+                activation.model_identity_entry().reference(&session),
                 activation.origin_entry().reference(&session),
             ]
         );

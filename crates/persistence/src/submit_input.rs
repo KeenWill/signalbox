@@ -2598,7 +2598,10 @@ pub(crate) async fn load_scheduling_projection(
             assistant_tool_request_id,
             tool_result_request_id,
             tool_result_attempt_id,
-            completed_turn_id
+            completed_turn_id,
+            model_identity_turn_id,
+            model_identity_defaults_version,
+            model_identity_direct_selection_id
          FROM semantic_transcript_entry
         WHERE payload_kind <> 'imported_entry'
           AND (
@@ -2647,6 +2650,49 @@ pub(crate) async fn load_scheduling_projection(
         let tool_result_request: Option<Uuid> = row.try_get("tool_result_request_id")?;
         let tool_result_attempt: Option<Uuid> = row.try_get("tool_result_attempt_id")?;
         let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
+        let model_identity_turn: Option<Uuid> = row.try_get("model_identity_turn_id")?;
+        let model_identity_defaults_version: Option<Decimal> =
+            row.try_get("model_identity_defaults_version")?;
+        let model_identity_direct_selection: Option<Uuid> =
+            row.try_get("model_identity_direct_selection_id")?;
+        if payload_kind == "model_identity_changed" {
+            let payload = match (
+                model_identity_turn,
+                model_identity_defaults_version,
+                model_identity_direct_selection,
+            ) {
+                (Some(turn), Some(defaults_version), Some(selected)) => {
+                    InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                        turn: turn_id_from_uuid(turn),
+                        defaults_version: defaults_version_from_numeric(defaults_version).map_err(
+                            |_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "model identity defaults version",
+                                )
+                            },
+                        )?,
+                        selected: DirectModelSelection::from_uuid(selected),
+                    }
+                }
+                _ => {
+                    return Err(
+                        SubmitInputCorruption::Inconsistent("semantic entry payload").into(),
+                    );
+                }
+            };
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                payload,
+            ));
+            continue;
+        }
+        if model_identity_turn.is_some()
+            || model_identity_defaults_version.is_some()
+            || model_identity_direct_selection.is_some()
+        {
+            return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+        }
         let payload = match (
             payload_kind.as_str(),
             origin,

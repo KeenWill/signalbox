@@ -951,6 +951,31 @@ those tests.
   a general artifact aggregate remains
   [open](open-questions.md#general-purpose-artifacts).
 
+## S30 — Change the model during a session
+
+- **User intent:** Choose a different configured model for future conversation
+  without changing work already accepted or in progress.
+- **Durable commands:** `ReplaceSessionDefaults` compare-and-sets the
+  caller-observed epoch and appends its complete successor. Each later
+  `SubmitInput` binds the epoch current at acceptance.
+- **State transitions:** The current defaults pointer advances without changing
+  queued or active turns. When the first turn frozen to a different direct model
+  starts, its predecessor frontier grows by one model-identity boundary and then
+  its ordinary origin. Target and credential pins are established for that turn;
+  prior pins remain unchanged.
+- **Transient updates:** None. The model learns the boundary from durable
+  frontier context, and the terminal client reports only the acknowledged
+  replacement receipt.
+- **Owning component:** The domain owns epoch and frontier laws; Postgres stores
+  and constrains them; the hub validates against its read-only catalog; protocol
+  version six and the terminal model verb expose the owner command.
+- **Failure behavior:** Missing session, stale or exhausted epoch, conflicting
+  command reuse, unknown catalog selection, and commit ambiguity retain their
+  distinct typed outcomes. Exact replay returns the first recorded result.
+- **Required invariants:** INV-008, INV-012, INV-014, INV-015, INV-033, INV-040.
+- **Remaining questions:** Richer client model discovery and non-Anthropic hub
+  composition remain outside this scenario.
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input

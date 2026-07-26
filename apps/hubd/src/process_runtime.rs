@@ -13,7 +13,8 @@ use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
     ImportedConversationConverter, InProcessEligibilityNudge, InProcessToolDispatchGate,
-    ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
+    ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionDefaultsOutcome,
+    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome,
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SessionMetadataListItem,
     SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
     SubmitInputTransaction, UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator,
@@ -24,7 +25,8 @@ use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, DangerousToolAutoApproval,
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
-    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionMetadataRejectedResult,
+    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SubmitInput, SubmitInputAppliedResult,
@@ -47,6 +49,9 @@ use signalbox_persistence::{
         ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
         ProcessSessionAncestry, ProcessTranscriptEntry, ProcessTranscriptItem,
         ProcessTranscriptTurn, ProcessTurnState,
+    },
+    replace_session_defaults::{
+        ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
@@ -565,6 +570,27 @@ where
                 session_id,
                 metadata,
                 &services.pool,
+            )
+            .await
+        }
+        ClientRequest::ReplaceSessionDefaults {
+            command_id,
+            session_id,
+            expected_defaults_version,
+            model_selection,
+            dangerous_tool_auto_approval,
+        } => {
+            handle_replace_session_defaults(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                expected_defaults_version,
+                model_selection,
+                dangerous_tool_auto_approval,
+                &services.pool,
+                services.model_configuration.as_ref(),
             )
             .await
         }
@@ -1259,6 +1285,158 @@ where
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the complete defaults replacement remains explicit at the wire adapter"
+)]
+async fn handle_replace_session_defaults<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    expected_defaults_version: CanonicalU64,
+    model_selection: WireModelSelection,
+    dangerous_tool_auto_approval: bool,
+    pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Some(expected_version) =
+        SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let replacement_model = domain_model_selection(model_selection);
+    let model_exists = match replacement_model {
+        ModelSelectionRequest::Direct(selection) => {
+            model_configuration.contains_selection(selection)
+        }
+        ModelSelectionRequest::Alias(alias) => model_configuration.resolve_alias(alias).is_some(),
+    };
+    if !model_exists {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
+    let replacement = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+        replacement_model,
+        if dangerous_tool_auto_approval {
+            DangerousToolAutoApproval::ApproveAll
+        } else {
+            DangerousToolAutoApproval::Disabled
+        },
+    );
+    let request = ReplaceSessionDefaultsRequest::try_new(
+        DurableCommandId::from_uuid(command_id),
+        SessionId::from_uuid(session_id.into_uuid()),
+        expected_version,
+        replacement,
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let mut service =
+        ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
+    match service.execute(request).await {
+        Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
+            applied,
+        ))) => {
+            let installed = applied.installed();
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionDefaultsReplaced {
+                    session_id,
+                    defaults_version: CanonicalU64::new(installed.version().as_u64()),
+                    model_selection: wire_domain_model_selection(installed.defaults().model()),
+                    dangerous_tool_auto_approval: matches!(
+                        installed.defaults().dangerous_tool_auto_approval(),
+                        DangerousToolAutoApproval::ApproveAll
+                    ),
+                },
+            )
+            .await
+        }
+        Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
+            rejected,
+        ))) => {
+            let detail = match rejected {
+                ReplaceSessionDefaultsRejectedResult::SessionNotFound(rejected) => {
+                    RejectionDetail::SessionNotFound {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                    }
+                }
+                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(rejected) => {
+                    RejectionDetail::DefaultsVersionMismatch {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        expected: CanonicalU64::new(rejected.expected().as_u64()),
+                        current: CanonicalU64::new(rejected.current().as_u64()),
+                    }
+                }
+                ReplaceSessionDefaultsRejectedResult::VersionExhausted(rejected) => {
+                    RejectionDetail::DefaultsVersionExhausted {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        current: CanonicalU64::new(rejected.current().as_u64()),
+                    }
+                }
+            };
+            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+        Ok(ReplaceSessionDefaultsOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(ReplaceSessionDefaultsRepositoryError::Database {
+            commit_ambiguous, ..
+        }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(commit_ambiguous),
+            )
+            .await
+        }
+        Err(
+            ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }
+            | ReplaceSessionDefaultsRepositoryError::Corruption(_),
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await
+        }
+    }
+}
+
 async fn write_session_metadata_read_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -1525,11 +1703,18 @@ async fn selected_session_required_protocol_version(
     pool: &PgPool,
     session: SessionId,
 ) -> Result<Option<u64>, ProcessReadError> {
-    if version.as_u64() >= ProtocolVersion::Three.as_u64() {
+    if version.as_u64() >= ProtocolVersion::Six.as_u64() {
         return Ok(None);
     }
     let repository = ProcessReadRepository::new(pool.clone());
-    let has_tool_history = repository.session_has_tool_history(session).await?;
+    let has_model_identity_history = repository
+        .session_has_model_identity_history(session)
+        .await?;
+    let has_tool_history = if version.as_u64() < ProtocolVersion::Three.as_u64() {
+        repository.session_has_tool_history(session).await?
+    } else {
+        false
+    };
     let ancestry = if version.as_u64() < IMPORTED_TRANSCRIPT_PROTOCOL_VERSION {
         repository.session_ancestry(session).await?
     } else {
@@ -1537,25 +1722,39 @@ async fn selected_session_required_protocol_version(
     };
     Ok(required_protocol_version_for_selected_session(
         version,
-        has_tool_history,
-        ancestry,
+        SelectedSessionRepresentationFacts {
+            has_model_identity_history,
+            has_tool_history,
+            ancestry,
+        },
     ))
 }
 
 fn required_protocol_version_for_selected_session(
     version: ProtocolVersion,
-    has_tool_history: bool,
-    ancestry: Option<ProcessSessionAncestry>,
+    facts: SelectedSessionRepresentationFacts,
 ) -> Option<u64> {
-    if has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
+    if facts.has_model_identity_history && version.as_u64() < ProtocolVersion::Six.as_u64() {
+        Some(ProtocolVersion::Six.as_u64())
+    } else if facts.has_tool_history && version.as_u64() < ProtocolVersion::Three.as_u64() {
         Some(ProtocolVersion::Three.as_u64())
     } else if version == ProtocolVersion::One
-        && matches!(ancestry, Some(ProcessSessionAncestry::ImportedConversation))
+        && matches!(
+            facts.ancestry,
+            Some(ProcessSessionAncestry::ImportedConversation)
+        )
     {
         Some(IMPORTED_TRANSCRIPT_PROTOCOL_VERSION)
     } else {
         None
     }
+}
+
+#[derive(Clone, Copy)]
+struct SelectedSessionRepresentationFacts {
+    has_model_identity_history: bool,
+    has_tool_history: bool,
+    ancestry: Option<ProcessSessionAncestry>,
 }
 
 async fn handle_read_transcript<Writer>(
@@ -1909,6 +2108,31 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match entry {
+        ProcessTranscriptEntry::ModelIdentityChanged {
+            entry_index,
+            source_session,
+            entry,
+            turn,
+            defaults_version,
+            selected,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ModelIdentityChanged {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        defaults_version: CanonicalU64::new(*defaults_version),
+                        selected_model_id: wire_uuid(selected.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
         ProcessTranscriptEntry::User {
             entry_index,
             source_session,
@@ -2669,6 +2893,7 @@ impl ProtocolError {
             message: match required_version {
                 2 => "the selected session requires protocol version 2",
                 3 => "the selected session requires protocol version 3",
+                6 => "the selected session requires protocol version 6",
                 _ => "the protocol version is unsupported",
             },
             detail: ErrorDetail::none(),
@@ -2681,7 +2906,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4, 5"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4, 5, 6"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",
@@ -3176,8 +3401,8 @@ mod tests {
         MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS, MAX_FRAME_BYTES,
         MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
         ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SnapshotSpoolError,
-        acquire_import_permit, acquire_inbound_frame_permit,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SelectedSessionRepresentationFacts,
+        SnapshotSpoolError, acquire_import_permit, acquire_inbound_frame_permit,
         acquire_inbound_frame_permit_after_input, acquire_snapshot_reader_permit,
         admitted_user_content, execute_import, inspect_connection_completion, read_frame_line,
         required_protocol_version_for_selected_session, run_until_shutdown,
@@ -3218,54 +3443,120 @@ mod tests {
                 .contains("version 3")
         );
         assert!(
+            ProtocolError::unsupported_version(6)
+                .message
+                .contains("version 6")
+        );
+        assert!(
             ProtocolError::without_detail(ErrorCode::UnsupportedVersion)
                 .message
-                .contains("1, 2, 3, 4")
+                .contains("1, 2, 3, 4, 5, 6")
         );
     }
 
+    /// INV-033 / INV-040: each retained protocol is gated by the first version
+    /// that can represent the selected session's durable history.
     #[test]
-    fn legacy_session_compatibility_requires_the_first_representable_version() {
+    fn inv033_inv040_legacy_session_compatibility_requires_first_representable_version() {
         assert_eq!(
             required_protocol_version_for_selected_session(
                 ProtocolVersion::One,
-                false,
-                Some(ProcessSessionAncestry::ImportedConversation),
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: false,
+                    has_tool_history: false,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
             ),
             Some(2)
         );
-        for version in [ProtocolVersion::One, ProtocolVersion::Two] {
-            assert_eq!(
-                required_protocol_version_for_selected_session(
-                    version,
-                    true,
-                    Some(ProcessSessionAncestry::OwnerInitiated),
-                ),
-                Some(3),
-                "tool history takes precedence over retained-version ancestry"
-            );
-        }
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::One,
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: false,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
+                },
+            ),
+            Some(3),
+            "tool history takes precedence over retained-version ancestry"
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Two,
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: false,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
+                },
+            ),
+            Some(3),
+            "tool history takes precedence over retained-version ancestry"
+        );
         assert_eq!(
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Three,
-                true,
-                Some(ProcessSessionAncestry::ImportedConversation),
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: false,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
             ),
             None
         );
         assert_eq!(
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Four,
-                true,
-                Some(ProcessSessionAncestry::ImportedConversation),
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: false,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
             ),
             None
         );
         assert_eq!(
             required_protocol_version_for_selected_session(
                 ProtocolVersion::Two,
-                false,
-                Some(ProcessSessionAncestry::ImportedConversation),
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: false,
+                    has_tool_history: false,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Five,
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: true,
+                    has_tool_history: false,
+                    ancestry: Some(ProcessSessionAncestry::OwnerInitiated),
+                },
+            ),
+            Some(6)
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::One,
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: true,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
+            ),
+            Some(6),
+            "model-identity history requires the newest retained representation"
+        );
+        assert_eq!(
+            required_protocol_version_for_selected_session(
+                ProtocolVersion::Six,
+                SelectedSessionRepresentationFacts {
+                    has_model_identity_history: true,
+                    has_tool_history: true,
+                    ancestry: Some(ProcessSessionAncestry::ImportedConversation),
+                },
             ),
             None
         );
