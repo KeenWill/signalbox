@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Renumber the review-workflow migration after main advanced
+
+**Context.** The review-workflow foundation reserved the `2026072602xx` block
+when its specification stack opened. Before the persistence pull request merged,
+its ultimate `main` parent acquired migrations `202607270001` and
+`202607280001`. Retaining the lower reserved version would make a database
+upgraded through that parent apply a newly introduced migration out of ledger
+order.
+
+**Decision.** The merged review-workflow persistence artifact is
+`202607280002_review_workflow.sql`, strictly after the highest migration on its
+ultimate `main` parent. References to `2026072602xx` in earlier decision entries
+record the stack's original reservation; this entry records the required
+renumber, and the
+[persistence protocol](spec/persistence-protocol.md#migrations) owns the current
+implemented inventory.
+
+**Rejected alternatives.** Keeping `2026072602xx` preserves the initial
+reservation but violates strictly increasing migration history. Renumbering or
+editing migrations already on `main` violates forward-only migration discipline.
+Rewriting the earlier decisions would erase the sequence that explains why the
+reservation and merged filename differ.
+
+**Affects.** The review-workflow migration filename, the provenance of PR #227,
+and interpretation of the earlier review-workflow decision entries' affected
+slice.
+
 ## 2026-07-26 — Bound Codex streamed redaction lookbehind
 
 **Context.** Credential-shape redaction must retain an incomplete marker or
