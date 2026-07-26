@@ -15,9 +15,10 @@ use signalbox_domain::{
     PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataReconstitutionFailure,
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionMetadataContent, TranscriptAncestry,
+    SessionMetadataContent, ToolRequestId, TranscriptAncestry,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     session_metadata::{
@@ -25,7 +26,7 @@ use signalbox_persistence::{
         SessionMetadataRepository, SessionMetadataRepositoryError,
     },
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -37,6 +38,7 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_metadata";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const UNSUPPORTED_COMMAND_ACTOR: &str = "recovery";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -56,6 +58,38 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
     migrate(&pool).await?;
+    Ok((container, pool))
+}
+
+async fn postgres_before_metadata_issuer()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202607280202)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
     Ok((container, pool))
 }
 
@@ -106,6 +140,62 @@ fn replacement(
     content: SessionMetadataContent,
 ) -> ReplaceSessionMetadata {
     ReplaceSessionMetadata::new(command(command_value), session(session_value), content)
+}
+
+/// INV-012: the issuer-evidence migration preserves the fixed owner agency of
+/// legacy metadata receipts even when their actor projection was corrupted.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_metadata_issuer_migration_preserves_legacy_owner_agency()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres_before_metadata_issuer().await?;
+    let command_id = Uuid::from_u128(0x901);
+    let session_id = Uuid::from_u128(0x701);
+    let tool_request_id = Uuid::from_u128(0xa01);
+    let actor_kind = "tool";
+    let expected_issuer = ("owner".to_owned(), None);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_session_metadata', 1, statement_timestamp())",
+    )
+    .bind(command_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_tool_request_id, replacement_archived,
+             result_kind, rejection_kind, result_session_id)
+         VALUES
+            ($1, 'replace_session_metadata', 1, $2,
+             $3, $4, false,
+             'rejected', 'session_not_found', $2)",
+    )
+    .bind(command_id)
+    .bind(session_id)
+    .bind(actor_kind)
+    .bind(tool_request_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    migrate(&pool).await?;
+
+    let issuer: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT issuer_kind, issuer_tool_request_id
+           FROM replace_session_metadata_command
+          WHERE command_id = $1",
+    )
+    .bind(command_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(issuer, expected_issuer);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 async fn collect_page(
@@ -181,11 +271,11 @@ async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-012: an applied receipt with a non-owner stored command actor fails
+/// INV-012: an applied receipt with an unsupported stored command actor fails
 /// closed during repository reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_applied_metadata_receipt_rejects_non_owner_command_actor()
+async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone())
@@ -208,33 +298,35 @@ async fn inv012_applied_metadata_receipt_rejects_non_owner_command_actor()
     .await?;
     sqlx::query(
         "UPDATE replace_session_metadata_command
-            SET actor_kind = 'recovery',
-                result_actor_kind = 'recovery'
-          WHERE command_id = $1",
+            SET actor_kind = $1,
+                result_actor_kind = $1
+          WHERE command_id = $2",
     )
+    .bind(UNSUPPORTED_COMMAND_ACTOR)
     .bind(Uuid::from_u128(0x902))
     .execute(&pool)
     .await?;
 
-    assert!(matches!(
-        repository.load_command(command(0x902)).await,
-        Err(SessionMetadataRepositoryError::Corruption(
-            SessionMetadataCorruption::Domain(
-                ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
-            )
-        ))
-    ));
+    let Err(SessionMetadataRepositoryError::Corruption(SessionMetadataCorruption::Unsupported {
+        field,
+        value,
+    })) = repository.load_command(command(0x902)).await
+    else {
+        panic!("recovery agency must remain unsupported for metadata commands")
+    };
+    assert_eq!(field, "command actor");
+    assert_eq!(value, UNSUPPORTED_COMMAND_ACTOR);
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// INV-012: a rejected receipt with a non-owner stored command actor fails
+/// INV-012: a rejected receipt with an unsupported stored command actor fails
 /// closed during repository reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_rejected_metadata_receipt_rejects_non_owner_command_actor()
+async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -254,21 +346,77 @@ async fn inv012_rejected_metadata_receipt_rejects_non_owner_command_actor()
     .await?;
     sqlx::query(
         "UPDATE replace_session_metadata_command
-            SET actor_kind = 'recovery'
-          WHERE command_id = $1",
+            SET actor_kind = $1
+          WHERE command_id = $2",
     )
+    .bind(UNSUPPORTED_COMMAND_ACTOR)
     .bind(Uuid::from_u128(0x901))
     .execute(&pool)
     .await?;
 
-    assert!(matches!(
-        repository.load_command(command(0x901)).await,
-        Err(SessionMetadataRepositoryError::Corruption(
-            SessionMetadataCorruption::Domain(
-                ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
-            )
+    let Err(SessionMetadataRepositoryError::Corruption(SessionMetadataCorruption::Unsupported {
+        field,
+        value,
+    })) = repository.load_command(command(0x901)).await
+    else {
+        panic!("recovery agency must remain unsupported for metadata commands")
+    };
+    assert_eq!(field, "command actor");
+    assert_eq!(value, UNSUPPORTED_COMMAND_ACTOR);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: changing both stored actor projections to another supported actor
+/// cannot change the constructor-selected command issuer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_metadata_receipt_rejects_supported_actor_reattribution()
+-> Result<(), Box<dyn Error>> {
+    const TARGET_SESSION: u128 = 0x701;
+    const REPLACEMENT_COMMAND: u128 = 0x902;
+    const CORRUPT_TOOL_REQUEST: u128 = 0xA01;
+
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(0x801, TARGET_SESSION))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            REPLACEMENT_COMMAND,
+            TARGET_SESSION,
+            metadata(Some("applied"), &[], &[], false),
         ))
-    ));
+        .await?;
+
+    sqlx::query(
+        "ALTER TABLE replace_session_metadata_command
+         DISABLE TRIGGER replace_session_metadata_command_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE replace_session_metadata_command
+            SET actor_kind = 'tool',
+                actor_tool_request_id = $1,
+                result_actor_kind = 'tool',
+                result_actor_tool_request_id = $1
+          WHERE command_id = $2",
+    )
+    .bind(Uuid::from_u128(CORRUPT_TOOL_REQUEST))
+    .bind(Uuid::from_u128(REPLACEMENT_COMMAND))
+    .execute(&pool)
+    .await?;
+
+    let Err(SessionMetadataRepositoryError::Corruption(SessionMetadataCorruption::Domain(
+        ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch,
+    ))) = repository.load_command(command(REPLACEMENT_COMMAND)).await
+    else {
+        panic!("supported actor reattribution must fail closed")
+    };
 
     pool.close().await;
     drop(container);
@@ -339,6 +487,67 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
             .content(),
         &first_content
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: an admitted tool-attributed replacement round-trips the exact
+/// request agency through the immutable receipt and current writer stamp.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn Error>> {
+    const CREATION_COMMAND: u128 = 0x801;
+    const TARGET_SESSION: u128 = 0x701;
+    const REPLACEMENT_COMMAND: u128 = 0x902;
+    const TOOL_REQUEST: u128 = 0xA01;
+
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(CREATION_COMMAND, TARGET_SESSION))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let tool_request = ToolRequestId::from_uuid(Uuid::from_u128(TOOL_REQUEST));
+    let replacement = ReplaceSessionMetadata::new_for_tool(
+        command(REPLACEMENT_COMMAND),
+        session(TARGET_SESSION),
+        tool_request,
+        SessionMetadataContent::empty(),
+    );
+
+    let outcome = repository.handle(replacement.clone()).await?;
+    let ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
+        applied,
+    )) = &outcome
+    else {
+        panic!("the first replacement for an existing session must apply")
+    };
+    let recorded = repository
+        .load_command(replacement.command_id())
+        .await?
+        .expect("the tool-attributed replacement receipt exists");
+
+    assert_eq!(
+        replacement.actor(),
+        Actor::Tool {
+            request: tool_request
+        }
+    );
+    assert_eq!(recorded.command(), &replacement);
+    assert_eq!(
+        recorded.result(),
+        &ReplaceSessionMetadataResult::Applied(applied.clone())
+    );
+    assert_eq!(
+        applied
+            .snapshot()
+            .last_writer()
+            .expect("an applied replacement has a writer")
+            .actor(),
+        replacement.actor()
+    );
+    assert_eq!(repository.handle(replacement).await?, outcome);
 
     pool.close().await;
     drop(container);
@@ -753,12 +962,12 @@ async fn inv012_metadata_installation_authenticates_snapshot_before_supersession
     let unauthenticated = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_title, replacement_archived,
+             issuer_kind, actor_kind, replacement_title, replacement_archived,
              result_kind, result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', 'receipt title', false,
+             'owner', 'owner', 'receipt title', false,
              'applied', $2, $2, to_timestamp(1), 'owner')",
     )
     .bind(Uuid::from_u128(0x905))
@@ -1061,12 +1270,12 @@ async fn inv002_applied_metadata_receipt_requires_result_actor() -> Result<(), B
     let missing_applied_actor = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind,
+             issuer_kind, actor_kind, replacement_archived, result_kind,
              result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, $2,
+             'owner', 'owner', false, 'applied', $2, $2,
              statement_timestamp(), NULL)",
     )
     .bind(Uuid::from_u128(0x907))
@@ -1123,12 +1332,12 @@ async fn inv002_metadata_receipt_timestamp_must_be_finite() -> Result<(), Box<dy
     let infinite = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind,
+             issuer_kind, actor_kind, replacement_archived, result_kind,
              result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, $2,
+             'owner', 'owner', false, 'applied', $2, $2,
              '-infinity'::timestamptz, 'owner')",
     )
     .bind(Uuid::from_u128(0x908))
@@ -1164,12 +1373,12 @@ async fn inv002_applied_metadata_receipt_requires_current_root() -> Result<(), B
     let missing_root = sqlx::query(
         "INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind,
+             issuer_kind, actor_kind, replacement_archived, result_kind,
              result_session_id, result_applied_session_id,
              result_updated_at, result_actor_kind)
          VALUES
             ($1, 'replace_session_metadata', 1, $2,
-             'owner', false, 'applied', $2, $2,
+             'owner', 'owner', false, 'applied', $2, $2,
              statement_timestamp(), 'owner')",
     )
     .bind(Uuid::from_u128(0x908))

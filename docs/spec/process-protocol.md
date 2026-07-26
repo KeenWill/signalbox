@@ -578,7 +578,7 @@ The version-three process projection resolves the domain's reference-only tool
 entries before crossing the wire. Tool use carries the exact checked name and
 exact normalized-or-scrubbed-undecodable arguments. Execution, denial, and
 closure carry the same provider-neutral success text or compact typed failure
-JSON defined by [tool-loop](tool-loop.md#provider-bridge-and-current_time). A
+JSON defined by [tool-loop](tool-loop.md#provider-bridge-and-daemon-catalog). A
 client therefore never needs private storage access to reconstruct tool-bearing
 conversation history.
 

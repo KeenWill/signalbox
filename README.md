@@ -87,6 +87,56 @@ change, run the repository-wide validation sequence in [AGENTS.md](AGENTS.md) �
 the canonical list of required commands and their setup notes — from the
 repository root.
 
+### Dev instance
+
+`devenv up` starts a dev instance: a PostgreSQL cluster on loopback and one
+`signalboxd` built from the working tree. The cluster asks for port 54341 and
+devenv allocates upward from there if it is taken, so the port is resolved
+rather than fixed — `echo $PGPORT` inside `devenv shell` names the one in use,
+and the daemon is given the same resolved value. What `devenv up` launches, in
+what order, and why test databases stay deliberately outside its scope are
+recorded in the [decision log](docs/decisions.md); everything below is
+operational usage.
+
+State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
+and everything the daemon needs in `dev-instance/` — a locally generated
+certificate authority and server certificate under `tls/`, a process-scoped home
+under `home/`, and `signalboxd.toml`, seeded on first run from
+[`config/signalboxd.example.toml`](config/signalboxd.example.toml) and left
+alone afterwards so local edits survive. Wipe the whole instance with
+`rm -rf .devenv/state`, or reseed just the catalog by deleting
+`.devenv/state/dev-instance/signalboxd.toml`.
+
+Two things are worth knowing before editing the seeded catalog or reaching for
+the socket. The seed is a copy of the checked-in example, so it carries that
+file's undated family names such as `claude-haiku-4-5`; the spelling a
+`provider_model` must take is stated in
+[configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),
+and how a reported identity is related back to it — including the dated snapshot
+a family name resolves to — in
+[provider-target identity](docs/spec/model-call-execution.md#provider-target-identity).
+And the process socket lives at `$DEVENV_RUNTIME/signalbox/signalboxd.sock`
+rather than directly in the runtime directory, because the daemon accepts only a
+socket parent meeting the ownership and permission rules the
+[process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
+states and creates neither that directory nor those permissions itself; the
+daemon process makes it before binding. Point the terminal client there with
+`--socket`.
+
+The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`,
+overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE`. No key material is
+committed or generated. When that file is read, and what its absence does, are
+stated in the
+[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
+
+Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
+[configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
+specifies — the `PG*` and `SSL_CERT_*` scrub, the process-scoped home the
+passfile check reads, the generated authority that lets a loopback cluster pass
+full verification, and a fully stated `DATABASE_URL` exported to the daemon
+process alone — so that experiments stop re-deriving them. Each is commented in
+`devenv.nix` at the point it is handled.
+
 ### Terminal client
 
 The `signalbox` binary is the supported local terminal surface for the
