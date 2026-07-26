@@ -430,24 +430,26 @@ the first handling.
 
 The error-code set in all seven versions is:
 
-| Code                  | Meaning                                                                                              |
-| --------------------- | ---------------------------------------------------------------------------------------------------- |
-| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                              |
-| `unsupported_version` | The frame version is unsupported, or the selected representation requires a newer supported version. |
-| `invalid_request`     | A boundary value cannot construct the requested application input.                                   |
-| `not_found`           | The selected session does not exist.                                                                 |
-| `conflicting_reuse`   | A durable command identity already names different intent.                                           |
-| `rejected`            | The canonical command was durably rejected by current typed state.                                   |
-| `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                      |
-| `unavailable`         | Infrastructure failed; no requested mutation may have committed.                                     |
-| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                    |
-| `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                       |
+| Code                  | Meaning                                                                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                                                                |
+| `unsupported_version` | The frame version is unsupported, or the selected representation requires a newer supported version.                                   |
+| `invalid_request`     | A boundary value cannot construct the requested application input.                                                                     |
+| `not_found`           | The selected session does not exist.                                                                                                   |
+| `conflicting_reuse`   | A durable command identity already names different intent.                                                                             |
+| `rejected`            | The canonical command was durably rejected by current typed state, or a request-specific precondition refused it before recording one. |
+| `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                                                        |
+| `unavailable`         | Infrastructure failed; no requested mutation may have committed.                                                                       |
+| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                                                      |
+| `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
-For `create_session`, `submit_input`, `replace_session_metadata`, and
-`replace_session_defaults`, a lost commit response maps to `commit_ambiguous`;
-the client retries the exact command identity and payload to discover the
-recorded outcome. A definitely pre-commit infrastructure failure maps to
-`unavailable`.
+For `create_session`, `submit_input`, `replace_session_metadata`,
+`replace_session_defaults`, and `reconcile_turn`, a lost commit response maps to
+`commit_ambiguous`; the client retries the exact command identity and payload to
+discover the recorded outcome. A `reconcile_turn` retry reaches that recorded
+outcome unconditionally, because a claimed command identity bypasses the
+precondition the first handling already satisfied. A definitely pre-commit
+infrastructure failure maps to `unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
