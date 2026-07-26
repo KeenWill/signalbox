@@ -1013,6 +1013,39 @@ async fn completion_after_an_incomplete_stdin_upload_is_boundary_loss() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn cancelled_completion_after_an_incomplete_stdin_upload_is_boundary_loss() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stderr_holding_incomplete_upload_cli(temporary.path());
+    let runtime = runtime(temporary.path(), executable);
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-stderr-wait-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+    let loss = boundary_loss(&report.evidence);
+    let failure = transport_failed(&loss.cause);
+
+    assert!(
+        failure
+            .detail
+            .contains("before the full request upload completed")
+    );
+    assert_eq!(
+        loss.usage,
+        TokenUsage {
+            input_tokens: Some(fixtures::INPUT_TOKENS),
+            output_tokens: Some(fixtures::OUTPUT_TOKENS),
+            cache_creation_input_tokens: Some(fixtures::CACHE_CREATION_INPUT_TOKENS),
+            cache_read_input_tokens: Some(fixtures::CACHE_READ_INPUT_TOKENS),
+        },
+        "the demoted nominal completion still carries its observed usage"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn cancellation_kills_descendants_after_the_group_leader_exits() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let mut config = CodexCliConfig::new(
@@ -1749,6 +1782,50 @@ async fn prepare(
 
 fn fake_cli() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-codex-cli"))
+}
+
+/// Scripts the reproduced launder-by-cancellation sequence: refuse the
+/// request upload, emit a nominal completion, close stdout, then hold stderr
+/// open so cancellation arrives while the adapter waits on stderr. The
+/// readiness marker is written only after stdout and stdin are closed and a
+/// settling second has passed, so cancellation cannot fire before the adapter
+/// has consumed the terminal marker and parked in its stderr wait.
+#[cfg(unix)]
+fn stderr_holding_incomplete_upload_cli(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let envelope_text = format!(
+        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
+        fixtures::BUFFERED_ANSWER
+    );
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+exec 1>&-
+exec 0<&-
+sleep 1
+printf 'ready\n' > fake-codex-stderr-wait-ready
+sleep 60
+"#,
+        thread_id = fixtures::THREAD_ID,
+        envelope_text = envelope_text,
+        input = fixtures::INPUT_TOKENS,
+        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
+        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
+        output = fixtures::OUTPUT_TOKENS,
+    );
+    let executable = directory.join("stderr-holding-codex");
+    std::fs::write(&executable, script).expect("the stderr-holding fake CLI is written");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("the stderr-holding fake CLI has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions)
+        .expect("the stderr-holding fake CLI is executable");
+    executable
 }
 
 #[cfg(unix)]
