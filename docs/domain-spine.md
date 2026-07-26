@@ -1257,6 +1257,10 @@ pub enum SubmitInputRejectedResult {
         active_turn: TurnId,
         existing_command: DurableCommandId,
     },
+    InterruptUnavailableWhileAwaitingApproval {
+        session: SessionId,
+        active_turn: TurnId,
+    },
 }
 
 pub struct PreparedSubmitInput { /* private */ }
@@ -1375,6 +1379,13 @@ impl SubmitInputReconstitutionInput {
         result_existing_command: DurableCommandId,
         active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
         existing_interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn rejected_interrupt_unavailable_while_awaiting_approval(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
     ) -> Self;
     pub const fn rejected_session_not_found(
         command: SubmitInput,

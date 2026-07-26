@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -12,10 +12,12 @@ use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
-    ModelCallDisposition, ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent,
-    ToolBatchState, TurnState, decode_server_line, encode_server_line,
+    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
+    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
+    ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+    TurnState, decode_server_line, encode_server_line,
 };
+use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
 
@@ -26,6 +28,7 @@ mod presentation;
 mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 
 /// Parses and runs one terminal-client invocation.
 pub async fn run(
@@ -73,6 +76,14 @@ async fn execute(
     } else {
         None
     };
+    let import_source = match &arguments.command {
+        Command::Import { path, .. } => Some(read_import_source(path).await?),
+        Command::Create { .. }
+        | Command::List
+        | Command::Send { .. }
+        | Command::Transcript { .. }
+        | Command::Follow { .. } => None,
+    };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
     let mut output = Output::new(stdout, stderr, arguments.raw_output);
@@ -105,7 +116,32 @@ async fn execute(
             Ok(())
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
+        Command::Import { format, .. } => {
+            let source = import_source.ok_or(ClientError::Input("import source was not read"))?;
+            import_conversation(&mut client, &mut output, format, source).await
+        }
     }
+}
+
+async fn read_import_source(path: &Path) -> Result<Vec<u8>, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(ClientError::source_file)?;
+    let read_limit = MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES
+        .checked_add(1)
+        .ok_or(ClientError::Protocol("import read bound overflow"))?;
+    let read_limit = u64::try_from(read_limit)
+        .map_err(|_| ClientError::Protocol("import read bound is not representable"))?;
+    let mut bounded = file.take(read_limit);
+    let mut source = Vec::new();
+    bounded
+        .read_to_end(&mut source)
+        .await
+        .map_err(ClientError::source_file)?;
+    if source.len() > MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES {
+        return Err(ClientError::SourceExceedsFrame);
+    }
+    Ok(source)
 }
 
 fn socket_path(
@@ -186,6 +222,40 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn import_conversation(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    format: ConversationImportFormat,
+    source: Vec<u8>,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .mutation_request(ClientRequest::ImportConversation {
+            format,
+            source: ConversationImportSource::new(source),
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => {
+            output.conversation_import_inserted(imported_conversation_id)?;
+            Ok(())
+        }
+        ServerMessage::ConversationImportAlreadyImported {
+            imported_conversation_id,
+        } => {
+            output.conversation_import_already_imported(imported_conversation_id)?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("import returned an unexpected response").mutation()),
     }
 }
 
@@ -742,10 +812,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, ProcessClient, SnapshotSelection, TurnTerminal, create,
-        model_call_recovery_transition, read_input, run, socket_path, submit_input,
-        terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
+        SnapshotSelection, TurnTerminal, create, model_call_recovery_transition, read_input, run,
+        socket_path, submit_input, terminal_event_state, terminal_snapshot_selection,
+        terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -1020,6 +1090,107 @@ mod tests {
         .await;
         assert_eq!(exit, ExitCode::FAILURE);
         assert!(String::from_utf8_lossy(&error).contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn missing_import_source_fails_before_a_missing_socket_is_opened() {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let exit = run(
+            [
+                OsString::from("--socket"),
+                OsString::from("/does/not/exist/hub.sock"),
+                OsString::from("import"),
+                OsString::from("--format"),
+                OsString::from("claude-code"),
+                OsString::from("/does/not/exist/session.jsonl"),
+            ],
+            None,
+            &mut input,
+            &mut output,
+            &mut error,
+        )
+        .await;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8_lossy(&error)
+                .contains("conversation import source file could not be read")
+        );
+    }
+
+    #[tokio::test]
+    async fn import_source_beyond_the_possible_frame_payload_is_read_bounded()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source_path = directory.path().join("oversized.jsonl");
+        let source_file = std::fs::File::create(&source_path)?;
+        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES + 1)?)?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+
+        let exit = run(
+            [
+                OsString::from("--socket"),
+                OsString::from("/does/not/exist/hub.sock"),
+                OsString::from("import"),
+                OsString::from("--format"),
+                OsString::from("claude-code"),
+                source_path.into_os_string(),
+            ],
+            None,
+            &mut input,
+            &mut output,
+            &mut error,
+        )
+        .await;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8_lossy(&error)
+                .contains("conversation import source cannot fit within the process frame bound")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_source_at_the_reader_bound_is_encoded_before_connecting()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let source_path = directory.path().join("boundary.jsonl");
+        let source_file = std::fs::File::create(&source_path)?;
+        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES)?)?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+
+        let exit = run(
+            [
+                OsString::from("--socket"),
+                OsString::from("/does/not/exist/hub.sock"),
+                OsString::from("import"),
+                OsString::from("--format"),
+                OsString::from("claude-code"),
+                source_path.into_os_string(),
+            ],
+            None,
+            &mut input,
+            &mut output,
+            &mut error,
+        )
+        .await;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(output.is_empty());
+        assert!(
+            String::from_utf8_lossy(&error)
+                .contains("conversation import source cannot fit within the process frame bound")
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -1,5 +1,9 @@
 /target/
 
+# Python bytecode from running the docs checkers locally; never committed.
+__pycache__/
+*.pyc
+
 # devenv/direnv local state; the environment definition (devenv.nix,
 # devenv.yaml, devenv.lock) is committed, local build state is not.
 .devenv/

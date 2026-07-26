@@ -2,12 +2,14 @@
 
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
-kinds and command family and the tool-loop identity kinds and decision command.
-The behavior lives in `crates/domain` (identity newtypes, command payloads,
-actor attribution, replay equality), `crates/application` (identity generation,
-command boundaries), `crates/persistence` (the owner-global command registry and
-typed record families), and `apps/hubd` (telemetry wiring). Storage transaction
-mechanics, locking, and the reconstitution seam are owned by
+kinds and command family and the tool-loop identity kinds and decision command,
+as verified against the implementing stack through PR #224
+(`agent/session-metadata-domain`). The behavior lives in `crates/domain`
+(identity newtypes, command payloads, actor attribution, replay equality),
+`crates/application` (identity generation, command boundaries),
+`crates/persistence` (the owner-global command registry and typed record
+families), and `apps/hubd` (telemetry wiring). Storage transaction mechanics,
+locking, and the reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
