@@ -63,6 +63,25 @@ pub(crate) const RUNNER_ENROLLMENT: &str = "SELECT enrollment_id
               WHERE enrollment_id = $1
               FOR UPDATE";
 
+pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
+               FROM runner_credential_grant
+              WHERE session_id = $1
+                AND runner_id = $2
+                AND grant_revision = $3
+              FOR UPDATE";
+
+pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
+               FROM runner_enrollment
+              WHERE enrollment_id = $1
+              FOR SHARE";
+
+pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT credential_profile_name
+               FROM runner_credential_grant
+              WHERE session_id = $1
+                AND runner_id = $2
+                AND grant_revision = $3
+              FOR SHARE";
+
 pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
                FROM runner_current_registration
               WHERE enrollment_id = $1

@@ -4,20 +4,21 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::error::Error;
+use std::{error::Error, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AuthorizedToolAttempt, CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval,
     ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
     RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration,
-    RunnerId, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolDispatchGeneration, ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId,
-    TurnAttemptId, TurnId, WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
+    RunnerId, RunnerLease, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerSelector,
+    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
+    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -48,6 +49,7 @@ const ATTEMPT: u128 = 0x9600;
 const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
+const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy)]
 struct PhysicalAttemptFacts {
@@ -302,6 +304,37 @@ async fn stored_pin_fixture(
         .expect("the validated registration pins the placement");
     store.store_pin(&pin, &registration).await?;
     Ok((store, expected_enrollment, registration, pin))
+}
+
+async fn stored_later_lease_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+        RunnerLease,
+    ),
+    Box<dyn Error>,
+> {
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(pool).await?;
+    terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            authorized(RETRY_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("the later lease is valid before durable authority is revoked");
+    Ok((store, expected_enrollment, registration, pin, lease))
 }
 
 async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
@@ -578,6 +611,117 @@ async fn s31_inv004_inv043_concurrent_attempt_binding_has_one_lease_lineage()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv042_concurrent_enrollment_revocation_blocks_a_later_lease()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment().into_uuid();
+    let mut revocation = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment)
+    .fetch_one(&mut *revocation)
+    .await?;
+    let mut lease_store = Box::pin(store.store_lease(&lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("the lease insert must wait for enrollment authority");
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id,
+             authentication_reference_id, allowed_class_count, state_kind)
+         SELECT enrollment_id, 2, runner_id,
+                authentication_reference_id, allowed_class_count, 'revoked'
+           FROM runner_enrollment_audit
+          WHERE enrollment_id = $1 AND revision = 1",
+    )
+    .bind(enrollment)
+    .execute(&mut *revocation)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_enrollment_audit_allowed_class
+          WHERE enrollment_id = $1 AND revision = 1",
+    )
+    .bind(enrollment)
+    .execute(&mut *revocation)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = 2, state_kind = 'revoked'
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment)
+    .execute(&mut *revocation)
+    .await?;
+    revocation.commit().await?;
+    let rejected = lease_store
+        .await
+        .expect_err("a concurrently revoked enrollment cannot authorize the lease");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv045_concurrent_grant_revocation_blocks_a_later_lease() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin, lease) = stored_later_lease_fixture(&pool).await?;
+    let grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let mut revocation = pool.begin().await?;
+    sqlx::query(
+        "SELECT credential_profile_name
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3
+          FOR UPDATE",
+    )
+    .bind(grant.session().into_uuid())
+    .bind(grant.runner().into_uuid())
+    .bind(Decimal::from(grant.revision().get()))
+    .fetch_one(&mut *revocation)
+    .await?;
+    let mut lease_store = Box::pin(store.store_lease(&lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("the lease insert must wait for credential-grant authority");
+    sqlx::query(
+        "INSERT INTO runner_credential_grant_audit
+            (session_id, runner_id, grant_revision, audit_ordinal,
+             event_kind, credential_profile_name)
+         VALUES ($1, $2, $3, 2, 'revoked', $4)",
+    )
+    .bind(grant.session().into_uuid())
+    .bind(grant.runner().into_uuid())
+    .bind(Decimal::from(grant.revision().get()))
+    .bind(grant.profile().as_str())
+    .execute(&mut *revocation)
+    .await?;
+    revocation.commit().await?;
+    let rejected = lease_store
+        .await
+        .expect_err("a concurrently revoked grant cannot authorize the lease");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
@@ -847,6 +991,68 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("a revoked predecessor cannot authorize its replacement");
 
     assert_store_check_violation(revoked_predecessor);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_current_placement_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    store
+        .store_placement(&lost, Some(&registration), pin.grant.as_ref())
+        .await?;
+    let rewound_head = sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal - 1
+          WHERE session_id = $1",
+    )
+    .bind(lost.session().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the placement head cannot be rewound to historical evidence");
+
+    assert_check_violation(rewound_head);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let replacement = pin
+        .placement
+        .clone()
+        .replace_credential_profile(
+            pin.grant
+                .clone()
+                .expect("the fixture pin carries a credential grant"),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the fixture profile replacement is valid");
+    let revoked = replacement
+        .grant
+        .grant
+        .revoke()
+        .expect("the new grant can be revoked before persistence");
+    store
+        .store_placement(&replacement.placement, Some(&registration), Some(&revoked))
+        .await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the replacement placement remains loadable");
+
+    assert_eq!(loaded.grant(), Some(&revoked));
     drop(pool);
     Ok(())
 }

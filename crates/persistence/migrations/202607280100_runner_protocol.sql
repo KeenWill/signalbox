@@ -902,6 +902,50 @@ CREATE TABLE runner_current_session_placement (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE FUNCTION guard_runner_current_placement()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    latest_ordinal numeric(20, 0);
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'runner placement head is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT max(event_ordinal) INTO latest_ordinal
+      FROM runner_session_placement_record
+     WHERE session_id = NEW.session_id;
+    IF NEW.event_ordinal IS DISTINCT FROM latest_ordinal
+       OR (
+            TG_OP = 'INSERT'
+            AND NEW.event_ordinal <> 1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_current_session_placement AS current_placement
+                 WHERE current_placement.session_id = NEW.session_id
+            )
+       )
+       OR (
+            TG_OP = 'UPDATE'
+            AND (
+                NEW.session_id <> OLD.session_id
+                OR NEW.event_ordinal <> OLD.event_ordinal + 1
+            )
+       )
+    THEN
+        RAISE EXCEPTION 'runner placement head must advance to latest'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_current_session_placement_advances
+BEFORE INSERT OR UPDATE OR DELETE ON runner_current_session_placement
+FOR EACH ROW
+EXECUTE FUNCTION guard_runner_current_placement();
+
 CREATE TRIGGER runner_session_placement_record_is_append_only
 BEFORE UPDATE OR DELETE ON runner_session_placement_record
 FOR EACH ROW

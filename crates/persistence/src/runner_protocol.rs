@@ -32,7 +32,8 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::lock_inventory::{
-    RUNNER_ENROLLMENT, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
+    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
+    RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
 
@@ -522,6 +523,38 @@ impl RunnerProtocolStore {
         }
         let revoked = grant.revoke().map_err(RunnerProtocolStoreError::Domain)?;
         let mut transaction = self.pool.begin().await?;
+        let locked: Option<String> = sqlx::query_scalar(RUNNER_GRANT)
+            .bind(session.into_uuid())
+            .bind(runner.into_uuid())
+            .bind(Decimal::from(revision.get()))
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some(locked_profile) = locked else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        if locked_profile != revoked.profile().as_str() {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let already_revoked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM runner_credential_grant_audit
+                  WHERE session_id = $1
+                    AND runner_id = $2
+                    AND grant_revision = $3
+                    AND event_kind = 'revoked'
+             )",
+        )
+        .bind(session.into_uuid())
+        .bind(runner.into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if already_revoked {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
         sqlx::query(
             "INSERT INTO runner_credential_grant_audit
                 (session_id, runner_id, grant_revision, audit_ordinal,
@@ -1254,6 +1287,20 @@ async fn insert_grant_if_new(
     .bind(grant.profile().as_str())
     .execute(&mut **transaction)
     .await?;
+    if grant.state() == CredentialProfileGrantState::Revoked {
+        sqlx::query(
+            "INSERT INTO runner_credential_grant_audit
+                (session_id, runner_id, grant_revision, audit_ordinal,
+                 event_kind, credential_profile_name)
+             VALUES ($1, $2, $3, 2, 'revoked', $4)",
+        )
+        .bind(grant.session().into_uuid())
+        .bind(grant.runner().into_uuid())
+        .bind(Decimal::from(grant.revision().get()))
+        .bind(grant.profile().as_str())
+        .execute(&mut **transaction)
+        .await?;
+    }
     Ok(())
 }
 
@@ -1466,7 +1513,28 @@ async fn insert_lease_generation(
     if placement_runner != lease.runner().into_uuid() {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    let enrollment = placement
+        .try_get::<Option<Uuid>, _>("registration_enrollment_id")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let enrollment_state: Option<String> = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if enrollment_state.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
     let authorization = lease.credential_authorization();
+    if let Some(authorization) = authorization {
+        let profile: Option<String> = sqlx::query_scalar(RUNNER_LEASE_GRANT_AUTHORITY)
+            .bind(authorization.session.into_uuid())
+            .bind(authorization.runner.into_uuid())
+            .bind(Decimal::from(authorization.grant_revision.get()))
+            .fetch_optional(&mut **transaction)
+            .await?;
+        if profile.as_deref() != Some(authorization.profile.as_str()) {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+    }
     sqlx::query(
         "INSERT INTO runner_lease_generation
             (lease_id, generation, attempt_id, session_id, runner_id,

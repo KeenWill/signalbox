@@ -923,10 +923,20 @@ impl RunnerLease {
             generation: input.generation,
             state: input.state,
         };
+        let credential_matches =
+            lease
+                .credential_authorization
+                .as_ref()
+                .is_none_or(|authorization| {
+                    authorization.session == lease.dispatch.session()
+                        && authorization.runner == lease.runner
+                        && authorization.tool == lease.tool
+                });
         if lease.correlation() != input.recorded_correlation
             || lease.dispatch.session() != input.recorded_session
             || lease.effect != input.recorded_effect
             || lease.credential_authorization != input.recorded_credential_authorization
+            || !credential_matches
             || lease.state != input.recorded_state
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
@@ -2632,6 +2642,57 @@ mod tests {
         let (_, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
         input.recorded_credential_authorization = None;
+
+        assert_eq!(
+            RunnerLease::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_session() {
+        let (_, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let authorization = input
+            .credential_authorization
+            .as_mut()
+            .expect("the fixture lease carries credential authorization");
+        authorization.session = session_id(SESSION + 1);
+        input.recorded_credential_authorization = input.credential_authorization.clone();
+
+        assert_eq!(
+            RunnerLease::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_runner() {
+        let (_, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let authorization = input
+            .credential_authorization
+            .as_mut()
+            .expect("the fixture lease carries credential authorization");
+        authorization.runner = runner_id(REPLACEMENT_RUNNER);
+        input.recorded_credential_authorization = input.credential_authorization.clone();
+
+        assert_eq!(
+            RunnerLease::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_inv045_lease_reconstitution_rejects_foreign_credential_tool() {
+        let (_, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let authorization = input
+            .credential_authorization
+            .as_mut()
+            .expect("the fixture lease carries credential authorization");
+        authorization.tool = tool("deploy");
+        input.recorded_credential_authorization = input.credential_authorization.clone();
 
         assert_eq!(
             RunnerLease::reconstitute(input),
