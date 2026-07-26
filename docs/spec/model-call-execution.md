@@ -11,19 +11,19 @@ Tool requests, approvals, attempts, and continuation are owned by
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
 storage protocol and the outbox in
 [persistence-protocol](persistence-protocol.md); the typed model-runtime layer
-and hub runtime in [runtime-substrate](runtime-substrate.md); model
+and daemon runtime in [runtime-substrate](runtime-substrate.md); model
 configuration and credentials in
 [configuration-and-credentials](configuration-and-credentials.md). Invariant
 tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
-A model call is one durable hub authorization to attempt a provider interaction
-(INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at creation:
-`ModelCallId`, owning turn and attempt, the exact frozen model selection, the
-turn-pinned resolved target, and the exact ordered context frontier it consumes
-(INV-015). Nonterminal states are `Prepared`, `InFlight`, and
-`CancellationRequested`; terminal history is a separate `EndedModelCall`
+A model call is one durable daemon authorization to attempt a provider
+interaction (INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at
+creation: `ModelCallId`, owning turn and attempt, the exact frozen model
+selection, the turn-pinned resolved target, and the exact ordered context
+frontier it consumes (INV-015). Nonterminal states are `Prepared`, `InFlight`,
+and `CancellationRequested`; terminal history is a separate `EndedModelCall`
 carrying one of five physical dispositions — `Completed`, `KnownFailed`,
 `Refused`, `Cancelled`, `Ambiguous` — and exposes no transition back (INV-006).
 
@@ -238,8 +238,8 @@ one fallback reclassified-successor candidate per pending input, while terminal
 closure and startup recovery draw one reclassified-successor candidate per
 pending input. Persistence invokes those closures inside the transaction but
 never owns minting. Why: the locked pending count moves into the transaction
-without moving identity authority into persistence. A proven hub-minted identity
-collision (unique-violation rollback on the call, entry, frontier, or
+without moving identity authority into persistence. A proven daemon-minted
+identity collision (unique-violation rollback on the call, entry, frontier, or
 reclassified-turn key) is the only same-invocation transaction retry, with fresh
 candidates and no repeated credential or provider work. Why: a proven
 unique-violation rollback is the one failure that guarantees the transaction had
@@ -288,7 +288,7 @@ exactly-once claim.
 ## Provider observation classification
 
 Classification is an adapter contract consuming the full-request-send boundary
-([runtime-substrate](runtime-substrate.md)); the hub never reinterprets SDK
+([runtime-substrate](runtime-substrate.md)); the daemon never reinterprets SDK
 errors by retryability or exception type. The runtime bridge
 (`crates/model-provider-runtime/src/lib.rs`) maps the runtime's typed terminal
 evidence ([runtime-substrate](runtime-substrate.md) owns how evidence is
@@ -433,8 +433,8 @@ roles), the in-process gate, and `RuntimeModelCallProvider` over the Anthropic
 runtime, with the domain target catalog and runtime model catalog built from one
 versioned static configuration file and a reread credential file
 ([configuration-and-credentials](configuration-and-credentials.md)). The
-`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives one
-session through the real scheduler and PostgreSQL path with either a
+`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
+one session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
 prints the semantic transcript; it is deliberately not the client protocol.
 

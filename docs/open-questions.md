@@ -180,7 +180,7 @@ questions below remain open.
   pinning where locality matters, with observable failure. Blocks workspace
   tools. (S05–S16)
 - **Multiple runners in one turn.** Leaning: at most one selected runner
-  initially, counting hub-local tools separately. Constrains version one.
+  initially, counting daemon-local tools separately. Constrains version one.
   (S13–S16)
 - **Runner result protocol.** The exact runner wire envelope must bind each
   result to its tool attempt and authorized dispatch generation or equivalent
@@ -238,9 +238,9 @@ is decided, specified in
 [configuration-and-credentials](spec/configuration-and-credentials.md); the
 questions below remain open.
 
-- **Owner client authentication and revocation.** Keep the hub's authorization
-  model single-owner while choosing a remotely safe authentication boundary.
-  Blocks any remote client. (S01, S10, S24, S25)
+- **Owner client authentication and revocation.** Keep the daemon's
+  authorization model single-owner while choosing a remotely safe authentication
+  boundary. Blocks any remote client. (S01, S10, S24, S25)
 - **Runner enrollment, authentication, and revocation.** Strong runner identity
   distinct from capability claims, with rotation. Blocks remote runners. (S05,
   S06, S12–S16)
@@ -313,10 +313,11 @@ questions below remain open.
   and exact cancellation-delivery records remain open. Those remaining questions
   block only their corresponding adapter slices; the generic scaffold and first
   typed command family are not blocked. (S03, S04, S17, S25, S27)
-- **Update-event retention, pruning, and multiple hub processes.** Version one
-  is owned by [process-protocol](spec/process-protocol.md). A pruning watermark,
-  follower retention guarantees, and any later multiple-hub shared-fan-out
-  mechanism remain undecided. Blocks pruning and multi-hub deployment. (S24)
+- **Update-event retention, pruning, and multiple daemon processes.** Version
+  one is owned by [process-protocol](spec/process-protocol.md). A pruning
+  watermark, follower retention guarantees, and any later multiple-daemon
+  shared-fan-out mechanism remain undecided. Blocks pruning and multi-daemon
+  deployment. (S24)
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)

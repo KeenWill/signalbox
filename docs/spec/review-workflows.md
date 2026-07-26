@@ -7,7 +7,7 @@ links, and their relational store. Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
-rest of the hub by [persistence protocol](persistence-protocol.md). Invariant
+rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
 tags cite [the invariant catalog](../invariants.md).
 
 ## Bounded-context boundary

@@ -14,12 +14,12 @@ and model-call rendering are owned by
 ## Record and ingestion boundary
 
 An imported conversation is durable record, never execution. It has one
-hub-minted `ImportedConversationId`, one closed-source format and converter
+daemon-minted `ImportedConversationId`, one closed-source format and converter
 version, one source-content digest, an immutable nonempty sequence of raw source
 record occurrences, and an immutable nonempty sequence of normalized
 `ImportedTranscriptEntry` values (INV-001, INV-038). Every raw record produces
 at least one normalized entry. Application orchestration rejects a converted
-aggregate carrying any conversation or entry identity that the hub did not
+aggregate carrying any conversation or entry identity that the daemon did not
 supply to that conversion invocation.
 
 Imported entries never carry an `AcceptedInputId`, `TurnId`, `TurnAttemptId`,
@@ -248,10 +248,10 @@ external causality.
 
 `ImportedConversationConverter` is the application-facing edge seam. A converter
 consumes source bytes, one caller-supplied conversation identity, and a total
-lazy callback that supplies hub-minted imported-entry identities. After it has
-completely parsed and normalized the source, the converter invokes that callback
-exactly once immediately before emitting each normalized entry, in global
-physical entry order; it neither preallocates identities nor invokes the
+lazy callback that supplies daemon-minted imported-entry identities. After it
+has completely parsed and normalized the source, the converter invokes that
+callback exactly once immediately before emitting each normalized entry, in
+global physical entry order; it neither preallocates identities nor invokes the
 callback for an entry it does not emit. The callback's return type is an
 identity, not an option or result, so exhaustion is deliberately unrepresentable
 at this seam: a caller must provide one identity for every invocation. A

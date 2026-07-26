@@ -264,9 +264,10 @@ sections do not.
 
 It does **NOT** touch: `model-provider-runtime` (the bridge is generic),
 `crates/application` (the `ModelCallProvider` port is provider-agnostic),
-`apps/signalboxd`, or any TOML config schema. Precedent: `crates/model-runtime-openai`
-is a fully-authored adapter that is a workspace member but referenced nowhere
-outside its own crate — the exact "adapter without wiring" shape.
+`apps/signalboxd`, or any TOML config schema. Precedent:
+`crates/model-runtime-openai` is a fully-authored adapter that is a workspace
+member but referenced nowhere outside its own crate — the exact "adapter without
+wiring" shape.
 
 ### A separate wiring PR owns (composition/config)
 
@@ -275,20 +276,22 @@ The bridge `RuntimeModelCallProvider<R>`
 bounded only by `R: ModelRuntime<ModelCallId>`, contains zero per-provider code,
 and needs no change. What the wiring PR must touch:
 
-1. **`apps/signalboxd/Cargo.toml`** — add the `signalbox-model-runtime-<provider>`
-   path dependency alongside the Anthropic one, plus the resulting `Cargo.lock`
-   update: the adapter PR already recorded the package there, but this edit adds
-   it to the tracked `signalboxd` dependency list in the lockfile.
-2. **`apps/signalboxd/src/main.rs`** `run_hub` — the composition root, today hardcoded
-   `AnthropicRuntime::new(...)` wrapped by `RuntimeModelCallProvider::new(...)`.
-   The Anthropic-specific credential wiring (`ANTHROPIC_CREDENTIAL_REFERENCE`,
-   `FileCredentialAccess`, `ANTHROPIC_API_KEY_FILE`) also needs generalization —
-   and that generalization reaches into persistence: today
-   `PostgresModelCallRepository` holds a single constructor-wide
-   `ModelCallCredentialReference` and pins it on every prepared call regardless
-   of the resolved target (`crates/persistence/src/model_execution.rs:233`), so
-   a second provider with its own credential needs the durable
-   target-to-credential routing, and its tests, in this PR's scope as well.
+1. **`apps/signalboxd/Cargo.toml`** — add the
+   `signalbox-model-runtime-<provider>` path dependency alongside the Anthropic
+   one, plus the resulting `Cargo.lock` update: the adapter PR already recorded
+   the package there, but this edit adds it to the tracked `signalboxd`
+   dependency list in the lockfile.
+2. **`apps/signalboxd/src/main.rs`** `run_hub` — the composition root, today
+   hardcoded `AnthropicRuntime::new(...)` wrapped by
+   `RuntimeModelCallProvider::new(...)`. The Anthropic-specific credential
+   wiring (`ANTHROPIC_CREDENTIAL_REFERENCE`, `FileCredentialAccess`,
+   `ANTHROPIC_API_KEY_FILE`) also needs generalization — and that generalization
+   reaches into persistence: today `PostgresModelCallRepository` holds a single
+   constructor-wide `ModelCallCredentialReference` and pins it on every prepared
+   call regardless of the resolved target
+   (`crates/persistence/src/model_execution.rs:233`), so a second provider with
+   its own credential needs the durable target-to-credential routing, and its
+   tests, in this PR's scope as well.
 3. **`apps/signalboxd/src/configuration.rs`** — the provider allow-list gate,
    currently a literal `!= "anthropic"` check →
    `HubModelConfigurationError::UnsupportedProvider`. Must admit the new
@@ -296,8 +299,8 @@ and needs no change. What the wiring PR must touch:
    drops it (`RuntimeModelDefinition` keeps only target, model spelling, and
    token limit), while the dispatch mechanism below needs the provider identity
    per target.
-4. **`config/signalboxd.example.toml`** — add an example `[[models]]` stanza with the
-   new `provider` value.
+4. **`config/signalboxd.example.toml`** — add an example `[[models]]` stanza
+   with the new `provider` value.
 5. **`apps/signalboxd/src/bin/signalbox-debug.rs`** — the debug harness's
    `--anthropic` mode validates a selection only via `contains_selection` before
    constructing `AnthropicRuntime`, so once the allow-list admits a second

@@ -10,6 +10,36 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Ship the server daemon as signalboxd
+
+**Context.** The recorded de-hub naming direction settled the server's name: the
+daemon ships as `signalboxd`, and future runner processes are a separate
+`signalbox-runner` binary. The crate still built as `signalbox-hubd` in
+`apps/hubd`, and the living documents still named the server process "the hub".
+This entry records that rename's execution.
+
+**Decision.** Rename the crate directory to `apps/signalboxd` and the package
+and binary target to `signalboxd`; rename `config/hubd.example.toml` to
+`config/signalboxd.example.toml`; update the CI integration-matrix label and
+package flags; and move the living surface — specification pages, architecture,
+vision, glossary, scenarios, invariant text, README, and config comments — to
+`signalboxd`/"the daemon" vocabulary, with "hub-local" tool placement becoming
+"daemon-local". Historical decision entries are append-only and keep their hubd
+vocabulary. Hub-named code identifiers (`SingleHubGuard`, `run_hub`, the
+persistence `hub_fence` module) and migration-committed SQL names stay for the
+recorded follow-on vocabulary pass, so cited code homes keep matching source.
+
+**Rejected alternatives.** Keeping the package name `signalbox-hubd` with only a
+binary-target rename would preserve dependency-graph continuity but leave the
+legacy name on the Cargo surface every reference spells. Renaming code
+identifiers in the same pass would mix a mechanical move with the broad
+vocabulary sweep the backlog scopes separately.
+
+**Affects.** `apps/signalboxd`, `apps/client` imports, the workspace member list
+and `Cargo.lock`, `.github/workflows/rust.yml`,
+`config/signalboxd.example.toml`, the living documents naming the server
+process, and the native client's stored server-settings key names.
+
 ## 2026-07-25 — Bind blocked publication to its attempted reservation
 
 **Context.** A blocked external-publication pass can follow an ambiguous write

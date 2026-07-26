@@ -12,8 +12,8 @@ import SwiftUI
 enum NativeAppConstants {
     static let defaultServerURL = "http://127.0.0.1:8000"
     static let serviceName = "co.rdwd.SignalboxNative"
-    static let apiKeyAccount = "hub-api-key"
-    static let serverURLDefaultsKey = "hub-url"
+    static let apiKeyAccount = "signalboxd-api-key"
+    static let serverURLDefaultsKey = "signalboxd-url"
 }
 
 extension Notification.Name {

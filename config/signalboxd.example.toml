@@ -1,4 +1,4 @@
-# Signalbox hub model configuration, version 1.
+# Signalbox daemon model configuration, version 1.
 version = 1
 
 [[models]]

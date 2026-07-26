@@ -33,10 +33,10 @@ adapter crates, the `crates/model-provider-runtime` bridge — whose
 `RuntimeModelCallProvider` implements the application's `ModelCallProvider` port
 over any `ModelRuntime<ModelCallId>`, depending on both crates so the dependency
 arrow points from the bridge into application, never from application into the
-runtime — and the hub composition root (see Open edges). The Cargo manifest is
-the enforcement mechanism: an undeclared dependency fails the workspace build.
-Why: manifest-visible boundaries make a boundary violation a reviewable diff
-instead of a silent import.
+runtime — and the daemon composition root (see Open edges). The Cargo manifest
+is the enforcement mechanism: an undeclared dependency fails the workspace
+build. Why: manifest-visible boundaries make a boundary violation a reviewable
+diff instead of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final
@@ -360,12 +360,12 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   provider-controlled output.
 - `CredentialAccess::resolve` is called during preparation of each physical
   request; nothing is cached. Why: per-request resolution makes mounted-secret
-  rotation visible without a hub restart. Resolution races the cancellation
+  rotation visible without a daemon restart. Resolution races the cancellation
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
-- The production implementation is signalboxd's `FileCredentialAccess`: each resolve
-  rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
+- The production implementation is signalboxd's `FileCredentialAccess`: each
+  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
   production `AnthropicRuntime`.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
@@ -382,8 +382,8 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and signalboxd telemetry: the scheduling and model-call error
-families (startup scan, turn activation, eligibility sweep, model-call
+persistence adapters, and signalboxd telemetry: the scheduling and model-call
+error families (startup scan, turn activation, eligibility sweep, model-call
 repository) map into `OperatorFailureClass` through the
 `ClassifyOperatorFailure` trait, exposing a user-content-free classification to
 shared telemetry while the underlying error keeps its diagnostic detail
@@ -395,8 +395,8 @@ internally. The four classes:
 - **`FailClosedCorruption`** — committed rows cannot construct the accepted
   domain value (fail-closed reconstitution:
   [persistence-protocol](persistence-protocol.md)).
-- **`IdentityCollision`** — a fresh hub-minted candidate identity collided with
-  a durable identity (per-stage retry rule:
+- **`IdentityCollision`** — a fresh daemon-minted candidate identity collided
+  with a durable identity (per-stage retry rule:
   [model-call-execution](model-call-execution.md)).
 - **`CallerOrHubBug`** — a request or internal guard that can fail only because
   of a defect, kept distinct from corruption.
@@ -416,7 +416,7 @@ failures after staleness handling.
 - `CancellationConfirmed` and `SendIncompleteProvenUnacceptable` are
   vocabulary-total variants no in-repository adapter constructs today.
 - The three-kind consumer allowlist (provider adapters, the
-  `model-provider-runtime` bridge, the hub composition root) is a review-time
+  `model-provider-runtime` bridge, the daemon composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns controlled provider-proxy and private-root support.
