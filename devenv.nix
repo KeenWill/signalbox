@@ -33,7 +33,7 @@ let
   # on whatever the developer keeps in their real home directory.
   daemonHome = "${stateRoot}/home";
 
-  daemonConfigFile = "${stateRoot}/hubd.toml";
+  daemonConfigFile = "${stateRoot}/signalboxd.toml";
 
   # The daemon validates the socket's parent directory before binding: it must
   # be owned by the effective user and be mode exactly 0700, and no ancestor
@@ -46,7 +46,7 @@ let
   # directory resolves under the sticky `/private/tmp`, which the ancestor
   # rule accepts for a directory the developer owns.
   daemonSocketDirectory = "${config.env.DEVENV_RUNTIME}/signalbox";
-  daemonSocketPath = "${daemonSocketDirectory}/hubd.sock";
+  daemonSocketPath = "${daemonSocketDirectory}/signalboxd.sock";
 
   # Every connection parameter is stated in the URL, including the user name
   # and host the daemon refuses to let SQLx take from the process account or
@@ -95,6 +95,17 @@ in
   # byte-identical to CI. Never run a system or Homebrew mdformat against
   # this repository: without the GFM plugin it silently corrupts GFM tables
   # under .mdformat.toml's wrap=80.
+
+  # Shared compiler cache: sccache wraps rustc for cargo invocations inside
+  # this environment, so dependency compilation is cached once per machine
+  # and reused across checkouts and worktrees. The cache lives in sccache's
+  # per-user default location (override with SCCACHE_DIR); workspace crates
+  # keep incremental compilation and are passed through uncached. CI never
+  # enters this environment — its caching is configured in
+  # .github/workflows/rust.yml.
+  packages = [ pkgs.sccache ];
+  env.RUSTC_WRAPPER = "sccache";
+
   languages.python = {
     enable = true;
     venv = {
@@ -103,8 +114,8 @@ in
     };
   };
 
-  # The dev instance: one PostgreSQL cluster and one hubd, started together
-  # by `devenv up` under devenv's native process manager. This is a
+  # The dev instance: one PostgreSQL cluster and one signalboxd, started
+  # together by `devenv up` under devenv's native process manager. This is a
   # development convenience only. The integration and end-to-end suites keep
   # provisioning their own disposable databases through testcontainers and
   # are not affected by anything below.
@@ -203,8 +214,8 @@ in
       # and an undated alias makes a call commit ambiguously, stops the daemon,
       # and wedges the session it was serving.
       if [ ! -f ${daemonConfigFile} ]; then
-        echo "dev instance: seeding ${daemonConfigFile} from config/hubd.example.toml"
-        cp "$DEVENV_ROOT/config/hubd.example.toml" ${daemonConfigFile}
+        echo "dev instance: seeding ${daemonConfigFile} from config/signalboxd.example.toml"
+        cp "$DEVENV_ROOT/config/signalboxd.example.toml" ${daemonConfigFile}
         chmod 644 ${daemonConfigFile}
       fi
     '';
@@ -223,7 +234,7 @@ in
   # The cluster cannot start until its certificate exists.
   processes.postgres.after = [ "signalbox:dev-instance" ];
 
-  processes.hubd = {
+  processes.signalboxd = {
     after = [ "devenv:processes:postgres" ];
 
     # A crash is a signal worth reading during an experiment, not something
@@ -236,7 +247,7 @@ in
       # Built with the full environment: cargo needs the real HOME for its
       # registry and the ambient certificate variables to reach crates.io.
       # Only the daemon itself runs scrubbed.
-      cargo build --package signalbox-hubd --bin signalbox-hubd
+      cargo build --package signalboxd --bin signalboxd
 
       target_dir="''${CARGO_TARGET_DIR:-$DEVENV_ROOT/target}"
 
@@ -260,7 +271,7 @@ in
         SIGNALBOX_CONFIG_FILE=${daemonConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
         SIGNALBOX_SOCKET_PATH=${daemonSocketPath} \
-        "$target_dir/debug/signalbox-hubd"
+        "$target_dir/debug/signalboxd"
     '';
   };
 }

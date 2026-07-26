@@ -120,7 +120,12 @@ impl Error for ReplaceSessionDefaultsCorruption {}
 #[derive(Debug)]
 pub enum ReplaceSessionDefaultsRepositoryError {
     /// PostgreSQL could not complete the operation.
-    Database(sqlx::Error),
+    Database {
+        /// The underlying SQLx failure.
+        source: sqlx::Error,
+        /// Whether the failure occurred while awaiting commit.
+        commit_ambiguous: bool,
+    },
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The owner-global identifier that names another kind.
@@ -133,10 +138,10 @@ pub enum ReplaceSessionDefaultsRepositoryError {
 impl fmt::Display for ReplaceSessionDefaultsRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Database(error) => {
+            Self::Database { source, .. } => {
                 write!(
                     formatter,
-                    "ReplaceSessionDefaults database failure: {error}"
+                    "ReplaceSessionDefaults database failure: {source}"
                 )
             }
             Self::DifferentCommandKind { command_id } => write!(
@@ -151,7 +156,7 @@ impl fmt::Display for ReplaceSessionDefaultsRepositoryError {
 impl Error for ReplaceSessionDefaultsRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database { source, .. } => Some(source),
             Self::DifferentCommandKind { .. } => None,
             Self::Corruption(error) => Some(error),
         }
@@ -160,7 +165,21 @@ impl Error for ReplaceSessionDefaultsRepositoryError {
 
 impl From<sqlx::Error> for ReplaceSessionDefaultsRepositoryError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        Self::from_database(error, false)
+    }
+}
+
+impl ReplaceSessionDefaultsRepositoryError {
+    fn from_database(source: sqlx::Error, commit_ambiguous: bool) -> Self {
+        Self::Database {
+            source,
+            commit_ambiguous,
+        }
+    }
+
+    fn from_commit_failure(source: sqlx::Error) -> Self {
+        let commit_ambiguous = crate::commit_failure_is_ambiguous(&source);
+        Self::from_database(source, commit_ambiguous)
     }
 }
 
@@ -305,7 +324,10 @@ impl ReplaceSessionDefaultsRepository {
 
         insert_typed_record(&mut transaction, prepared).await?;
         let outcome = result_outcome(prepared.result());
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(ReplaceSessionDefaultsRepositoryError::from_commit_failure)?;
         Ok(outcome)
     }
 
@@ -881,5 +903,27 @@ fn map_registry_error(error: RegistryInspectionError) -> ReplaceSessionDefaultsR
         RegistryInspectionError::Corruption(RegistryCorruption::ConflictingTypedRecords) => {
             ReplaceSessionDefaultsCorruption::Inconsistent("typed command family").into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::ReplaceSessionDefaultsRepositoryError;
+
+    #[test]
+    fn lost_commit_response_is_typed_as_ambiguous() {
+        let error = ReplaceSessionDefaultsRepositoryError::from_commit_failure(sqlx::Error::Io(
+            io::Error::new(io::ErrorKind::ConnectionReset, "commit response was lost"),
+        ));
+
+        assert!(matches!(
+            error,
+            ReplaceSessionDefaultsRepositoryError::Database {
+                commit_ambiguous: true,
+                ..
+            }
+        ));
     }
 }

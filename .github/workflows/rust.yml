@@ -91,9 +91,9 @@ jobs:
               --features postgres-integration
               --tests
               -- --ignored --test-threads=4
-          - suite: hubd
+          - suite: signalboxd
             command: >-
-              cargo test -p signalbox-hubd
+              cargo test -p signalboxd
               --tests
               -- --ignored --test-threads=4
           - suite: terminal-client

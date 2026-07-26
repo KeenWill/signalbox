@@ -83,12 +83,12 @@ covers:
   A production isolation or containment claim for a runner profile requires real
   containment testing of that profile; fake-runner tests never substantiate an
   isolation label.
-- **Restart and recovery:** stop the hub at named durability boundaries (before
-  acceptance; after acceptance but before scheduling; after attempt creation but
-  before send; after send but before outcome persistence; during waits; after
-  outcome persistence but before acknowledgement) and assert both the final
-  state and the absence of forbidden effects; re-running the startup scan
-  changes nothing.
+- **Restart and recovery:** stop the daemon at named durability boundaries
+  (before acceptance; after acceptance but before scheduling; after attempt
+  creation but before send; after send but before outcome persistence; during
+  waits; after outcome persistence but before acknowledgement) and assert both
+  the final state and the absence of forbidden effects; re-running the startup
+  scan changes nothing.
 - **Protocol fixtures and end-to-end slices:** language-neutral compatibility
   fixtures before a second independently versioned process or language client
   merges, and one narrow deterministic end-to-end slice per major capability

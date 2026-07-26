@@ -2,7 +2,7 @@
 
 Signalbox is a personal, self-hosted platform for durable LLM-assisted work —
 your own always-on agent and chat hub rather than an account on someone else's
-product. One central hub owns your sessions and keeps them alive across
+product. One central daemon owns your sessions and keeps them alive across
 restarts, disconnects, and device switches; terminal, web, macOS, and iOS
 clients connect to it from anywhere, and runners you operate execute tools on
 your own machines.
@@ -28,7 +28,7 @@ these capabilities directionally — accepted records decide them — and severa
 
 > **Status:** early implementation phase; APIs, protocols, and storage details
 > are not yet stable. The initial domain and persistence slices now support a
-> local hub process protocol, terminal client, scheduler, and offline and
+> local daemon process protocol, terminal client, scheduler, and offline and
 > Anthropic model-call paths. Remote runners and graphical clients remain future
 > milestones.
 
@@ -37,7 +37,7 @@ these capabilities directionally — accepted records decide them — and severa
     \            |            /
      +-----------+-----------+
                  |
-          [ Central hub ] ---- [ Postgres ]
+          [ Central daemon ] ---- [ Postgres ]
             |         |
     provider adapters | scheduler / tool policy
                       |
@@ -46,7 +46,7 @@ these capabilities directionally — accepted records decide them — and severa
        [ambient runner]  [restricted runner]
 ```
 
-The hub is the source of truth; a client device and an execution machine need
+The daemon is the source of truth; a client device and an execution machine need
 not be the same machine. See [Architecture](docs/architecture.md) for the
 boundaries and important qualifications behind this sketch.
 
@@ -79,18 +79,19 @@ can instead allow the committed `.envrc`. The Postgres integration suite still
 needs a running Docker daemon. See [AGENTS.md](AGENTS.md) for the authoritative
 tooling, formatting, and validation workflow.
 
-The workspace contains the dependency chain `apps/hubd` → `crates/application` →
-`crates/domain`, with `crates/persistence` depending on both
-`crates/application` and `crates/domain`, and the dev-only `crates/expect-table`
-consumed by the domain crate's tests. Before finishing any change, run the
-repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
-list of required commands and their setup notes — from the repository root.
+The workspace contains the dependency chain `apps/signalboxd` →
+`crates/application` → `crates/domain`, with `crates/persistence` depending on
+both `crates/application` and `crates/domain`, and the dev-only
+`crates/expect-table` consumed by the domain crate's tests. Before finishing any
+change, run the repository-wide validation sequence in [AGENTS.md](AGENTS.md) —
+the canonical list of required commands and their setup notes — from the
+repository root.
 
 ### Dev instance
 
 `devenv up` starts a dev instance under devenv's native process manager: a
-PostgreSQL 18 cluster on loopback port 54341, and one `signalbox-hubd` built
-from the working tree that starts once the cluster reports ready. This is a
+PostgreSQL 18 cluster on loopback port 54341, and one `signalboxd` built from
+the working tree that starts once the cluster reports ready. This is a
 development convenience only. It is not how tests get a database — the
 integration and end-to-end suites still provision their own disposable
 containers through testcontainers, and nothing here changes that.
@@ -98,21 +99,23 @@ containers through testcontainers, and nothing here changes that.
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
 certificate authority and server certificate under `tls/`, a process-scoped home
-under `home/`, and `hubd.toml`, seeded on first run from
-[`config/hubd.example.toml`](config/hubd.example.toml) and left alone afterwards
-so local edits survive. Wipe the whole instance with `rm -rf .devenv/state`, or
-reseed just the catalog by deleting `.devenv/state/dev-instance/hubd.toml`.
+under `home/`, and `signalboxd.toml`, seeded on first run from
+[`config/signalboxd.example.toml`](config/signalboxd.example.toml) and left alone
+afterwards so local edits survive. Wipe the whole instance with
+`rm -rf .devenv/state`, or reseed just the catalog by deleting
+`.devenv/state/dev-instance/signalboxd.toml`.
 
 Two things about the seeded catalog are worth preserving when you edit it.
 `provider_model` must be the exact canonical identity the provider echoes back —
 the dated `claude-haiku-4-5-20251001`, not an undated alias, which makes a model
 call commit ambiguously, stops the daemon, and wedges the session it was
-serving. And the process socket lives at `$DEVENV_RUNTIME/signalbox/hubd.sock`
-rather than directly in the runtime directory: the daemon requires the socket's
-parent to be owned by you and mode exactly 0700, with no group- or
-other-writable ancestor except a sticky one holding a directory you own, and it
-creates neither that directory nor those permissions itself. The daemon process
-makes it before binding. Point the terminal client there with `--socket`.
+serving. And the process socket lives at
+`$DEVENV_RUNTIME/signalbox/signalboxd.sock` rather than directly in the runtime
+directory: the daemon requires the socket's parent to be owned by you and mode
+exactly 0700, with no group- or other-writable ancestor except a sticky one
+holding a directory you own, and it creates neither that directory nor those
+permissions itself. The daemon process makes it before binding. Point the
+terminal client there with `--socket`.
 
 The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`,
 overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE`. No key material is
@@ -152,7 +155,7 @@ specifies, so that experiments stop re-deriving them:
 ### Terminal client
 
 The `signalbox` binary is the supported local terminal surface for the
-[process protocol](docs/spec/process-protocol.md). Point it at the hub socket
+[process protocol](docs/spec/process-protocol.md). Point it at the daemon socket
 with `--socket` or `SIGNALBOX_SOCKET_PATH`; `signalbox --help` lists the closed
 command surface. For example:
 
@@ -175,7 +178,7 @@ The companion ignored real-Anthropic path makes a live provider request and may
 incur cost. It runs only when all three opt-in values are supplied:
 
 ```console
-SIGNALBOX_E2E_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_E2E_CONFIG_FILE=config/signalboxd.example.toml \
 SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
 SIGNALBOX_E2E_SELECTION_ID=10000000-0000-4000-8000-000000000001 \
   cargo test -p signalbox-client --test end_to_end \
@@ -194,7 +197,7 @@ semantic transcript:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-  cargo run -p signalbox-hubd --bin signalbox-debug -- \
+  cargo run -p signalboxd --bin signalbox-debug -- \
   "hello" "scripted assistant reply"
 ```
 
@@ -202,14 +205,14 @@ The debug database connection explicitly disables TLS and must not be used as
 production connection configuration.
 
 The same harness can run the production runtime bridge against Anthropic. Copy
-and review [`config/hubd.example.toml`](config/hubd.example.toml), put only the
-API-key bytes in a mode-`0600` file, then run:
+and review [`config/signalboxd.example.toml`](config/signalboxd.example.toml),
+put only the API-key bytes in a mode-`0600` file, then run:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-SIGNALBOX_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_CONFIG_FILE=config/signalboxd.example.toml \
 ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
-  cargo run -p signalbox-hubd --bin signalbox-debug -- \
+  cargo run -p signalboxd --bin signalbox-debug -- \
   --anthropic 10000000-0000-4000-8000-000000000001 \
   "Reply with exactly: signalbox smoke ok"
 ```

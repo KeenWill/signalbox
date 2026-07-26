@@ -8,8 +8,9 @@ as verified against the implementing stack through PR #224
 (identity newtypes, command payloads, actor attribution, replay equality),
 `crates/application` (identity generation, command boundaries),
 `crates/persistence` (the owner-global command registry and typed record
-families), and `apps/hubd` (telemetry wiring). Storage transaction mechanics,
-locking, and the reconstitution seam are owned by
+families), and `apps/signalboxd` (telemetry wiring); those `apps/signalboxd`
+code homes were verified through PR #258 (`agent/signalboxd-rename`). Storage
+transaction mechanics, locking, and the reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
@@ -33,19 +34,20 @@ derived `Debug` is the one logging-reachable render path (see Encoding).
 Identities fall into three supply classes:
 
 - **Caller-supplied idempotency identity** — `DurableCommandId` only. Each
-  application request constructor accepts the caller-supplied value, and the hub
-  accepts any non-sentinel RFC 9562 UUID — the nil and max sentinels are
+  application request constructor accepts the caller-supplied value, and the
+  daemon accepts any non-sentinel RFC 9562 UUID — the nil and max sentinels are
   rejected (see below) — without checking its version bits. Why: idempotency
   correctness comes from the owner-global durable claim plus canonical payload
   comparison, never from trusting a caller's clock or version bits (INV-012).
-- **Hub-minted durable-fact identity** — `SessionId`, `ImportedConversationId`,
-  `ImportedTranscriptEntryId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`,
-  `SemanticTranscriptEntryId`, `ContextFrontierId`, `ModelCallId`,
-  `ToolRequestId`, and `ToolAttemptId` today; `ProviderTargetEvidenceId` is
-  assigned here but not yet minted (see Open edges). All production generators
-  mint UUIDv7 (`uuid::Uuid::now_v7()`). Why: the recorded rationale for UUIDv7
-  is insertion locality for append-heavy Postgres B-tree keys without changing
-  the 128-bit storage shape; no index-level artifact measures this.
+- **Daemon-minted durable-fact identity** — `SessionId`,
+  `ImportedConversationId`, `ImportedTranscriptEntryId`, `AcceptedInputId`,
+  `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, `ContextFrontierId`,
+  `ModelCallId`, `ToolRequestId`, and `ToolAttemptId` today;
+  `ProviderTargetEvidenceId` is assigned here but not yet minted (see Open
+  edges). All production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why:
+  the recorded rationale for UUIDv7 is insertion locality for append-heavy
+  Postgres B-tree keys without changing the 128-bit storage shape; no
+  index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name owner-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -53,11 +55,11 @@ Identities fall into three supply classes:
   domain preparation, so an unknown alias becomes a recorded rejection, not an
   accepted identity.
 
-`ProviderModelIdentity` names the hub's normalized provider/model value space.
-It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
+`ProviderModelIdentity` names the daemon's normalized provider/model value
+space. It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
 `model_call.resolved_provider_model_identity_id`) and supplied as an
-owner-configured key from hubd's model-configuration file; how provider-reported
-data normalizes into it remains open (see Open edges).
+owner-configured key from signalboxd's model-configuration file; how
+provider-reported data normalizes into it remains open (see Open edges).
 
 UUID contents are never semantic. No code derives acceptance order, queue order,
 lifecycle precedence, ancestry, ownership, or authorization from UUID bytes or
@@ -148,10 +150,10 @@ none is derive-generated. Version ordinals and queue positions use checked
 Telemetry renders identities in two forms. Application sites render the
 lowercase hyphenated RFC 9562 form (`session_id = %session.as_uuid()` in
 `crates/application/src/scheduler.rs`), with the structured field name
-identifying the kind. The hubd startup-failure site logs
+identifying the kind. The signalboxd startup-failure site logs
 `session_id = ?error.session` and `turn_id = ?error.turn` — the derived `Debug`
 of `Option<SessionId>`/`Option<TurnId>`, which renders `Some(SessionId(..))` or
-`None`, not bare canonical UUID text (`apps/hubd/src/main.rs`).
+`None`, not bare canonical UUID text (`apps/signalboxd/src/main.rs`).
 
 The local [process protocol](process-protocol.md) maps identity values at its
 wire adapter boundary and admits commands through the same application services;
@@ -334,13 +336,13 @@ exists — they are independent facts, and neither substitutes for the other (se
 ## Durable-command telemetry correlation
 
 Operational telemetry is emitted through the `tracing` facade by
-`crates/application` and `apps/hubd`; `crates/persistence` and `crates/domain`
-have no `tracing` dependency and emit none. Subscriber selection and
-installation live only in `apps/hubd` (see
+`crates/application` and `apps/signalboxd`; `crates/persistence` and
+`crates/domain` have no `tracing` dependency and emit none. Subscriber selection
+and installation live only in `apps/signalboxd` (see
 [runtime-substrate](runtime-substrate.md) for the runtime and the operator
-failure taxonomy). Telemetry events correlate durable failures with hub-minted
-aggregate identifiers — `session_id`, turn identities, phase, and failure-class
-fields — in the two render forms described under Encoding.
+failure taxonomy). Telemetry events correlate durable failures with
+daemon-minted aggregate identifiers — `session_id`, turn identities, phase, and
+failure-class fields — in the two render forms described under Encoding.
 
 No telemetry site emits a caller-supplied `DurableCommandId` in any form: no raw
 UUID, prefix, digest, or token appears in any `tracing` call in the codebase.

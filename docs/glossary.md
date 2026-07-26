@@ -53,7 +53,7 @@ until it ends or yields to a durable wait. See
 
 ## Model call
 
-One durable hub authorization to attempt a physical interaction with a model
+One durable daemon authorization to attempt a physical interaction with a model
 provider against one exact resolved target and context frontier. See
 [call records and lifecycle](spec/model-call-execution.md#call-records-and-lifecycle).
 
@@ -78,7 +78,7 @@ state, and eventual logical outcome. Deferred design; see
 
 ## Tool attempt
 
-One physical effort by a hub-local or runner-local executor to perform a tool
+One physical effort by a daemon-local or runner-local executor to perform a tool
 request. Deferred design; see [tool safety](open-questions.md#tool-safety).
 
 ## Creation cause
@@ -133,8 +133,8 @@ user, container, sandbox, and filesystem scope. Deferred design; see
 
 ## Tool policy
 
-Hub-owned evaluation that determines whether a specific logical tool request is
-allowed, denied, or requires confirmation, plus any placement or constraint
+Daemon-owned evaluation that determines whether a specific logical tool request
+is allowed, denied, or requires confirmation, plus any placement or constraint
 decision. Deferred design; see [tool safety](open-questions.md#tool-safety).
 
 ## Approval
@@ -145,7 +145,7 @@ as presented to the user. Deferred design; see
 
 ## Executor placement
 
-The selected location for a physical tool attempt: a hub-local executor or a
+The selected location for a physical tool attempt: a daemon-local executor or a
 runner-local executor on an identified runner. Deferred design; see
 [scheduling and runners](open-questions.md#scheduling-and-runners).
 
