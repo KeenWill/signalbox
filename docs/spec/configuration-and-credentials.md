@@ -17,7 +17,9 @@ checked-in example path were verified through PR #258
 code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
-finite startup scan and removal of the superseded steering blocker were verified
+credential-file value narrowing and the credential-shaped code-host detail were
+verified through PR #285 (`agent/dev-instance-code-host-credential`). The finite
+startup scan and removal of the superseded steering blocker were verified
 through PR #290 (`agent/audit-fix-startup-blocker`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
 
@@ -31,10 +33,10 @@ at startup:
   channel is explicitly provisional; the database-credential delivery decision
   remains open (see Open edges).
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
-- `ANTHROPIC_API_KEY_FILE` — path to the file whose bytes are the current
-  Anthropic API key value.
-- `GITHUB_TOKEN_FILE` — path to the file whose bytes are the current GitHub
-  code-host token value.
+- `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
+  key value.
+- `GITHUB_TOKEN_FILE` — path to the file holding the current GitHub code-host
+  token value.
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
   [process protocol](process-protocol.md), which owns its binding and trust
   semantics.
@@ -209,6 +211,17 @@ deployment-side rules that code cannot enforce are stated in
   Resolution is reference-scoped: a foreign reference fails typed `Unmapped`; a
   missing file is `Unavailable`; an unreadable file is `Unreadable` — all
   reference-only errors.
+- **The value is the file's bytes less trailing line termination.** The read
+  drops trailing `\n` and `\r` bytes and retains every other byte exactly,
+  including leading and interior whitespace. Why: the tools that write a
+  credential file — `gh auth token`, `op read`, `pass`, a shell redirect —
+  terminate the line they print, so the terminator is how the file ends rather
+  than part of the secret; without this, a routine deployment step produced a
+  value no HTTP header could carry. The narrowing happens once, at the file
+  channel, so every adapter and the redaction scrub all see the same value. A
+  file holding nothing but termination narrows to an empty value, which the
+  adapter boundary then refuses exactly as it already refuses an empty file;
+  narrowing never invents a credential.
 - **No startup preflight.** signalboxd never reads either credential file at
   boot, so a missing or unsynced credential cannot block startup or the recovery
   scan. Why: recovery of acknowledged work must not depend on any provider or
@@ -230,9 +243,10 @@ deployment-side rules that code cannot enforce are stated in
   substitution would hide it. A provider rejecting the credential after send is
   ordinary outcome evidence ([model-call-execution](model-call-execution.md)).
   For a code-host tool, resolution or header failure is fixed known-failure
-  evidence; definitive code-host rejection is likewise fixed, while an uncertain
-  mutation acknowledgement follows the tool loop's external-effect ambiguity
-  contract.
+  evidence naming the credential rather than the code host — the request never
+  left the daemon; definitive code-host rejection is likewise fixed under its
+  own detail, while an uncertain mutation acknowledgement follows the tool
+  loop's external-effect ambiguity contract.
 - **Durable references, never values.** Postgres never stores a credential
   value. Each model call durably pins its non-secret credential reference at the
   `Prepared` insert (`model_call.credential_reference`), immutable thereafter
@@ -248,8 +262,8 @@ deployment-side rules that code cannot enforce are stated in
 The following never appear in logs, error text, or durable records: credential
 values, credential file paths, `DATABASE_URL`, and raw catalog file content.
 Full user content never appears in logs: every tracing site logs phase, failure
-class, counts, and daemon-minted aggregate identifiers, never conversation
-content (which identifiers may appear is
+class, counts, daemon-minted aggregate identifiers, and closed classification
+tokens, never conversation content (which identifiers and tokens may appear is
 [identity-and-commands](identity-and-commands.md) material). For
 provider-controlled evidence the guarantee is mechanism-bounded: text is
 scrubbed of the exact preparation-time credential value, as described below.
@@ -263,8 +277,10 @@ Enforcement as implemented:
   credential value. Access errors carry reference and typed failure class only.
 - signalboxd logging is a compact INFO tracing subscriber; startup and runtime
   errors log phase, failure class, counts, and aggregate ids only. The
-  `crates/application` tracing sites emit the same typed fields; no call site in
-  the codebase passes accepted-input or assistant content to `tracing`.
+  `crates/application` tracing sites emit the same typed fields, plus the closed
+  tool error kind and the daemon-authored catalog tool name at the failed
+  tool-attempt site; no call site in the codebase passes accepted-input,
+  assistant content, tool arguments, or tool error detail to `tracing`.
 - Every provider-controlled text that leaves the Anthropic adapter — stream text
   and thinking deltas, tool-argument JSON, tool proposals, native error bodies,
   provider request ids, reported model identity, stop-sequence and finish
