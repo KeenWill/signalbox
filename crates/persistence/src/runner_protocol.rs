@@ -31,6 +31,11 @@ use signalbox_domain::{
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
+use crate::lock_inventory::{
+    RUNNER_ENROLLMENT, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
+    RUNNER_REGISTRATION_HEAD,
+};
+
 /// Adapter-owned positive revision of one validated registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RunnerRegistrationRevision(NonZeroU64);
@@ -172,15 +177,10 @@ impl RunnerProtocolStore {
         enrollment: RunnerEnrollmentId,
     ) -> Result<Option<RunnerEnrollment>, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let locked = sqlx::query(
-            "SELECT enrollment_id
-               FROM runner_enrollment
-              WHERE enrollment_id = $1
-              FOR UPDATE",
-        )
-        .bind(enrollment.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         if locked.is_none() {
             transaction.rollback().await?;
             return Ok(None);
@@ -217,15 +217,10 @@ impl RunnerProtocolStore {
         catalog: &signalbox_domain::RunnerCatalog,
     ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let locked = sqlx::query(
-            "SELECT enrollment_id
-               FROM runner_enrollment
-              WHERE enrollment_id = $1
-              FOR UPDATE",
-        )
-        .bind(enrollment.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         if locked.is_none() {
             return Err(RunnerProtocolStoreError::Corruption(
                 RunnerProtocolCorruption::MissingCanonicalEnrollment,
@@ -237,15 +232,10 @@ impl RunnerProtocolStore {
         let registration = canonical
             .register(advertisement, catalog)
             .map_err(RunnerProtocolStoreError::Domain)?;
-        let previous: Option<Decimal> = sqlx::query_scalar(
-            "SELECT registration_revision
-               FROM runner_current_registration
-              WHERE enrollment_id = $1
-              FOR UPDATE",
-        )
-        .bind(enrollment.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let previous: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         let revision = match previous {
             Some(value) => decode_registration_revision(value)?.checked_next().ok_or(
                 RunnerProtocolStoreError::Corruption(RunnerProtocolCorruption::GenerationExhausted),
@@ -343,19 +333,10 @@ impl RunnerProtocolStore {
         }
 
         let mut transaction = self.pool.begin().await?;
-        let prior = sqlx::query(
-            "SELECT record.event_ordinal, record.placement_revision,
-                    record.state_kind
-               FROM runner_current_session_placement AS current_placement
-               JOIN runner_session_placement_record AS record
-                 ON record.session_id = current_placement.session_id
-                AND record.event_ordinal = current_placement.event_ordinal
-              WHERE current_placement.session_id = $1
-              FOR UPDATE OF current_placement",
-        )
-        .bind(placement.session().into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(placement.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         let event_ordinal = prior
             .as_ref()
             .map(|row| decode_u64(row.get("event_ordinal")))
@@ -402,19 +383,10 @@ impl RunnerProtocolStore {
         registration: &StoredValidatedRunnerRegistration,
     ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let prior = sqlx::query(
-            "SELECT record.event_ordinal, record.placement_revision,
-                    record.state_kind
-               FROM runner_current_session_placement AS current_placement
-               JOIN runner_session_placement_record AS record
-                 ON record.session_id = current_placement.session_id
-                AND record.event_ordinal = current_placement.event_ordinal
-              WHERE current_placement.session_id = $1
-              FOR UPDATE OF current_placement",
-        )
-        .bind(pin.placement.session().into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(pin.placement.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
         let event_ordinal = prior
             .as_ref()
             .map(|row| decode_u64(row.get("event_ordinal")))
@@ -554,32 +526,11 @@ impl RunnerProtocolStore {
     pub async fn store_lease(&self, lease: &RunnerLease) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let correlation = lease.correlation();
-        let current_event = sqlx::query(
-            "SELECT current_event.event_ordinal, event.state_kind,
-                    lease_generation.attempt_id,
-                    lease_generation.session_id,
-                    lease_generation.runner_id,
-                    lease_generation.tool_name,
-                    lease_generation.effect_class,
-                    lease_generation.credential_profile_name,
-                    lease_generation.credential_grant_revision,
-                    lease_generation.credential_approval_kind
-               FROM runner_current_lease_event AS current_event
-               JOIN runner_lease_event AS event
-                 ON event.lease_id = current_event.lease_id
-                AND event.generation = current_event.generation
-                AND event.event_ordinal = current_event.event_ordinal
-               JOIN runner_lease_generation AS lease_generation
-                 ON lease_generation.lease_id = current_event.lease_id
-                AND lease_generation.generation = current_event.generation
-              WHERE current_event.lease_id = $1
-                AND current_event.generation = $2
-              FOR UPDATE OF current_event",
-        )
-        .bind(correlation.lease.into_uuid())
-        .bind(Decimal::from(correlation.generation.get()))
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let current_event = sqlx::query(RUNNER_LEASE_HEAD)
+            .bind(correlation.lease.into_uuid())
+            .bind(Decimal::from(correlation.generation.get()))
+            .fetch_optional(&mut *transaction)
+            .await?;
         let event_ordinal = match current_event {
             None => {
                 if lease.state() != RunnerLeaseState::Offered {
@@ -1386,19 +1337,11 @@ async fn insert_lease_generation(
     lease: &RunnerLease,
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
-    let placement = sqlx::query(
-        "SELECT record.*
-           FROM runner_current_session_placement AS current_placement
-           JOIN runner_session_placement_record AS record
-             ON record.session_id = current_placement.session_id
-            AND record.event_ordinal = current_placement.event_ordinal
-          WHERE current_placement.session_id = $1
-          FOR UPDATE OF current_placement",
-    )
-    .bind(lease.session().into_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let placement = sqlx::query(RUNNER_LEASE_PLACEMENT)
+        .bind(lease.session().into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
     let placement_runner = placement
         .try_get::<Option<Uuid>, _>("pinned_runner_id")?
         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
