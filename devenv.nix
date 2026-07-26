@@ -161,62 +161,65 @@ in
   # existing state and local edits to the copied catalog survive.
   tasks."signalbox:dev-instance" = {
     description = "Provision dev-instance TLS material, home, and catalog.";
+    # Every interpolated path is quoted: DEVENV_STATE sits inside the
+    # checkout, so a directory name containing whitespace anywhere above the
+    # repository would otherwise word-split these commands.
     exec = ''
       set -euo pipefail
 
-      mkdir -p ${tlsRoot} ${daemonHome}
-      chmod 700 ${tlsRoot}
+      mkdir -p "${tlsRoot}" "${daemonHome}"
+      chmod 700 "${tlsRoot}"
 
       # The pgpass refusal is a presence check against the process home. Fail
       # loudly rather than deleting a file the developer put here on purpose.
-      if [ -e ${daemonHome}/.pgpass ]; then
+      if [ -e "${daemonHome}/.pgpass" ]; then
         echo "dev instance: ${daemonHome}/.pgpass exists; the daemon refuses" \
              "to parse its database URL while it does. Remove it." >&2
         exit 1
       fi
 
-      if [ ! -f ${authorityCertificate} ] || [ ! -f ${serverCertificate} ]; then
+      if [ ! -f "${authorityCertificate}" ] || [ ! -f "${serverCertificate}" ]; then
         echo "dev instance: generating local TLS material under ${tlsRoot}"
-        rm -f ${authorityCertificate} ${authorityKey} \
-              ${serverCertificate} ${serverKey}
+        rm -f "${authorityCertificate}" "${authorityKey}" \
+              "${serverCertificate}" "${serverKey}"
 
-        ${openssl} req -x509 -newkey rsa:2048 -noenc -sha256 -days 3650 \
+        "${openssl}" req -x509 -newkey rsa:2048 -noenc -sha256 -days 3650 \
           -subj "/CN=signalbox devenv dev-instance authority" \
           -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
           -addext "keyUsage=critical,keyCertSign,cRLSign" \
-          -keyout ${authorityKey} -out ${authorityCertificate} 2>/dev/null
+          -keyout "${authorityKey}" -out "${authorityCertificate}" 2>/dev/null
 
-        ${openssl} req -newkey rsa:2048 -noenc -sha256 \
+        "${openssl}" req -newkey rsa:2048 -noenc -sha256 \
           -subj "/CN=localhost" \
-          -keyout ${serverKey} -out ${tlsRoot}/server.csr 2>/dev/null
+          -keyout "${serverKey}" -out "${tlsRoot}/server.csr" 2>/dev/null
 
         printf '%s\n' \
           'basicConstraints=critical,CA:FALSE' \
           'keyUsage=critical,digitalSignature,keyEncipherment' \
           'extendedKeyUsage=serverAuth' \
-          'subjectAltName=DNS:localhost' > ${tlsRoot}/server.ext
+          'subjectAltName=DNS:localhost' > "${tlsRoot}/server.ext"
 
-        ${openssl} x509 -req -in ${tlsRoot}/server.csr -sha256 -days 3650 \
-          -CA ${authorityCertificate} -CAkey ${authorityKey} -CAcreateserial \
-          -extfile ${tlsRoot}/server.ext -out ${serverCertificate} 2>/dev/null
+        "${openssl}" x509 -req -in "${tlsRoot}/server.csr" -sha256 -days 3650 \
+          -CA "${authorityCertificate}" -CAkey "${authorityKey}" -CAcreateserial \
+          -extfile "${tlsRoot}/server.ext" -out "${serverCertificate}" 2>/dev/null
 
-        rm -f ${tlsRoot}/server.csr ${tlsRoot}/server.ext
+        rm -f "${tlsRoot}/server.csr" "${tlsRoot}/server.ext"
       fi
 
       # PostgreSQL refuses to start if the private key is group- or
       # world-readable.
-      chmod 600 ${authorityKey} ${serverKey}
-      chmod 644 ${authorityCertificate} ${serverCertificate}
+      chmod 600 "${authorityKey}" "${serverKey}"
+      chmod 644 "${authorityCertificate}" "${serverCertificate}"
 
       # Seeded verbatim from the checked-in example, which already states the
       # dated canonical model id. Keep it that way when editing the copy:
       # `provider_model` must be the exact identity the provider echoes back,
       # and an undated alias makes a call commit ambiguously, stops the daemon,
       # and wedges the session it was serving.
-      if [ ! -f ${daemonConfigFile} ]; then
+      if [ ! -f "${daemonConfigFile}" ]; then
         echo "dev instance: seeding ${daemonConfigFile} from config/signalboxd.example.toml"
-        cp "$DEVENV_ROOT/config/signalboxd.example.toml" ${daemonConfigFile}
-        chmod 644 ${daemonConfigFile}
+        cp "$DEVENV_ROOT/config/signalboxd.example.toml" "${daemonConfigFile}"
+        chmod 644 "${daemonConfigFile}"
       fi
     '';
   };
@@ -247,16 +250,25 @@ in
       # Built with the full environment: cargo needs the real HOME for its
       # registry and the ambient certificate variables to reach crates.io.
       # Only the daemon itself runs scrubbed.
-      cargo build --package signalboxd --bin signalboxd
-
-      target_dir="''${CARGO_TARGET_DIR:-$DEVENV_ROOT/target}"
+      #
+      # The artifact path comes from Cargo's own build output rather than an
+      # assumed $target_dir/debug: a developer with `build.target` in their
+      # Cargo configuration, or CARGO_BUILD_TARGET in the environment — both
+      # inherited here, because this build is deliberately unscrubbed — gets
+      # the executable under $target_dir/<triple>/debug instead. Diagnostics
+      # still render to stderr; only the JSON artifact stream is captured.
+      daemon_executable="$(
+        cargo build --package signalboxd --bin signalboxd \
+          --message-format=json-render-diagnostics |
+          python3 -c "import json, sys; print([message['executable'] for message in map(json.loads, sys.stdin) if message.get('executable')][-1])"
+      )"
 
       # Recreated here rather than in the provisioning task because the
       # runtime directory does not survive between runs. Mode 0700 is exact:
       # the daemon rejects anything else, including the 0755 devenv gives its
       # own runtime directory.
-      mkdir -p ${daemonSocketDirectory}
-      chmod 700 ${daemonSocketDirectory}
+      mkdir -p "${daemonSocketDirectory}"
+      chmod 700 "${daemonSocketDirectory}"
 
       # Deployment-owned credential channel: a file whose bytes are the key.
       # It is read lazily, per model call, never at startup — so the daemon
@@ -266,12 +278,12 @@ in
       key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
 
       exec env ${scrub} \
-        HOME=${daemonHome} \
-        DATABASE_URL=${databaseUrl} \
-        SIGNALBOX_CONFIG_FILE=${daemonConfigFile} \
+        HOME="${daemonHome}" \
+        DATABASE_URL="${databaseUrl}" \
+        SIGNALBOX_CONFIG_FILE="${daemonConfigFile}" \
         ANTHROPIC_API_KEY_FILE="$key_file" \
-        SIGNALBOX_SOCKET_PATH=${daemonSocketPath} \
-        "$target_dir/debug/signalboxd"
+        SIGNALBOX_SOCKET_PATH="${daemonSocketPath}" \
+        "$daemon_executable"
     '';
   };
 }
