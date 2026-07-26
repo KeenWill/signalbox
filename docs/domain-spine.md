@@ -5366,6 +5366,14 @@ pub struct RunnerLeaseCorrelation {
 pub struct RunnerLeaseOfferRequest {
     /* public exact initial-offer fields */
 }
+pub struct RunnerToolAttemptAuthorization { /* private */ }
+impl RunnerToolAttemptAuthorization {
+    pub fn try_new(
+        approved: ApprovedToolRequest,
+        authorized: AuthorizedToolAttempt,
+    ) -> Result<Self, RunnerDomainError>;
+    pub const fn tool(&self) -> &ToolName;
+}
 pub enum RunnerLeaseState {
     Offered,
     Claimed,
@@ -5403,7 +5411,13 @@ pub enum RunnerLeaseLoss {
         attempt: ToolAttemptId,
     },
 }
+impl RunnerLeaseLoss {
+    // accessors: retry(), crash_attempt()
+}
 pub struct RunnerLeaseRetryAuthority { /* private */ }
+impl RunnerLeaseRetryAuthority {
+    // accessors: generation()
+}
 
 pub enum WorkingDirectorySelection {
     RunnerDefault,
@@ -5442,7 +5456,7 @@ impl SessionRunnerPlacement {
         registration: &ValidatedRunnerRegistration,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
-        authorized: AuthorizedToolAttempt,
+        authorization: RunnerToolAttemptAuthorization,
         offer: RunnerLeaseOfferRequest,
     ) -> Result<SessionRunnerPin, RunnerDomainError>;
     pub fn offer_lease(
@@ -5450,7 +5464,7 @@ impl SessionRunnerPlacement {
         enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
-        authorized: AuthorizedToolAttempt,
+        authorization: RunnerToolAttemptAuthorization,
         offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn offer_retry(
@@ -5459,7 +5473,7 @@ impl SessionRunnerPlacement {
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
         loss: RunnerLeaseLoss,
-        authorized: AuthorizedToolAttempt,
+        authorization: RunnerToolAttemptAuthorization,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn mark_runner_lost(self) -> Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
@@ -5484,7 +5498,7 @@ impl SessionRunnerPlacement {
     pub fn reconstitute(
         self,
         expected_session: SessionId,
-        registration: Option<&ValidatedRunnerRegistration>,
+        pinned_registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: state(), revision()
 }
@@ -5556,8 +5570,8 @@ pub struct CredentialProfileChange {
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 43                   |
-| **signalbox-domain total**                         | **412 (+1 free fn)** |
+| domain: runner                                     | 44                   |
+| **signalbox-domain total**                         | **413 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
