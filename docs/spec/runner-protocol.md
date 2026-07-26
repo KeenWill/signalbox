@@ -93,11 +93,15 @@ Each `RunnerToolDeclaration` contains:
 - `DaemonOrRunner { selector }`.
 
 A runner selector is either one exact `RunnerId` or one `RunnerCapabilityClass`.
-When both loci are admissible, dispatch selects the session's attached runner
-when that runner satisfies the selector and currently advertises the tool;
-otherwise daemon-local execution is admissible. Placement is immutable
-declaration metadata, not a per-call choice supplied by a runner or model. An
-MCP locus is not part of the vocabulary.
+When both loci are admissible, the domain retains daemon-local admissibility if
+the attached runner does not currently advertise the tool, while runner lease
+creation fails `ToolUnavailable`. It does not transfer the consumed runner
+authorization or credential-profile grant to daemon execution. Later application
+orchestration must select the locus before authorization; a change to daemon
+fallback discards runner-pair authority and resolves the daemon-local tool
+policy without the runner-resident profile. Placement is immutable declaration
+metadata, not a per-call choice supplied by a runner or model. An MCP locus is
+not part of the vocabulary.
 
 `RunnerToolDeclaration` is the one daemon-authoritative runner-dispatch
 declaration. Every runner-advertisable tool therefore has model-facing
@@ -198,7 +202,8 @@ reconnect resynchronization, and exact wire correlations are later stacks.
 
 ## Session placement and affinity
 
-`SessionRunnerPlacement` starts with one immutable request:
+`SessionRunnerPlacement` starts with one request that is immutable between
+explicit replacement transitions:
 
 - a `RunnerSelector`, targeting a capability class or exact runner identity;
 - `WorkingDirectorySelection`, either runner default or one exact bounded
@@ -242,20 +247,22 @@ registration leaves the placement unchanged.
 
 Runner loss is explicit state, not implicit reassignment. Marking the pinned
 runner lost retains the prior placement and disables future lease creation. An
-owner-directed replacement supplies a new validated registration, working
-directory, credential-profile selection, tool inventory, and provisioned
-workspace. It advances a positive placement revision and returns one
-`RunnerPlacementChange` value carrying the complete before-and-after placement
-facts needed for a later frontier-extending injected message. Reconstitution
-rejects an unpinned revision other than one, a pinned or lost state that does
-not match its current request and validated capabilities. Durable
-replacement-history verification belongs to the later persistence projection.
-Pinned or lost reconstitution validates against the exact registration snapshot
-that produced the pin and rejects any stored tool or runner-required-tool
-inventory that differs from that checked result. A current narrowed
-re-registration is reconciled separately and is not substituted for that
-historical snapshot. This domain aggregate accepts every positive revision
-because each is reachable through checked successor transitions.
+owner-directed replacement supplies and installs a new complete placement
+request, validated registration, working directory, credential-profile
+selection, tool inventory, and provisioned workspace. Exact-runner placement
+therefore changes identity only through this explicit replacement. It advances a
+positive placement revision and returns one `RunnerPlacementChange` value
+carrying the complete before-and-after placement facts needed for a later
+frontier-extending injected message. Reconstitution rejects an unpinned revision
+other than one, a pinned or lost state that does not match its current request
+and validated capabilities. Durable replacement-history verification belongs to
+the later persistence projection. Pinned or lost reconstitution validates
+against the exact registration snapshot that produced the pin and rejects any
+stored tool or runner-required-tool inventory that differs from that checked
+result. A current narrowed re-registration is reconciled separately and is not
+substituted for that historical snapshot. This domain aggregate accepts every
+positive revision because each is reachable through checked successor
+transitions.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -341,10 +348,11 @@ the later runner workspace stack.
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Catalog file parsing, reload, revision pinning, and safe rebinding are
   recorded in [Tool safety](../open-questions.md#tool-safety).
-- Application orchestration that resolves credential-pair posture through the
-  existing tool-decision path, compilation of runner argument schemas into
-  executable validators, and the compatibility projection from current
-  daemon-local tool definitions is recorded in
+- Application orchestration that selects runner or daemon locus before
+  authorization, resolves credential-pair posture through the existing
+  tool-decision path, discards runner-pair authority before daemon fallback,
+  compiles runner argument schemas into executable validators, and projects from
+  current daemon-local tool definitions is recorded in
   [Tool safety](../open-questions.md#tool-safety).
 - Runner result-egress policy, including whether and how arbitrary tool output
   is screened for credential disclosure, is recorded in
