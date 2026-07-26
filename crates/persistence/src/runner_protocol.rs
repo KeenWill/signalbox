@@ -478,13 +478,24 @@ impl RunnerProtocolStore {
     pub async fn store_lease(&self, lease: &RunnerLease) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let correlation = lease.correlation();
-        let current_event: Option<(Decimal, String)> = sqlx::query_as(
-            "SELECT current_event.event_ordinal, event.state_kind
+        let current_event = sqlx::query(
+            "SELECT current_event.event_ordinal, event.state_kind,
+                    lease_generation.attempt_id,
+                    lease_generation.session_id,
+                    lease_generation.runner_id,
+                    lease_generation.tool_name,
+                    lease_generation.effect_class,
+                    lease_generation.credential_profile_name,
+                    lease_generation.credential_grant_revision,
+                    lease_generation.credential_approval_kind
                FROM runner_current_lease_event AS current_event
                JOIN runner_lease_event AS event
                  ON event.lease_id = current_event.lease_id
                 AND event.generation = current_event.generation
                 AND event.event_ordinal = current_event.event_ordinal
+               JOIN runner_lease_generation AS lease_generation
+                 ON lease_generation.lease_id = current_event.lease_id
+                AND lease_generation.generation = current_event.generation
               WHERE current_event.lease_id = $1
                 AND current_event.generation = $2
               FOR UPDATE OF current_event",
@@ -503,9 +514,12 @@ impl RunnerProtocolStore {
                 insert_lease_generation(&mut transaction, lease).await?;
                 1
             }
-            Some((ordinal, _)) => decode_u64(ordinal)?
-                .checked_add(1)
-                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+            Some(row) => {
+                require_stored_lease_identity(&row, lease)?;
+                decode_u64(row.get("event_ordinal"))?
+                    .checked_add(1)
+                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)?
+            }
         };
         let state = encode_lease_state(lease.state());
         sqlx::query(
@@ -1403,6 +1417,39 @@ fn grant_input(grant: &CredentialProfileGrant) -> CredentialProfileGrantReconsti
             .collect(),
         state: grant.state(),
     }
+}
+
+fn require_stored_lease_identity(
+    row: &PgRow,
+    lease: &RunnerLease,
+) -> Result<(), RunnerProtocolStoreError> {
+    let correlation = lease.correlation();
+    let stored_authorization = match (
+        row.try_get::<Option<String>, _>("credential_profile_name")?,
+        row.try_get::<Option<Decimal>, _>("credential_grant_revision")?,
+        row.try_get::<Option<String>, _>("credential_approval_kind")?,
+    ) {
+        (None, None, None) => None,
+        (Some(profile), Some(revision), Some(approval)) => Some(CredentialDispatchAuthorization {
+            session: lease.session(),
+            runner: lease.runner(),
+            grant_revision: decode_generation(revision)?,
+            profile: profile_name(profile)?,
+            tool: lease.tool().clone(),
+            approval: decode_approval(approval)?,
+        }),
+        _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
+    };
+    if row.get::<Uuid, _>("attempt_id") != correlation.attempt.into_uuid()
+        || row.get::<Uuid, _>("session_id") != lease.session().into_uuid()
+        || row.get::<Uuid, _>("runner_id") != correlation.runner.into_uuid()
+        || row.get::<String, _>("tool_name") != correlation.tool.as_str()
+        || decode_effect(row.get("effect_class"))? != lease.effect()
+        || stored_authorization.as_ref() != lease.credential_authorization()
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
 }
 
 fn encode_placement_state(

@@ -36,6 +36,26 @@ const SESSION: u128 = 0x9400;
 const LEASE: u128 = 0x9500;
 const ATTEMPT: u128 = 0x9600;
 const RETRY_ATTEMPT: u128 = 0x9601;
+const FOREIGN_RUNNER: u128 = 0x9201;
+const RELATED_IDENTITY_OFFSET: u128 = 0x100;
+
+#[derive(Clone, Copy)]
+struct PhysicalAttemptFacts {
+    attempt: u128,
+    request: u128,
+    turn: u128,
+}
+
+const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
+    attempt: ATTEMPT,
+    request: 0x9700,
+    turn: 0x9800,
+};
+const RETRY_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
+    attempt: RETRY_ATTEMPT,
+    request: 0x9701,
+    turn: 0x9801,
+};
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -137,9 +157,7 @@ async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 async fn insert_physical_attempt(
     pool: &PgPool,
-    attempt: u128,
-    request: u128,
-    turn: u128,
+    facts: PhysicalAttemptFacts,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
         .execute(pool)
@@ -150,10 +168,10 @@ async fn insert_physical_attempt(
              request_ordinal, tool_name, arguments_kind, arguments_text)
          VALUES ($1, $2, $3, $4, 0, 'inspect', 'json', '{}')",
     )
-    .bind(uuid(request))
+    .bind(uuid(facts.request))
     .bind(uuid(SESSION))
-    .bind(uuid(turn))
-    .bind(uuid(request + 0x100))
+    .bind(uuid(facts.turn))
+    .bind(uuid(facts.request + RELATED_IDENTITY_OFFSET))
     .execute(pool)
     .await?;
     sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
@@ -169,17 +187,29 @@ async fn insert_physical_attempt(
              state_kind)
          VALUES ($1, $2, $3, $4, $5, 'effect_free', 1, 'prepared')",
     )
-    .bind(uuid(attempt))
-    .bind(uuid(request))
+    .bind(uuid(facts.attempt))
+    .bind(uuid(facts.request))
     .bind(uuid(SESSION))
-    .bind(uuid(turn))
-    .bind(uuid(turn + 0x100))
+    .bind(uuid(facts.turn))
+    .bind(uuid(facts.turn + RELATED_IDENTITY_OFFSET))
     .execute(pool)
     .await?;
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
     Ok(())
+}
+
+#[track_caller]
+fn assert_check_violation(error: sqlx::Error) {
+    assert_eq!(
+        error
+            .as_database_error()
+            .expect("PostgreSQL reports a database error")
+            .code()
+            .as_deref(),
+        Some("23514")
+    );
 }
 
 #[tokio::test]
@@ -305,8 +335,8 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
-    insert_physical_attempt(&pool, ATTEMPT, 0x9700, 0x9800).await?;
-    insert_physical_attempt(&pool, RETRY_ATTEMPT, 0x9701, 0x9801).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
@@ -373,10 +403,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         .expect("claimed pure work requires a fresh physical attempt");
     store.store_lease(&retry).await?;
     let reconstituted = store
-        .load_lease(
-            RunnerLeaseId::from_uuid(uuid(LEASE)),
-            RunnerGeneration::try_from_u64(2).expect("two is positive"),
-        )
+        .load_lease(RunnerLeaseId::from_uuid(uuid(LEASE)), retry.generation())
         .await?
         .expect("the retry generation is durable");
 
@@ -385,6 +412,87 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         signalbox_domain::RunnerLeaseState::LostClaimed
     );
     assert_eq!(reconstituted, retry);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: Some(profile()),
+        workspace: WorkspaceRequirement::None,
+    };
+    let placement = SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), request);
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin(
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+        )
+        .expect("the validated registration pins the placement");
+    store
+        .store_placement(&pin.placement, Some(&registration), pin.grant.as_ref())
+        .await?;
+    let offered = pin
+        .placement
+        .offer_lease(
+            registration.registration(),
+            pin.grant.as_ref(),
+            RunnerLeaseId::from_uuid(uuid(LEASE)),
+            ToolAttemptId::from_uuid(uuid(ATTEMPT)),
+            tool("inspect"),
+            RunnerGeneration::one(),
+        )
+        .expect("the pinned placement authorizes the fixture lease");
+    store.store_lease(&offered).await?;
+    let correlation = offered.correlation();
+    let claimed = offered
+        .claim(correlation)
+        .expect("the exact lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed.lose().expect("the claimed pure lease may be lost");
+    store.store_lease(loss.lost()).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         SELECT lease_id, generation + 1, attempt_id, session_id, runner_id,
+                tool_name, effect_class, placement_event_ordinal,
+                registration_enrollment_id, registration_revision,
+                credential_profile_name, credential_grant_revision,
+                credential_approval_kind, generation
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await
+    .expect_err("claimed retry cannot reuse its physical attempt identity");
+
+    assert_check_violation(error);
     drop(pool);
     Ok(())
 }
@@ -414,7 +522,7 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<
     )
     .bind(expected_enrollment.enrollment().into_uuid())
     .bind(rust_decimal::Decimal::from(stored.revision().get()))
-    .bind(uuid(RUNNER + 1))
+    .bind(uuid(FOREIGN_RUNNER))
     .execute(&pool)
     .await?;
     sqlx::query("ALTER TABLE runner_registration ENABLE TRIGGER ALL")

@@ -1094,7 +1094,21 @@ CREATE TABLE runner_credential_grant (
             event_ordinal
         )
         ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CONSTRAINT runner_credential_grant_prior_fk
+        FOREIGN KEY (
+            session_id,
+            runner_id,
+            prior_grant_revision
+        )
+        REFERENCES runner_credential_grant (
+            session_id,
+            runner_id,
+            grant_revision
+        )
+        ON UPDATE RESTRICT
         ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE runner_credential_grant_tool (
