@@ -293,10 +293,15 @@ enum StreamField {
     Thinking,
 }
 
-struct PendingStreamText<C> {
+struct StreamFragment<C> {
     field: StreamField,
     index: u32,
     correlation: C,
+    text: String,
+}
+
+struct PendingStreamText<C> {
+    fragments: Vec<StreamFragment<C>>,
     text: String,
 }
 
@@ -317,32 +322,14 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
             if stream_candidate_starts_at_zero(&pending.text) {
-                self.emit(
-                    pending.field,
-                    pending.index,
-                    pending.correlation,
-                    REDACTED.to_string(),
-                );
+                self.emit_redacted(pending.fragments);
             } else if let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text) {
-                self.emit(
-                    pending.field,
-                    pending.index,
-                    pending.correlation.clone(),
-                    redact_text(&pending.text[..unsafe_start]),
-                );
-                self.emit(
-                    pending.field,
-                    pending.index,
-                    pending.correlation,
-                    REDACTED.to_string(),
-                );
+                let (safe, unsafe_fragments) =
+                    split_stream_fragments(pending.fragments, unsafe_start);
+                self.emit_original(safe);
+                self.emit_redacted(unsafe_fragments);
             } else {
-                self.emit(
-                    pending.field,
-                    pending.index,
-                    pending.correlation,
-                    redact_text(&pending.text),
-                );
+                self.emit_original(pending.fragments);
             }
         }
     }
@@ -350,11 +337,32 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// Flushes already-decoded text when no later provider text can extend it.
     pub(crate) fn finish(&mut self) {
         if let Some(pending) = self.pending.take() {
+            if redact_text(&pending.text) == pending.text {
+                self.emit_original(pending.fragments);
+            } else {
+                self.emit_redacted(pending.fragments);
+            }
+        }
+    }
+
+    fn emit_original(&mut self, fragments: Vec<StreamFragment<C>>) {
+        for fragment in fragments {
             self.emit(
-                pending.field,
-                pending.index,
-                pending.correlation,
-                redact_text(&pending.text),
+                fragment.field,
+                fragment.index,
+                fragment.correlation,
+                redact_text(&fragment.text),
+            );
+        }
+    }
+
+    fn emit_redacted(&mut self, fragments: Vec<StreamFragment<C>>) {
+        for fragment in fragments {
+            self.emit(
+                fragment.field,
+                fragment.index,
+                fragment.correlation,
+                REDACTED.to_string(),
             );
         }
     }
@@ -375,64 +383,89 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             if !stream_candidate_starts_at_zero(&pending.text)
                 && let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text)
             {
-                self.emit(
-                    pending.field,
-                    pending.index,
-                    pending.correlation.clone(),
-                    redact_text(&pending.text[..unsafe_start]),
-                );
+                let (safe, unsafe_fragments) =
+                    split_stream_fragments(pending.fragments, unsafe_start);
+                self.emit_original(safe);
+                pending.fragments = unsafe_fragments;
                 pending.text = pending.text[unsafe_start..].to_string();
             }
             let mut combined = pending.text.clone();
             combined.push_str(&text);
             if stream_candidate_starts_at_zero(&combined) {
+                pending.fragments.push(StreamFragment {
+                    field,
+                    index,
+                    correlation,
+                    text,
+                });
                 if let Some(unsafe_start) = unsafe_stream_suffix_start(&combined) {
                     if unsafe_start == 0 {
                         pending.text = combined;
                         self.pending = Some(pending);
                         return;
                     }
-                    self.emit(
-                        pending.field,
-                        pending.index,
-                        pending.correlation,
-                        redact_text(&combined[..unsafe_start]),
-                    );
+                    let (redacted, unsafe_fragments) =
+                        split_stream_fragments(pending.fragments, unsafe_start);
+                    self.emit_redacted(redacted);
                     self.pending = Some(PendingStreamText {
-                        field,
-                        index,
-                        correlation,
+                        fragments: unsafe_fragments,
                         text: combined[unsafe_start..].to_string(),
                     });
                     return;
                 }
-                self.emit(
-                    pending.field,
-                    pending.index,
-                    pending.correlation,
-                    redact_text(&combined),
-                );
+                self.emit_redacted(pending.fragments);
                 return;
             }
-            self.emit(
-                pending.field,
-                pending.index,
-                pending.correlation,
-                redact_text(&pending.text),
-            );
+            self.emit_original(pending.fragments);
         }
 
         if unsafe_stream_suffix_start(&text).is_some() {
             self.pending = Some(PendingStreamText {
-                field,
-                index,
-                correlation,
+                fragments: vec![StreamFragment {
+                    field,
+                    index,
+                    correlation,
+                    text: text.clone(),
+                }],
                 text,
             });
         } else {
             self.emit(field, index, correlation, redact_text(&text));
         }
     }
+}
+
+fn split_stream_fragments<C: Clone>(
+    fragments: Vec<StreamFragment<C>>,
+    split_at: usize,
+) -> (Vec<StreamFragment<C>>, Vec<StreamFragment<C>>) {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut consumed = 0;
+    for fragment in fragments {
+        let end = consumed + fragment.text.len();
+        if end <= split_at {
+            before.push(fragment);
+        } else if consumed >= split_at {
+            after.push(fragment);
+        } else {
+            let local_split = split_at - consumed;
+            before.push(StreamFragment {
+                field: fragment.field,
+                index: fragment.index,
+                correlation: fragment.correlation.clone(),
+                text: fragment.text[..local_split].to_string(),
+            });
+            after.push(StreamFragment {
+                field: fragment.field,
+                index: fragment.index,
+                correlation: fragment.correlation,
+                text: fragment.text[local_split..].to_string(),
+            });
+        }
+        consumed = end;
+    }
+    (before, after)
 }
 
 impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {

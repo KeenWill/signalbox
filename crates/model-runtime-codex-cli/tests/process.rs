@@ -88,6 +88,9 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("exec\n--json\n--ephemeral"));
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
+    assert!(result.argv.contains("--disable\nshell_tool"));
+    assert!(result.argv.contains("--disable\nunified_exec"));
+    assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
 }
@@ -157,6 +160,13 @@ async fn inv_035_split_credential_before_final_text_is_redacted() {
 
     assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
     assert!(streamed.contains("[redacted]"));
+    assert!(result.observations.iter().any(|observation| {
+        observation.fact
+            == ObservationFact::TextDelta {
+                index: 1,
+                text: "[redacted]".to_string(),
+            }
+    }));
     assert_eq!(result.spawns, 1);
 }
 
@@ -1285,6 +1295,21 @@ fn unrepresentable_exchange_timeout_is_rejected_at_construction() {
         .expect_err("execution must never panic while constructing its process deadline");
 
     assert_eq!(error, CodexCliConstructionError::InvalidExchangeTimeout);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn unsupported_platform_is_rejected_at_construction() {
+    let config = CodexCliConfig::new(
+        "/codex",
+        "/",
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("process descendants cannot be supervised on this platform");
+
+    assert_eq!(error, CodexCliConstructionError::UnsupportedPlatform);
 }
 
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {

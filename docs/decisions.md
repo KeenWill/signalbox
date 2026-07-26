@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Require Unix process-group supervision for Codex
+
+**Context.** Cancellation and timeout evidence is sound only when the adapter
+can terminate the spawned CLI and its descendants. The implemented supervisor
+uses Unix process groups; its non-Unix fallback could kill only the direct
+process and leave a descendant continuing provider work after terminal evidence
+was returned.
+
+**Decision.** Construct the Codex CLI runtime only on Unix hosts. Keep one
+process group per dispatch and signal that group through interrupt and forced
+termination. A later non-Unix implementation must provide equivalent
+process-tree lifetime control before broadening support.
+
+**Rejected alternatives.** Killing only the direct child violates the
+one-dispatch evidence boundary when a descendant survives. Adding a Windows Job
+Object dependency and implementation is outside this adapter slice. Claiming
+portable supervision from a no-op fallback would overstate implemented behavior.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-26 — Codex CLI generation settings are advisory
 
 **Context.** `ModelSettings` normally names provider-enforced request controls,

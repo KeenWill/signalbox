@@ -90,6 +90,8 @@ pub struct CodexCliPreparedRequest<C> {
 /// Why a [`CodexCliRuntime`] could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexCliConstructionError {
+    /// Process-tree supervision is unavailable on this host platform.
+    UnsupportedPlatform,
     /// No executable path was configured.
     EmptyExecutable,
     /// The executable path is relative and would change meaning under the
@@ -112,6 +114,9 @@ pub enum CodexCliConstructionError {
 impl std::fmt::Display for CodexCliConstructionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedPlatform => {
+                formatter.write_str("Codex CLI runtime requires Unix process-group supervision")
+            }
             Self::EmptyExecutable => formatter.write_str("Codex executable path is empty"),
             Self::RelativeExecutable => {
                 formatter.write_str("Codex executable path must be absolute")
@@ -156,6 +161,9 @@ impl CodexCliRuntime {
     /// Validates adapter configuration without invoking Codex or inspecting
     /// its login store.
     pub fn new(config: CodexCliConfig) -> Result<Self, CodexCliConstructionError> {
+        if !cfg!(unix) {
+            return Err(CodexCliConstructionError::UnsupportedPlatform);
+        }
         if config.executable.as_os_str().is_empty() {
             return Err(CodexCliConstructionError::EmptyExecutable);
         }
@@ -326,6 +334,12 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("--ignore-user-config")
         .arg("--ignore-rules")
         .arg("--strict-config")
+        .arg("--disable")
+        .arg("shell_tool")
+        .arg("--disable")
+        .arg("unified_exec")
+        .arg("--config")
+        .arg("project_doc_max_bytes=0")
         .arg("--sandbox")
         .arg("read-only")
         .arg("--skip-git-repo-check")
