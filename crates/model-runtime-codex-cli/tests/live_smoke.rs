@@ -34,8 +34,8 @@ use std::time::Duration;
 use signalbox_model_runtime::{
     CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
     CredentialReference, DeliveryMode, ExchangeFacts, ModelOperation, ModelRuntime, ModelSettings,
-    PreparationOutcome, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    PreparationDefect, PreparationFailure, PreparationOutcome, ProviderRequestId, RefusalEvidence,
+    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime, SUPPORTED_CODEX_CLI_VERSION,
@@ -193,6 +193,137 @@ async fn assert_pinned_version(executable: &str) {
     );
 }
 
+/// Writes an executable version-probe script and returns its path.
+#[cfg(unix)]
+fn version_probe_fixture(directory: &std::path::Path, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = directory.join("codex-version-probe");
+    std::fs::write(&path, script).expect("the version-probe script is written");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("the version-probe script has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&path, permissions).expect("the version-probe script is runnable");
+    path.to_str()
+        .expect("the version-probe path is UTF-8")
+        .to_string()
+}
+
+/// The gate accepts an executable that reports exactly the pinned version.
+#[cfg(unix)]
+#[tokio::test]
+async fn version_gate_accepts_the_pinned_version() {
+    let directory = tempfile::tempdir().expect("version fixture directory is created");
+    let script = format!("#!/bin/sh\nprintf 'codex-cli %s\\n' '{SUPPORTED_CODEX_CLI_VERSION}'\n");
+    let executable = version_probe_fixture(directory.path(), &script);
+
+    assert_pinned_version(&executable).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic(expected = "only produce compatibility evidence")]
+async fn version_gate_rejects_a_mismatched_version() {
+    let directory = tempfile::tempdir().expect("version fixture directory is created");
+    let executable = version_probe_fixture(
+        directory.path(),
+        "#!/bin/sh\nprintf 'codex-cli %s\\n' '0.0.1-drifted'\n",
+    );
+
+    assert_pinned_version(&executable).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic(expected = "printed no version token")]
+async fn version_gate_rejects_empty_version_output() {
+    let directory = tempfile::tempdir().expect("version fixture directory is created");
+    let executable = version_probe_fixture(directory.path(), "#!/bin/sh\n");
+
+    assert_pinned_version(&executable).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic(expected = "printed non-UTF-8 output")]
+async fn version_gate_rejects_non_utf8_version_output() {
+    let directory = tempfile::tempdir().expect("version fixture directory is created");
+    let executable =
+        version_probe_fixture(directory.path(), "#!/bin/sh\nprintf '\\377\\376\\375'\n");
+
+    assert_pinned_version(&executable).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[should_panic(expected = "exited with")]
+async fn version_gate_rejects_a_failing_probe() {
+    let directory = tempfile::tempdir().expect("version fixture directory is created");
+    let executable = version_probe_fixture(directory.path(), "#!/bin/sh\nexit 3\n");
+
+    assert_pinned_version(&executable).await;
+}
+
+/// The projection returns the capability for a prepared outcome; preparation
+/// is offline here — validation, translation, and request construction only,
+/// with no process spawn.
+#[tokio::test]
+async fn preparation_projection_returns_a_prepared_capability() {
+    let working_directory = tempfile::tempdir().expect("smoke working directory is created");
+    let credential_reference = CredentialReference::new("codex-smoke");
+    let config = CodexCliConfig::new(
+        working_directory.path().join("codex-fixture"),
+        working_directory.path(),
+        credential_reference.clone(),
+    );
+    let runtime = CodexCliRuntime::new(config).expect("smoke runtime configuration is valid");
+    let operation = ModelOperation::new(
+        "codex-smoke".to_string(),
+        credential_reference,
+        RequestedTarget::new(DEFAULT_MODEL),
+        ResolvedTarget::new(DEFAULT_MODEL),
+        vec![ConversationMessage::user_text(PROMPT)],
+        ModelSettings::new(64),
+    );
+
+    let _prepared = require_prepared(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+}
+
+#[test]
+#[should_panic(expected = "smoke preparation was not cancelled")]
+fn preparation_projection_rejects_a_cancelled_outcome() {
+    let _ = require_prepared(PreparationOutcome::Cancelled {
+        correlation: "codex-smoke".to_string(),
+    });
+}
+
+#[test]
+#[should_panic(expected = "smoke preparation failed")]
+fn preparation_projection_rejects_a_failed_outcome() {
+    let _ = require_prepared(PreparationOutcome::Failed {
+        correlation: "codex-smoke".to_string(),
+        failure: PreparationFailure::UnsupportedOperation {
+            detail: "fixture failure".to_string(),
+        },
+    });
+}
+
+#[test]
+#[should_panic(expected = "smoke preparation found a defect")]
+fn preparation_projection_rejects_a_defect_outcome() {
+    let _ = require_prepared(PreparationOutcome::Defect {
+        correlation: "codex-smoke".to_string(),
+        defect: PreparationDefect::RequestConstructionFailed {
+            detail: "fixture defect".to_string(),
+        },
+    });
+}
+
 #[test]
 fn decoded_response_accepts_completion() {
     let exchange = ExchangeFacts {
@@ -243,10 +374,47 @@ fn decoded_response_accepts_refusal_without_completion_material() {
 }
 
 fn variable_or(name: &str, fallback: &str) -> String {
-    match std::env::var(name) {
-        Ok(value) if !value.trim().is_empty() => value,
+    selected_or(std::env::var(name).ok(), fallback)
+}
+
+/// Pure selection behind [`variable_or`]: the caller supplies the variable's
+/// value, so every branch is testable without mutating process-global state.
+/// An unset or non-Unicode variable arrives as `None` and falls back exactly
+/// as a blank one does.
+fn selected_or(value: Option<String>, fallback: &str) -> String {
+    match value {
+        Some(value) if !value.trim().is_empty() => value,
         _ => fallback.to_string(),
     }
+}
+
+#[test]
+fn smoke_variable_selection_prefers_a_populated_override() {
+    assert_eq!(
+        selected_or(Some("codex-override".to_string()), DEFAULT_EXECUTABLE),
+        "codex-override"
+    );
+}
+
+#[test]
+fn smoke_variable_selection_falls_back_for_an_absent_variable() {
+    assert_eq!(selected_or(None, DEFAULT_MODEL), DEFAULT_MODEL);
+}
+
+#[test]
+fn smoke_variable_selection_falls_back_for_a_blank_variable() {
+    assert_eq!(
+        selected_or(Some(String::new()), DEFAULT_MODEL),
+        DEFAULT_MODEL
+    );
+}
+
+#[test]
+fn smoke_variable_selection_falls_back_for_a_whitespace_variable() {
+    assert_eq!(
+        selected_or(Some("   ".to_string()), DEFAULT_EXECUTABLE),
+        DEFAULT_EXECUTABLE
+    );
 }
 
 /// The adapter accepts only an absolute executable path, so the bare-command
@@ -278,7 +446,7 @@ fn resolved_executable(
     }
     std::env::split_paths(search)
         .map(|directory| directory.join(executable))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| executable_file(candidate))
         .unwrap_or_else(|| {
             panic!(
                 "`{executable}` was not found on PATH; set {EXECUTABLE_VARIABLE} \
@@ -287,6 +455,23 @@ fn resolved_executable(
         })
         .to_string_lossy()
         .into_owned()
+}
+
+/// Mirrors shell `PATH` lookup: a regular file that carries no execute bit is
+/// skipped, so a non-executable shadow cannot hide the real executable in a
+/// later directory.
+#[cfg(unix)]
+fn executable_file(candidate: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    candidate.is_file()
+        && std::fs::metadata(candidate)
+            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn executable_file(candidate: &std::path::Path) -> bool {
+    candidate.is_file()
 }
 
 #[test]
@@ -322,16 +507,49 @@ fn executable_resolution_anchors_a_relative_path_to_the_working_directory() {
     );
 }
 
+/// Writes an executable fixture file and returns its path.
+#[cfg(unix)]
+fn executable_fixture(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = directory.join(name);
+    std::fs::write(&path, "#!/bin/sh\n").expect("the executable fixture file is written");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("the executable fixture file has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&path, permissions).expect("the executable fixture is made runnable");
+    path
+}
+
+#[cfg(unix)]
 #[test]
 fn executable_resolution_finds_a_bare_command_on_the_search_path() {
     let empty = tempfile::tempdir().expect("resolution fixture directory is created");
     let populated = tempfile::tempdir().expect("resolution fixture directory is created");
-    let on_path = populated.path().join("codex-on-path");
-    std::fs::write(&on_path, "#!/bin/sh\n").expect("the search-path fixture file is written");
+    let on_path = executable_fixture(populated.path(), "codex-on-path");
     let search = std::env::join_paths([empty.path(), populated.path()])
         .expect("the fixture search path joins");
 
     let resolved = resolved_executable("codex-on-path", empty.path(), &search);
+
+    assert_eq!(resolved, on_path.to_string_lossy());
+}
+
+/// A regular but non-executable file earlier on the search path cannot shadow
+/// the real executable in a later directory, matching shell `PATH` lookup.
+#[cfg(unix)]
+#[test]
+fn executable_resolution_skips_a_non_executable_shadow() {
+    let shadowing = tempfile::tempdir().expect("resolution fixture directory is created");
+    let populated = tempfile::tempdir().expect("resolution fixture directory is created");
+    std::fs::write(shadowing.path().join("codex-shadowed"), "not runnable\n")
+        .expect("the non-executable shadow file is written");
+    let on_path = executable_fixture(populated.path(), "codex-shadowed");
+    let search = std::env::join_paths([shadowing.path(), populated.path()])
+        .expect("the fixture search path joins");
+
+    let resolved = resolved_executable("codex-shadowed", shadowing.path(), &search);
 
     assert_eq!(resolved, on_path.to_string_lossy());
 }
