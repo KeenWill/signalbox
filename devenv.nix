@@ -393,18 +393,23 @@ in
       mkdir -p ${shellArg daemonSocketDirectory}
       chmod 700 ${shellArg daemonSocketDirectory}
 
-      # Deployment-owned credential channel: a file whose bytes are the key.
-      # Naming a path that does not exist is deliberate and safe here; the
-      # read timing and the effect of an absent file are stated in the
-      # credential lifecycle section of
-      # docs/spec/configuration-and-credentials.md.
+      # Deployment-owned credential channels: one file per secret. Both
+      # variables are required at startup, so each is always passed; naming a
+      # path that does not exist is deliberate and safe here, because neither
+      # file is read at startup. The read timing, what the file's bytes mean,
+      # and the effect of an absent file are stated in the credential
+      # lifecycle section of docs/spec/configuration-and-credentials.md. The
+      # defaults resolve against the developer's own home directory, not the
+      # process-scoped HOME the exec below sets.
       key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
+      token_file="''${SIGNALBOX_DEV_GITHUB_TOKEN_FILE:-$HOME/.config/signalbox/github-token}"
 
       exec env ${scrub} \
         HOME=${shellArg daemonHome} \
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
+        GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \
         "$daemon_executable"
     '';
