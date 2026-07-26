@@ -6,8 +6,10 @@ kinds and command family and the tool-loop identity kinds and decision command.
 The behavior lives in `crates/domain` (identity newtypes, command payloads,
 actor attribution, replay equality), `crates/application` (identity generation,
 command boundaries), `crates/persistence` (the owner-global command registry and
-typed record families), and `apps/signalboxd` (telemetry wiring). Storage
-transaction mechanics, locking, and the reconstitution seam are owned by
+typed record families), and `apps/signalboxd` (telemetry wiring); those
+`apps/signalboxd` code homes were verified through PR #258
+(`agent/signalboxd-rename`). Storage transaction mechanics, locking, and the
+reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and

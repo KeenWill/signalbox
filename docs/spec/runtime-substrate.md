@@ -3,9 +3,12 @@
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`, and
 `crates/model-runtime-openai`, verified against the implementing stack through
-PR #183 (`agent/provider-call-security-parser`). It covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the two provider adapters; and the in-process
+PR #183 (`agent/provider-call-security-parser`); the `signalboxd` names this
+page states for the composition root, its telemetry, and the production
+`FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`). It covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the two provider adapters; and the in-process
 credential-access boundary. Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline

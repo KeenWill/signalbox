@@ -6,7 +6,9 @@ eligibility derivation, the scheduler, and startup recovery. Code homes:
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
-`lock_inventory}.rs` and its migrations, and `apps/signalboxd/src/main.rs`.
+`lock_inventory}.rs` and its migrations, and `apps/signalboxd/src/main.rs`. The
+`signalboxd` composition-root name and that `apps/signalboxd` code home were
+verified through PR #258 (`agent/signalboxd-rename`).
 [docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
 reference its rows without restating them. Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). Sibling

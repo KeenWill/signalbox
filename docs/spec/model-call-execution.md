@@ -13,8 +13,10 @@ storage protocol and the outbox in
 [persistence-protocol](persistence-protocol.md); the typed model-runtime layer
 and daemon runtime in [runtime-substrate](runtime-substrate.md); model
 configuration and credentials in
-[configuration-and-credentials](configuration-and-credentials.md). Invariant
-tags cite [docs/invariants.md](../invariants.md).
+[configuration-and-credentials](configuration-and-credentials.md). The
+`apps/signalboxd` supervision and `signalbox-debug` code homes this page names
+were verified through PR #258 (`agent/signalboxd-rename`). Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 

@@ -1,18 +1,20 @@
 # Process protocol
 
 The baseline Signalbox process protocol version one and the terminal client that
-consumes it were verified through PR #177 (`agent/terminal-client`). The
-conversation-import stack adds protocol version two for the conservative
-imported transcript-snapshot projection described here. The tool-loop stack adds
-protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. The session-metadata stack adds
-protocol version four for paginated metadata listing, single-session metadata
-reads, and durable complete-snapshot replacement; versions one through three
-retain their closed request and message vocabularies unchanged. The
-implementation in this stack speaks versions one through four, and its terminal
-client continues to select version three. This page is the normative boundary
-between a local client process and `signalboxd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+consumes it were verified through PR #177 (`agent/terminal-client`); the
+`signalboxd` binary name this page states for the serving process was verified
+through PR #258 (`agent/signalboxd-rename`). The conversation-import stack adds
+protocol version two for the conservative imported transcript-snapshot
+projection described here. The tool-loop stack adds protocol version three for
+tool-bearing projection; versions one and two retain their closed message
+vocabularies unchanged. The session-metadata stack adds protocol version four
+for paginated metadata listing, single-session metadata reads, and durable
+complete-snapshot replacement; versions one through three retain their closed
+request and message vocabularies unchanged. The implementation in this stack
+speaks versions one through four, and its terminal client continues to select
+version three. This page is the normative boundary between a local client
+process and `signalboxd`; domain values, PostgreSQL records, and wire messages
+remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by

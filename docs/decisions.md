@@ -28,6 +28,10 @@ vision, glossary, scenarios, invariant text, README, and config comments — to
 vocabulary. Hub-named code identifiers (`SingleHubGuard`, `run_hub`, the
 persistence `hub_fence` module) and migration-committed SQL names stay for the
 recorded follow-on vocabulary pass, so cited code homes keep matching source.
+The native client's stored keychain-account and defaults-key literals
+(`hub-api-key`, `hub-url`) stay permanently on PR #238's recorded ground:
+renaming a stored-state identifier orphans already-saved settings and buys
+nothing, so only the Swift constants naming them carry the new vocabulary.
 
 **Rejected alternatives.** Keeping the package name `signalbox-hubd` with only a
 binary-target rename would preserve dependency-graph continuity but leave the
@@ -37,8 +41,8 @@ vocabulary sweep the backlog scopes separately.
 
 **Affects.** `apps/signalboxd`, `apps/client` imports, the workspace member list
 and `Cargo.lock`, `.github/workflows/rust.yml`,
-`config/signalboxd.example.toml`, the living documents naming the server
-process, and the native client's stored server-settings key names.
+`config/signalboxd.example.toml`, and the living documents naming the server
+process.
 
 ## 2026-07-25 — Bind blocked publication to its attempted reservation
 
