@@ -369,11 +369,11 @@ probe. Preparation validates and renders the complete operation, writes the
 non-secret response-envelope schema to a private temporary file, and returns a
 one-shot capability without starting a process. Execution consumes it as exactly
 one `codex exec --json --ephemeral` spawn, passes the full rendered frontier on
-stdin, selects the exact resolved model, ignores user configuration and rule
-files, and uses the read-only CLI sandbox. It neither resumes nor persists a
-Codex thread. Why: a fresh ephemeral invocation keeps provider session state out
-of memory and makes the caller's complete handed context the sole semantic
-input.
+stdin, requires an absolute configured executable path, selects the exact
+resolved model, ignores user configuration and rule files, and uses the
+read-only CLI sandbox. It neither resumes nor persists a Codex thread. Why: a
+fresh ephemeral invocation keeps provider session state out of memory and makes
+the caller's complete handed context the sole semantic input.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
@@ -389,13 +389,16 @@ never completion.
 
 `turn.completed` is success evidence only when the last completed agent-message
 item decodes as the adapter's response envelope and satisfies the declared tool
-and structured-output constraints. The envelope distinguishes completion from
-refusal. Buffered delivery retains its content without deltas; streamed delivery
-emits bounded CLI reasoning items and the final envelope content as ordered
-deltas before the same terminal evidence. Tool argument JSON remains
-byte-verbatim when it is credential-shape clean. Usage comes only from
-`turn.completed`; an omitted cache counter remains unreported rather than
-becoming a reported zero.
+and structured-output constraints. The decoded envelope is checked against the
+shared JSON nesting bound independently of the escaped outer event. The envelope
+distinguishes completion from refusal. Buffered delivery retains its content
+without deltas; streamed delivery emits bounded CLI reasoning items and the
+final envelope content as ordered deltas before the same terminal evidence. Tool
+argument JSON remains byte-verbatim when it is credential-shape clean. Usage
+comes only from `turn.completed`; an omitted cache counter remains unreported
+rather than becoming a reported zero. Preparation rejects a zero output-token
+limit, non-finite sampling values, temperature outside zero through two, and
+top-p outside zero through one.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Cancellation before spawn is proven unsent.
@@ -404,9 +407,15 @@ positive grace, and force-kills only as fallback; either path is
 `BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
 starts immediately after successful spawn, governs stdin transfer, stdout
 decoding, and process exit, then force-kills the original process as typed
-boundary loss. Control signals take priority over continuously ready stdout. The
-offline test binary exercises all process and evidence paths without a live CLI
-or network.
+boundary loss. Ready stdout is polled before simultaneous control signals, then
+the decoder drains only the current bounded reader batch before synchronously
+rechecking control, so continuously ready stdout cannot starve it. Once a
+provider terminal marker is observed, a later cancellation cannot replace that
+definitive evidence, but the process deadline continues to govern exit and
+cleanup. The adapter also bounds stderr cleanup after the direct child exits and
+terminates the original process group when an inherited stderr handle outlives
+the deadline. The offline test binary exercises all process and evidence paths
+without a live CLI or network.
 
 ## Credential-access boundary
 
@@ -445,9 +454,11 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   logs, or transports the CLI credential store. Because no credential value
   crosses the adapter boundary to seed exact-value redaction, CLI-controlled
   text and JSON are recursively scrubbed by credential-bearing member names and
-  credential token shapes before observations or evidence leave the crate. Why:
-  subscription authentication remains wholly inside the intended CLI control
-  surface while credential-shaped reflection still fails closed.
+  credential token shapes before observations or evidence leave the crate;
+  credential-bearing authorization and cookie header shapes consume their whole
+  line value. Why: subscription authentication remains wholly inside the
+  intended CLI control surface while credential-shaped reflection still fails
+  closed.
 
 ## Operator failure taxonomy
 

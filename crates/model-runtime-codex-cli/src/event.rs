@@ -175,6 +175,10 @@ impl<C: Clone> EventDecoder<C> {
         boundary_loss(self.exchange, self.usage, cause)
     }
 
+    pub(crate) fn terminal_observed(&self) -> bool {
+        self.terminal.is_some()
+    }
+
     fn completed(mut self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
         let Some(agent_message) = self.agent_message.take() else {
             return boundary_loss(
@@ -185,6 +189,15 @@ impl<C: Clone> EventDecoder<C> {
                 },
             );
         };
+        if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
+            return boundary_loss(
+                self.exchange,
+                self.usage,
+                LossCause::ResponseUnintelligible {
+                    detail: format!("last agent message exceeds JSON nesting bounds: {error}"),
+                },
+            );
+        }
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
             Err(error) => {

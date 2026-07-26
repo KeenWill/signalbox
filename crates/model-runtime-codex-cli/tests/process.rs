@@ -16,7 +16,9 @@ use signalbox_model_runtime::{
     StructuredOutputContract, TerminalEvidence, TokenUsage, ToolChoice, ToolDefinition, ToolName,
     decode_structured,
 };
-use signalbox_model_runtime_codex_cli::{CodexCliConfig, CodexCliRuntime};
+use signalbox_model_runtime_codex_cli::{
+    CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
+};
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -149,6 +151,21 @@ async fn an_undecodable_last_agent_message_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause)
             .contains("last agent message")
+    );
+}
+
+#[tokio::test]
+async fn deeply_nested_decoded_envelope_is_boundary_loss() {
+    let result = execute_scenario(
+        "deep_agent_message",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause).contains("JSON nesting")
     );
 }
 
@@ -514,6 +531,33 @@ async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
 }
 
 #[tokio::test]
+async fn buffered_terminal_output_wins_over_simultaneous_cancellation() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "completion_before_cancellation",
+            DeliveryMode::Streamed,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-completion-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        completed(&report.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
 async fn whole_process_timeout_is_boundary_loss_without_respawn() {
     let result = execute_scenario_with_timeout(
         "hang",
@@ -571,6 +615,24 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
         "Codex CLI process exceeded its exchange timeout"
     );
     assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
+async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
+    let result = execute_scenario_with_timeout(
+        "inherited_stderr",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
 }
 
 /// INV-035: credential-shaped CLI text and tool JSON are redacted before
@@ -640,6 +702,105 @@ async fn non_object_structured_schema_fails_before_spawn() {
 
     assert!(unsupported_detail(failure).contains("must describe an object"));
     assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn undeclared_named_choice_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.tool_choice = ToolChoice::Named(ToolName::new("missing"));
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("no declared tool"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn zero_output_token_limit_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.max_output_tokens = 0;
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("at least 1"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn non_finite_temperature_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.temperature = Some(f64::NAN);
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("finite number"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn out_of_domain_top_p_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.top_p = Some(1.1);
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("from 0 through 1"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[test]
+fn relative_executable_is_rejected_at_construction() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let config = CodexCliConfig::new(
+        "codex",
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("relative executable meaning would change under the child directory");
+
+    assert_eq!(error, CodexCliConstructionError::RelativeExecutable);
 }
 
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
@@ -818,7 +979,7 @@ fn read_optional(path: std::path::PathBuf) -> String {
 }
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
-    CancellationSignal::when(async move {
+    let watcher = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if tokio::fs::read_to_string(&path)
@@ -833,7 +994,12 @@ fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
             }
         })
         .await
-        .expect("the fake CLI records its spawn before cancellation");
+        .expect("the fake CLI records the awaited marker before cancellation");
+    });
+    CancellationSignal::when(async move {
+        watcher
+            .await
+            .expect("the cancellation-record watcher completes");
     })
 }
 

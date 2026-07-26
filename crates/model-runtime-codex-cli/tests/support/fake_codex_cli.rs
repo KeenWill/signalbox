@@ -4,6 +4,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
 mod fixtures;
@@ -58,6 +59,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             agent_message("message-last", "not a response envelope");
+            completed();
+        }
+        "deep_agent_message" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-deep","name":"{}","arguments":{}}}]}}"#,
+                fixtures::TOOL_NAME,
+                deeply_nested_arguments()
+            ));
             completed();
         }
         "tool_call" => {
@@ -134,6 +143,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed_without_cache();
+        }
+        "completion_before_cancellation" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            std::fs::write("fake-codex-completion-ready", "ready\n")?;
+        }
+        "inherited_stderr" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()?;
         }
         "stderr_redaction" => {
             eprintln!(
@@ -219,6 +250,14 @@ fn completed_without_cache() {
         fixtures::INPUT_TOKENS,
         fixtures::OUTPUT_TOKENS
     ));
+}
+
+fn deeply_nested_arguments() -> String {
+    let mut value = "{}".to_string();
+    for _ in 0..130 {
+        value = format!(r#"{{"nested":{value}}}"#);
+    }
+    value
 }
 
 fn failed(message: &str) -> ! {
