@@ -5206,7 +5206,7 @@ pub trait ToolExecutionTransaction {
 
 ## domain: runner
 
-````rust
+```rust
 pub enum RunnerDomainError {
     Empty,
     ContainsNull,
@@ -5542,6 +5542,9 @@ pub struct CredentialProfileGrantReplacement {
 }
 pub struct CredentialProfileChange {
     /* public before-and-after facts */
+}
+```
+
 ## domain: review_workflow
 
 ```rust
@@ -6301,7 +6304,7 @@ pub enum ReviewExternalLinkTransitionFailure {
     NotAttached,
     NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
 }
-````
+```
 
 ## Inventory
 
