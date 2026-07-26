@@ -108,13 +108,14 @@ alone afterwards so local edits survive. Wipe the whole instance with
 `.devenv/state/dev-instance/signalboxd.toml`.
 
 Two things are worth knowing before editing the seeded catalog or reaching for
-the socket. `provider_model` must be the exact canonical identity the provider
-echoes back — the dated `claude-haiku-4-5-20251001`, not an undated alias, which
-makes a model call commit ambiguously, stops the daemon, and wedges the session
-it was serving. And the process socket lives at
-`$DEVENV_RUNTIME/signalbox/signalboxd.sock` rather than directly in the runtime
-directory, because the daemon accepts only a socket parent meeting the ownership
-and permission rules the
+the socket. The seeded `provider_model` is the dated
+`claude-haiku-4-5-20251001`; the spelling that value must take is stated in
+[configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),
+and what happens when the provider reports a different one in
+[model-call execution](docs/spec/model-call-execution.md#provider-observation-classification).
+And the process socket lives at `$DEVENV_RUNTIME/signalbox/signalboxd.sock`
+rather than directly in the runtime directory, because the daemon accepts only a
+socket parent meeting the ownership and permission rules the
 [process protocol](docs/spec/process-protocol.md#transport-and-trust-boundary)
 states and creates neither that directory nor those permissions itself; the
 daemon process makes it before binding. Point the terminal client there with

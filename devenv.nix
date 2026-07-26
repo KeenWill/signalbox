@@ -310,6 +310,25 @@ in
           python3 -c "import json, sys; print([message['executable'] for message in map(json.loads, sys.stdin) if message.get('executable')][-1])"
       )"
 
+      # Resolving the artifact says where Cargo put it, not whether this host
+      # can run it: a configured foreign target with a working cross toolchain
+      # builds successfully and only the exec below fails. Compare against the
+      # two layouts a host build produces — plain, and an explicitly named host
+      # target — and refuse anything else with an actionable message.
+      target_directory="$(
+        cargo metadata --no-deps --format-version 1 |
+          python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])"
+      )"
+      host_target="$(rustc -vV | sed -n 's/^host: //p')"
+      if [ "$daemon_executable" != "$target_directory/debug/signalboxd" ] \
+         && [ "$daemon_executable" != "$target_directory/$host_target/debug/signalboxd" ]; then
+        echo "dev instance: cargo built signalboxd for a target this host cannot" \
+             "run:" "$daemon_executable" >&2
+        echo "dev instance: unset build.target and CARGO_BUILD_TARGET, or set" \
+             "them to" "$host_target" >&2
+        exit 1
+      fi
+
       # Recreated here rather than in the provisioning task because the
       # runtime directory does not survive between runs. Mode 0700 is exact:
       # the daemon rejects anything else, including the 0755 devenv gives its
