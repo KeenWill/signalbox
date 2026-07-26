@@ -33,9 +33,9 @@ ship an endpoint or state ahead of its semantics.
 
 ## Terminal stop and steer verbs [blocked-on: client stack merge] [size: S]
 
-Owns: `apps/client`, `crates/process-protocol` (additive request kinds), hubd
-server handlers. Collides-with: the client stack files. Steering and
-proof-bearing stops are landed hub-side with no client verb; this is the
+Owns: `apps/client`, `crates/process-protocol` (additive request kinds),
+signalboxd server handlers. Collides-with: the client stack files. Steering and
+proof-bearing stops are landed daemon-side with no client verb; this is the
 cheapest capability on the board.
 
 ## Frontier scaling fix [ready] [size: M]
@@ -46,9 +46,9 @@ frontier/projection loads.
 
 ## OpenAI composition wiring [blocked-on: client stack merge] [size: S]
 
-Owns: hubd configuration/composition, the model catalog example. Collides-with:
-`apps/hubd`. The merged OpenAI adapter is unreachable; the catalog admits only
-one provider.
+Owns: signalboxd configuration/composition, the model catalog example.
+Collides-with: `apps/signalboxd`. The merged OpenAI adapter is unreachable; the
+catalog admits only one provider.
 
 ## Model catalog automation [blocked-on: OpenAI composition wiring; the wrapped-CLI drift-defense scaffolding] [size: S-M]
 
@@ -77,17 +77,22 @@ compatibility smoke also enumerates the CLI's advertised models and surfaces
 catalog diffs in that same PR, so a CLI update shipping new models forces the
 catalog question at the moment of change.
 
-## De-hub naming pass [blocked-on: in-flight stacks landing] [size: S-M]
+## De-hub naming pass [server rename executed; remainder blocked-on: in-flight stacks landing] [size: S]
 
-Owns: the `apps/hubd` rename (binary and directory to `signalboxd`) and "hub"
-vocabulary across code, spec prose, and config. Collides-with: broad — hub
-vocabulary reaches `crates/process-protocol`, persistence internals, and most
-`docs/spec/` pages, not just `apps/hubd` — so it runs effectively solo and waits
-for the current stacks. "Hub" survives only as occasional prose metaphor, never
-as the name of a binary, crate, module, or protocol concept. The Swift client's
-naming is not this entry's job — it was renamed to Signalbox-prefixed names in
-its own pass, and the native client rewire owns any protocol-driven renames that
-remain.
+The server rename executed on 2026-07-25 (`agent/signalboxd-rename`, recorded in
+`docs/decisions.md`): crate, binary, and directory are `signalboxd`, and "hub"
+vocabulary left the living docs and config. Owns what remains: hub-named code
+identifiers and comment vocabulary — `single_hub`/`SingleHubGuard`,
+`FencedHubDatabase`, `run_hub`, `hub.sock` test fixtures, the persistence
+`hub_fence` module, and "hub-minted"/"hub-resolved" comment vocabulary across
+crates; whether the migration-committed `hub_fence_state` SQL names follow is
+the owner's call (needs a new migration). Collides-with: broad — that vocabulary
+reaches `crates/process-protocol`, persistence internals, and `apps/signalboxd`
+— so it runs effectively solo and waits for the current stacks. "Hub" survives
+only as occasional prose metaphor, never as the name of a binary, crate, module,
+or protocol concept. The Swift client's naming is not this entry's job — it was
+renamed to Signalbox-prefixed names in its own pass, and the native client
+rewire owns any protocol-driven renames that remain.
 
 Owner direction, 2026-07-25: the point previously deferred here is settled — the
 server renames to `signalboxd`, and future runner processes are a separate
@@ -171,36 +176,37 @@ open PR. No longer an unstarted item exposed to selection.
 ## Subscription-backed provider runtimes (three tracks)
 
 New `ModelRuntime` adapters that spend subscription capacity instead of API
-billing. A pure adapter crate that adds no hubd wiring collides with runtime
-crates only — parallel-safe against everything else and against each other. The
-exception is provider dispatch: whichever runtime track wires it first (see
-below) also touches hubd composition, and therefore collides with the OpenAI
-composition wiring entry and any other hubd-composition work. One caveat: every
-runtime-track crate edits the root `Cargo.toml` workspace-member list and
-`Cargo.lock`, and the provider-security track also touches `Cargo.lock` (reqwest
-upgrade). That is a light merge-coordination point (lockfile conflicts), not a
-semantic collision — land them in sequence or expect trivial lockfile rebases.
-The runtime trait is rated stable (two-method signature byte-stable since early
-on; evidence vocabulary grows additively), so adapters written now are unlikely
-to reshape. Prior art exists in the owner's own prior subprocess-based provider
-work and is supplied per session at launch, not pointed at here; whatever CLI
-argv, JSON-event parsing, and process-supervision it carries, its turn-shaped
-semantics must be tightened to Signalbox's evidence-shaped contract
-(exit-0-without-a-terminal-marker is BoundaryLoss, not success). Open design
-tensions the track's spec-diff must resolve, not decide here: (1) a subprocess
-is one physical request the adapter cannot prove is retry-free internally, so
-the spec-diff has to reconcile that boundary with the one-physical-request
-invariants (INV-025/026); (2) for the wrapped-CLI tracks below, auth rides the
-CLI's ambient subscription login, so the spec-diff has to reconcile that with
-the credential-reference boundary and per-request value durability the
-`ModelRuntime` contract pins (recovered calls, logged-in-account changes).
+billing. A pure adapter crate that adds no signalboxd wiring collides with
+runtime crates only — parallel-safe against everything else and against each
+other. The exception is provider dispatch: whichever runtime track wires it
+first (see below) also touches signalboxd composition, and therefore collides
+with the OpenAI composition wiring entry and any other signalboxd-composition
+work. One caveat: every runtime-track crate edits the root `Cargo.toml`
+workspace-member list and `Cargo.lock`, and the provider-security track also
+touches `Cargo.lock` (reqwest upgrade). That is a light merge-coordination point
+(lockfile conflicts), not a semantic collision — land them in sequence or expect
+trivial lockfile rebases. The runtime trait is rated stable (two-method
+signature byte-stable since early on; evidence vocabulary grows additively), so
+adapters written now are unlikely to reshape. Prior art exists in the owner's
+own prior subprocess-based provider work and is supplied per session at launch,
+not pointed at here; whatever CLI argv, JSON-event parsing, and
+process-supervision it carries, its turn-shaped semantics must be tightened to
+Signalbox's evidence-shaped contract (exit-0-without-a-terminal-marker is
+BoundaryLoss, not success). Open design tensions the track's spec-diff must
+resolve, not decide here: (1) a subprocess is one physical request the adapter
+cannot prove is retry-free internally, so the spec-diff has to reconcile that
+boundary with the one-physical-request invariants (INV-025/026); (2) for the
+wrapped-CLI tracks below, auth rides the CLI's ambient subscription login, so
+the spec-diff has to reconcile that with the credential-reference boundary and
+per-request value durability the `ModelRuntime` contract pins (recovered calls,
+logged-in-account changes).
 
-The FIRST of these to wire also introduces the provider-dispatch mechanism hubd
-lacks today (selection is currently two hardcoded "anthropic" points); an
-adapter-only PR does not touch hubd, but the first second-provider wiring PR
-must add the enum/factory. The adapter-author conformance checklist and the
-loopback test pattern from the runtime-adapter study are the reusable body of
-each goal prompt.
+The FIRST of these to wire also introduces the provider-dispatch mechanism
+signalboxd lacks today (selection is currently two hardcoded "anthropic"
+points); an adapter-only PR does not touch signalboxd, but the first
+second-provider wiring PR must add the enum/factory. The adapter-author
+conformance checklist and the loopback test pattern from the runtime-adapter
+study are the reusable body of each goal prompt.
 
 Further prior art, for the design rather than the code: an earlier unmerged
 prototype from the owner holds a working dual-runtime reference —
@@ -292,8 +298,8 @@ starting. Codex source is Apache-2.0 (attribution/patent terms).
 
 Owns: an account concept and account-aware dispatch/selection policy, account
 cooldown state, and additive evidence enrichment (capturing provider retry-after
-material). Collides-with: hubd composition/dispatch — the same surface as the
-first subscription wiring and the OpenAI composition wiring — and scheduler
+material). Collides-with: signalboxd composition/dispatch — the same surface as
+the first subscription wiring and the OpenAI composition wiring — and scheduler
 policy surfaces. Generalizes the dispatch concern of the subscription-runtimes
 entry above: spread sessions and calls across multiple provider accounts —
 several API accounts per provider and several subscription accounts (for the
@@ -368,7 +374,7 @@ rewire's inventory). The repo is public, so macOS runners are free.
 
 Owns: an E2E workflow booting the server with Postgres and driving the rewired
 native client against it (scripted provider, no real credentials).
-Collides-with: CI config and `apps/hubd` composition. Exercises the
+Collides-with: CI config and `apps/signalboxd` composition. Exercises the
 client-server protocol as CI evidence rather than manual smoke.
 
 ## Tool loop foundation [in-flight] [size: XL]
@@ -378,11 +384,12 @@ Owner-flagged: the next major milestone. The owner design pass completed on
 
 Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra
-(AwaitingApproval storage and flow), persistence slice, first hub-local tool.
+(AwaitingApproval storage and flow), persistence slice, first daemon-local tool.
 Collides-with: everything turn-side — runs solo. The gate for the entire tool
 economy (catalog, permissions, confirm/deny, shared tools, delegation). This
-foundation is the hub-side approval algebra plus the first hub-local tool; the
-client approval surface is a separate later milestone whose UX is settled then.
+foundation is the daemon-side approval algebra plus the first daemon-local tool;
+the client approval surface is a separate later milestone whose UX is settled
+then.
 
 Cross-reference: the tool registry this foundation establishes is where two
 later per-tool declarations land — admissible execution loci and effect class
@@ -497,9 +504,9 @@ account-pools entry above records that boundary and does not own this.
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 
 Owns: outbox dispatcher consumers, additive monitor protocol surface.
-Collides-with: dispatcher wiring. Hub-wide fleet view fed by the outbox: session
-summaries, needs-attention triage, the operator escape hatch. The future web
-surface's backbone.
+Collides-with: dispatcher wiring. Daemon-wide fleet view fed by the outbox:
+session summaries, needs-attention triage, the operator escape hatch. The future
+web surface's backbone.
 
 ## Channel integrations [blocked-on: client stack merge; actor-admissibility decision (inbound path)] [size: M]
 
@@ -739,8 +746,8 @@ client. Bolted-on shared-key auth is the anti-pattern to avoid.
 
 ## Web surface [blocked-on: monitor stream; remote transport] [size: L]
 
-Owns: new web client. Collides-with: nothing hub-side once its feeds exist. Owns
-the operator/monitor role; needs-attention triage first.
+Owns: new web client. Collides-with: nothing daemon-side once its feeds exist.
+Owns the operator/monitor role; needs-attention triage first.
 
 ## OpenAI-compatible facade [blocked-on: remote transport] [size: M]
 
