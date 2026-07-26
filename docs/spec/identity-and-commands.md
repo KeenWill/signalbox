@@ -188,19 +188,30 @@ records keep each command's comparison payload and result reviewable and
 constraint-checked instead of delegating meaning to a serializer; there is no
 universal JSONB or byte-blob payload anywhere.
 
-For `SubmitInput`, a second deferred constraint trigger
-(`submit_input_command_requires_correlated_effect`, migration `202607180003`,
-redefined for occupied-slot pending steering in `202607180005`) enforces effect
-correlation at every transaction boundary: an `applied` turn-origin row must
-agree field-by-field with exactly one committed `accepted_input` plus
-`queued_input_origin` effect, including the frozen model configuration; an
-applied `next_safe_point` row instead initially correlates with exactly one
-`pending_steering` accepted input naming the expected active turn, with no
-`queued_input_origin` effect permitted; a `rejected` row must have no
-accepted-input effect; and an `unknown_model_alias` rejection must match real
-alias evidence in `session_defaults_version`. The next-safe-point receipt
-remains immutable when that accepted input later becomes consumed steering or a
-reclassified origin. Equal replay returns its original
+For `SubmitInput`, two deferred constraint triggers partition effect correlation
+at every transaction boundary. The original
+`submit_input_command_requires_correlated_effect` trigger was introduced in
+migration `202607180003`, revised for occupied-slot pending steering in
+`202607180005`, and rewired in `202607220005` to the renamed
+`require_submit_input_legacy_effect_correlation` function. It covers every row
+except an applied interrupt and the two interrupt-evidence rejections. An
+`applied` ordinary turn-origin row must agree field-by-field with exactly one
+committed `accepted_input` plus `queued_input_origin` effect, including the
+frozen model configuration; an applied `next_safe_point` row instead initially
+correlates with exactly one `pending_steering` accepted input naming the
+expected active turn, with no `queued_input_origin` effect permitted. Other
+rejected rows have no accepted-input effect, and an `unknown_model_alias`
+rejection must match real alias evidence in `session_defaults_version`.
+
+Migration `202607220005` adds `submit_input_command_requires_interrupt_effect`.
+Its guarded trigger exclusively checks applied interrupts plus
+`safe_point_unavailable_while_stopping` and `interrupt_already_applied`
+rejections. An applied interrupt must correlate its accepted input and immediate
+successor with the stopped predecessor attempt; one of those rejections must
+instead correlate with exactly one already-applied interrupt for the actual
+active turn and must create no accepted-input effect of its own. The
+next-safe-point receipt remains immutable when its accepted input later becomes
+consumed steering or a reclassified origin. Equal replay returns its original
 `Applied(PendingSteering)` result only after the accepted input's current
 lifecycle passes the correlation checks owned by
 [persistence-protocol](persistence-protocol.md). Why: replay returns recorded

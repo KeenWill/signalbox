@@ -11,9 +11,11 @@ law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
 semantic entries and frontiers in
 [sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
 outbox in [persistence-protocol](persistence-protocol.md); the typed
-model-runtime layer and daemon runtime in
-[runtime-substrate](runtime-substrate.md); model configuration and credentials
-in [configuration-and-credentials](configuration-and-credentials.md). The
+model-runtime layer in [runtime-substrate](runtime-substrate.md); daemon
+startup, scheduling, and shutdown composition in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
+configuration and credentials in
+[configuration-and-credentials](configuration-and-credentials.md). The
 `apps/signalboxd` supervision and `signalbox-debug` code homes this page names
 were verified through PR #258 (`agent/signalboxd-rename`); the
 [provider-target identity](#provider-target-identity) rule and the sanitized
@@ -253,9 +255,11 @@ no effect, so retrying it cannot duplicate anything.
 Commit ambiguity has an explicit detection rule (`commit_failure_is_ambiguous`,
 `crates/persistence/src/model_execution.rs`): a database error with SQLSTATE
 08007 or 40003, or any non-database error while awaiting `COMMIT`, is ambiguous;
-a server-rejected commit is a plain non-ambiguous failure; and a unique
-violation surfacing only at `COMMIT` (the identity constraints are deferred) is
-still classified as an identity collision and retried.
+a server-rejected commit is a plain non-ambiguous failure. The identity
+constraints are immediate, so their unique violations surface during statement
+execution. `ModelCallRepositoryError::from_database` checks those named
+constraint violations before generic database or commit-ambiguity
+classification, preserving identity collision as the only retryable failure.
 
 Ambiguous commits are never resolved by replay:
 

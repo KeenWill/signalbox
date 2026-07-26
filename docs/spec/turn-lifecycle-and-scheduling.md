@@ -26,9 +26,12 @@ than restating its material.
 ## Turns, states, and the single active slot
 
 A turn is one durable logical request for one conversational outcome from one
-accepted-input origin under one frozen effective configuration (configuration
-freeze is [identity-and-commands](identity-and-commands.md) scope). The
-implemented slice stores three lifecycle states per turn
+accepted-input origin under one frozen effective configuration. Model-selection
+freeze is
+[configuration-and-credentials](configuration-and-credentials.md#model-selection-validation)
+scope; defaults-epoch binding is
+[sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and

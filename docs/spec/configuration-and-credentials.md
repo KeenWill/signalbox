@@ -163,8 +163,9 @@ credential presence is never consulted (INV-008):
   consultation. An alias request consults an acceptance-time definition
   resolver; an unknown alias is a recorded `UnknownModelAlias` rejection, not an
   error. The live process runtime supplies the immutable `HubModelConfiguration`
-  alias catalog to the acceptance transaction; acceptance semantics are
-  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) material.
+  alias catalog to the acceptance transaction. These model-selection freeze
+  semantics are this page's material; the surrounding input-delivery lifecycle
+  is [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send
