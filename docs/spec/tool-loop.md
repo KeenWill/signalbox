@@ -446,17 +446,22 @@ tools:
   compact `{"text": ...}` object. Its permission default is `Auto` and its
   effect class is `EffectFree`: execution observes no external state.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
-  User information and fragments are invalid. Its permission default is `Auto`;
-  its effect class is `ExternalEffect` because the remote server can observe a
-  GET. One dispatch performs at most one credential-free request: ambient
-  proxies, redirects, protocol retries, and idle reuse are disabled, TLS uses
-  rustls with a TLS 1.2 floor, and a 15-second timeout bounds the whole
-  exchange. The executor retains at most 64 KiB of response bytes and at most
-  1,024 bytes of a valid content-type header. Success is compact JSON containing
-  the exact requested `url`, numeric `status`, optional `content_type`, a lossy
-  UTF-8 `body`, and `truncated`; transport failures return only fixed sanitized
-  details. Truncation stops body consumption and never follows or issues another
-  request.
+  User information, fragments, and direct non-public IP destinations are
+  invalid. Before dispatch, a domain must resolve to between one and 32
+  addresses and every address must be public; the admitted addresses are pinned
+  into the request client so connection setup cannot substitute a later DNS
+  answer. Its permission default is `Auto`; its effect class is `ExternalEffect`
+  because the remote server can observe a GET. One dispatch performs at most one
+  credential-free request: ambient proxies, redirects, protocol retries, and
+  idle reuse are disabled, TLS uses rustls with a TLS 1.2 floor, and a 15-second
+  timeout bounds resolution and the exchange. The executor retains at most 64
+  KiB of response bytes and at most 1,024 bytes of a valid content-type header.
+  Success is compact JSON containing the exact requested `url`, numeric
+  `status`, optional `content_type`, a lossy UTF-8 `body`, and `truncated`.
+  Resolution and client-setup failure before dispatch returns a fixed sanitized
+  known failure; timeout, transport, or body loss after dispatch begins is
+  commit-ambiguous. Truncation stops body consumption and never follows or
+  issues another request.
 - `session_status_update` requires one complete existing session-metadata shape:
   nullable `title`, complete `tags`, complete string-to-string `attributes`, and
   `archived`. Partial patches are invalid. The invocation's session is the
@@ -464,8 +469,11 @@ tools:
   default is `Confirm` and its effect class is `ExternalEffect`. Execution
   derives a durable command identity from the physical tool attempt, attributes
   the command and last-writer stamp to the exact `ToolRequestId`, and calls the
-  existing metadata replacement application service. Success returns the
-  committed session identity and snapshot content as compact JSON;
+  existing metadata replacement application service. Argument validation admits
+  the exact compact success receipt under the independent result-text bound
+  before the write can begin. Success requires the writer's applied snapshot to
+  match the admitted session and replacement, then returns that session identity
+  and snapshot content as compact JSON; mismatch is a daemon defect,
   missing-session rejection is a fixed known failure, and ambiguous commit
   acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
   mechanics remain owned by
