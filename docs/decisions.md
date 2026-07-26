@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Add sccache as the devenv shared compiler cache
+
+**Context.** Every checkout and worktree cold-builds the full dependency graph,
+which takes tens of minutes on the primary development machine, and concurrent
+agent worktrees repeat identical dependency compilation. Continuous integration
+already caches its target directory; local builds share nothing across
+worktrees.
+
+**Decision.** The developer environment provides sccache and sets
+`RUSTC_WRAPPER` inside the devenv shell. Dependency compilation is cached once
+per machine, in sccache's per-user default cache directory (`SCCACHE_DIR`
+overrides), and reused across checkouts and worktrees; workspace crates keep
+incremental compilation and pass through uncached. No machine-specific path is
+committed. Continuous integration does not enter the devenv environment and
+keeps its existing target-directory cache.
+
+**Rejected alternatives.** A committed `.cargo/config.toml` imposes the wrapper
+on every consumer, including CI and machines without sccache installed. A shared
+`CARGO_TARGET_DIR` across worktrees serializes concurrent builds on the
+target-directory lock and collides on profiles and features. Adding sccache to
+CI duplicates the existing target-directory cache and, without a shared remote
+backend, every job would start against a cold cache.
+
+**Affects.** `devenv.nix`, the build-tooling guidance in `AGENTS.md`, and build
+behavior inside the devenv shell only; no Cargo dependency, workspace
+configuration, or CI behavior changes.
+
 ## 2026-07-26 — Renumber the review-workflow migration after main advanced
 
 **Context.** The review-workflow foundation reserved the `2026072602xx` block
@@ -135,6 +162,57 @@ reverse the recorded wrap direction.
 **Affects.** `ModelSettings` contract comments, the Codex CLI section of
 [runtime-substrate](spec/runtime-substrate.md), and
 `crates/model-runtime-codex-cli`.
+
+## 2026-07-25 — Grandfather pre-boundary started frontiers
+
+**Context.** Before durable model-identity boundaries existed, per-input model
+replacement could start adjacent turns with different frozen direct selections.
+Those immutable historical frontiers contain no boundary entry. The new law must
+apply to work that can still start without fabricating or rewriting
+already-executed history.
+
+**Decision.** Give each turn lifecycle an immutable boundary-requirement bit.
+The migration marks existing active and terminal turns false, existing queued
+turns true, and defaults every new turn to true. Reconstitution permits a
+marker-free changed-model start only when that durable bit is false and rejects
+a boundary entry on such a grandfathered start.
+
+**Rejected alternatives.** Rewriting immutable prefix frontiers would invent
+historical conversation events and alter every descendant snapshot. Treating all
+pre-migration turns alike would let queued work start after deployment without
+the newly implemented boundary.
+
+**Affects.** Turn-lifecycle storage, scheduling reconstitution, the
+model-identity boundary constraint, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Render model-identity boundaries as injected user-role events
+
+**Context.** The recorded mid-session model-selection direction fixes
+forward-only defaults replacement and requires the new model to learn its
+identity through the conversation frontier. The existing provider-neutral
+runtime message algebra has user and assistant roles but no system-event role.
+The remaining implementation choice was the exact durable boundary and its
+provider-visible projection.
+
+**Decision.** When a started turn's frozen direct selection differs from its
+immediate predecessor's, one durable `ModelIdentityChanged` semantic entry sits
+immediately before that turn's origin. It names the turn, defaults epoch, and
+direct selection. The application preserves that distinct entry kind; the
+provider bridge projects it as a user-role message with the fixed
+`Signalbox session event:` prefix and exact selected-model UUID and epoch. No
+entry is created for the first turn, an equal-selection successor, or a defaults
+epoch no turn ever binds.
+
+**Rejected alternatives.** An assistant-role message would fabricate model
+authorship. A silent switch would leave the new model unaware of context
+identity. Recording every replacement would put unused configuration history in
+the conversation frontier. Adding a new provider-runtime role would broaden the
+runtime contract beyond this boundary.
+
+**Affects.** Semantic transcript entries, turn-start frontier construction,
+provider-neutral conversation rendering, protocol version six, and
+[sessions and transcript](spec/sessions-and-transcript.md).
 
 ## 2026-07-25 — Allowlist the Codex subprocess environment
 

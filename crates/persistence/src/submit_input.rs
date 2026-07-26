@@ -1219,6 +1219,7 @@ pub(crate) async fn load_scheduling_projection(
             turn.active_tool_round_call_id,
             turn.approval_tool_request_id,
             turn.recovery_tool_attempt_id,
+            turn.model_identity_boundary_required,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
             turn.terminal_tool_attempt_id,
@@ -1408,6 +1409,8 @@ pub(crate) async fn load_scheduling_projection(
         let active_phase: Option<String> = row.try_get("active_phase_kind")?;
         let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
         let pinned_target: Option<Uuid> = row.try_get("pinned_provider_model_identity_id")?;
+        let model_identity_boundary_required: bool =
+            required(&row, "model_identity_boundary_required")?;
         let recovery_model_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
         let active_tool_round: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
         let approval_tool_request: Option<Uuid> = row.try_get("approval_tool_request_id")?;
@@ -2336,7 +2339,7 @@ pub(crate) async fn load_scheduling_projection(
             return Err(SubmitInputCorruption::Inconsistent("duplicate turn target pin").into());
         }
 
-        let record = match binding {
+        let mut record = match binding {
             Some(binding) => AcceptedInputTurnSchedulingRecord::reclassified(
                 lifecycle_session,
                 lifecycle_turn,
@@ -2363,6 +2366,9 @@ pub(crate) async fn load_scheduling_projection(
                 state,
             ),
         };
+        if !model_identity_boundary_required {
+            record = record.without_legacy_model_identity_boundary();
+        }
         turns.push(record);
     }
 
@@ -2598,7 +2604,13 @@ pub(crate) async fn load_scheduling_projection(
             assistant_tool_request_id,
             tool_result_request_id,
             tool_result_attempt_id,
-            completed_turn_id
+            completed_turn_id,
+            imported_conversation_id,
+            imported_transcript_entry_id,
+            assistant_response_part_ordinal,
+            model_identity_turn_id,
+            model_identity_defaults_version,
+            model_identity_direct_selection_id
          FROM semantic_transcript_entry
         WHERE payload_kind <> 'imported_entry'
           AND (
@@ -2647,6 +2659,70 @@ pub(crate) async fn load_scheduling_projection(
         let tool_result_request: Option<Uuid> = row.try_get("tool_result_request_id")?;
         let tool_result_attempt: Option<Uuid> = row.try_get("tool_result_attempt_id")?;
         let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
+        let imported_conversation: Option<Uuid> = row.try_get("imported_conversation_id")?;
+        let imported_transcript_entry: Option<Uuid> =
+            row.try_get("imported_transcript_entry_id")?;
+        let assistant_response_part_ordinal: Option<Decimal> =
+            row.try_get("assistant_response_part_ordinal")?;
+        let model_identity_turn: Option<Uuid> = row.try_get("model_identity_turn_id")?;
+        let model_identity_defaults_version: Option<Decimal> =
+            row.try_get("model_identity_defaults_version")?;
+        let model_identity_direct_selection: Option<Uuid> =
+            row.try_get("model_identity_direct_selection_id")?;
+        if payload_kind == "model_identity_changed" {
+            if origin.is_some()
+                || steering_source_turn.is_some()
+                || failed_turn.is_some()
+                || cancelled_turn.is_some()
+                || assistant_text.is_some()
+                || producing_call.is_some()
+                || tool_request.is_some()
+                || tool_result_request.is_some()
+                || tool_result_attempt.is_some()
+                || completed_turn.is_some()
+                || imported_conversation.is_some()
+                || imported_transcript_entry.is_some()
+                || assistant_response_part_ordinal.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+            }
+            let payload = match (
+                model_identity_turn,
+                model_identity_defaults_version,
+                model_identity_direct_selection,
+            ) {
+                (Some(turn), Some(defaults_version), Some(selected)) => {
+                    InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                        turn: turn_id_from_uuid(turn),
+                        defaults_version: defaults_version_from_numeric(defaults_version).map_err(
+                            |_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "model identity defaults version",
+                                )
+                            },
+                        )?,
+                        selected: DirectModelSelection::from_uuid(selected),
+                    }
+                }
+                _ => {
+                    return Err(
+                        SubmitInputCorruption::Inconsistent("semantic entry payload").into(),
+                    );
+                }
+            };
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                payload,
+            ));
+            continue;
+        }
+        if model_identity_turn.is_some()
+            || model_identity_defaults_version.is_some()
+            || model_identity_direct_selection.is_some()
+        {
+            return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+        }
         let payload = match (
             payload_kind.as_str(),
             origin,
