@@ -6,9 +6,11 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 PR #183 (`agent/provider-call-security-parser`); the `signalboxd` names this
 page states for the composition root, its telemetry, and the production
 `FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`). It covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the two provider adapters; and the in-process
+(`agent/signalboxd-rename`); the Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
+(`agent/provider-identity-normalization`). It covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the two provider adapters; and the in-process
 credential-access boundary. Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
@@ -76,7 +78,21 @@ adapter-produced fact surfaced through the `ProviderModelReported` observation
 and the `reported_model` field of terminal evidence. Adapters send exactly the
 resolved target as the provider model parameter, never the requested selection,
 and surface a provider-reported identity as soon as observed without fabricating
-a match or mismatch; comparison is the caller's classification work (INV-014).
+a match or mismatch; comparison is the caller's classification work (INV-014),
+under the provider-target identity rule of
+[model-call-execution](model-call-execution.md#provider-target-identity).
+
+Neither adapter ever requests server-side model fallback, so a provider marker
+announcing that another model continued the turn is evidence that the resolved
+target did not serve it. The Anthropic adapter therefore recognizes the
+`fallback` content block explicitly rather than leaving it in the tolerated
+additive-evolution branch: the buffered decoder reports the model the block
+names as continuing the turn through the ordinary `ProviderModelReported` fact
+and then closes the response as `ResponseUnintelligible` boundary loss, and the
+stream decoder treats an opened `fallback` block as a protocol violation. Why:
+the caller's identity rule must be able to tell an alias made concrete from a
+different model substituted, and a signal the provider states explicitly should
+not reach that rule as a generic unknown-block failure.
 
 ## Two-stage execution
 
@@ -403,6 +419,11 @@ internally. The four classes:
   [model-call-execution](model-call-execution.md)).
 - **`CallerOrHubBug`** — a request or internal guard that can fail only because
   of a defect, kept distinct from corruption.
+
+The class states only how bad a failure is. The orthogonal sanitized cause code
+stating *what happened* — carried by the model-call bridge, reusing this page's
+`ProviderErrorKind` vocabulary verbatim for definitive provider errors — is
+owned by [model-call-execution](model-call-execution.md#operator-diagnostics).
 
 Concurrent staleness is not a class: a guarded write that matches zero rows is
 consumed inside adapters by reload-and-rederive
