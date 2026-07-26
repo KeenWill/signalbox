@@ -221,11 +221,22 @@ fn credential_value_bounds(
         })
         .map(char::len_utf8)
         .sum::<usize>();
-    let opening_quote = text[value_start + whitespace..]
-        .chars()
-        .next()
-        .filter(|character| matches!(character, '"' | '\''));
-    let prefix_end = value_start + whitespace + usize::from(opening_quote.is_some());
+    let value_body = value_start + whitespace;
+    let opening = text[value_body..].chars().next();
+    if matches!(opening, Some('{' | '[')) {
+        let structural_end = structural_value_end(text, value_body);
+        let value_end = match termination {
+            ValueTermination::Token => structural_end,
+            ValueTermination::Line => structural_end.max(
+                text[value_body..]
+                    .find(['\r', '\n'])
+                    .map_or(text.len(), |length| value_body + length),
+            ),
+        };
+        return (&text[value_start..value_body], value_body, value_end);
+    }
+    let opening_quote = opening.filter(|character| matches!(character, '"' | '\''));
+    let prefix_end = value_body + usize::from(opening_quote.is_some());
     let value_end = opening_quote.map_or_else(
         || match termination {
             ValueTermination::Line => text[prefix_end..]
@@ -241,6 +252,42 @@ fn credential_value_bounds(
         |quote| quoted_value_end(text, prefix_end, quote),
     );
     (&text[value_start..prefix_end], prefix_end, value_end)
+}
+
+/// Consumes a `{`- or `[`-opened credential value through its balanced
+/// structural close, treating `"`-quoted spans (with backslash escapes) as
+/// opaque content. The scan is bounded by the text it is given: a container
+/// still open at the end of the text reports the text's end, so the stateless
+/// redactor suppresses the unterminated value whole and the stateful sink
+/// holds it as an unterminated credential candidate.
+fn structural_value_end(text: &str, value_start: usize) -> usize {
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, character) in text[value_start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else {
+            match character {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return value_start + offset + character.len_utf8();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    text.len()
 }
 
 fn quoted_value_end(text: &str, value_start: usize, quote: char) -> usize {
@@ -746,6 +793,9 @@ mod tests {
     const ESCAPED_QUOTED_SECRET_VALUE: &str = r#"sensitive \"quoted\" value"#;
     const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
     const COMPOSITE_SECRET_VALUE: &str = "sensitive-composite-value";
+    const STRUCTURED_OBJECT_SECRET_VALUE: &str = "sensitive-structured-object-value";
+    const STRUCTURED_ARRAY_SECRET_ONE: &str = "sensitive-structured-array-one";
+    const STRUCTURED_ARRAY_SECRET_TWO: &str = "sensitive-structured-array-two";
 
     /// INV-035: credential-shaped text never leaves the CLI adapter.
     #[test]
@@ -826,6 +876,66 @@ mod tests {
         assert!(!output.contains(COMPOSITE_SECRET_VALUE));
     }
 
+    /// INV-035: a credential member whose value is a JSON object is consumed
+    /// through its balanced structural close, never released piecewise.
+    #[test]
+    fn inv_035_redacts_an_object_valued_credential_member_whole() {
+        let fixture = format!(r#"{{"credential":{{"value":"{STRUCTURED_OBJECT_SECRET_VALUE}"}}}}"#);
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, r#"{"credential":[redacted]}"#);
+        assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
+    }
+
+    /// INV-035: a credential member whose value is a JSON array is consumed
+    /// through its balanced structural close.
+    #[test]
+    fn inv_035_redacts_an_array_valued_credential_member_whole() {
+        let fixture = format!(
+            r#"{{"password":["{STRUCTURED_ARRAY_SECRET_ONE}","{STRUCTURED_ARRAY_SECRET_TWO}"]}}"#
+        );
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, r#"{"password":[redacted]}"#);
+        assert!(!output.contains(STRUCTURED_ARRAY_SECRET_ONE));
+        assert!(!output.contains(STRUCTURED_ARRAY_SECRET_TWO));
+    }
+
+    /// INV-035: a structured value behind a key=value credential marker is
+    /// consumed whole rather than to its first structural character.
+    #[test]
+    fn inv_035_redacts_a_marker_prefixed_structured_value_whole() {
+        let fixture = format!(r#"api_key={{"nested":"{STRUCTURED_OBJECT_SECRET_VALUE}"}} tail"#);
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, "api_key=[redacted] tail");
+        assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
+    }
+
+    /// INV-035: a structured credential value still open at the end of the
+    /// text is suppressed through the end rather than released piecewise.
+    #[test]
+    fn inv_035_suppresses_an_unterminated_structured_credential_value() {
+        let fixture = format!(r#"{{"credential":{{"value":"{STRUCTURED_OBJECT_SECRET_VALUE}"#);
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, r#"{"credential":[redacted]"#);
+        assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
+    }
+
+    /// INV-035: a structured authorization header value spanning lines is
+    /// consumed through its structural close, not only to the line end.
+    #[test]
+    fn inv_035_redacts_a_multiline_structured_header_value_whole() {
+        let fixture = format!(
+            "authorization: {{\"token\":\n\"{STRUCTURED_OBJECT_SECRET_VALUE}\"}}\nsafe-after-value"
+        );
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, "authorization: [redacted]\nsafe-after-value");
+        assert!(!output.contains(STRUCTURED_OBJECT_SECRET_VALUE));
+    }
+
     #[test]
     fn harmless_tool_arguments_remain_byte_exact() {
         let input = r#"{ "city" : "Oslo", "limit": 3 }"#;
@@ -852,6 +962,68 @@ mod tests {
     fn inv_035_stream_redaction_holds_a_split_composite_json_key() {
         assert_eq!(unsafe_stream_suffix_start(r#"safe {"client_sec"#), Some(6));
         assert!(stream_candidate_starts_at_zero(r#""client_secret":"#));
+    }
+
+    /// INV-035: a structured credential value still open at the end of
+    /// streamed text is held as an unterminated credential candidate.
+    #[test]
+    fn inv_035_stream_redaction_holds_an_unterminated_structured_value() {
+        assert_eq!(
+            unsafe_stream_suffix_start(r#"{"credential":{"value":"#),
+            Some(1)
+        );
+    }
+
+    /// INV-035: a structured credential value split across streamed deltas
+    /// is redacted whole once its structural close arrives.
+    #[test]
+    fn inv_035_stream_redaction_redacts_a_structured_value_split_across_deltas() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: r#"{"credential":{"value":"#.to_string(),
+                },
+            });
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: 1,
+                    text: format!(r#""{STRUCTURED_OBJECT_SECRET_VALUE}"}}}}"#),
+                },
+            });
+            sink.finish();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: "{".to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
+        );
     }
 
     /// INV-035: an unterminated streamed credential cannot grow retained

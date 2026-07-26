@@ -34,7 +34,12 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
         }
         _ if contains_any(
             &normalized,
-            &["model not found", "unknown model", "target not found"],
+            &[
+                "model not found",
+                "model_not_found",
+                "unknown model",
+                "target not found",
+            ],
         ) =>
         {
             ProviderErrorKind::TargetNotFound
@@ -172,6 +177,12 @@ mod tests {
         );
         assert_eq!(
             classify_error("400 Bad Request: model not found"),
+            ProviderErrorKind::TargetNotFound
+        );
+        assert_eq!(
+            classify_error(
+                r#"unexpected status 404 Not Found: {"error":{"code":"model_not_found"}}"#
+            ),
             ProviderErrorKind::TargetNotFound
         );
         assert_eq!(

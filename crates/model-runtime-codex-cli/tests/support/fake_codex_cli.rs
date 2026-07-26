@@ -208,6 +208,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "structured_credential_value" => {
+            let text = json_escape(&format!(
+                r#"provider detail: {{"credential":{{"value":"{}"}}}}"#,
+                fixtures::SENSITIVE_STRUCTURED_SECRET
+            ));
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{text}","tool_calls":[]}}"#
+            ));
+            completed();
+        }
+        "split_stream_structured_credential" => {
+            reasoning("reason-structured-1", r#"{"credential":{"value":"#);
+            reasoning(
+                "reason-structured-2",
+                &format!(r#""{}"}}}}"#, fixtures::SENSITIVE_STRUCTURED_SECRET),
+            );
+            envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
+            completed();
+        }
         "structured_refused" => {
             envelope(&format!(
                 r#"{{"outcome":"refused","text":"{}","tool_calls":[]}}"#,
