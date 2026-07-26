@@ -33,6 +33,38 @@ documentation, so reverse discovery is limited to test declarations.
 **Affects.** `scripts/check_docs_consistency.py`, its tests, the validate
 checkout, and [the invariant catalog](invariants.md). Reachability does not
 judge whether a verification PR is the newest relevant implementation.
+## 2026-07-26 — Derive daemon tool schemas from their argument types
+
+**Context.** Each daemon tool declared its model-facing JSON Schema as a
+hand-written literal beside a decoder enforcing the same shape by hand: member
+names, requiredness, value types, and `additionalProperties: false` were each
+stated twice, and nothing tied the statements together, so a decoder edit could
+silently leave the advertised schema stale. Validated argument values also
+advertised as bare strings, hiding the constraints the decoder actually
+enforces.
+
+**Decision.** A `ToolContract` trait in `signalboxd` binds each tool's registry
+name, model-facing description, and typed argument struct. The struct's serde
+implementation is the decoder and its schemars derive (already in the workspace
+tree via the model-runtime substrate) renders the schema, with
+`#[serde(deny_unknown_fields)]` making the rendered
+`additionalProperties: false` and the decoder's rejection of unexpected members
+agree by construction. Validated argument newtypes implement `JsonSchema` by
+hand so their real constraints reach the model. The rendered artifact stays
+reviewable: one golden test per tool asserts the complete canonical wire schema,
+so a schemars upgrade or derive edit surfaces as a reviewed snapshot diff, and
+rendering feeds the existing `ToolInputSchema` registration path rather than a
+parallel one.
+
+**Rejected alternatives.** Keeping the literals and adding a conformance test
+against a derived form retains the duplication it checks. A bespoke proc macro
+re-owns what schemars already provides. Hosting the trait in the application
+crate would push a schema-rendering dependency beneath the daemon boundary that
+actually composes tools.
+
+**Affects.** The Tier 0 declarations in `apps/signalboxd` (`current_time`,
+`echo`, `web_fetch`, `session_status_update`) and their golden schema tests; the
+code-host declarations migrate mechanically as a follow-up.
 
 ## 2026-07-26 — Reconcile an ambiguity wait through an explicit owner request
 

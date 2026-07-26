@@ -4,28 +4,33 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolArgumentValidator, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault,
+    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 
+use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+
 pub(crate) const ECHO_NAME: &str = "echo";
-const ECHO_DESCRIPTION: &str = "Returns the supplied text unchanged in a compact JSON object.";
-const ECHO_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "text": {
-            "type": "string",
-            "description": "Exact text to return."
-        }
-    },
-    "required": ["text"],
-    "additionalProperties": false
-}"#;
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object containing exactly one text string";
+
+/// Typed `echo` argument shape; decoder and rendered schema share it.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EchoArguments {
+    /// Exact text to return.
+    #[expect(dead_code, reason = "execution returns the canonical argument text")]
+    text: String,
+}
+
+impl ToolContract for EchoTool {
+    type Arguments = EchoArguments;
+    const NAME: &'static str = ECHO_NAME;
+    const DESCRIPTION: &'static str =
+        "Returns the supplied text unchanged in a compact JSON object.";
+}
 
 /// A static `echo` declaration could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,20 +71,17 @@ pub struct EchoTool {
 impl EchoTool {
     /// Compiles the immutable declaration and typed argument validator.
     pub fn try_new() -> Result<Self, EchoToolConstructionError> {
-        let name = ToolName::try_new(String::from(ECHO_NAME))
-            .map_err(|_| EchoToolConstructionError::Name)?;
-        let schema = ToolInputSchema::try_new(String::from(ECHO_SCHEMA))
-            .map_err(|_| EchoToolConstructionError::Schema)?;
         let invalid_arguments_detail =
             ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
                 .map_err(|_| EchoToolConstructionError::ErrorDetail)?;
-        let definition = ToolDefinition::new(
-            name,
-            String::from(ECHO_DESCRIPTION),
-            schema,
+        let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Auto,
             ToolEffectClass::EffectFree,
-        );
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => EchoToolConstructionError::Name,
+            ToolContractCompileError::Schema => EchoToolConstructionError::Schema,
+        })?;
         let compiled = CompiledTool::new(
             definition,
             EchoArgumentValidator {
@@ -157,19 +159,9 @@ impl ToolExecutor for EchoExecutor {
 struct InvalidEchoArguments;
 
 fn decode_arguments(arguments: &NormalizedToolArguments) -> Result<(), InvalidEchoArguments> {
-    let serde_json::Value::Object(object) =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidEchoArguments)?
-    else {
-        return Err(InvalidEchoArguments);
-    };
-    if object.len() != 1 {
-        return Err(InvalidEchoArguments);
-    }
-    object
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(InvalidEchoArguments)?;
-    Ok(())
+    serde_json::from_str::<EchoArguments>(arguments.as_str())
+        .map(|_| ())
+        .map_err(|_| InvalidEchoArguments)
 }
 
 fn echo_evidence(
@@ -206,6 +198,36 @@ mod tests {
         assert_eq!(definition.name().as_str(), ECHO_NAME);
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
+    }
+
+    /// The complete rendered wire schema. The pretty golden is the review
+    /// surface; the byte-exact assertion pins the canonical compact form the
+    /// registry stores and providers receive as its exact serialization.
+    #[test]
+    fn echo_rendered_schema_is_the_exact_wire_artifact() {
+        let (catalog, _executor) = EchoTool::try_new()
+            .expect("static echo tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+        let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
+            .expect("registry schema is valid JSON");
+
+        expect_test::expect![[r#"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "description": "Exact text to return.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "type": "object"
+            }"#]]
+        .assert_eq(&format!("{schema:#}"));
+        assert_eq!(definition.input_schema().as_str(), schema.to_string());
     }
 
     /// Typed decoding accepts one exact text field.
