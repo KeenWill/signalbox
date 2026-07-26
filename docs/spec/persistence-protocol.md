@@ -611,4 +611,4 @@ by [process-protocol](process-protocol.md).
   operator classification covers only startup scan, turn activation, the
   eligibility sweep, and the model-call repository.
 - Database-role separation remains a deployment choice; migration invocation
-  itself is wired in `apps/hubd`.
+  itself is wired in `apps/signalboxd`.

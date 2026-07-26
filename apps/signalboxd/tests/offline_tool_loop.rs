@@ -31,9 +31,6 @@ use signalbox_domain::{
     ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
-use signalbox_hubd::{
-    ActivatedTurnExecution, PostgresProviderModelExecution, PostgresProviderToolLoopExecution,
-};
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
@@ -50,6 +47,9 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
+use signalboxd::{
+    ActivatedTurnExecution, PostgresProviderModelExecution, PostgresProviderToolLoopExecution,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -57,7 +57,7 @@ use testcontainers_modules::{
 };
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalbox_hubd_tool_loop_e2e";
+const DATABASE_NAME: &str = "signalboxd_tool_loop_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const FIXTURE_ID_SEED: u128 = 0x3100;

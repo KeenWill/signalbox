@@ -393,7 +393,7 @@ was prevented.
 
 ## Crash, restart, and supervision
 
-hubd (`apps/hubd/src/lib.rs`, `main.rs`) wraps execution in
+signalboxd (`apps/signalboxd/src/lib.rs`, `main.rs`) wraps execution in
 `FatalExecutionSupervisor`: a post-activation stage failure — after at most one
 same-incarnation reconciliation pass when retained evidence exists — raises a
 fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
@@ -433,7 +433,7 @@ roles), the in-process gate, and `RuntimeModelCallProvider` over the Anthropic
 runtime, with the domain target catalog and runtime model catalog built from one
 versioned static configuration file and a reread credential file
 ([configuration-and-credentials](configuration-and-credentials.md)). The
-`signalbox-debug` binary (`apps/hubd/src/bin/signalbox-debug.rs`) drives one
+`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives one
 session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
 prints the semantic transcript; it is deliberately not the client protocol.

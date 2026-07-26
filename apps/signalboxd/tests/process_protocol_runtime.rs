@@ -26,9 +26,6 @@ use signalbox_domain::{
     ImportedSessionRelationship, ImportedTranscriptEntryId, ModelSelectionRequest,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
 };
-use signalbox_hubd::{
-    HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
-};
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
@@ -40,6 +37,9 @@ use signalbox_process_protocol::{
     ModelSelection, ProtocolVersion, RejectionDetail, RequestId, ServerFrame, ServerMessage,
     SessionEvent, SessionMetadata, TranscriptEntry, TranscriptTextEntry, TurnState,
     decode_server_line, encode_client_line,
+};
+use signalboxd::{
+    HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{

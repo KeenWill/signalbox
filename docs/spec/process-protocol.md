@@ -11,7 +11,7 @@ reads, and durable complete-snapshot replacement; versions one through three
 retain their closed request and message vocabularies unchanged. The
 implementation in this stack speaks versions one through four, and its terminal
 client continues to select version three. This page is the normative boundary
-between a local client process and `signalbox-hubd`; domain values, PostgreSQL
+between a local client process and `signalboxd`; domain values, PostgreSQL
 records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
@@ -23,7 +23,7 @@ tag. Durable update storage and the delivered-through cursor are owned by
 All four versions use one Unix domain stream socket. The hub requires its path
 in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
-`signalbox-hubd` binds the socket with owner-only `0600` permissions. The
+`signalboxd` binds the socket with owner-only `0600` permissions. The
 configured path must be absolute and must end in an explicit filename component;
 a trailing separator, `/.`, or `/..` is rejected rather than normalized. The hub
 canonicalizes its existing parent once and uses that resolved parent for the
@@ -384,7 +384,7 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 The hub builds that complete sequence in a secure unnamed temporary file before
 writing its first snapshot frame to the connection. Persistence validates the
 execution lineage in PostgreSQL and yields one turn or frontier member at a time
-from the same read-only repeatable-read transaction; hubd encodes each item
+from the same read-only repeatable-read transaction; signalboxd encodes each item
 directly to the spool, commits the transaction after the final item, rewinds,
 and streams the completed file. A slow client therefore holds neither a
 PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
@@ -514,7 +514,7 @@ endpoint. Transaction- and statement-pooled proxy modes are unsupported because
 the guard and generation fences below use locks owned by one PostgreSQL server
 session.
 
-Before migration or recovery, `signalbox-hubd` acquires
+Before migration or recovery, `signalboxd` acquires
 `pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
 connection and retains that connection—and therefore the session-level
 lock—until shutdown. Failure to acquire the fixed database-scoped guard fails

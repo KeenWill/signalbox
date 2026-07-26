@@ -6,7 +6,7 @@ eligibility derivation, the scheduler, and startup recovery. Code homes:
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
-`lock_inventory}.rs` and its migrations, and `apps/hubd/src/main.rs`.
+`lock_inventory}.rs` and its migrations, and `apps/signalboxd/src/main.rs`.
 [docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
 reference its rows without restating them. Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). Sibling
@@ -251,9 +251,9 @@ failure after active-turn execution begins trips fatal recovery supervision. A
 parked approval returns from the pass immediately and therefore retains no
 scheduler worker capacity. Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
-hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
+signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
-activates and then drives the turn's model call. hubd depends on
+activates and then drives the turn's model call. signalboxd depends on
 `model-runtime`/`model-runtime-anthropic` through the `model-provider-runtime`
 bridge; application and persistence still declare no runtime-crate dependency.
 The same execution composition drives approval, tool attempts, and continuation
@@ -261,7 +261,7 @@ through the ports owned by [tool-loop](tool-loop.md).
 
 ## Startup scan and recovery
 
-After configuration and database connection, hubd acquires the dedicated
+After configuration and database connection, signalboxd acquires the dedicated
 single-hub advisory guard specified by [process-protocol](process-protocol.md),
 then orders startup strictly: embedded migrations, the startup scan to
 completion, process-socket bind, and only then request admission, outbox
@@ -485,7 +485,7 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Hub runtime: startup order and shutdown
 
-hubd is the composition root. It reads exactly `DATABASE_URL`,
+signalboxd is the composition root. It reads exactly `DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
 selections, and aliases), `ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`
 from the process environment (the provisional configuration channels are

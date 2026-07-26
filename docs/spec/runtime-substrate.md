@@ -14,7 +14,7 @@ authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
 companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
-`crates/application` and consumed by hubd telemetry.
+`crates/application` and consumed by signalboxd telemetry.
 
 ## Boundary and crate layout
 
@@ -364,7 +364,7 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
-- The production implementation is hubd's `FileCredentialAccess`: each resolve
+- The production implementation is signalboxd's `FileCredentialAccess`: each resolve
   rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
   production `AnthropicRuntime`.
 - The resolved value is scoped to the one prepared request as a
@@ -382,7 +382,7 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and hubd telemetry: the scheduling and model-call error
+persistence adapters, and signalboxd telemetry: the scheduling and model-call error
 families (startup scan, turn activation, eligibility sweep, model-call
 repository) map into `OperatorFailureClass` through the
 `ClassifyOperatorFailure` trait, exposing a user-content-free classification to

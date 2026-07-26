@@ -25,18 +25,18 @@ use signalbox_application::{
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
 use signalbox_domain::{SessionId, TurnId};
-use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SystemCurrentTimeClock,
-};
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     migrate, model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+};
+use signalboxd::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    SystemCurrentTimeClock,
 };
 use tokio::{
     pin, select,

@@ -2,8 +2,8 @@
 
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #183
-(`agent/provider-call-security-parser`; hubd configuration loading in
-`apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
+(`agent/provider-call-security-parser`; signalboxd configuration loading in
+`apps/signalboxd/src/configuration.rs` and `apps/signalboxd/src/main.rs`, the static TOML
 catalog, and the provider bridge in `crates/model-provider-runtime`) together
 with the model-runtime crates it composes
 (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
@@ -15,7 +15,7 @@ in [process configuration](#process-configuration) were verified through PR #237
 
 ## Process configuration
 
-`signalbox-hubd` reads exactly four deployment values from the process
+`signalboxd` reads exactly four deployment values from the process
 environment at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -90,7 +90,7 @@ driver, not the client protocol.
 ## The static model and alias catalog
 
 The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
-(`config/hubd.example.toml` is the checked-in example). Parsing is fail-closed:
+(`config/signalboxd.example.toml` is the checked-in example). Parsing is fail-closed:
 
 - The root must carry `version = 1`; any other or absent version is rejected.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
@@ -100,7 +100,7 @@ The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
   silently ignored key would let a typo change model meaning invisibly, so
   unrecognized content fails explicitly instead.
 - Parse errors are typed, sanitized values; no file content appears in error
-  text. (hubd erases the type before logging, as described above.)
+  text. (signalboxd erases the type before logging, as described above.)
 
 Each `[[models]]` entry defines one direct selection:
 
@@ -183,11 +183,11 @@ deployment-side rules that code cannot enforce are stated in
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the reference to the `ANTHROPIC_API_KEY_FILE` path and reads the file for
   every request preparation; nothing is cached. Why: atomic file replacement
-  rotates the key without restarting hubd, and an in-flight call keeps the value
+  rotates the key without restarting signalboxd, and an in-flight call keeps the value
   it authenticated with. Resolution is reference-scoped: a foreign reference
   fails typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
   `Unreadable` — all reference-only errors.
-- **No startup preflight.** hubd never reads the key file at boot, so a missing
+- **No startup preflight.** signalboxd never reads the key file at boot, so a missing
   or unsynced credential cannot block startup or the recovery scan. Why:
   recovery of acknowledged work must not depend on any provider's credential
   (INV-034).
@@ -228,7 +228,7 @@ Enforcement as implemented:
   sensitive. `FileCredentialAccess`'s `Debug` redacts its path;
   `AnthropicRuntime`'s `Debug` redacts its credential source and version header.
   Access errors carry reference and typed failure class only.
-- hubd logging is a compact INFO tracing subscriber; startup and runtime errors
+- signalboxd logging is a compact INFO tracing subscriber; startup and runtime errors
   log phase, failure class, counts, and aggregate ids only. The
   `crates/application` tracing sites emit the same typed fields; no call site in
   the codebase passes accepted-input or assistant content to `tracing`.
@@ -247,7 +247,7 @@ Enforcement as implemented:
   (base64, say) is outside these code paths. INV-035-tagged tests in
   `crates/model-runtime/src/credential.rs`,
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
-  `apps/hubd/src/configuration.rs` enforce this boundary.
+  `apps/signalboxd/src/configuration.rs` enforce this boundary.
 
 ## Credential operations policy
 
@@ -284,7 +284,7 @@ here because the surviving hub-side mechanics depend on them):
   starts even when the Secret object is absent or a first sync has not completed
   — during a restore, a deleted Secret, or bootstrap. A required volume would
   turn a missing or unsynced credential into a boot failure and so block the
-  startup recovery scan that hubd's no-startup-preflight behavior protects
+  startup recovery scan that signalboxd's no-startup-preflight behavior protects
   (INV-034); an absent credential surfaces at the effect boundary that needs it.
   The deployment likewise verifies that the operator retains last-synced Secrets
   across a manager outage, so a paused sync delays rotation propagation only,
@@ -312,7 +312,7 @@ here because the surviving hub-side mechanics depend on them):
   caught by any test.
 - `DATABASE_URL` via process environment is explicitly provisional; the
   database-credential delivery channel remains an open decision.
-- hubd erases typed configuration diagnostics before logging: catalog-parse and
+- signalboxd erases typed configuration diagnostics before logging: catalog-parse and
   Anthropic-construction variants (and connection and migration errors) collapse
   to a generic `Infrastructure` class plus phase, so startup logs cannot
   distinguish failure causes within the `Configuration` phase.

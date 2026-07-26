@@ -132,7 +132,7 @@ remaining tool work and the interrupt applies.
 
 The application `ToolCatalog` port supplies immutable `ToolDefinition` values:
 name, model-facing description, argument JSON Schema, permission default (`Auto`
-or `Confirm`), and effect class (`EffectFree` or `ExternalEffect`). hubd wires
+or `Confirm`), and effect class (`EffectFree` or `ExternalEffect`). signalboxd wires
 the only implemented catalog as one process-lifetime immutable compiled value.
 Catalog lookup and iteration are ports rather than a static global, but runtime
 rebinding and deployment compatibility for outstanding requests are not

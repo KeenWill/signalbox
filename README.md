@@ -79,7 +79,7 @@ can instead allow the committed `.envrc`. The Postgres integration suite still
 needs a running Docker daemon. See [AGENTS.md](AGENTS.md) for the authoritative
 tooling, formatting, and validation workflow.
 
-The workspace contains the dependency chain `apps/hubd` → `crates/application` →
+The workspace contains the dependency chain `apps/signalboxd` → `crates/application` →
 `crates/domain`, with `crates/persistence` depending on both
 `crates/application` and `crates/domain`, and the dev-only `crates/expect-table`
 consumed by the domain crate's tests. Before finishing any change, run the
@@ -112,7 +112,7 @@ The companion ignored real-Anthropic path makes a live provider request and may
 incur cost. It runs only when all three opt-in values are supplied:
 
 ```console
-SIGNALBOX_E2E_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_E2E_CONFIG_FILE=config/signalboxd.example.toml \
 SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
 SIGNALBOX_E2E_SELECTION_ID=10000000-0000-4000-8000-000000000001 \
   cargo test -p signalbox-client --test end_to_end \
@@ -131,7 +131,7 @@ semantic transcript:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-  cargo run -p signalbox-hubd --bin signalbox-debug -- \
+  cargo run -p signalboxd --bin signalbox-debug -- \
   "hello" "scripted assistant reply"
 ```
 
@@ -139,14 +139,14 @@ The debug database connection explicitly disables TLS and must not be used as
 production connection configuration.
 
 The same harness can run the production runtime bridge against Anthropic. Copy
-and review [`config/hubd.example.toml`](config/hubd.example.toml), put only the
+and review [`config/signalboxd.example.toml`](config/signalboxd.example.toml), put only the
 API-key bytes in a mode-`0600` file, then run:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-SIGNALBOX_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_CONFIG_FILE=config/signalboxd.example.toml \
 ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
-  cargo run -p signalbox-hubd --bin signalbox-debug -- \
+  cargo run -p signalboxd --bin signalbox-debug -- \
   --anthropic 10000000-0000-4000-8000-000000000001 \
   "Reply with exactly: signalbox smoke ok"
 ```
