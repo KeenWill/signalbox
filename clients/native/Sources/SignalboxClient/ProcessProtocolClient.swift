@@ -16,6 +16,17 @@ public protocol SignalboxProcessConnectionFactory: Sendable {
   func makeConnection() -> any SignalboxProcessConnection
 }
 
+public protocol SignalboxProcessExchange: Sendable {
+  func next() async throws -> SignalboxProcessServerFrame?
+  func close() async
+}
+
+public protocol SignalboxProcessRequesting: Sendable {
+  func open(
+    _ request: SignalboxProcessClientRequest
+  ) async throws -> any SignalboxProcessExchange
+}
+
 public enum SignalboxProcessClientError: LocalizedError, Equatable {
   case requestIdentityExhausted
   case oversizedFrame
@@ -42,7 +53,7 @@ public enum SignalboxProcessClientError: LocalizedError, Equatable {
   }
 }
 
-public actor SignalboxProcessClient {
+public actor SignalboxProcessClient: SignalboxProcessRequesting {
   private let connectionFactory: any SignalboxProcessConnectionFactory
   private var nextRequestID: UInt64
 
@@ -54,9 +65,9 @@ public actor SignalboxProcessClient {
     self.nextRequestID = firstRequestID
   }
 
-  public func messages(
-    for request: SignalboxProcessClientRequest
-  ) throws -> AsyncThrowingStream<SignalboxProcessServerFrame, Error> {
+  public func open(
+    _ request: SignalboxProcessClientRequest
+  ) async throws -> any SignalboxProcessExchange {
     let requestID = try claimRequestID()
     let version = SignalboxProcessProtocol.currentVersion
     let frame = SignalboxProcessClientFrame(
@@ -70,49 +81,18 @@ public actor SignalboxProcessClient {
       throw SignalboxProcessClientError.oversizedFrame
     }
     let connection = connectionFactory.makeConnection()
-
-    return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
-      let task = Task {
-        do {
-          try await connection.start()
-          try await connection.send(encoded)
-          let reader = SignalboxProcessLineReader(connection: connection)
-          while !Task.isCancelled {
-            let line = try await reader.nextLine()
-            let response = try SignalboxJSONCoding.decoder().decode(
-              SignalboxProcessServerFrame.self,
-              from: line
-            )
-            guard
-              Self.admits(
-                responseVersion: response.version,
-                message: response.message,
-                requestedVersion: version
-              )
-            else {
-              throw SignalboxProcessClientError.responseVersionMismatch
-            }
-            guard response.requestID.rawValue == requestID.rawValue else {
-              throw SignalboxProcessClientError.responseIdentityMismatch
-            }
-            continuation.yield(response)
-          }
-        } catch SignalboxProcessClientError.connectionClosed {
-          continuation.finish()
-        } catch is CancellationError {
-          continuation.finish()
-        } catch {
-          continuation.finish(throwing: error)
-        }
-        await connection.close()
-      }
-      continuation.onTermination = { _ in
-        task.cancel()
-        Task {
-          await connection.close()
-        }
-      }
+    do {
+      try await connection.start()
+      try await connection.send(encoded)
+    } catch {
+      await connection.close()
+      throw error
     }
+    return SignalboxPullProcessExchange(
+      connection: connection,
+      requestedVersion: version,
+      requestID: requestID
+    )
   }
 
   private func claimRequestID() throws -> SignalboxRequestID {
@@ -124,7 +104,7 @@ public actor SignalboxProcessClient {
     return claimed
   }
 
-  private static func admits(
+  fileprivate static func admits(
     responseVersion: SignalboxProcessProtocolVersion,
     message: SignalboxProcessServerMessage,
     requestedVersion: SignalboxProcessProtocolVersion
@@ -138,6 +118,65 @@ public actor SignalboxProcessClient {
       return false
     }
     return error.code == .malformedFrame || error.code == .unsupportedVersion
+  }
+}
+
+private actor SignalboxPullProcessExchange: SignalboxProcessExchange {
+  private let connection: any SignalboxProcessConnection
+  private let reader: SignalboxProcessLineReader
+  private let requestedVersion: SignalboxProcessProtocolVersion
+  private let requestID: SignalboxRequestID
+  private var isClosed = false
+
+  init(
+    connection: any SignalboxProcessConnection,
+    requestedVersion: SignalboxProcessProtocolVersion,
+    requestID: SignalboxRequestID
+  ) {
+    self.connection = connection
+    self.reader = SignalboxProcessLineReader(connection: connection)
+    self.requestedVersion = requestedVersion
+    self.requestID = requestID
+  }
+
+  func next() async throws -> SignalboxProcessServerFrame? {
+    guard !isClosed else {
+      return nil
+    }
+    do {
+      let line = try await reader.nextLine()
+      let response = try SignalboxJSONCoding.decoder().decode(
+        SignalboxProcessServerFrame.self,
+        from: line
+      )
+      guard
+        SignalboxProcessClient.admits(
+          responseVersion: response.version,
+          message: response.message,
+          requestedVersion: requestedVersion
+        )
+      else {
+        throw SignalboxProcessClientError.responseVersionMismatch
+      }
+      guard response.requestID.rawValue == requestID.rawValue else {
+        throw SignalboxProcessClientError.responseIdentityMismatch
+      }
+      return response
+    } catch SignalboxProcessClientError.connectionClosed {
+      await close()
+      return nil
+    } catch {
+      await close()
+      throw error
+    }
+  }
+
+  func close() async {
+    guard !isClosed else {
+      return
+    }
+    isClosed = true
+    await connection.close()
   }
 }
 
@@ -200,14 +239,18 @@ private final class SignalboxLocalSocketConnection: SignalboxProcessConnection, 
   }
 
   func start() async throws {
-    try await withCheckedThrowingContinuation { continuation in
-      stateLock.lock()
-      startContinuation = continuation
-      stateLock.unlock()
-      connection.stateUpdateHandler = { [weak self] state in
-        self?.receive(state: state)
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        stateLock.lock()
+        startContinuation = continuation
+        stateLock.unlock()
+        connection.stateUpdateHandler = { [weak self] state in
+          self?.receive(state: state)
+        }
+        connection.start(queue: .global(qos: .userInitiated))
       }
-      connection.start(queue: .global(qos: .userInitiated))
+    } onCancel: {
+      connection.cancel()
     }
   }
 

@@ -12,8 +12,11 @@ import SwiftUI
 final class AppCoordinator: ObservableObject {
     @Published var settings: SignalboxSettingsViewModel
     @Published var service: (any SignalboxClientProtocol)?
+    @Published var processSettings: SignalboxProcessSettingsViewModel
+    @Published var processService: (any SignalboxProcessServiceProtocol)?
     @Published var selectedSection: AppSection = .sessions
     @Published var selectedSessionID: SignalboxSessionID?
+    @Published var selectedProcessSessionID: SignalboxCanonicalUUID?
 
     let isMockMode: Bool
     let screenshotScenario: ScreenshotScenario?
@@ -24,9 +27,11 @@ final class AppCoordinator: ObservableObject {
         self.isMockMode = shouldInstallMockService
         if resetPersistedSettings {
             UserDefaults.standard.removeObject(forKey: NativeAppConstants.serverURLDefaultsKey)
+            UserDefaults.standard.removeObject(forKey: NativeProcessConstants.socketDefaultsKey)
             KeychainSecretStore().deleteSecret()
         }
         self.settings = SignalboxSettingsViewModel()
+        self.processSettings = SignalboxProcessSettingsViewModel()
         if resetPersistedSettings {
             self.settings.serverURLText = ""
             self.settings.apiKey = ""
@@ -34,39 +39,68 @@ final class AppCoordinator: ObservableObject {
         if let screenshotScenario {
             selectedSection = screenshotScenario.selectedSection
             selectedSessionID = screenshotScenario.selectedSessionID
+            if let rawSessionID = screenshotScenario.selectedSessionID?.rawValue {
+                selectedProcessSessionID = try? SignalboxCanonicalUUID(validating: rawSessionID)
+            }
         }
         if shouldInstallMockService {
             self.service = MockSignalboxService()
+            self.processService = SignalboxProcessService(
+                requester: SignalboxProcessClient(
+                    connectionFactory: MockProcessProtocolConnectionFactory()
+                ),
+                policy: .nativeDefault
+            )
             self.settings.serverURLText = NativeAppConstants.defaultServerURL
             self.settings.apiKey = "mock-key"
+            self.processSettings.socketPath = "In-memory v5 JSONL harness"
+            self.processSettings.markConnectedForHarness()
         } else if screenshotScenario == .setup {
             self.service = nil
+            self.processService = nil
             self.settings.apiKey = ""
-        } else if case .success(let configuration) = settings.configurationResult() {
-            self.service = SignalboxAPIClient(configuration: configuration)
+            self.processSettings.socketPath = ""
+            self.processSettings.markNotConfigured()
+        } else {
+            self.service = nil
+            #if os(macOS)
+            if let socketPath = processSettings.validatedSocketPath {
+                self.processService = Self.makeProcessService(socketPath: socketPath)
+            }
+            #endif
         }
     }
 
+    private static func makeProcessService(socketPath: String) -> SignalboxProcessService {
+        SignalboxProcessService(
+            requester: SignalboxProcessClient(
+                connectionFactory: SignalboxLocalSocketConnectionFactory(socketPath: socketPath)
+            ),
+            policy: .nativeDefault
+        )
+    }
+
     func testConnectionAndInstallClient() async {
-        if case .failure(let error) = settings.configurationResult() {
-            await settings.testConnection(using: FailingSignalboxClient(error: error))
-            return
-        }
         if isMockMode {
-            await settings.testConnection(using: service)
+            await processSettings.test(using: processService)
             return
         }
-        switch settings.configurationResult() {
-        case .success(let configuration):
-            let client = SignalboxAPIClient(configuration: configuration)
-            await settings.testConnection(using: client)
-            if settings.connectionStatus == .connected {
-                service = client
-                NotificationCenter.default.post(name: .refreshRequested, object: nil)
-            }
-        case .failure(let error):
-            await settings.testConnection(using: FailingSignalboxClient(error: error))
+        #if os(macOS)
+        guard let socketPath = processSettings.validatedSocketPath else {
+            processService = nil
+            processSettings.save()
+            return
         }
+        let candidate = Self.makeProcessService(socketPath: socketPath)
+        await processSettings.test(using: candidate)
+        if processSettings.connectionStatus == .connected {
+            processService = candidate
+            NotificationCenter.default.post(name: .refreshRequested, object: nil)
+        }
+        #else
+        processService = nil
+        await processSettings.test(using: nil)
+        #endif
     }
 }
 

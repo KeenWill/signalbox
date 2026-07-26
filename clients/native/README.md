@@ -1,65 +1,64 @@
 # Signalbox Native
 
 > Snapshot import (2026-07-23) from the owner's private monorepo, without
-> history. This tree still speaks the project's earlier REST/WebSocket server
-> protocol and awaits rewiring to the Signalbox process protocol.
+> history.
 
-Native SwiftUI client for that earlier server protocol.
+Native SwiftUI client for the Signalbox process protocol.
 
-The app uses the server's native REST and WebSocket APIs. It does not use the
-OpenAI-compatible facade.
+The production path encodes and decodes the version 5 session and transcript
+vocabulary as newline-delimited JSON. It does not use the earlier REST,
+WebSocket, or OpenAI-compatible surfaces.
 
-## Features
+## Phase A surface
 
-- Configure server URL and shared API key.
-- Store the API key in Keychain.
-- List, create, open, archive, and unarchive sessions.
-- Subscribe to session streams and render structured events.
-- Render tool invocations as expandable approval/status cards.
-- Approve and deny confirmation-gated tool calls.
-- Browse runners, templates, monitor summaries, and artifacts.
-- Run deterministic mock UI flows with `--mock-server`.
+- List, search, open, archive, and unarchive sessions from metadata operations.
+- Follow a session through explicit connect, hello, history, replay, steady, and
+  bounded-recovery states.
+- Project transcript snapshots into the existing timeline normalizer.
+- Preserve queued input separately until matching transcript content appears.
+- Submit input with the session's defaults version and retry only an exact
+  `commit_ambiguous` command, with a finite schedule.
+- Treat unknown wire kinds conservatively without losing an entire page or
+  stream.
+- Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
+  deterministic mock UI flows.
 
-## Build
+The process protocol exposes no tool-decision operation. Tool cards therefore
+show observed state but never offer approve or deny controls. It also exposes no
+runner, template, monitor, artifact, or model-discovery catalog; those views and
+new-session creation are explicit capability gates rather than fabricated client
+behavior.
+
+## Transport gate
+
+`signalboxd` currently serves the protocol only on a local Unix socket, without
+an authentication field. On macOS, set an absolute socket path in Settings or
+launch with:
+
+```bash
+export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
+```
+
+There is no owner-approved network transport reachable by a remote or mobile
+client. Phase A does not invent one. iPhone and iPad builds run against the
+in-memory v5 harness; real remote/mobile connectivity remains an owner design
+gate tracked by
+[Authenticated transports and remote clients](../../docs/open-questions.md#protocols-and-persistence).
+
+## Build and test
 
 ```bash
 scripts/build-xcode.sh
-```
-
-## Test
-
-```bash
 scripts/test-xcode.sh
 ```
 
-The scheme runs the app, client, model, and integration unit suites under the
-`SignalboxNativeTests` target.
-
-## Launch In Simulator
-
-```bash
-scripts/run-simulator.sh
-```
-
-The simulator script launches the deterministic mock server flow. To smoke-test
-a real server on a Mac, point the smoke test at your server endpoint and API key
-(for example via 1Password):
-
-```bash
-export SIGNALBOX_NATIVE_REAL_SERVER_URL='http://127.0.0.1:8000'
-export SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$(op read 'op://<vault>/<item>/<field>')"
-export SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID='<runner-id>'
-scripts/test-real-server-xcode.sh
-```
-
-`SIGNALBOX_NATIVE_REAL_SERVER_RUNNER_ID` is optional. When it is omitted, the
-smoke test accepts any registered runner but still requires at least one online
-runner.
+The scheme runs app, client, model, integration, and UI tests. The local mock is
+selected with `--mock-server`.
 
 ## Screenshots
 
 Golden screenshots live under `Screenshots/iOS`, `Screenshots/iPadOS`, and
-`Screenshots/macOS`. Regenerate and review them with:
+`Screenshots/macOS`. Regenerate and verify them with:
 
 ```bash
 scripts/capture-screenshots.sh
@@ -67,7 +66,10 @@ scripts/capture-macos-screenshots.sh
 scripts/check-screenshot-goldens.sh
 ```
 
-## Tart VM Validation
+The `new-session`, operations, and remote setup captures intentionally present
+capability gates. They are not previews of unimplemented server behavior.
+
+## Tart VM validation
 
 Apple validation can also run inside macOS Tart VM shards:
 
@@ -77,60 +79,32 @@ scripts/tart/run-shard.sh xcode
 scripts/tart/run-matrix.sh
 ```
 
-See `docs/tart-vm-validation.md` for image setup, shard names, screenshot
-parallelism, and real-server smoke configuration.
+See [Tart VM validation](docs/tart-vm-validation.md).
 
-## Privacy Boundary
+## Privacy boundary
 
 The client contains no analytics, ads, tracking, telemetry, remote config,
-accounts, or unrelated third-party SDKs. The only network traffic is user
-configured Signalbox REST/WebSocket traffic.
+accounts, or unrelated third-party SDKs. The real transport is a user-selected
+local Unix socket. The process-protocol path accepts no credential and places
+none in a URL or log.
 
-## Known issues (deferred to the protocol rewire)
+## Rewire inventory
 
-Findings from the import review that live in code the protocol rewire replaces
-(client, transport, and view-model layers). They are recorded here instead of
-being fixed piecemeal in the snapshot; the rewire milestone takes them up, in
-order. This deferral and its ordering are owned by the
-[decision log](../../docs/decisions.md) entry "Defer native-snapshot review
-findings to the rewire inventory"; the bullets below are descriptive inventory
-under that decision, not normative claims.
+Phase A closes the imported transport and synchronization findings: settings now
+install the tested socket client; every reconnect path is capped; deadlines are
+typed separately from heartbeat concerns; snapshot/stream ordering is owned by
+the synchronization machine; fallbacks preserve diagnostics; failed submission
+preserves the composer; internal wire details do not become legacy
+`visible_to_user` failures; and no credential crosses a plaintext URL.
 
-- Saving settings persists the new server URL/API key without rebuilding the
-  installed client, so traffic keeps flowing to the previous server until a
-  successful Test Connection or relaunch.
-- The session stream does not reconnect after a transient WebSocket drop; the
-  session must be closed and reopened.
-- A failed message submission clears the composer, so the draft is lost.
-- `turn_failed` events render a failure card even when `visible_to_user` is
-  false, exposing internal-only failure reasons in the timeline.
-- The WebSocket stream carries the API key as a `token` URL query parameter (a
-  design of the earlier protocol; the rewire's local-socket protocol eliminates
-  it).
-- Plain-HTTP server URLs are accepted for non-loopback hosts. App Transport
-  Security blocks non-local plaintext requests to public hostnames, mitigating
-  credential exposure there, but the local-network exception permits numeric IP
-  addresses and those configurations can still send bearer credentials in
-  cleartext. Input validation therefore permits both unsafe and nonconnecting
-  configurations (same legacy transport; gone with the rewire).
-- Templates are missing from compact-width iOS navigation.
-- The Create button stays enabled while session creation is pending, so a double
-  tap can create duplicate sessions.
-- The operations refresh is all-or-nothing: a monitor-endpoint failure blanks
-  the independently successful runner and template loads.
-- Setup-screenshot capture clears the API key but not a previously saved server
-  URL, so the setup golden can capture a private endpoint.
-- `SignalboxNativeTests` writes to a persistent `UserDefaults` suite that is
-  never cleaned between runs.
-- `scripts/run-simulator.sh` discards the `simctl bootstatus` exit code and
-  proceeds to install/launch even after a failed boot.
-- When `listMonitorSessions()` fails while the session-list requests succeed,
-  the sessions view falls back to labeling every session "Idle" (including
-  running or approval-blocked ones) instead of an unknown/unavailable
-  presentation.
-- `scripts/capture-screenshots.sh` silently emits no match for unrecognized
-  screenshot state names, so a typo skips captures while stale goldens keep
-  manifest checks passing; requested names are not validated.
-- The macOS screenshot exporter omits the `completed-tool` scenario that the
-  iOS/iPadOS matrix captures, so there is no macOS golden coverage for the
-  completed tool-card state.
+The following work remains:
+
+- Remote/mobile transport, authentication, authorization, and revocation await
+  an owner-approved server design.
+- Session creation awaits model discovery or another owner-approved way to
+  select the protocol's required model UUID.
+- Tool decisions, runners, templates, monitor summaries, and artifacts await
+  real process-protocol operations.
+- The older REST/WebSocket implementation remains compiled temporarily for
+  import-era test and presentation compatibility, but production composition no
+  longer installs it.

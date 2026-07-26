@@ -24,10 +24,9 @@ final class ProcessProtocolClientTests: XCTestCase {
       connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
     )
 
-    let messages = try await client.messages(for: .listSessions)
-    var iterator = messages.makeAsyncIterator()
-    let malformed = try await iterator.next()
-    let following = try await iterator.next()
+    let exchange = try await client.open(.listSessions)
+    let malformed = try await exchange.next()
+    let following = try await exchange.next()
 
     XCTAssertEqual(
       malformed?.message,
@@ -62,15 +61,42 @@ final class ProcessProtocolClientTests: XCTestCase {
       connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
     )
 
-    let messages = try await client.messages(for: .listSessions)
-    var iterator = messages.makeAsyncIterator()
-    _ = try await iterator.next()
+    let exchange = try await client.open(.listSessions)
+    _ = try await exchange.next()
     let sent = await connection.sentData
 
     XCTAssertEqual(
       String(decoding: sent, as: UTF8.self),
       #"{"request":{"type":"list_sessions"},"request_id":"1","version":5}"# + "\n"
     )
+  }
+
+  func testPullExchangeReadsNoFollowingChunkBeforeNextRequest() async throws {
+    let connection = ScriptedProcessConnection(
+      chunks: [
+        Data(
+          ("""
+          {"version":5,"request_id":"1","message":{"type":"sessions_start"}}
+          """ + "\n").utf8
+        ),
+        Data(
+          ("""
+          {"version":5,"request_id":"1","message":{"type":"sessions_end","session_count":"0"}}
+          """ + "\n").utf8
+        ),
+      ]
+    )
+    let client = SignalboxProcessClient(
+      connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
+    )
+
+    let exchange = try await client.open(.listSessions)
+    let readsBeforeNext = await connection.receiveCount
+    _ = try await exchange.next()
+    let readsAfterOneFrame = await connection.receiveCount
+
+    XCTAssertEqual(readsBeforeNext, 0)
+    XCTAssertEqual(readsAfterOneFrame, 1)
   }
 }
 
@@ -85,6 +111,7 @@ private struct ScriptedProcessConnectionFactory: SignalboxProcessConnectionFacto
 private actor ScriptedProcessConnection: SignalboxProcessConnection {
   private var chunks: [Data]
   private(set) var sentData = Data()
+  private(set) var receiveCount = 0
 
   init(chunks: [Data]) {
     self.chunks = chunks
@@ -97,6 +124,7 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
   }
 
   func receive() async throws -> Data? {
+    receiveCount += 1
     guard !chunks.isEmpty else {
       return nil
     }

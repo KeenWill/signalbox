@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Select bounded native-client operational policies
+
+**Context.** The native synchronization and application layers require concrete
+deadlines, reconnect schedules, memory capacities, metadata pagination limits,
+and ambiguous-mutation retry timing. The process protocol fixes none of these
+client-operational values, and the synchronization policy deliberately keeps
+deadlines separate from heartbeat concerns.
+
+**Decision.** The app allows 5 seconds for connect and hello, 20 seconds for
+initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
+second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
+records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
+MiB. Metadata uses 100-row pages with a 100-page cap. An exact
+`commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds, then
+stops. Each list is the complete cap; there is no implicit retry.
+
+**Rejected alternatives.** Unbounded retries and memory permit indefinite work
+or heap growth. One shared timeout conflates stages with different costs.
+Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
+Using the wire frame limit as an aggregate history limit does not bound a
+multi-frame snapshot.
+
+**Affects.** Native application composition, metadata paging, mutation retry,
+and synchronization runtime behavior.
+
 ## 2026-07-26 — Bound native followed-event buffering in memory
 
 **Context.** The native synchronization machine buffers followed events while it

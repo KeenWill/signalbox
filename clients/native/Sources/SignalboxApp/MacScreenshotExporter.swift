@@ -1,7 +1,4 @@
 #if os(macOS)
-#if canImport(SignalboxModels)
-import SignalboxModels
-#endif
 import AppKit
 import Darwin
 import SwiftUI
@@ -18,9 +15,9 @@ final class MacScreenshotExportAppDelegate: NSObject, NSApplicationDelegate {
 enum MacScreenshotExporter {
     private static var didStartExport = false
     private static let windowSizes = [
-        MacScreenshotWindowSize(name: "compact", desktopSize: CGSize(width: 960, height: 640), artifactSize: CGSize(width: 760, height: 560)),
-        MacScreenshotWindowSize(name: "regular", desktopSize: CGSize(width: 1280, height: 860), artifactSize: CGSize(width: 920, height: 680)),
-        MacScreenshotWindowSize(name: "wide", desktopSize: CGSize(width: 1600, height: 1000), artifactSize: CGSize(width: 1120, height: 760))
+        MacScreenshotWindowSize(name: "compact", desktopSize: CGSize(width: 960, height: 640)),
+        MacScreenshotWindowSize(name: "regular", desktopSize: CGSize(width: 1280, height: 860)),
+        MacScreenshotWindowSize(name: "wide", desktopSize: CGSize(width: 1600, height: 1000))
     ]
 
     static func exportIfRequested(arguments: [String]) async {
@@ -52,7 +49,7 @@ enum MacScreenshotExporter {
         for windowSize in windowSizes {
             let sizeDirectory = outputDirectory.appendingPathComponent(windowSize.name, isDirectory: true)
             try FileManager.default.createDirectory(at: sizeDirectory, withIntermediateDirectories: true)
-            let specifications = try screenshotSpecifications(windowSize: windowSize)
+            let specifications = screenshotSpecifications(windowSize: windowSize)
             for specification in specifications {
                 try await render(
                     specification.content(),
@@ -63,12 +60,11 @@ enum MacScreenshotExporter {
         }
     }
 
-    private static func screenshotSpecifications(windowSize: MacScreenshotWindowSize) throws -> [MacScreenshotSpecification] {
-        let artifact = try sampleArtifact()
+    private static func screenshotSpecifications(windowSize: MacScreenshotWindowSize) -> [MacScreenshotSpecification] {
         return [
             rootSpecification(name: "setup", scenario: .setup, windowSize: windowSize),
             rootSpecification(name: "sessions", scenario: .sessions, windowSize: windowSize),
-            newSessionSpecification(windowSize: windowSize),
+            rootSpecification(name: "new-session", scenario: .newSession, windowSize: windowSize),
             rootSpecification(name: "active-chat", scenario: .activeChat, windowSize: windowSize),
             rootSpecification(name: "markdown-basics", scenario: .markdownBasics, windowSize: windowSize),
             rootSpecification(name: "markdown-table", scenario: .markdownTable, windowSize: windowSize),
@@ -76,21 +72,13 @@ enum MacScreenshotExporter {
             rootSpecification(name: "markdown-message", scenario: .markdownMessage, windowSize: windowSize),
             rootSpecification(name: "pending-approval", scenario: .pendingApproval, windowSize: windowSize),
             rootSpecification(name: "failed-tool", scenario: .failedTool, windowSize: windowSize),
-            MacScreenshotSpecification(name: "artifact-preview", size: windowSize.artifactSize) {
-                AnyView(ArtifactPreviewScreen(artifact: artifact))
-            },
+            rootSpecification(name: "artifact-preview", scenario: .artifactPreview, windowSize: windowSize),
             rootSpecification(name: "runners", scenario: .runners, windowSize: windowSize),
             rootSpecification(name: "monitor", scenario: .monitor, windowSize: windowSize),
             rootSpecification(name: "settings", scenario: .settings, windowSize: windowSize),
             rootSpecification(name: "dark", scenario: .activeChat, windowSize: windowSize, colorScheme: .dark),
             rootSpecification(name: "large-type", scenario: .pendingApproval, windowSize: windowSize, dynamicTypeSize: .accessibility2)
         ]
-    }
-
-    private static func newSessionSpecification(windowSize: MacScreenshotWindowSize) -> MacScreenshotSpecification {
-        MacScreenshotSpecification(name: "new-session", size: windowSize.desktopSize) {
-            AnyView(MacNewSessionScreenshotView())
-        }
     }
 
     private static func rootSpecification(
@@ -153,116 +141,6 @@ enum MacScreenshotExporter {
         window.orderOut(nil)
     }
 
-    private static func sampleArtifact() throws -> SignalboxArtifact {
-        let decoder = SignalboxJSONCoding.decoder()
-        let fixture = try decoder.decode(MacArtifactFixture.self, from: Data(MockSignalboxFixtures.initial.utf8))
-        guard let artifact = fixture.artifactsBySession[MockSignalboxFixtures.activeSessionID]?.first else {
-            throw MacScreenshotExportError.missingArtifactFixture
-        }
-        return artifact
-    }
-}
-
-private struct MacNewSessionScreenshotView: View {
-    @StateObject private var coordinator = AppCoordinator(isMockMode: true, screenshotScenario: .sessions)
-
-    var body: some View {
-        ZStack {
-            RootView()
-                .environmentObject(coordinator)
-                .disabled(true)
-
-            Color.black.opacity(0.18)
-                .ignoresSafeArea()
-
-            MacNewSessionModalPreview()
-                .frame(width: 560)
-                .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.22), radius: 28, y: 12)
-        }
-        .environment(\.dynamicTypeSize, .large)
-    }
-}
-
-private struct MacNewSessionModalPreview: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("New Session")
-                .font(.title3.weight(.semibold))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 22)
-                .padding(.top, 20)
-                .padding(.bottom, 16)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 18) {
-                NewSessionFormField(label: "Title") {
-                    MacPreviewTextField(value: "Native session")
-                }
-
-                NewSessionFormField(label: "Template") {
-                    Picker("Template", selection: .constant("general_chat")) {
-                        Text("General Chat").tag("general_chat")
-                        Text("Coder").tag("coder")
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                }
-
-                NewSessionFormField(label: "Runner") {
-                    Picker("Runner", selection: .constant("local-runner")) {
-                        Text("local-runner (laptop)").tag("local-runner")
-                        Text("Auto placement").tag("auto")
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                }
-
-                NewSessionTemplateDetails(
-                    description: "Broad assistant with safe tools.",
-                    model: "claude-sonnet-latest",
-                    tools: ["echo", "current_time", "save_report"]
-                )
-            }
-            .padding(22)
-
-            Divider()
-
-            HStack(spacing: 10) {
-                Spacer()
-                Button("Cancel") {}
-                    .keyboardShortcut(.cancelAction)
-                Button("Create") {}
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 15)
-        }
-    }
-}
-
-private struct MacPreviewTextField: View {
-    let value: String
-
-    var body: some View {
-        Text(value)
-            .font(.body)
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 8)
-            .frame(height: 28)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color.secondary.opacity(0.22), lineWidth: 1)
-            )
-    }
 }
 
 private struct MacScreenshotSpecification {
@@ -274,21 +152,11 @@ private struct MacScreenshotSpecification {
 private struct MacScreenshotWindowSize {
     let name: String
     let desktopSize: CGSize
-    let artifactSize: CGSize
-}
-
-private struct MacArtifactFixture: Decodable {
-    let artifactsBySession: [String: [SignalboxArtifact]]
-
-    private enum CodingKeys: String, CodingKey {
-        case artifactsBySession = "artifacts_by_session"
-    }
 }
 
 private enum MacScreenshotExportError: LocalizedError {
     case bitmapCreationFailed
     case pngEncodingFailed
-    case missingArtifactFixture
 
     var errorDescription: String? {
         switch self {
@@ -296,8 +164,6 @@ private enum MacScreenshotExportError: LocalizedError {
             return "Could not create a bitmap from the hosted SwiftUI view."
         case .pngEncodingFailed:
             return "Could not encode the hosted SwiftUI view as PNG."
-        case .missingArtifactFixture:
-            return "The mock artifact fixture is missing."
         }
     }
 }

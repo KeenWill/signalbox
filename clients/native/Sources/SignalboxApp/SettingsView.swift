@@ -1,256 +1,115 @@
 import SwiftUI
 
 struct SettingsScreen: View {
-    @EnvironmentObject private var coordinator: AppCoordinator
-    @State private var isTesting = false
-    @FocusState private var focusedField: SettingsFocusedField?
+  @EnvironmentObject private var coordinator: AppCoordinator
+  @State private var isTesting = false
 
-    var body: some View {
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section {
+          #if os(macOS)
+            TextField("Unix socket path", text: $coordinator.processSettings.socketPath)
+              .accessibilityIdentifier("socket-path-field")
+          #else
+            Text(remoteTransportGateMessage)
+              .foregroundStyle(.secondary)
+          #endif
+          statusRow
+        } header: {
+          Text("Process protocol")
+        } footer: {
+          Text(
+            "signalboxd serves version 5 JSONL over a local Unix socket. It defines no authentication field."
+          )
+        }
+
         #if os(macOS)
-        macSettingsLayout
-            .accessibilityIdentifier("settings-screen")
-        #else
-        NavigationStack {
-            settingsForm
-            .navigationTitle("Settings")
-        }
-        .accessibilityIdentifier("settings-screen")
-        #endif
-    }
-
-    private var settingsForm: some View {
-        Form {
-            Section {
-                serverURLField
-                apiKeyField
-                connectionStatusRow
-            } header: {
-                Text("Connection")
-            } footer: {
-                Text("The API key is stored in the system keychain and is never written to logs.")
-            }
-
-            Section {
-                testConnectionButton
-                saveSettingsButton
-            }
-
-            if case .failed(let message) = coordinator.settings.connectionStatus {
-                Section("Error") {
-                    connectionErrorText(message)
-                }
-            }
-
-            Section("Client") {
-                clientDiagnostics
-            }
-        }
-        #if os(iOS)
-        .scrollDismissesKeyboard(.interactively)
-        #endif
-    }
-
-    #if os(macOS)
-    private var macSettingsLayout: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Settings")
-                        .font(.largeTitle.weight(.semibold))
-                    Text("Connect this client to a native Signalbox instance.")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(alignment: .top, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        macPanelHeader("Connection", systemImage: "link")
-
-                        VStack(alignment: .leading, spacing: 14) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Server URL")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                serverURLField
-                                    .textFieldStyle(.roundedBorder)
-                            }
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("API key")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                apiKeyField
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                        }
-
-                        connectionStatusRow
-
-                        if case .failed(let message) = coordinator.settings.connectionStatus {
-                            connectionErrorText(message)
-                                .padding(12)
-                                .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                        }
-
-                        HStack(spacing: 10) {
-                            testConnectionButton
-                                .buttonStyle(.borderedProminent)
-                            saveSettingsButton
-                                .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(20)
-                    .frame(maxWidth: 560, alignment: .leading)
-                    .background(macPanelBackground)
-                    .overlay(macPanelBorder)
-                    .shadow(color: .black.opacity(0.035), radius: 12, y: 3)
-
-                    VStack(alignment: .leading, spacing: 18) {
-                        macPanelHeader("Client", systemImage: "desktopcomputer")
-                        clientDiagnostics
-                        Divider()
-                        Label("Secrets stay in Keychain and are never emitted to logs.", systemImage: "key.fill")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(20)
-                    .frame(maxWidth: 340, alignment: .leading)
-                    .background(macPanelBackground)
-                    .overlay(macPanelBorder)
-                    .shadow(color: .black.opacity(0.035), radius: 12, y: 3)
-                }
-            }
-            .padding(28)
-            .frame(maxWidth: 980, alignment: .leading)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private func macPanelHeader(_ title: String, systemImage: String) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.title3.weight(.semibold))
-    }
-
-    private var macPanelBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color(nsColor: .textBackgroundColor))
-    }
-
-    private var macPanelBorder: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
-    }
-    #endif
-
-    private var serverURLField: some View {
-        TextField("Server URL", text: $coordinator.settings.serverURLText)
-            #if os(iOS)
-            .keyboardType(.URL)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .submitLabel(.next)
-            #endif
-            .focused($focusedField, equals: .serverURL)
-            .onSubmit {
-                focusedField = .apiKey
-            }
-            .accessibilityIdentifier("server-url-field")
-    }
-
-    private var apiKeyField: some View {
-        SecureField("API key", text: $coordinator.settings.apiKey)
-            #if os(iOS)
-            .submitLabel(.done)
-            .textContentType(.oneTimeCode)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            #endif
-            .focused($focusedField, equals: .apiKey)
-            .onSubmit {
-                focusedField = nil
-            }
-            .accessibilityIdentifier("api-key-field")
-    }
-
-    private var connectionStatusRow: some View {
-        HStack {
-            Label(coordinator.settings.connectionStatus.label, systemImage: statusIcon)
-                .foregroundStyle(statusColor)
-                .font(.callout.weight(.semibold))
-            Spacer()
-            if isTesting {
-                ProgressView()
-                    .controlSize(.small)
-            }
-        }
-        .accessibilityIdentifier("connection-status")
-    }
-
-    private var testConnectionButton: some View {
-        Button {
-            focusedField = nil
-            Task {
+          Section {
+            Button {
+              Task {
                 isTesting = true
                 await coordinator.testConnectionAndInstallClient()
                 isTesting = false
+              }
+            } label: {
+              Label("Test Connection", systemImage: "cable.connector")
             }
-        } label: {
-            Label("Test Connection", systemImage: "network")
+            .disabled(isTesting)
+            .accessibilityIdentifier("test-connection-button")
+
+            Button {
+              coordinator.processSettings.save()
+            } label: {
+              Label("Save Socket Path", systemImage: "externaldrive.badge.checkmark")
+            }
+            .disabled(coordinator.isMockMode)
+            .accessibilityIdentifier("save-settings-button")
+          }
+        #endif
+
+        if case .failed(let message) = coordinator.processSettings.connectionStatus {
+          Section("Connection") {
+            Text(message)
+              .foregroundStyle(.red)
+              .textSelection(.enabled)
+              .accessibilityIdentifier("connection-error-text")
+          }
         }
-        .disabled(isTesting)
-        .accessibilityIdentifier("test-connection-button")
-    }
 
-    private var saveSettingsButton: some View {
-        Button {
-            focusedField = nil
-            coordinator.settings.save()
-        } label: {
-            Label("Save Settings", systemImage: "externaldrive.badge.checkmark")
+        Section("Client") {
+          LabeledContent(
+            "Mode",
+            value: coordinator.isMockMode ? "v5 JSONL harness" : "Local Unix socket"
+          )
+          LabeledContent("Wire", value: "Process protocol v5")
+            .accessibilityIdentifier("wire-diagnostic")
+          LabeledContent("Authentication", value: "Not defined")
+          LabeledContent("Remote transport", value: "Owner design gate")
+            .accessibilityIdentifier("remote-transport-diagnostic")
         }
-        .accessibilityIdentifier("save-settings-button")
+      }
+      .navigationTitle("Settings")
     }
+    .accessibilityIdentifier("settings-screen")
+  }
 
-    private var clientDiagnostics: some View {
-        Group {
-            LabeledContent("Mode", value: coordinator.isMockMode ? "Mock fixtures" : "Native server API")
-            LabeledContent("Core API", value: "REST + WebSocket")
-            LabeledContent("OpenAI facade", value: "Not used")
-        }
+  private var statusRow: some View {
+    HStack {
+      Label(
+        coordinator.processSettings.connectionStatus.label,
+        systemImage: statusIcon
+      )
+      .foregroundStyle(statusColor)
+      .font(.callout.weight(.semibold))
+      Spacer()
+      if isTesting {
+        ProgressView()
+          .controlSize(.small)
+      }
     }
+    .accessibilityIdentifier("connection-status")
+  }
 
-    private func connectionErrorText(_ message: String) -> some View {
-        Text(message)
-            .foregroundStyle(.red)
-            .textSelection(.enabled)
-            .accessibilityIdentifier("connection-error-text")
+  private var statusIcon: String {
+    switch coordinator.processSettings.connectionStatus {
+    case .connected:
+      return "checkmark.circle.fill"
+    case .failed:
+      return "xmark.octagon.fill"
+    case .notConfigured, .unknown:
+      return "circle.dashed"
     }
+  }
 
-    private var statusIcon: String {
-        switch coordinator.settings.connectionStatus {
-        case .connected:
-            return "checkmark.circle.fill"
-        case .failed:
-            return "xmark.octagon.fill"
-        case .notConfigured, .unknown:
-            return "circle.dashed"
-        }
+  private var statusColor: Color {
+    switch coordinator.processSettings.connectionStatus {
+    case .connected:
+      return .green
+    case .failed:
+      return .red
+    case .notConfigured, .unknown:
+      return .secondary
     }
-
-    private var statusColor: Color {
-        switch coordinator.settings.connectionStatus {
-        case .connected:
-            return .green
-        case .failed:
-            return .red
-        case .notConfigured, .unknown:
-            return .secondary
-        }
-    }
-}
-
-private enum SettingsFocusedField: Hashable {
-    case serverURL
-    case apiKey
+  }
 }

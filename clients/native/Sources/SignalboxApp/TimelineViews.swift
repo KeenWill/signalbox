@@ -563,7 +563,7 @@ struct ToolInvocationCard: View {
                 .accessibilityLabel(isExpanded ? "Collapse tool" : "Expand tool")
             }
 
-            if tool.status == .waitingForApproval {
+            if tool.status == .waitingForApproval && tool.decisionAvailable {
                 HStack(spacing: 10) {
                     Button(role: .destructive) {
                         onDeny()
@@ -581,6 +581,13 @@ struct ToolInvocationCard: View {
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("approve-tool-button")
                 }
+            } else if tool.status == .waitingForApproval {
+                Label(
+                    "Decision unavailable in process protocol v5",
+                    systemImage: "lock.fill"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
             }
 
             if isExpanded {
@@ -635,7 +642,7 @@ struct ToolInvocationCard: View {
             return .red
         case .succeeded:
             return .green
-        case .running, .approved, .completed:
+        case .proposed, .running, .approved, .completed:
             return .blue
         }
     }
@@ -652,7 +659,7 @@ struct ToolInvocationCard: View {
             return "checkmark.seal.fill"
         case .completed:
             return "checkmark.circle.fill"
-        case .running, .approved:
+        case .proposed, .running, .approved:
             return "terminal"
         }
     }

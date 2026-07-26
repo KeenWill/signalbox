@@ -26,7 +26,7 @@ public struct SignalboxTimelineMessage: Equatable, Sendable {
     public let text: String
     public let thinkingText: String?
     public let isStreaming: Bool
-    public let createdAt: Date
+    public let createdAt: Date?
 }
 
 public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
@@ -39,6 +39,31 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     public let statusUpdates: [String]
     public let decisionReason: String?
     public let childSessionID: SignalboxSessionID?
+    public let decisionAvailable: Bool
+
+    public init(
+        eventID: SignalboxEventID,
+        invocationID: SignalboxToolInvocationID,
+        toolName: String,
+        status: SignalboxToolCardStatus,
+        arguments: String?,
+        output: String?,
+        statusUpdates: [String],
+        decisionReason: String?,
+        childSessionID: SignalboxSessionID?,
+        decisionAvailable: Bool = true
+    ) {
+        self.eventID = eventID
+        self.invocationID = invocationID
+        self.toolName = toolName
+        self.status = status
+        self.arguments = arguments
+        self.output = output
+        self.statusUpdates = statusUpdates
+        self.decisionReason = decisionReason
+        self.childSessionID = childSessionID
+        self.decisionAvailable = decisionAvailable
+    }
 
     public var id: SignalboxToolInvocationID { invocationID }
 
@@ -66,6 +91,7 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
 }
 
 public enum SignalboxToolCardStatus: Equatable, Sendable {
+    case proposed
     case waitingForApproval
     case running
     case approved
@@ -76,6 +102,8 @@ public enum SignalboxToolCardStatus: Equatable, Sendable {
 
     public var label: String {
         switch self {
+        case .proposed:
+            return "Proposed"
         case .waitingForApproval:
             return "Needs Approval"
         case .running:
@@ -98,7 +126,7 @@ public struct SignalboxTurnFailureCard: Equatable, Sendable {
     public let eventID: SignalboxEventID
     public let reason: String
     public let runnerID: SignalboxRunnerID?
-    public let failedAt: Date
+    public let failedAt: Date?
 }
 
 public struct SignalboxUnknownEventCard: Equatable, Sendable {
@@ -178,6 +206,49 @@ public enum SignalboxEventNormalizer {
                     failedAt: event.failedAt
                 )
             )
+        case .processMessage(let event):
+            return .message(
+                SignalboxTimelineMessage(
+                    eventID: record.eventID,
+                    role: event.role,
+                    text: event.text,
+                    thinkingText: nil,
+                    isStreaming: false,
+                    createdAt: nil
+                )
+            )
+        case .processTool(let event):
+            return .tool(
+                SignalboxToolCard(
+                    eventID: record.eventID,
+                    invocationID: event.toolRequestID,
+                    toolName: event.toolName,
+                    status: processToolStatus(event.status),
+                    arguments: event.arguments,
+                    output: event.output,
+                    statusUpdates: [],
+                    decisionReason: nil,
+                    childSessionID: nil,
+                    decisionAvailable: false
+                )
+            )
+        case .processTurnFailure(let event):
+            return .turnFailure(
+                SignalboxTurnFailureCard(
+                    eventID: record.eventID,
+                    reason: event.reason,
+                    runnerID: nil,
+                    failedAt: nil
+                )
+            )
+        case .processConservative(let event):
+            return .unknown(
+                SignalboxUnknownEventCard(
+                    eventID: record.eventID,
+                    kind: event.kind,
+                    diagnostic: event.diagnostic
+                )
+            )
         case .unknown(let event):
             guard event.payload["visible_to_user"] != .bool(false) else {
                 return nil
@@ -190,6 +261,23 @@ public enum SignalboxEventNormalizer {
                         ?? event.payload.keys.sorted().joined(separator: ", ")
                 )
             )
+        }
+    }
+
+    private static func processToolStatus(
+        _ status: SignalboxProcessToolStatus
+    ) -> SignalboxToolCardStatus {
+        switch status {
+        case .proposed:
+            return .proposed
+        case .awaitingDecision:
+            return .waitingForApproval
+        case .completed:
+            return .succeeded
+        case .denied:
+            return .denied
+        case .closed, .recoveryRequired:
+            return .failed
         }
     }
 
