@@ -941,8 +941,9 @@ mod tests {
     use signalbox_domain::{
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
         ImportedMessageContentAbsence, ImportedSourceAttestation, ImportedSpeaker,
-        ImportedStructuredValue, ImportedToolResultBlock, ImportedToolResultValue,
-        ImportedTranscriptContent, ImportedTranscriptEntryId,
+        ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+        ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+        ImportedTranscriptEntryId,
     };
     use uuid::Uuid;
 
@@ -1149,6 +1150,172 @@ mod tests {
             CodexRolloutJsonlConversionFailure::InvalidMessageRole { line: 1 }
         );
         assert_eq!(error.to_string(), "Codex rollout JSONL conversion failed");
+    }
+
+    fn attested_text(value: &str) -> ImportedSourceAttestation<ImportedText> {
+        ImportedSourceAttestation::Attested(ImportedText::new(String::from(value)))
+    }
+
+    fn structured_text(value: &str) -> ImportedStructuredValue {
+        ImportedStructuredValue::String(ImportedText::new(String::from(value)))
+    }
+
+    fn structured_object(members: Vec<(&str, ImportedStructuredValue)>) -> ImportedStructuredValue {
+        ImportedStructuredValue::Object(
+            members
+                .into_iter()
+                .map(|(name, value)| {
+                    ImportedStructuredObjectMember::new(
+                        ImportedText::new(String::from(name)),
+                        value,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+
+    /// S28 / INV-038: a `tool_search_call` maps its exact `call_id` and its
+    /// structured `arguments` value, fabricating no tool name.
+    #[test]
+    fn s28_inv038_normalizes_tool_search_call_structured_arguments() {
+        let imported = convert_synthetic(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"tool_search_call\",\"call_id\":\"call-search\",\"arguments\":{\"query\":\"read_file\"}}}",
+        );
+
+        assert_eq!(imported.entries().len(), 1);
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::ToolCall {
+                source_call_id: attested_text("call-search"),
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(structured_object(vec![(
+                    "query",
+                    structured_text("read_file"),
+                )])),
+                caller: ImportedSourceAttestation::NotAttested,
+            }
+        );
+    }
+
+    /// S28 / INV-038: a `local_shell_call` maps its structured `action` value
+    /// as tool input, fabricating no tool name.
+    #[test]
+    fn s28_inv038_normalizes_local_shell_call_structured_action() {
+        let imported = convert_synthetic(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"local_shell_call\",\"call_id\":\"call-shell\",\"action\":{\"command\":[\"list\"]}}}",
+        );
+
+        assert_eq!(imported.entries().len(), 1);
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::ToolCall {
+                source_call_id: attested_text("call-shell"),
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(structured_object(vec![(
+                    "command",
+                    ImportedStructuredValue::Array(
+                        vec![structured_text("list")].into_boxed_slice()
+                    ),
+                )])),
+                caller: ImportedSourceAttestation::NotAttested,
+            }
+        );
+    }
+
+    /// S28 / INV-038: a `web_search_call` takes its call identity from the item
+    /// `id`. The fixture also states a competing `call_id`, which the mapping
+    /// must not read.
+    #[test]
+    fn s28_inv038_normalizes_web_search_call_item_id_as_call_identity() {
+        let imported = convert_synthetic(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"web_search_call\",\"id\":\"item-web\",\"call_id\":\"unread-call-id\",\"action\":{\"query\":\"invariant catalog\"}}}",
+        );
+
+        assert_eq!(imported.entries().len(), 1);
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::ToolCall {
+                source_call_id: attested_text("item-web"),
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(structured_object(vec![(
+                    "query",
+                    structured_text("invariant catalog"),
+                )])),
+                caller: ImportedSourceAttestation::NotAttested,
+            }
+        );
+    }
+
+    /// S28 / INV-038: a `custom_tool_call` maps its exact `name` and reads its
+    /// input from `input` rather than `arguments`, keeping the lexical string.
+    #[test]
+    fn s28_inv038_normalizes_custom_tool_call_string_input() {
+        let imported = convert_synthetic(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call-custom\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\"}}",
+        );
+
+        assert_eq!(imported.entries().len(), 1);
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::ToolCall {
+                source_call_id: attested_text("call-custom"),
+                name: attested_text("apply_patch"),
+                input: ImportedSourceAttestation::Attested(structured_text("*** Begin Patch")),
+                caller: ImportedSourceAttestation::NotAttested,
+            }
+        );
+    }
+
+    /// S28 / INV-038: a `custom_tool_call_output` maps its exact `call_id` and
+    /// string `output` as an exact-text tool result with no error attestation.
+    #[test]
+    fn s28_inv038_normalizes_custom_tool_call_output_as_exact_text_result() {
+        let imported = convert_synthetic(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-custom\",\"output\":\"applied\"}}",
+        );
+
+        assert_eq!(imported.entries().len(), 1);
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::ToolResult {
+                source_call_id: attested_text("call-custom"),
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(
+                    ImportedText::new(String::from("applied"))
+                )),
+                is_error: ImportedSourceAttestation::NotAttested,
+            }
+        );
+    }
+
+    /// S28 / INV-038: a `tool_search_output` emits one ordered source result
+    /// block per `tools` element, retaining an object element's exact type
+    /// attestation and leaving a non-object element unattested.
+    #[test]
+    fn s28_inv038_normalizes_tool_search_output_tools_as_ordered_source_blocks() {
+        let imported = convert_synthetic(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"tool_search_output\",\"call_id\":\"call-search\",\"tools\":[{\"type\":\"function\",\"name\":\"read_file\"},\"bare\"]}}",
+        );
+
+        assert_eq!(imported.entries().len(), 1);
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::ToolResult {
+                source_call_id: attested_text("call-search"),
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                    vec![
+                        ImportedToolResultBlock::SourceResultBlock {
+                            source_type: attested_text("function"),
+                        },
+                        ImportedToolResultBlock::SourceResultBlock {
+                            source_type: ImportedSourceAttestation::NotAttested,
+                        },
+                    ]
+                    .into_boxed_slice()
+                )),
+                is_error: ImportedSourceAttestation::NotAttested,
+            }
+        );
     }
 
     #[test]

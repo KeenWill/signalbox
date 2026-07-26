@@ -869,8 +869,9 @@ fn decode_command(
     require_supported_version(row, "typed_version")?;
 
     let session = session_id_from_uuid(required(row, "session_id")?);
+    let actor_kind: String = required(row, "actor_kind")?;
     let command_actor = decode_actor(
-        required(row, "actor_kind")?,
+        actor_kind.clone(),
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
         "command actor",
@@ -890,7 +891,7 @@ fn decode_command(
         Actor::Model { .. } | Actor::Recovery => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
-                value: String::from("unsupported metadata writer"),
+                value: actor_kind,
             }
             .into());
         }

@@ -54,6 +54,16 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_terminal_client";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const IMPORT_MODEL_CONFIGURATION: &str = r#"
+version = 1
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000002"
+provider = "anthropic"
+provider_model = "import-fixture"
+max_output_tokens = 64
+"#;
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -153,6 +163,76 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
         )
         .into()
     })
+}
+
+/// S28 / INV-038: the shipped terminal verb reads one named file and exposes
+/// first insertion separately from exact-snapshot reimport.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("session.jsonl");
+    fs::write(
+        &source_path,
+        concat!(
+            "{\"sessionId\":\"terminal-import\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+            "{\"sessionId\":\"terminal-import\",\"type\":\"assistant\",",
+            "\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}"
+        ),
+    )?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+    let arguments = vec![
+        String::from("import"),
+        String::from("--format"),
+        String::from("claude-code"),
+        source_path.display().to_string(),
+    ];
+
+    let inserted = run_client(
+        socket_directory.socket().to_owned(),
+        arguments.clone(),
+        None,
+    )
+    .await?;
+    assert!(inserted.status.success());
+    assert!(inserted.stderr.is_empty());
+    let inserted_output = String::from_utf8(inserted.stdout)?;
+    let inserted_identity = inserted_output
+        .strip_prefix("inserted imported_conversation_id=")
+        .expect("the first receipt carries the inserted outcome")
+        .trim();
+    Uuid::parse_str(inserted_identity)?;
+
+    let already_imported =
+        run_client(socket_directory.socket().to_owned(), arguments, None).await?;
+    assert!(already_imported.status.success());
+    assert!(already_imported.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(already_imported.stdout)?,
+        format!("already_imported imported_conversation_id={inserted_identity}\n")
+    );
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
 }
 
 /// S01 / S02 / INV-014 / INV-032: the daily terminal binary drives the real

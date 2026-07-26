@@ -1,16 +1,16 @@
 # Configuration and credentials
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against the implementing stack through PR #183
-(`agent/provider-call-security-parser`; signalboxd configuration loading in
-`apps/signalboxd/src/configuration.rs` and `apps/signalboxd/src/main.rs`, the
-static TOML catalog, and the provider bridge in `crates/model-provider-runtime`)
-together with the model-runtime crates it composes
-(`crates/model-runtime/src/credential.rs` and the redaction pipeline in
+Signalbox, verified against the implementing stack through PR #217
+(`agent/credential-reference-total`). This includes signalboxd configuration
+loading in `apps/signalboxd/src/configuration.rs` and
+`apps/signalboxd/src/main.rs`, the static TOML catalog, and the provider bridge
+in `crates/model-provider-runtime`, together with the model-runtime crates it
+composes (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`); the database-channel refusals
 in [process configuration](#process-configuration) were verified through PR #237
-(`agent/fix-pg-env-surface`; `production_connection_options` in
-`crates/persistence/src/lib.rs`); the `signalboxd` binary name, its
+(`agent/fix-pg-env-surface`), in `production_connection_options` under
+`crates/persistence/src/lib.rs`; the `signalboxd` binary name, its
 `apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
 checked-in example path were verified through PR #258
 (`agent/signalboxd-rename`). The daemon-held GitHub credential channel and its

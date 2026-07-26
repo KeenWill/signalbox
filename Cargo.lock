@@ -2729,6 +2729,7 @@ dependencies = [
 name = "signalbox-process-protocol"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "uuid",
@@ -2746,6 +2747,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",
+ "signalbox-conversation-import-codex",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",

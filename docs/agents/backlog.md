@@ -50,6 +50,33 @@ Owns: signalboxd configuration/composition, the model catalog example.
 Collides-with: `apps/signalboxd`. The merged OpenAI adapter is unreachable; the
 catalog admits only one provider.
 
+## Model catalog automation [blocked-on: OpenAI composition wiring; the wrapped-CLI drift-defense scaffolding] [size: S-M]
+
+Owns: a scheduled provider-listing watcher and the catalog-diff step that rides
+the wrapped-CLI pin-bump smoke, plus the PRs either one opens. Collides-with:
+the drift-defense CI wiring the subscription-runtime tracks introduce, and
+whichever entry holds the catalog file when a generated PR lands. Keeping the
+catalog current is an operations concern the composition-wiring entry above does
+not own; that entry makes the catalog multi-provider once, this one keeps it
+from going stale.
+
+Owner direction, 2026-07-25 (orientation only; per-model defaults, alias policy,
+and identity-generation rules are settled in the owning spec diff at pickup, not
+here): keeping the model catalog current should be automated, with the owner as
+the merge gate. Two mechanisms, both composing with the drift-defense pattern
+already recorded in the subscription-runtime entry's pin/Renovate/gated-smoke
+addendum below rather than restating it. (1) A provider-API watcher — a
+scheduled, main-only job under the same environment-protected-secrets rules as
+the gated smokes — queries each configured provider's model-listing endpoint,
+diffs the result against the catalog file (the `[[models]]` records in the
+example daemon configuration, or wherever the catalog lives at pickup), and
+opens a PR drafting entries for the new models with generated identities and
+conservative defaults for owner review; it never merges anything itself. (2)
+CLI-bump piggyback — for the wrapped-CLI runtimes, the Renovate pin-bump PR's
+compatibility smoke also enumerates the CLI's advertised models and surfaces
+catalog diffs in that same PR, so a CLI update shipping new models forces the
+catalog question at the moment of change.
+
 ## De-hub naming pass [server rename executed; remainder blocked-on: in-flight stacks landing] [size: S]
 
 The server rename executed on 2026-07-25 (`agent/signalboxd-rename`, recorded in
@@ -97,6 +124,37 @@ import-time mode). Owner addendum: an importer conformance corpus — synthetic
 fixture conversations only, never the owner's real archives, covering each
 source-format era, with golden/expect assertions on the imported result — is
 part of the entry's scope.
+
+Owner direction, 2026-07-26 (orientation only; the provenance marker's
+representation and the lineage mechanism are settled in the owning spec diff at
+pickup, not here): agent-to-agent subagent session transcripts import as
+first-class conversations — the same imported-conversation store, the same
+importer identity model, nothing second-class about how they are held. Two
+additions come with them. First, linkage to the parent session's imported
+conversation, recorded as durable evidence in the same spirit as the
+source-session lineage evidence the header already carries. Second, a typed
+provenance marker distinguishing an agent-driven session from a human-driven
+one; it composes with the session satellites the session-metadata entry below
+owns rather than standing up a parallel mechanism, and whether it lands as a
+metadata tag or a dedicated typed field is the design pass's call.
+
+One tension is flagged for pickup rather than settled here. The import spec's
+recorded law forbids deriving identity from a filename or source path and keeps
+converters bytes-only, yet for some source formats the parent linkage lives only
+in the archive's directory layout — a per-session subagent directory whose
+placement, not whose bytes, names the parent. The likely resolution is declared
+lineage: the parent arrives as explicit caller-supplied evidence on the import
+request, the operator asserting the relationship, which keeps the converter
+pure. The same request also carries the source filename, captured as recorded
+provenance evidence and never as identity input, which leaves the byte-digest
+identity law untouched. It is cheap, auditable corroboration: some source
+formats name their files by session identifier, and that is worth the most
+exactly where in-band metadata is thin, as in the subagent case. The owning spec
+diff decides.
+
+Counting follows from the first-class stance: subagent conversations are
+conversations and count in any conversation inventory, with the provenance
+marker enabling filtered views rather than exclusion from the count.
 
 ## Migration baseline reset [blocked-on: schema-audit verdict; owner checkpoint call] [size: S-M]
 
@@ -333,6 +391,11 @@ foundation is the daemon-side approval algebra plus the first daemon-local tool;
 the client approval surface is a separate later milestone whose UX is settled
 then.
 
+Cross-reference: the tool registry this foundation establishes is where two
+later per-tool declarations land — admissible execution loci and effect class
+(pure/idempotent/side-effecting) — recorded as owner direction in the runner
+protocol and placement entry below.
+
 ## Durable approval waits [blocked-on: tool loop design pass] [size: M]
 
 Owns: a waiting-for-confirmation turn state, dedupe-keyed resume commands in the
@@ -343,6 +406,66 @@ tool/approval waits. The reference design is an earlier unmerged prototype from
 the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
 outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
 executors, with replay eligibility conditioned on turn state.
+
+## Tool catalog buildout [ready] [size: L, spread over batches]
+
+Owns: catalog declarations and their executors — one new tool module per entry
+with its argument schema, permission default, and effect class, plus the
+integration clients the credentialed tools need. Collides-with: the tool-loop
+registry surface, since every batch touches the compiled catalog wiring;
+individual tools are otherwise disjoint from each other, so batches parallelize
+well among themselves and poorly against the foundation itself. Best pulled as
+small batches of related tools rather than one pass.
+
+Owner direction, 2026-07-25 (orientation only; per-tool argument shapes, result
+shapes, and failure taxonomies are settled in the owning specification diff at
+pickup): the inventory below distills the owner's prior work into the tools the
+platform wants, tiered by what gates them. It is a menu and a sequencing map,
+not a design.
+
+Tier 0 — daemon-side, no credentials, unblocked now. An echo tool (a conformance
+and test fixture more than a capability), a bounded single-URL web fetch, and a
+session status update tool that writes through the session-metadata satellites
+owned by the entry below.
+
+Tier 1 — daemon-side behind held credentials, also unblocked now. Daemon-held
+credentials ride the existing configuration channel (the same file-path pattern
+as the provider keys); the runner entry's credential-profile machinery is not a
+prerequisite here — its (tool, profile) approval pairing governs this tier only
+once profiles exist, and until then the registry's own approval defaults apply.
+A change-request review suite against the code host: summary, changed files,
+per-file patch, checks status, comment, review threads, thread reply, thread
+resolve, CI job log, and rerun failed jobs. Its first consumer is the platform's
+own review workflows (the review-workflow tier below), which is why it leads the
+tier. Alongside it, a library-documentation lookup service.
+
+Tier 2 — runner-side workspace tools [blocked-on: runner protocol design pass].
+File operations (read, multi-read, contextual read, write, text replace, patch
+apply, copy, move, delete, directory create, list, glob, content search, stat);
+version-control inspection (status, diff, log, show); shell execution and
+interactive process management (start, read, write, stop, list); and project dev
+loops (build, lint, test). This tier is the concrete catalog input to that
+design pass — the placement, dispatch, and advertised-catalog machinery in the
+runner protocol and placement entry below exists to carry exactly this list, so
+the two are read together.
+
+Tier 3 — feature-coupled, each item blocked on the feature it needs rather than
+on any tool machinery. Task management tools [blocked-on: a task aggregate] —
+the domain feature of the durable session tasks entry below, not a tool;
+delegation tools, meaning delegate to a sub-session plus list, read, and
+summarize delegated sessions \[blocked-on: a child-session delegation substrate
+— goal mode alone owns goal-session semantics, not child sessions\]; skills,
+guidance, and profile tools [blocked-on: those concepts existing at all]; report
+and artifact persistence [blocked-on: the artifact-boundary open question];
+image inspection [blocked-on: multimodal input]; and MCP-bridged tools
+[blocked-on: the deferred MCP pass].
+
+Every tool added under the current seam follows the compiled-registry pattern
+the first compiled tool `current_time` established — a process-lifetime
+immutable catalog value carrying each tool's permission default and effect
+class. The per-tool placement and effect-class declarations recorded as owner
+direction in the runner protocol and placement entry below govern this catalog
+once that design lands; this entry does not restate them.
 
 ## Session metadata, tags, and visibility [in-flight] [size: M-L]
 
@@ -469,6 +592,11 @@ freshness/TTL policies; the plugin isolation runtime; goal-mode-as-plugin (the
 goal-mode entry above stays the owning entry for that); per-session pipeline
 overrides; cache-aware stage placement.
 
+Cross-reference: runner loss or replacement extends the session frontier with an
+injected message naming the new machine, working directory, and tool list — an
+injection this pipeline composes, recorded as owner direction in the runner
+protocol and placement entry below.
+
 ## Durable session tasks [blocked-on: owner design pass] [size: M]
 
 Owns: task satellite store, protocol additions, later model-callable task tools.
@@ -486,7 +614,7 @@ Owns: execution placement and sandboxing for tool execution. Collides-with: tool
 loop and runner-protocol machinery. A first restricted placement for tool
 execution per the target model's execution-isolation target.
 
-## Runner protocol and placement [blocked-on: runner capability/auth decisions] [size: XL]
+## Runner protocol and placement [blocked-on: owner commission call (capability, placement, and auth kernel decided 2026-07-25; design pass unblocked)] [size: XL]
 
 Owns: runner registry, outbound runner connection protocol, dispatch fencing
 completion, placement. Collides-with: tool loop machinery. Carries the remote
@@ -506,6 +634,100 @@ first-class protocol flows, runner identity is not machine-pinned, and
 authentication must work for a runner that did not exist minutes earlier — which
 sharpens the standing design-runner-authentication-in-from-day-one caution.
 Everything else stays with the design pass.
+
+Owner direction, 2026-07-25 (second pass — placement, dispatch, effect classes;
+orientation only, same standing caveat): placement is a registry property. Each
+tool declares a non-empty set of admissible loci — Daemon (signalboxd-local; the
+locus name deliberately avoids legacy hub naming), Runner (with a selector), or
+both — and where both are admissible the session's attached runner is preferred,
+falling back to the daemon. Declarations are static per tool; per-call dynamic
+placement is a later upgrade. An MCP-bridged locus is reserved vocabulary for a
+future pass, not designed here. Dispatch topology: a runner initiates one held
+outbound connection (a WebSocket-shaped streaming channel) over which the daemon
+streams leased work, and runners never accept inbound connections. That channel
+is transport, never truth — lease and claim state is durable in the store, and a
+reconnecting runner re-syncs from durable state.
+
+Effect class is a required declaration on every tool, with no default: pure,
+idempotent, or side-effecting (pure implies idempotent; idempotent means
+state-changing but safely retryable). The retry law follows from it — pure and
+idempotent tools may be re-leased after a lost lease, while a side-effecting
+tool's lost attempt is crash-classified into typed evidence through the existing
+physical-attempt machinery and is never silently re-dispatched. A
+runner-advertised tool carrying no daemon-side effect declaration is treated as
+side-effecting.
+
+Runner tool catalogs are advertised, never trusted. Approval defaults, effect
+class, and placement admissibility for runner tools come from a daemon-side
+owner-editable catalog — configuration validated into typed domain at load,
+following the model-catalog TOML precedent — and the advertisement is compared
+against that catalog; an advertised tool with no daemon-side declaration is
+excluded, or fails closed to confirmation. A runner never widens its own
+approval surface, and the no-permission-downgrade-on-re-registration point above
+stands. Credential doctrine for the first slice: a tool declaring credential
+access is Daemon-only, and signalboxd hands no credentials over the runner
+protocol — INV-035 read as placement law. Runners may hold their own ambient
+machine or environment credentials, which sit outside this model;
+credential-scoped runner classes are a recorded deferred extension.
+
+Runner identity and session placement, kernel only (the design pass owns the
+rest): runner identity is logical — enrollment-based, not hardware-fingerprinted
+— yet a session may target either a capability class or a specific runner
+identity, both first-class at session creation (the owner's new-session flow:
+pick a machine or a class, optionally a working directory, with a default
+workdir for ephemeral runners). Once a session executes on a runner it is pinned
+there, because workspace state makes silent cross-runner rescheduling incorrect;
+there is no automatic migration. Runner loss or replacement is an explicit event
+that extends the session frontier — the model is told the new machine,
+directory, and tool list through an injected message, composing with the
+context-assembly direction above. Recovery flows, lease-affinity interaction,
+and workspace lifecycle all need the design pass. MCP — a daemon-side client for
+centralized servers, runner-side hosting for sandboxed execution — stays
+deferred to its own pass, flagged soon by owner priority.
+
+Owner direction, 2026-07-25 (third pass — credential profiles; orientation only,
+same standing caveat): the kernel is a split between credential values and
+credential selection, and the design pass owns everything the split does not
+settle. Values are runner-resident. A runner holds named credential profiles
+locally — scoped read-only and admin variants of an infrastructure credential, a
+dedicated agent VCS identity — provisioned by the owner on that machine
+out-of-band, and no value ever transits the runner protocol. That preserves the
+credential doctrine above rather than weakening it: the daemon still hands
+nothing down the channel.
+
+Selection, audit, and policy are daemon-resident. Runners advertise profile
+names, never values, at enrollment, over the same advertised-never-trusted
+channel as the tool catalog and validated the same way against the daemon-side
+owner-editable catalog. Session creation then selects a profile as a third
+placement axis alongside machine and working directory, and the picker can only
+offer profiles the targeted runner actually advertised — credential availability
+composes with placement, so a runner that never held a profile can never be
+granted it. The daemon records every grant durably, which makes it auditable
+which sessions ran under which profile.
+
+Approval posture resolves on (tool, credential profile), not on tool alone.
+Properly scoped credentials substitute for approval judging: a session on a
+read-only profile runs the matching tools under automatic approval with no
+judging spend, while the admin-profile variant of the same tools falls back to
+confirmation or the session's blanket posture. This is a new input to the
+existing approval-resolution chain, not new machinery, and it operationalizes
+the credential-ops policy already distilled in the spec (least-privilege,
+optional-mount, channel-scope) as session-selectable mounts.
+
+Lifecycle is snapshot-then-replace. The profile grant and the tool set are
+snapshotted into session state at creation; a mid-session change is an explicit
+owner command replacing defaults forward-only — the same shape as the direction
+recorded in the mid-session model selection entry above — and each change
+extends the frontier with an injected message so the model is informed of its
+changed tools and credentials. Revoking a profile gates future tool dispatches;
+an in-flight leased call completes or crash-classifies normally, and nothing is
+yanked mid-execution.
+
+Workspace provisioning is a runner capability in the same advertisement model: a
+session declares that it needs a repo workspace, and the runner provisions
+worktree-per-session and owns cleanup. The first consumer is the goal of running
+this repo's own review workflow inside the platform (the review-workflow tier
+entry below). Details go to the design pass.
 
 ## Delegation and child sessions [blocked-on: delegation cause decision; tool loop; selectable transcript-frontier decision (fork selection)] [size: L]
 

@@ -18,8 +18,9 @@ disciplines that apply to production and test code alike:
    structure.
 
 Every worked example in the appendix starts from a real excerpt of this
-repository, abridged where the text says so; the rewrite that follows each
-excerpt is proposed, not existing code.
+repository, abridged where the text says so, and quoted (with its line
+citations) as of the adoption commit; the rewrite that follows each excerpt is
+proposed, not existing code, except where the text says it has since landed.
 
 ## Core principles
 
@@ -184,9 +185,10 @@ names instead of a positional tuple — the assertion message improves for free
 
 **Worked example** — the streaming budget helper in both provider runtimes
 (`crates/model-runtime-openai/src/runtime.rs:506`, mirrored in
-`crates/model-runtime-anthropic/src/runtime.rs`) returns `(usize, bool)`, and
-its tests assert bare pairs
-(`crates/model-runtime-openai/src/runtime.rs:2036-2050`):
+`crates/model-runtime-anthropic/src/runtime.rs`) returned `(usize, bool)`, and
+its tests asserted bare pairs
+(`crates/model-runtime-openai/src/runtime.rs:2036-2050`); the enum rewrite below
+has since landed in both runtimes:
 
 ```rust
 fn streamed_response_prefix_len(current: usize, chunk: usize) -> (usize, bool) { ... }
@@ -218,16 +220,17 @@ The minimum fix —
 `struct PrefixBudget { accepted_len: usize, overflowed: bool }` — labels the
 fields but keeps the boolean axis; prefer the enum.
 
-The same axis-erasure appears at call sites:
+The same axis-erasure appeared at call sites:
 `StreamDecoder::new(ExchangeFacts::default(), false)` (three call sites) and the
 test drivers `drive_with_stop_sequences(&[...], true)` /
 `decode_with_stop_sequences(json, true)`
 (`crates/model-runtime-openai/src/stream.rs:594-599`,
-`crates/model-runtime-openai/src/response.rs:384-390`). The parameter is
+`crates/model-runtime-openai/src/response.rs:384-390`). The parameter was
 `stop_sequences_declared: bool` — a name every call site hides. As
-`enum StopSequences { Declared, NotDeclared }`, every site says what it means,
-and the variant is where declared sequences themselves would live if the decoder
-ever needs them (principle 5).
+`enum StopSequences { Declared, NotDeclared }` — since landed as the decoder's
+actual signature — every site says what it means, and the variant is where
+declared sequences themselves would live if the decoder ever needs them
+(principle 5).
 
 ### C. Arbitrary versus load-bearing, spelled out
 
@@ -298,7 +301,7 @@ let issued =
 
 ### D. Labeled matches for flag inventories
 
-**Worked example** — the registry corruption check matches a kind against six
+**Worked example** — the registry corruption check matched a kind against six
 presence booleans (`crates/persistence/src/command_registry.rs:130-170`,
 production code), abridged here to three flags:
 
@@ -316,7 +319,9 @@ match (kind, has_create, has_defaults, has_input) {
 
 Every arm demands positional cross-referencing, and the actual rule — *exactly
 one typed record exists, and it is the registered kind* — is nowhere stated.
-Pairing each flag with its kind makes the rule the code:
+Pairing each flag with its kind makes the rule the code, the form that has since
+landed there (with the decision match extracted as `sole_typed_record` so unit
+tests pin its arms without a database):
 
 ```rust
 let present: Vec<CommandKind> = [

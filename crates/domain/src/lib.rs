@@ -122,8 +122,9 @@ pub use replace_session_defaults::{
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
     ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
-    ReviewExternalLinkAttachmentResult, ReviewExternalLinkObservation,
-    ReviewExternalLinkObservationResult, ReviewExternalLinkTransitionError,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkClaim, ReviewExternalLinkNoChangeResult,
+    ReviewExternalLinkObservation, ReviewExternalLinkObservationResult,
+    ReviewExternalLinkPublicationBlockedResult, ReviewExternalLinkTransitionError,
     ReviewExternalLinkTransitionFailure, ReviewExternalObjectClaim, ReviewExternalObjectClaimError,
     ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
     ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,

@@ -2,7 +2,10 @@
 //!
 //! The normative specification is `docs/spec/review-workflows.md`.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::{NonZeroU32, NonZeroU64},
+};
 
 use crate::{
     AcceptedInputId, ContextFrontierId, ReviewExternalLinkId, ReviewFindingId, ReviewPassId,
@@ -321,6 +324,13 @@ pub enum ReviewTargetSubject {
     Commit,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReviewChangeRequestIdentity {
+    provider: ReviewKey,
+    repository: ReviewKey,
+    number: ReviewChangeRequestNumber,
+}
+
 /// Canonical topology facts for one review target's immediate stack parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewTargetParentRef {
@@ -372,6 +382,7 @@ pub struct ReviewTarget {
     base_revision: Option<ReviewKey>,
     stack_parent: Option<ReviewTargetParentRef>,
     ancestry: Vec<ReviewTargetId>,
+    change_request_ancestry: Vec<ReviewChangeRequestIdentity>,
 }
 
 impl ReviewTarget {
@@ -405,6 +416,16 @@ impl ReviewTarget {
             if parent.head_revision != *base_revision {
                 return Err(ReviewTargetError::DisconnectedParent { target: id });
             }
+            if let ReviewTargetSubject::ChangeRequest(number) = subject {
+                let identity = ReviewChangeRequestIdentity {
+                    provider: provider.clone(),
+                    repository: repository.clone(),
+                    number,
+                };
+                if parent.change_request_ancestry.contains(&identity) {
+                    return Err(ReviewTargetError::RepeatedChangeRequest { target: id });
+                }
+            }
         }
         let ancestry = stack_parent.map_or_else(Vec::new, |parent| {
             let mut ancestry = Vec::with_capacity(parent.ancestry.len() + 1);
@@ -412,6 +433,17 @@ impl ReviewTarget {
             ancestry.extend_from_slice(&parent.ancestry);
             ancestry
         });
+        let mut change_request_ancestry = Vec::new();
+        if let ReviewTargetSubject::ChangeRequest(number) = subject {
+            change_request_ancestry.push(ReviewChangeRequestIdentity {
+                provider: provider.clone(),
+                repository: repository.clone(),
+                number,
+            });
+        }
+        if let Some(parent) = stack_parent {
+            change_request_ancestry.extend_from_slice(&parent.change_request_ancestry);
+        }
         Ok(Self {
             id,
             provider,
@@ -421,7 +453,35 @@ impl ReviewTarget {
             base_revision,
             stack_parent: stack_parent.map(ReviewTargetParentRef::from_target),
             ancestry,
+            change_request_ancestry,
         })
+    }
+
+    /// Reconstitutes a target snapshot after authenticating the parent
+    /// identity stored on the child row against the supplied canonical parent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_reconstitute(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<ReviewTargetId>,
+        stack_parent_evidence: Option<&ReviewTarget>,
+    ) -> Result<Self, ReviewTargetError> {
+        if stack_parent != stack_parent_evidence.map(Self::id) {
+            return Err(ReviewTargetError::ParentIdentityMismatch { target: id });
+        }
+        Self::try_new(
+            id,
+            provider,
+            repository,
+            subject,
+            head_revision,
+            base_revision,
+            stack_parent_evidence,
+        )
     }
 
     /// Returns the target identity.
@@ -496,6 +556,17 @@ pub enum ReviewTargetError {
     /// The child's comparison revision is not its canonical parent's head.
     DisconnectedParent {
         /// The child target whose topology was rejected.
+        target: ReviewTargetId,
+    },
+    /// One stack chain contains two snapshots of the same change request.
+    RepeatedChangeRequest {
+        /// The child snapshot whose proposed chain repeats its logical subject.
+        target: ReviewTargetId,
+    },
+    /// The parent identity stored on the child row differs from the supplied
+    /// canonical parent evidence.
+    ParentIdentityMismatch {
+        /// The child snapshot whose stored parent edge was rejected.
         target: ReviewTargetId,
     },
 }
@@ -859,6 +930,68 @@ impl ReviewExternalLinkObservationResult {
     }
 }
 
+/// Exact unchanged external state that consumed one import pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReviewExternalLinkNoChangeResult {
+    link: ReviewExternalLinkId,
+    observed_through: ReviewEventOrdinal,
+    state: ReviewExternalObjectState,
+}
+
+impl ReviewExternalLinkNoChangeResult {
+    /// Commits one reservation, consumed observation frontier, and unchanged state.
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        observed_through: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self {
+        Self {
+            link,
+            observed_through,
+            state,
+        }
+    }
+
+    /// Returns the exact reservation.
+    pub const fn link(self) -> ReviewExternalLinkId {
+        self.link
+    }
+
+    /// Returns the exact latest observation consumed by this report.
+    pub const fn observed_through(self) -> ReviewEventOrdinal {
+        self.observed_through
+    }
+
+    /// Returns the exact unchanged reported state.
+    pub const fn state(self) -> ReviewExternalObjectState {
+        self.state
+    }
+}
+
+/// Exact pending publication reservation consumed by one blocked pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewExternalLinkPublicationBlockedResult {
+    link: ReviewExternalLinkId,
+    reason: ReviewText,
+}
+
+impl ReviewExternalLinkPublicationBlockedResult {
+    /// Commits one pending reservation and nonempty blocking reason.
+    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self {
+        Self { link, reason }
+    }
+
+    /// Returns the exact pending reservation.
+    pub const fn link(&self) -> ReviewExternalLinkId {
+        self.link
+    }
+
+    /// Borrows the nonempty blocking reason.
+    pub const fn reason(&self) -> &ReviewText {
+        &self.reason
+    }
+}
+
 /// One closed exact effect committed by a terminal review pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewPassResult {
@@ -870,6 +1003,10 @@ pub enum ReviewPassResult {
     ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
     /// One exact external-state observation.
     ExternalLinkObservation(ReviewExternalLinkObservationResult),
+    /// One unchanged external-state report that consumed its import pass.
+    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
+    /// One blocked publication bound to its exact pending reservation.
+    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
 }
 
 /// Canonical referenced-finding facts frozen when a reference event is admitted.
@@ -993,19 +1130,23 @@ pub struct ReviewRunEvidence {
     reference: ReviewRunRef,
     workflow: ReviewWorkflowKind,
     policy: ReviewPolicy,
+    state: ReviewRunState,
 }
 
 impl ReviewRunEvidence {
-    /// Supplies one independently stored run reference, workflow, and policy.
+    /// Supplies one independently stored run reference, workflow, policy, and
+    /// lifecycle projection.
     pub const fn new(
         reference: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         policy: ReviewPolicy,
+        state: ReviewRunState,
     ) -> Self {
         Self {
             reference,
             workflow,
             policy,
+            state,
         }
     }
 
@@ -1023,6 +1164,11 @@ impl ReviewRunEvidence {
     pub const fn policy(self) -> ReviewPolicy {
         self.policy
     }
+
+    /// Returns the canonical run lifecycle projection.
+    pub const fn state(self) -> ReviewRunState {
+        self.state
+    }
 }
 
 /// Canonical pass facts independently loaded for review claims and projections.
@@ -1035,9 +1181,7 @@ pub struct ReviewPassEvidence {
 }
 
 impl ReviewPassEvidence {
-    /// Supplies one independently stored pass reference, kind, run policy, and
-    /// current state.
-    pub const fn new(
+    const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
         policy: ReviewPolicy,
@@ -1049,6 +1193,53 @@ impl ReviewPassEvidence {
             policy,
             state,
         }
+    }
+
+    /// Derives authenticated evidence from one fully validated pass and its
+    /// canonical run policy.
+    pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self {
+        Self::new(pass.reference, pass.kind, policy, pass.state.clone())
+    }
+
+    /// Projects one exact effect result from already authenticated terminal
+    /// pass evidence while preserving its identity, purpose, policy, turn, and
+    /// terminal outcome.
+    ///
+    /// The effect aggregate remains responsible for validating that the
+    /// proposed result belongs to that effect. Persistence may use this
+    /// projection while atomically deciding which exact result first binds an
+    /// otherwise result-free terminal pass.
+    pub fn project_result(&self, result: ReviewPassResult) -> Option<Self> {
+        let state = match &self.state {
+            ReviewPassState::Succeeded {
+                turn,
+                output_frontier,
+                result: None,
+            } => ReviewPassState::Succeeded {
+                turn: *turn,
+                output_frontier: *output_frontier,
+                result: Some(result),
+            },
+            ReviewPassState::Blocked { turn, result: None } => ReviewPassState::Blocked {
+                turn: *turn,
+                result: Some(result),
+            },
+            ReviewPassState::Succeeded {
+                result: Some(current),
+                ..
+            }
+            | ReviewPassState::Blocked {
+                result: Some(current),
+                ..
+            } if current == &result => return Some(self.clone()),
+            ReviewPassState::Queued
+            | ReviewPassState::Running { .. }
+            | ReviewPassState::Failed { .. }
+            | ReviewPassState::Cancelled { .. }
+            | ReviewPassState::Succeeded { .. }
+            | ReviewPassState::Blocked { .. } => return None,
+        };
+        Some(Self::new(self.reference, self.kind, self.policy, state))
     }
 
     /// Returns the canonical pass reference.
@@ -1292,9 +1483,9 @@ impl ReviewRun {
         self.recorded_pass
     }
 
-    /// Returns canonical identity, workflow, and policy evidence for this run.
+    /// Returns canonical identity, workflow, policy, and lifecycle evidence.
     pub const fn evidence(&self) -> ReviewRunEvidence {
-        ReviewRunEvidence::new(self.reference, self.workflow, self.policy)
+        ReviewRunEvidence::new(self.reference, self.workflow, self.policy, self.state)
     }
 }
 
@@ -1392,6 +1583,14 @@ fn run_state_matches_pass(run: ReviewRunState, pass: &ReviewPassState) -> bool {
             ReviewPassState::Cancelled { .. }
         )
     )
+}
+
+fn run_evidence_matches_pass(run: ReviewRunEvidence, pass: &ReviewPassEvidence) -> bool {
+    run.reference() == pass.reference().run()
+        && run.state().pass() == Some(pass.reference())
+        && workflow_matches_pass_kind(run.workflow(), pass.kind())
+        && run.policy() == pass.policy()
+        && run_state_matches_pass(run.state(), pass.state())
 }
 
 /// Why canonical pass facts cannot support a run projection.
@@ -1681,7 +1880,8 @@ pub struct ReviewPassReconstitutionInput {
     workflow_run: ReviewRunRef,
     workflow: ReviewWorkflowKind,
     session: SessionId,
-    accepted_input: ReviewPassAcceptedInputEvidence,
+    accepted_input: AcceptedInputId,
+    accepted_input_evidence: ReviewPassAcceptedInputEvidence,
     state: ReviewPassState,
     turn_evidence: Option<ReviewPassTurnEvidence>,
 }
@@ -1695,7 +1895,8 @@ impl ReviewPassReconstitutionInput {
         workflow_run: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         session: SessionId,
-        accepted_input: ReviewPassAcceptedInputEvidence,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
         state: ReviewPassState,
         turn_evidence: Option<ReviewPassTurnEvidence>,
     ) -> Self {
@@ -1706,6 +1907,7 @@ impl ReviewPassReconstitutionInput {
             workflow,
             session,
             accepted_input,
+            accepted_input_evidence,
             state,
             turn_evidence,
         }
@@ -1737,8 +1939,13 @@ impl ReviewPassReconstitutionInput {
     }
 
     /// Returns the accepted input stored on the pass.
-    pub const fn accepted_input(&self) -> ReviewPassAcceptedInputEvidence {
+    pub const fn accepted_input(&self) -> AcceptedInputId {
         self.accepted_input
+    }
+
+    /// Returns the canonical evidence loaded for the stored accepted input.
+    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence {
+        self.accepted_input_evidence
     }
 
     /// Returns the stored pass state.
@@ -1830,7 +2037,7 @@ impl ReviewPass {
                 failure,
             });
         }
-        let Some(origin_turn) = input.accepted_input.origin_turn else {
+        let Some(origin_turn) = input.accepted_input_evidence.origin_turn else {
             return Err(ReviewPassReconstitutionError {
                 input: Box::new(input),
                 failure: ReviewPassReconstitutionFailure::AcceptedInputHasNoOriginTurn,
@@ -1840,7 +2047,7 @@ impl ReviewPass {
             reference: input.reference,
             kind: input.kind,
             session: input.session,
-            accepted_input: input.accepted_input.accepted_input,
+            accepted_input: input.accepted_input,
             origin_turn,
             state: input.state,
         })
@@ -2030,22 +2237,30 @@ fn validate_pass_reconstitution(
     if !workflow_matches_pass_kind(input.workflow, input.kind) {
         return Some(ReviewPassReconstitutionFailure::RunWorkflowMismatch);
     }
-    if input.session != input.accepted_input.session {
+    if input.accepted_input != input.accepted_input_evidence.accepted_input {
+        return Some(ReviewPassReconstitutionFailure::AcceptedInputEvidenceMismatch);
+    }
+    if input.session != input.accepted_input_evidence.session {
         return Some(ReviewPassReconstitutionFailure::AcceptedInputSessionMismatch);
     }
-    let Some(origin_turn) = input.accepted_input.origin_turn else {
+    let Some(origin_turn) = input.accepted_input_evidence.origin_turn else {
         return Some(ReviewPassReconstitutionFailure::AcceptedInputHasNoOriginTurn);
     };
     if let Some(failure) = validate_pass_result(input.reference, input.kind, &input.state) {
         return Some(failure);
     }
-    validate_pass_turn_evidence(
+    if let Some(failure) = validate_pass_turn_evidence(
         input.session,
-        input.accepted_input.accepted_input,
+        input.accepted_input,
         origin_turn,
         &input.state,
         input.turn_evidence,
-    )
+    ) {
+        return Some(failure);
+    }
+    (input.kind == ReviewPassKind::ReadOnlyReview
+        && matches!(input.state, ReviewPassState::Succeeded { result: None, .. }))
+    .then_some(ReviewPassReconstitutionFailure::IncompatibleResult)
 }
 
 fn validate_pass_turn_evidence(
@@ -2132,17 +2347,27 @@ fn validate_pass_result(
     kind: ReviewPassKind,
     state: &ReviewPassState,
 ) -> Option<ReviewPassReconstitutionFailure> {
-    let result = state.result()?;
+    let Some(result) = state.result() else {
+        return (kind == ReviewPassKind::Publish
+            && matches!(state, ReviewPassState::Blocked { .. }))
+        .then_some(ReviewPassReconstitutionFailure::IncompatibleResult);
+    };
     let foreign_target = match result {
         ReviewPassResult::ProducedFindings(findings) => findings
             .findings()
             .iter()
             .any(|finding| finding.target() != reference.target()),
-        ReviewPassResult::FindingEvent(event) => event.finding().target() != reference.target(),
+        ReviewPassResult::FindingEvent(event) => {
+            event.finding().target() != reference.target()
+                || referenced_finding_result(event)
+                    .is_some_and(|referenced| referenced.reference().target() != reference.target())
+        }
         ReviewPassResult::ExternalLinkAttachment(result) => result
             .finding_event()
             .is_some_and(|event| event.finding().target() != reference.target()),
-        ReviewPassResult::ExternalLinkObservation(_) => false,
+        ReviewPassResult::ExternalLinkObservation(_)
+        | ReviewPassResult::ExternalLinkNoChange(_)
+        | ReviewPassResult::ExternalLinkPublicationBlocked(_) => false,
     };
     if foreign_target {
         return Some(ReviewPassReconstitutionFailure::ForeignResultTarget);
@@ -2159,6 +2384,7 @@ fn validate_pass_result(
         (ReviewPassState::Succeeded { .. }, ReviewPassResult::FindingEvent(event)) => {
             !matches!(event.kind(), ReviewFindingEventResultKind::Posted { .. })
                 && event.finding().target() == reference.target()
+                && finding_event_result_reference_is_compatible(event)
                 && finding_event_result_matches_pass(
                     event.kind(),
                     kind,
@@ -2167,6 +2393,7 @@ fn validate_pass_result(
         }
         (ReviewPassState::Blocked { .. }, ReviewPassResult::FindingEvent(event)) => {
             event.finding().target() == reference.target()
+                && finding_event_result_reference_is_compatible(event)
                 && finding_event_result_matches_pass(
                     event.kind(),
                     kind,
@@ -2192,9 +2419,37 @@ fn validate_pass_result(
         (ReviewPassState::Succeeded { .. }, ReviewPassResult::ExternalLinkObservation(_)) => {
             kind == ReviewPassKind::ImportExternalContext
         }
+        (ReviewPassState::Succeeded { .. }, ReviewPassResult::ExternalLinkNoChange(_)) => {
+            kind == ReviewPassKind::ImportExternalContext
+        }
+        (ReviewPassState::Blocked { .. }, ReviewPassResult::ExternalLinkPublicationBlocked(_)) => {
+            kind == ReviewPassKind::Publish
+        }
         _ => false,
     };
     (!compatible).then_some(ReviewPassReconstitutionFailure::IncompatibleResult)
+}
+
+fn referenced_finding_result(
+    event: &ReviewFindingEventResult,
+) -> Option<ReviewReferencedFindingEvidence> {
+    match event.kind() {
+        ReviewFindingEventResultKind::Duplicate { canonical } => Some(*canonical),
+        ReviewFindingEventResultKind::Superseded { successor } => Some(*successor),
+        _ => None,
+    }
+}
+
+fn finding_event_result_reference_is_compatible(event: &ReviewFindingEventResult) -> bool {
+    referenced_finding_result(event).is_none_or(|referenced| {
+        referenced.reference().finding() != event.finding().finding()
+            && referenced.reference().run() == event.finding().run()
+            && referenced.producing_pass() == event.finding().pass()
+            && matches!(
+                referenced.status(),
+                ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
+            )
+    })
 }
 
 fn finding_event_result_matches_pass(
@@ -2312,6 +2567,9 @@ pub enum ReviewPassReconstitutionFailure {
     ForeignWorkflowRun,
     /// The pass kind is incompatible with its canonical run workflow.
     RunWorkflowMismatch,
+    /// The accepted-input identity stored on the pass differs from the
+    /// supplied canonical accepted-input evidence.
+    AcceptedInputEvidenceMismatch,
     /// The accepted input belongs to another session.
     AcceptedInputSessionMismatch,
     /// The accepted input is pending or consumed steering with no origin turn.
@@ -2641,7 +2899,7 @@ impl ReviewFindingProposal {
             ));
         }
         if producing_run.workflow() != ReviewWorkflowKind::ReadOnlyReview
-            || producing_run.policy() != producing_pass.policy()
+            || !run_evidence_matches_pass(producing_run, &producing_pass)
         {
             return Err(ReviewFindingTransitionError::proposal(
                 ReviewFindingTransitionFailure::IncompatibleProducingRunEvidence,
@@ -2654,6 +2912,10 @@ impl ReviewFindingProposal {
                     result: Some(ReviewPassResult::ProducedFindings(findings)),
                     ..
                 } if findings.contains(reference)
+                    && findings
+                        .findings()
+                        .iter()
+                        .all(|finding| finding.pass() == producing_pass.reference())
             )
         {
             return Err(ReviewFindingTransitionError::proposal(
@@ -2939,7 +3201,8 @@ impl ReviewFindingEventKind {
 pub struct ReviewFindingEvent {
     finding: ReviewFindingRef,
     ordinal: ReviewEventOrdinal,
-    pass: ReviewPassEvidence,
+    pass: ReviewPassRef,
+    pass_evidence: ReviewPassEvidence,
     run: ReviewRunEvidence,
     kind: ReviewFindingEventKind,
 }
@@ -2949,7 +3212,8 @@ impl ReviewFindingEvent {
     pub const fn new(
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         kind: ReviewFindingEventKind,
     ) -> Self {
@@ -2957,6 +3221,7 @@ impl ReviewFindingEvent {
             finding,
             ordinal,
             pass,
+            pass_evidence,
             run,
             kind,
         }
@@ -2974,12 +3239,12 @@ impl ReviewFindingEvent {
 
     /// Returns the producing pass.
     pub const fn pass(&self) -> ReviewPassRef {
-        self.pass.reference()
+        self.pass
     }
 
     /// Returns the canonical producing-pass evidence.
     pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
-        &self.pass
+        &self.pass_evidence
     }
 
     /// Returns the canonical producing-run evidence.
@@ -2999,6 +3264,9 @@ pub struct ReviewFinding {
     proposal: ReviewFindingProposal,
     events: Vec<ReviewFindingEvent>,
     status: ReviewFindingStatus,
+    pass_claims: BTreeMap<ReviewPassId, (ReviewPassEvidence, ReviewRunEvidence)>,
+    run_claims: BTreeMap<ReviewRunId, (ReviewPassEvidence, ReviewRunEvidence)>,
+    publication_links: BTreeSet<ReviewExternalLinkId>,
 }
 
 impl ReviewFinding {
@@ -3008,6 +3276,9 @@ impl ReviewFinding {
             proposal,
             events: Vec::new(),
             status: ReviewFindingStatus::Open,
+            pass_claims: BTreeMap::new(),
+            run_claims: BTreeMap::new(),
+            publication_links: BTreeSet::new(),
         }
     }
 
@@ -3055,18 +3326,22 @@ impl ReviewFinding {
                 ReviewFindingTransitionFailure::NoncontiguousOrdinal { expected },
             ));
         }
-        if event.pass.reference().target() != self.proposal.reference.target() {
+        if event.pass.target() != self.proposal.reference.target() {
             return Err(self.event_error(event, ReviewFindingTransitionFailure::ForeignEventPass));
         }
-        if event.run.reference() != event.pass.reference().run()
-            || !workflow_matches_pass_kind(event.run.workflow(), event.pass.kind())
-        {
+        if event.pass != event.pass_evidence.reference() {
+            return Err(self.event_error(
+                event,
+                ReviewFindingTransitionFailure::EventPassEvidenceMismatch,
+            ));
+        }
+        if !run_evidence_matches_pass(event.run, &event.pass_evidence) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::IncompatibleEventRunEvidence,
             ));
         }
-        if event.run.policy() != event.pass.policy()
+        if event.run.policy() != event.pass_evidence.policy()
             || event.run.policy() != self.proposal.producing_pass.policy()
         {
             return Err(
@@ -3079,19 +3354,19 @@ impl ReviewFinding {
                 self.proposal.reference.run(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 self.proposal.producing_pass.policy(),
+                ReviewRunState::Succeeded {
+                    concluding_pass: self.proposal.producing_pass.reference(),
+                },
             ),
         );
-        let prior_pass = if self.proposal.producing_pass.reference().pass()
-            == event.pass.reference().pass()
-        {
+        let prior_pass = if self.proposal.producing_pass.reference().pass() == event.pass.pass() {
             Some(producing_claim)
         } else {
-            self.events
-                .iter()
-                .find(|previous| previous.pass.reference().pass() == event.pass.reference().pass())
-                .map(|previous| (&previous.pass, previous.run))
+            self.pass_claims
+                .get(&event.pass.pass())
+                .map(|(pass, run)| (pass, *run))
         };
-        if prior_pass.is_some_and(|prior| prior != (&event.pass, event.run)) {
+        if prior_pass.is_some_and(|prior| prior != (&event.pass_evidence, event.run)) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::ConflictingPassEvidence,
@@ -3104,21 +3379,23 @@ impl ReviewFinding {
                     self.proposal.reference.run(),
                     ReviewWorkflowKind::ReadOnlyReview,
                     self.proposal.producing_pass.policy(),
+                    ReviewRunState::Succeeded {
+                        concluding_pass: self.proposal.producing_pass.reference(),
+                    },
                 ),
             ))
         } else {
-            self.events
-                .iter()
-                .find(|previous| previous.run.reference().run() == event.run.reference().run())
-                .map(|previous| (&previous.pass, previous.run))
+            self.run_claims
+                .get(&event.run.reference().run())
+                .map(|(pass, run)| (pass, *run))
         };
-        if prior_run.is_some_and(|prior| prior != (&event.pass, event.run)) {
+        if prior_run.is_some_and(|prior| prior != (&event.pass_evidence, event.run)) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::ConflictingRunEvidence,
             ));
         }
-        if !finding_event_matches_pass_evidence(&event, &event.pass) {
+        if !finding_event_matches_pass_evidence(&event, &event.pass_evidence) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::IncompatibleEventPassEvidence,
@@ -3143,14 +3420,7 @@ impl ReviewFinding {
         }
         validate_finding_reference(&self, &event)?;
         if let ReviewFindingEventKind::Posted { link } = &event.kind
-            && self.events.iter().any(|previous| {
-                matches!(
-                    previous.kind(),
-                    ReviewFindingEventKind::Posted {
-                        link: previous_link
-                    } if previous_link.link() == link.link()
-                )
-            })
+            && self.publication_links.contains(&link.link())
         {
             return Err(
                 self.event_error(event, ReviewFindingTransitionFailure::ReusedPublicationLink)
@@ -3165,6 +3435,16 @@ impl ReviewFinding {
                 },
             ));
         };
+        let pass_claim = (event.pass_evidence.clone(), event.run);
+        self.pass_claims
+            .entry(event.pass.pass())
+            .or_insert_with(|| pass_claim.clone());
+        self.run_claims
+            .entry(event.run.reference().run())
+            .or_insert(pass_claim);
+        if let ReviewFindingEventKind::Posted { link } = &event.kind {
+            self.publication_links.insert(link.link());
+        }
         self.status = next_status;
         self.events.push(event);
         Ok(self)
@@ -3377,6 +3657,9 @@ pub enum ReviewFindingTransitionFailure {
     ForeignEventFinding,
     /// An event pass belongs to another target.
     ForeignEventPass,
+    /// The pass identity stored on the event differs from the supplied
+    /// canonical pass evidence.
+    EventPassEvidenceMismatch,
     /// The event pass contradicts its independently loaded owning run.
     IncompatibleEventRunEvidence,
     /// An event pass's run carries a different policy from the finding.
@@ -3509,7 +3792,8 @@ pub enum ReviewExternalObjectKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkAttachment {
     link: ReviewExternalLinkId,
-    pass: ReviewPassEvidence,
+    pass: ReviewPassRef,
+    pass_evidence: ReviewPassEvidence,
     run: ReviewRunEvidence,
     external_object: ReviewKey,
 }
@@ -3518,13 +3802,15 @@ impl ReviewExternalLinkAttachment {
     /// Constructs attachment evidence.
     pub const fn new(
         link: ReviewExternalLinkId,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         external_object: ReviewKey,
     ) -> Self {
         Self {
             link,
             pass,
+            pass_evidence,
             run,
             external_object,
         }
@@ -3537,12 +3823,12 @@ impl ReviewExternalLinkAttachment {
 
     /// Returns the producing pass.
     pub const fn pass(&self) -> ReviewPassRef {
-        self.pass.reference()
+        self.pass
     }
 
     /// Returns the canonical producing-pass evidence.
     pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
-        &self.pass
+        &self.pass_evidence
     }
 
     /// Returns the canonical producing-run evidence.
@@ -3572,7 +3858,8 @@ pub enum ReviewExternalObjectState {
 pub struct ReviewExternalLinkObservation {
     link: ReviewExternalLinkId,
     ordinal: ReviewEventOrdinal,
-    pass: ReviewPassEvidence,
+    pass: ReviewPassRef,
+    pass_evidence: ReviewPassEvidence,
     run: ReviewRunEvidence,
     state: ReviewExternalObjectState,
 }
@@ -3582,7 +3869,8 @@ impl ReviewExternalLinkObservation {
     pub const fn new(
         link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         state: ReviewExternalObjectState,
     ) -> Self {
@@ -3590,6 +3878,7 @@ impl ReviewExternalLinkObservation {
             link,
             ordinal,
             pass,
+            pass_evidence,
             run,
             state,
         }
@@ -3607,12 +3896,12 @@ impl ReviewExternalLinkObservation {
 
     /// Returns the observing pass.
     pub const fn pass(&self) -> ReviewPassRef {
-        self.pass.reference()
+        self.pass
     }
 
     /// Returns the canonical observing-pass evidence.
     pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
-        &self.pass
+        &self.pass_evidence
     }
 
     /// Returns the canonical observing-run evidence.
@@ -3626,6 +3915,36 @@ impl ReviewExternalLinkObservation {
     }
 }
 
+/// One durable result-bearing pass/run claim that appends no link child row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewExternalLinkClaim {
+    pass: ReviewPassEvidence,
+    run: ReviewRunEvidence,
+}
+
+impl ReviewExternalLinkClaim {
+    /// Supplies the exact canonical pass and run evidence persisted for a
+    /// no-change report or blocked publication.
+    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self {
+        Self { pass, run }
+    }
+
+    /// Returns the claiming pass.
+    pub const fn pass(&self) -> ReviewPassRef {
+        self.pass.reference()
+    }
+
+    /// Returns the canonical claiming-pass evidence.
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
+        &self.pass
+    }
+
+    /// Returns the canonical claiming-run evidence.
+    pub const fn run_evidence(&self) -> ReviewRunEvidence {
+        self.run
+    }
+}
+
 /// One durable external-link reservation with optional attachment and observations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLink {
@@ -3635,6 +3954,9 @@ pub struct ReviewExternalLink {
     object_kind: ReviewExternalObjectKind,
     attachment: Option<ReviewExternalLinkAttachment>,
     observations: Vec<ReviewExternalLinkObservation>,
+    claims: Vec<ReviewExternalLinkClaim>,
+    pass_claims: BTreeMap<ReviewPassId, (ReviewPassEvidence, ReviewRunEvidence)>,
+    run_claims: BTreeMap<ReviewRunId, (ReviewPassEvidence, ReviewRunEvidence)>,
 }
 
 impl ReviewExternalLink {
@@ -3659,10 +3981,14 @@ impl ReviewExternalLink {
             object_kind,
             attachment: None,
             observations: Vec::new(),
+            claims: Vec::new(),
+            pass_claims: BTreeMap::new(),
+            run_claims: BTreeMap::new(),
         })
     }
 
     /// Reconstitutes a complete link by validating attachment and observations.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_reconstitute(
         id: ReviewExternalLinkId,
         association: ReviewExternalLinkAssociation,
@@ -3670,6 +3996,7 @@ impl ReviewExternalLink {
         object_kind: ReviewExternalObjectKind,
         attachment: Option<ReviewExternalLinkAttachment>,
         observations: Vec<ReviewExternalLinkObservation>,
+        claims: Vec<ReviewExternalLinkClaim>,
         target: &ReviewTarget,
     ) -> Result<Self, ReviewExternalLinkTransitionFailure> {
         let mut link = Self::try_reserve(id, association, provider, object_kind, target)?;
@@ -3678,6 +4005,9 @@ impl ReviewExternalLink {
         }
         for observation in observations {
             link = link.observe(observation).map_err(|error| error.failure)?;
+        }
+        for claim in claims {
+            link = link.replay_claim(claim)?;
         }
         Ok(link)
     }
@@ -3690,6 +4020,94 @@ impl ReviewExternalLink {
             current: Box::new(self.clone()),
             failure,
         }
+    }
+
+    fn claim_failure(
+        &self,
+        pass: &ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Option<ReviewExternalLinkTransitionFailure> {
+        if self
+            .pass_claims
+            .get(&pass.reference().pass())
+            .is_some_and(|(prior_pass, prior_run)| prior_pass != pass || *prior_run != run)
+        {
+            return Some(ReviewExternalLinkTransitionFailure::ConflictingPassEvidence);
+        }
+        self.run_claims
+            .get(&run.reference().run())
+            .is_some_and(|(prior_pass, prior_run)| prior_pass != pass || *prior_run != run)
+            .then_some(ReviewExternalLinkTransitionFailure::ConflictingRunEvidence)
+    }
+
+    fn record_claim(&mut self, pass: &ReviewPassEvidence, run: ReviewRunEvidence) {
+        let claim = (pass.clone(), run);
+        self.pass_claims
+            .entry(pass.reference().pass())
+            .or_insert_with(|| claim.clone());
+        self.run_claims
+            .entry(run.reference().run())
+            .or_insert(claim);
+    }
+
+    fn record_durable_claim(&mut self, claim: ReviewExternalLinkClaim) {
+        self.record_claim(&claim.pass, claim.run);
+        let pass = claim.pass().pass();
+        match self
+            .claims
+            .binary_search_by_key(&pass, |existing| existing.pass().pass())
+        {
+            Ok(_) => {}
+            Err(index) => self.claims.insert(index, claim),
+        }
+    }
+
+    fn replay_claim(
+        mut self,
+        claim: ReviewExternalLinkClaim,
+    ) -> Result<Self, ReviewExternalLinkTransitionFailure> {
+        if claim.pass.reference().target() != self.association.target() {
+            return Err(ReviewExternalLinkTransitionFailure::ForeignPass);
+        }
+        let publication_block = claim.pass.kind() == ReviewPassKind::Publish
+            && matches!(claim.pass.state(), ReviewPassState::Blocked { .. });
+        if !run_evidence_matches_pass(claim.run, &claim.pass) {
+            return Err(if publication_block {
+                ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockRunEvidence
+            } else {
+                ReviewExternalLinkTransitionFailure::IncompatibleObservationRunEvidence
+            });
+        }
+        let compatible = match claim.pass.state() {
+            ReviewPassState::Succeeded {
+                result: Some(ReviewPassResult::ExternalLinkNoChange(result)),
+                ..
+            } => {
+                claim.pass.kind() == ReviewPassKind::ImportExternalContext
+                    && result.link() == self.id
+                    && self.attachment.is_some()
+                    && self.observations.iter().any(|observation| {
+                        observation.ordinal == result.observed_through()
+                            && observation.state == result.state()
+                    })
+            }
+            ReviewPassState::Blocked {
+                result: Some(_), ..
+            } => publication_block_matches_link(&claim.pass, self.association, self.id),
+            _ => false,
+        };
+        if !compatible {
+            return Err(if publication_block {
+                ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockPass
+            } else {
+                ReviewExternalLinkTransitionFailure::IncompatibleObservationPass
+            });
+        }
+        if let Some(failure) = self.claim_failure(&claim.pass, claim.run) {
+            return Err(failure);
+        }
+        self.record_durable_claim(claim);
+        Ok(self)
     }
 
     /// Attaches the exact external identity after reservation.
@@ -3705,18 +4123,23 @@ impl ReviewExternalLink {
                 self.transition_error(ReviewExternalLinkTransitionFailure::ForeignAttachmentLink)
             );
         }
-        if attachment.pass.reference().target() != self.association.target() {
+        if attachment.pass != attachment.pass_evidence.reference() {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::AttachmentPassEvidenceMismatch,
+            ));
+        }
+        if attachment.pass.target() != self.association.target() {
             return Err(self.transition_error(ReviewExternalLinkTransitionFailure::ForeignPass));
         }
-        if attachment.run.reference() != attachment.pass.reference().run()
-            || attachment.run.policy() != attachment.pass.policy()
-            || !workflow_matches_pass_kind(attachment.run.workflow(), attachment.pass.kind())
-        {
+        if !run_evidence_matches_pass(attachment.run, &attachment.pass_evidence) {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatibleAttachmentRunEvidence,
             ));
         }
-        let Some(result) = (match attachment.pass.state() {
+        if let Some(failure) = self.claim_failure(&attachment.pass_evidence, attachment.run) {
+            return Err(self.transition_error(failure));
+        }
+        let Some(result) = (match attachment.pass_evidence.state() {
             ReviewPassState::Succeeded {
                 result: Some(ReviewPassResult::ExternalLinkAttachment(result)),
                 ..
@@ -3728,7 +4151,7 @@ impl ReviewExternalLink {
             ));
         };
         if !matches!(
-            attachment.pass.kind(),
+            attachment.pass_evidence.kind(),
             ReviewPassKind::Publish | ReviewPassKind::ImportExternalContext
         ) || result.link() != self.id
             || result.external_object() != &attachment.external_object
@@ -3747,7 +4170,7 @@ impl ReviewExternalLink {
                     )
                     || !finding_event_result_matches_pass(
                         event.kind(),
-                        attachment.pass.kind(),
+                        attachment.pass_evidence.kind(),
                         ReviewPassTurnOutcome::Completed,
                     )
             })
@@ -3756,6 +4179,7 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::IncompatibleAttachmentPass,
             ));
         }
+        self.record_claim(&attachment.pass_evidence, attachment.run);
         self.attachment = Some(attachment);
         Ok(self)
     }
@@ -3773,20 +4197,22 @@ impl ReviewExternalLink {
                 self.transition_error(ReviewExternalLinkTransitionFailure::ForeignObservationLink)
             );
         }
-        if observation.pass.reference().target() != self.association.target() {
+        if observation.pass != observation.pass_evidence.reference() {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::ObservationPassEvidenceMismatch,
+            ));
+        }
+        if observation.pass.target() != self.association.target() {
             return Err(self.transition_error(ReviewExternalLinkTransitionFailure::ForeignPass));
         }
-        if observation.run.reference() != observation.pass.reference().run()
-            || observation.run.policy() != observation.pass.policy()
-            || !workflow_matches_pass_kind(observation.run.workflow(), observation.pass.kind())
-        {
+        if !run_evidence_matches_pass(observation.run, &observation.pass_evidence) {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatibleObservationRunEvidence,
             ));
         }
-        if observation.pass.kind() != ReviewPassKind::ImportExternalContext
+        if observation.pass_evidence.kind() != ReviewPassKind::ImportExternalContext
             || !matches!(
-                observation.pass.state(),
+                observation.pass_evidence.state(),
                 ReviewPassState::Succeeded {
                     result: Some(ReviewPassResult::ExternalLinkObservation(result)),
                     ..
@@ -3817,49 +4243,88 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::NoncontiguousOrdinal { expected },
             ));
         }
-        let attachment_claim = self
-            .attachment
-            .as_ref()
-            .filter(|attachment| {
-                attachment.pass.reference().pass() == observation.pass.reference().pass()
-            })
-            .map(|attachment| (&attachment.pass, attachment.run));
-        let prior_claim = self
-            .observations
-            .iter()
-            .find(|previous| {
-                previous.pass.reference().pass() == observation.pass.reference().pass()
-            })
-            .map(|previous| (&previous.pass, previous.run));
-        if attachment_claim
-            .or(prior_claim)
-            .is_some_and(|prior| prior != (&observation.pass, observation.run))
-        {
-            return Err(
-                self.transition_error(ReviewExternalLinkTransitionFailure::ConflictingPassEvidence)
-            );
+        if let Some(failure) = self.claim_failure(&observation.pass_evidence, observation.run) {
+            return Err(self.transition_error(failure));
         }
-        let attachment_run_claim = self
-            .attachment
-            .as_ref()
-            .filter(|attachment| {
-                attachment.run.reference().run() == observation.run.reference().run()
-            })
-            .map(|attachment| (&attachment.pass, attachment.run));
-        let prior_run_claim = self
-            .observations
-            .iter()
-            .find(|previous| previous.run.reference().run() == observation.run.reference().run())
-            .map(|previous| (&previous.pass, previous.run));
-        if attachment_run_claim
-            .or(prior_run_claim)
-            .is_some_and(|prior| prior != (&observation.pass, observation.run))
-        {
-            return Err(
-                self.transition_error(ReviewExternalLinkTransitionFailure::ConflictingRunEvidence)
-            );
-        }
+        self.record_claim(&observation.pass_evidence, observation.run);
         self.observations.push(observation);
+        Ok(self)
+    }
+
+    /// Confirms that one import pass reported the latest durable state without
+    /// appending another observation.
+    pub fn confirm_unchanged(
+        mut self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError> {
+        if self.attachment.is_none() {
+            return Err(self.transition_error(ReviewExternalLinkTransitionFailure::NotAttached));
+        }
+        if pass.reference().target() != self.association.target() {
+            return Err(self.transition_error(ReviewExternalLinkTransitionFailure::ForeignPass));
+        }
+        if !run_evidence_matches_pass(run, &pass) {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::IncompatibleObservationRunEvidence,
+            ));
+        }
+        let Some(result) = (match pass.state() {
+            ReviewPassState::Succeeded {
+                result: Some(ReviewPassResult::ExternalLinkNoChange(result)),
+                ..
+            } => Some(result),
+            _ => None,
+        }) else {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::IncompatibleObservationPass,
+            ));
+        };
+        if pass.kind() != ReviewPassKind::ImportExternalContext
+            || result.link() != self.id
+            || self.observations.last().is_none_or(|previous| {
+                previous.ordinal != result.observed_through() || previous.state != result.state()
+            })
+        {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::IncompatibleObservationPass,
+            ));
+        }
+        if let Some(failure) = self.claim_failure(&pass, run) {
+            return Err(self.transition_error(failure));
+        }
+        self.record_durable_claim(ReviewExternalLinkClaim::new(pass, run));
+        Ok(self)
+    }
+
+    /// Authenticates one blocked publication against this exact pending
+    /// reservation.
+    pub fn block_publication(
+        mut self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError> {
+        if self.attachment.is_some() {
+            return Err(self.transition_error(ReviewExternalLinkTransitionFailure::AlreadyAttached));
+        }
+        if pass.reference().target() != self.association.target() {
+            return Err(self.transition_error(ReviewExternalLinkTransitionFailure::ForeignPass));
+        }
+        if !run_evidence_matches_pass(run, &pass) {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockRunEvidence,
+            ));
+        }
+        let compatible = publication_block_matches_link(&pass, self.association, self.id);
+        if !compatible {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockPass,
+            ));
+        }
+        if let Some(failure) = self.claim_failure(&pass, run) {
+            return Err(self.transition_error(failure));
+        }
+        self.record_durable_claim(ReviewExternalLinkClaim::new(pass, run));
         Ok(self)
     }
 
@@ -3892,6 +4357,39 @@ impl ReviewExternalLink {
     pub fn observations(&self) -> &[ReviewExternalLinkObservation] {
         &self.observations
     }
+
+    /// Borrows canonical no-change and publication-block claims.
+    pub fn claims(&self) -> &[ReviewExternalLinkClaim] {
+        &self.claims
+    }
+}
+
+fn publication_block_matches_link(
+    pass: &ReviewPassEvidence,
+    association: ReviewExternalLinkAssociation,
+    link: ReviewExternalLinkId,
+) -> bool {
+    match pass.state() {
+        ReviewPassState::Blocked {
+            result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(result)),
+            ..
+        } => pass.kind() == ReviewPassKind::Publish && result.link() == link,
+        ReviewPassState::Blocked {
+            result: Some(ReviewPassResult::FindingEvent(event)),
+            ..
+        } => {
+            pass.kind() == ReviewPassKind::Publish
+                && association == ReviewExternalLinkAssociation::Finding(event.finding())
+                && matches!(
+                    event.kind(),
+                    ReviewFindingEventResultKind::BlockedWithReason {
+                        link: Some(result_link),
+                        ..
+                    } if *result_link == link
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Canonical claim that one attached provider object belongs to one target.
@@ -3913,6 +4411,9 @@ impl ReviewExternalObjectClaim {
     ) -> Result<Self, ReviewExternalObjectClaimError> {
         if link.association.target() != target.id() {
             return Err(ReviewExternalObjectClaimError::ForeignTarget);
+        }
+        if &link.provider != target.provider() {
+            return Err(ReviewExternalObjectClaimError::ProviderMismatch);
         }
         let Some(attachment) = link.attachment.as_ref() else {
             return Err(ReviewExternalObjectClaimError::NotAttached);
@@ -3970,6 +4471,8 @@ impl ReviewExternalObjectClaim {
 pub enum ReviewExternalObjectClaimError {
     /// The canonical target does not own the link association.
     ForeignTarget,
+    /// The canonical target contradicts the reservation's frozen provider.
+    ProviderMismatch,
     /// The link is still an unattached reservation.
     NotAttached,
     /// The compared claims name different canonical provider objects.
@@ -4021,12 +4524,20 @@ pub enum ReviewExternalLinkTransitionFailure {
     ForeignPass,
     /// Attachment evidence did not canonically succeed in an attaching pass.
     IncompatibleAttachmentPass,
+    /// The stored attachment pass identity contradicts its canonical evidence.
+    AttachmentPassEvidenceMismatch,
     /// Attachment pass evidence contradicts its independently loaded run.
     IncompatibleAttachmentRunEvidence,
     /// Observation evidence did not canonically succeed in an import pass.
     IncompatibleObservationPass,
+    /// The stored observation pass identity contradicts its canonical evidence.
+    ObservationPassEvidenceMismatch,
     /// Observation pass evidence contradicts its independently loaded run.
     IncompatibleObservationRunEvidence,
+    /// Publication-block evidence did not name this pending reservation.
+    IncompatiblePublicationBlockPass,
+    /// Publication-block pass evidence contradicts its independently loaded run.
+    IncompatiblePublicationBlockRunEvidence,
     /// The reported state equals the latest durable observation.
     UnchangedObservation,
     /// One reused pass identity carries contradictory canonical evidence.
@@ -4160,6 +4671,9 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             ReviewPolicy::version_one(),
+            ReviewRunState::Succeeded {
+                concluding_pass: pass_ref(PRODUCING_PASS_SEED),
+            },
         )
     }
 
@@ -4249,10 +4763,30 @@ mod tests {
     }
 
     fn pass_run_evidence(pass: &ReviewPassEvidence) -> ReviewRunEvidence {
+        let reference = pass.reference();
+        let state = match pass.state() {
+            ReviewPassState::Queued => ReviewRunState::Queued,
+            ReviewPassState::Running { .. } => ReviewRunState::Running {
+                active_pass: reference,
+            },
+            ReviewPassState::Succeeded { .. } => ReviewRunState::Succeeded {
+                concluding_pass: reference,
+            },
+            ReviewPassState::Failed { .. } => ReviewRunState::Failed {
+                failed_pass: reference,
+            },
+            ReviewPassState::Blocked { .. } => ReviewRunState::Blocked {
+                blocking_pass: reference,
+            },
+            ReviewPassState::Cancelled { .. } => ReviewRunState::Cancelled {
+                last_pass: Some(reference),
+            },
+        };
         ReviewRunEvidence::new(
-            pass.reference().run(),
+            reference.run(),
             workflow_for_pass(pass.kind()),
             pass.policy(),
+            state,
         )
     }
 
@@ -4363,6 +4897,7 @@ mod tests {
         ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             kind,
@@ -4385,6 +4920,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -4395,6 +4931,7 @@ mod tests {
         ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Posted {
@@ -4626,6 +5163,20 @@ mod tests {
         .expect("fixture reservation matches its canonical target")
     }
 
+    fn reconstitute_link(link: &ReviewExternalLink) -> ReviewExternalLink {
+        ReviewExternalLink::try_reconstitute(
+            link.id,
+            link.association,
+            link.provider.clone(),
+            link.object_kind,
+            link.attachment.clone(),
+            link.observations.clone(),
+            link.claims.clone(),
+            &target_with_base(),
+        )
+        .expect("fixture link reconstitutes from every durable child and claim")
+    }
+
     fn attachment_evidence(
         link: ReviewExternalLinkId,
         pass: ReviewPassEvidence,
@@ -4634,6 +5185,7 @@ mod tests {
         let pass = pass_with_attachment_result(pass, link, &external_object);
         ReviewExternalLinkAttachment::new(
             link,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -4668,10 +5220,50 @@ mod tests {
         ReviewExternalLinkObservation::new(
             link,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             state,
         )
+    }
+
+    fn no_change_pass(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassEvidence,
+        state: ReviewExternalObjectState,
+    ) -> ReviewPassEvidence {
+        let next = match pass.state() {
+            ReviewPassState::Succeeded {
+                turn,
+                output_frontier,
+                ..
+            } => ReviewPassState::Succeeded {
+                turn: *turn,
+                output_frontier: *output_frontier,
+                result: Some(ReviewPassResult::ExternalLinkNoChange(
+                    ReviewExternalLinkNoChangeResult::new(link, ReviewEventOrdinal::one(), state),
+                )),
+            },
+            other => other.clone(),
+        };
+        ReviewPassEvidence::new(pass.reference(), pass.kind(), pass.policy(), next)
+    }
+
+    fn publication_blocked_pass(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassEvidence,
+        reason: ReviewText,
+    ) -> ReviewPassEvidence {
+        let next = match pass.state() {
+            ReviewPassState::Blocked { turn, .. } => ReviewPassState::Blocked {
+                turn: *turn,
+                result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(
+                    ReviewExternalLinkPublicationBlockedResult::new(link, reason),
+                )),
+            },
+            other => other.clone(),
+        };
+        ReviewPassEvidence::new(pass.reference(), pass.kind(), pass.policy(), next)
     }
 
     fn attached_finding_link_with_pass(
@@ -4740,6 +5332,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(accepted_input_id(5), session_id(4), state.turn()),
             state.clone(),
             Some(ReviewPassTurnEvidence::new(
@@ -4972,6 +5565,40 @@ mod tests {
         );
     }
 
+    /// INV-040: reconstitution preserves the child row's exact parent
+    /// identity instead of adopting a compatible joined target.
+    #[test]
+    fn inv040_review_target_reconstitution_rejects_substituted_parent_identity() {
+        let canonical_parent = ReviewTarget::try_new(
+            target_id(2),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("parent-head"),
+            None,
+            None,
+        )
+        .expect("canonical parent target is valid");
+        let error = ReviewTarget::try_reconstitute(
+            target_id(1),
+            canonical_parent.provider().clone(),
+            canonical_parent.repository().clone(),
+            ReviewTargetSubject::Commit,
+            key("child-head"),
+            Some(canonical_parent.head_revision().clone()),
+            Some(target_id(3)),
+            Some(&canonical_parent),
+        )
+        .expect_err("the joined parent must equal the parent stored on the child row");
+
+        assert_eq!(
+            error,
+            ReviewTargetError::ParentIdentityMismatch {
+                target: target_id(1)
+            }
+        );
+    }
+
     /// INV-040: a parent edge requires an exact frozen child comparison.
     #[test]
     fn inv040_review_target_rejects_parent_without_base_revision() {
@@ -5070,6 +5697,88 @@ mod tests {
         .expect_err("the complete canonical chain cannot contain the child");
 
         assert_eq!(error, ReviewTargetError::CyclicParent { target: root.id() });
+    }
+
+    /// INV-040: refresh history for one change request is not an immediate
+    /// stack edge.
+    #[test]
+    fn inv040_review_target_rejects_immediate_same_change_request_parent() {
+        let parent = ReviewTarget::try_new(
+            target_id(2),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::ChangeRequest(
+                ReviewChangeRequestNumber::try_new(42).expect("positive change-request number"),
+            ),
+            key("parent-head"),
+            Some(key("parent-base")),
+            None,
+        )
+        .expect("fixture parent freezes its comparison");
+        let error = ReviewTarget::try_new(
+            target_id(1),
+            parent.provider().clone(),
+            parent.repository().clone(),
+            parent.subject(),
+            key("refreshed-head"),
+            Some(parent.head_revision().clone()),
+            Some(&parent),
+        )
+        .expect_err("a refreshed snapshot cannot parent the same logical change request");
+
+        assert_eq!(
+            error,
+            ReviewTargetError::RepeatedChangeRequest {
+                target: target_id(1)
+            }
+        );
+    }
+
+    /// INV-040: refresh history for one change request cannot reappear
+    /// transitively in a stack chain.
+    #[test]
+    fn inv040_review_target_rejects_transitive_same_change_request_parent() {
+        let root = ReviewTarget::try_new(
+            target_id(3),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::ChangeRequest(
+                ReviewChangeRequestNumber::try_new(42).expect("positive change-request number"),
+            ),
+            key("root-head"),
+            Some(key("root-base")),
+            None,
+        )
+        .expect("fixture root freezes its comparison");
+        let parent = ReviewTarget::try_new(
+            target_id(2),
+            root.provider().clone(),
+            root.repository().clone(),
+            ReviewTargetSubject::ChangeRequest(
+                ReviewChangeRequestNumber::try_new(43).expect("positive change-request number"),
+            ),
+            key("parent-head"),
+            Some(root.head_revision().clone()),
+            Some(&root),
+        )
+        .expect("a distinct change request extends the stack");
+        let error = ReviewTarget::try_new(
+            target_id(1),
+            parent.provider().clone(),
+            parent.repository().clone(),
+            root.subject(),
+            key("refreshed-head"),
+            Some(parent.head_revision().clone()),
+            Some(&parent),
+        )
+        .expect_err("a logical change request cannot repeat deeper in the stack");
+
+        assert_eq!(
+            error,
+            ReviewTargetError::RepeatedChangeRequest {
+                target: target_id(1)
+            }
+        );
     }
 
     /// INV-040: a valid parent reference retains canonical scope and head
@@ -5183,15 +5892,16 @@ mod tests {
     #[test]
     fn inv040_finding_proposal_rejects_incompatible_producing_pass() {
         let target = target_with_base();
+        let pass = ReviewPassEvidence::new(
+            pass_ref(3),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Failed { turn: turn_id(6) },
+        );
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
-            ReviewPassEvidence::new(
-                pass_ref(3),
-                ReviewPassKind::ReadOnlyReview,
-                ReviewPolicy::version_one(),
-                ReviewPassState::Failed { turn: turn_id(6) },
-            ),
-            run_evidence(),
+            pass.clone(),
+            pass_run_evidence(&pass),
             &target,
             finding_content(Some(ReviewFindingDiffSide::Right)),
         )
@@ -5211,11 +5921,82 @@ mod tests {
         let error = ReviewFindingProposal::try_new(
             finding_ref(10),
             succeeded_pass(3, ReviewPassKind::ReadOnlyReview),
-            ReviewRunEvidence::new(run_ref(), ReviewWorkflowKind::ReadOnlyReview, later_policy),
+            ReviewRunEvidence::new(
+                run_ref(),
+                ReviewWorkflowKind::ReadOnlyReview,
+                later_policy,
+                ReviewRunState::Succeeded {
+                    concluding_pass: pass_ref(PRODUCING_PASS_SEED),
+                },
+            ),
             &target,
             finding_content(Some(ReviewFindingDiffSide::Right)),
         )
         .expect_err("finding policy must be authenticated by its producing run");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::IncompatibleProducingRunEvidence
+        );
+    }
+
+    /// INV-040: a finding cannot be produced while its canonical run remains
+    /// active.
+    #[test]
+    fn inv040_finding_proposal_rejects_contradictory_run_lifecycle() {
+        let target = target_with_base();
+        let pass = produced_findings_pass(
+            finding_ref(10),
+            succeeded_pass(PRODUCING_PASS_SEED, ReviewPassKind::ReadOnlyReview),
+        );
+        let run = ReviewRunEvidence::new(
+            pass.reference().run(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            pass.policy(),
+            ReviewRunState::Running {
+                active_pass: pass.reference(),
+            },
+        );
+        let error = ReviewFindingProposal::try_new(
+            finding_ref(10),
+            pass,
+            run,
+            &target,
+            finding_content(Some(ReviewFindingDiffSide::Right)),
+        )
+        .expect_err("a succeeded pass contradicts a still-running canonical run");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::IncompatibleProducingRunEvidence
+        );
+    }
+
+    /// INV-040: a producing run must name the exact pass that produced the
+    /// finding inventory.
+    #[test]
+    fn inv040_finding_proposal_rejects_run_naming_another_pass() {
+        let target = target_with_base();
+        let pass = produced_findings_pass(
+            finding_ref(10),
+            succeeded_pass(PRODUCING_PASS_SEED, ReviewPassKind::ReadOnlyReview),
+        );
+        let run = ReviewRunEvidence::new(
+            pass.reference().run(),
+            ReviewWorkflowKind::ReadOnlyReview,
+            pass.policy(),
+            ReviewRunState::Succeeded {
+                concluding_pass: ReviewPassRef::new(pass.reference().run(), pass_id(99)),
+            },
+        );
+        let error = ReviewFindingProposal::try_new(
+            finding_ref(10),
+            pass,
+            run,
+            &target,
+            finding_content(Some(ReviewFindingDiffSide::Right)),
+        )
+        .expect_err("the canonical run must conclude with the producing pass");
 
         assert_eq!(
             error.failure(),
@@ -5583,6 +6364,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(
                 accepted_input_id(5),
                 session_id(4),
@@ -5744,6 +6526,7 @@ mod tests {
                 ReviewRunRef::new(target_id(1), run_id(9)),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -5796,7 +6579,10 @@ mod tests {
         let state = ReviewPassState::Succeeded {
             turn: turn_id(6),
             output_frontier: frontier_id(8),
-            result: None,
+            result: Some(ReviewPassResult::ProducedFindings(
+                ReviewProducedFindings::try_new(Vec::new())
+                    .expect("an empty review inventory is complete"),
+            )),
         };
         let exact = ReviewPassReconstitutionInput::new(
             pass_ref(3),
@@ -5804,6 +6590,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(
                 accepted_input_id(5),
                 session_id(4),
@@ -5826,6 +6613,30 @@ mod tests {
         );
     }
 
+    /// INV-040: pass reconstitution preserves the pass row's accepted-input
+    /// identity instead of adopting the joined evidence identity.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_substituted_accepted_input_identity() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                run_ref(),
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(9),
+                ReviewPassAcceptedInputEvidence::new(
+                    accepted_input_id(5),
+                    session_id(4),
+                    Some(turn_id(6)),
+                ),
+                ReviewPassState::Queued,
+                None,
+            ),
+            ReviewPassReconstitutionFailure::AcceptedInputEvidenceMismatch,
+        );
+    }
+
     /// INV-040: the accepted input must belong to the pass session.
     #[test]
     fn inv040_pass_reconstitution_rejects_foreign_accepted_input_session() {
@@ -5836,6 +6647,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(9),
@@ -5868,6 +6680,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -5894,6 +6707,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -5922,6 +6736,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -5954,6 +6769,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -5986,6 +6802,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6018,6 +6835,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6050,6 +6868,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6138,6 +6957,143 @@ mod tests {
         );
     }
 
+    /// S29 / INV-040: authenticated successful pass evidence may project one
+    /// exact effect result without changing its execution facts.
+    #[test]
+    fn inv040_succeeded_pass_evidence_projects_one_exact_effect_result() {
+        let pass = succeeded_pass(70, ReviewPassKind::ImportExternalContext);
+        let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+            link_id(71),
+            ReviewEventOrdinal::one(),
+            ReviewExternalObjectState::Current,
+        ));
+
+        let projected = pass
+            .project_result(result.clone())
+            .expect("succeeded evidence may project an atomic effect result");
+        let ReviewPassState::Succeeded {
+            turn,
+            output_frontier,
+            ..
+        } = pass.state()
+        else {
+            panic!("fixture is a succeeded pass");
+        };
+
+        assert_eq!(projected.reference(), pass.reference());
+        assert_eq!(projected.kind(), pass.kind());
+        assert_eq!(projected.policy(), pass.policy());
+        assert_eq!(
+            projected.state(),
+            &ReviewPassState::Succeeded {
+                turn: *turn,
+                output_frontier: *output_frontier,
+                result: Some(result),
+            }
+        );
+    }
+
+    /// S29 / INV-040: an authenticated effect projection admits exact replay
+    /// but cannot be rebound to a distinct result.
+    #[test]
+    fn inv040_pass_evidence_result_projection_is_immutable() {
+        let pass = succeeded_pass(71, ReviewPassKind::ImportExternalContext);
+        let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+            link_id(72),
+            ReviewEventOrdinal::one(),
+            ReviewExternalObjectState::Current,
+        ));
+        let projected = pass
+            .project_result(result.clone())
+            .expect("result-free succeeded evidence admits its first result");
+        let distinct =
+            ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+                link_id(72),
+                ReviewEventOrdinal::one(),
+                ReviewExternalObjectState::Outdated,
+            ));
+
+        assert_eq!(projected.project_result(result), Some(projected.clone()));
+        assert_eq!(projected.project_result(distinct), None);
+    }
+
+    /// S29 / INV-040: authenticated blocked pass evidence may project one exact
+    /// effect result without changing its execution facts.
+    #[test]
+    fn inv040_blocked_pass_evidence_projects_one_exact_effect_result() {
+        let pass = ReviewPassEvidence::new(
+            pass_ref(72),
+            ReviewPassKind::Publish,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Blocked {
+                turn: turn_id(73),
+                result: None,
+            },
+        );
+        let result = ReviewPassResult::ExternalLinkPublicationBlocked(
+            ReviewExternalLinkPublicationBlockedResult::new(
+                link_id(74),
+                text("publication is unavailable"),
+            ),
+        );
+
+        let projected = pass
+            .project_result(result.clone())
+            .expect("blocked evidence may project an atomic effect result");
+
+        assert_eq!(projected.reference(), pass.reference());
+        assert_eq!(projected.kind(), pass.kind());
+        assert_eq!(projected.policy(), pass.policy());
+        assert_eq!(
+            projected.state(),
+            &ReviewPassState::Blocked {
+                turn: turn_id(73),
+                result: Some(result),
+            }
+        );
+    }
+
+    /// S29 / INV-040: non-effect pass states cannot project effect results.
+    #[test]
+    fn inv040_non_effect_pass_evidence_rejects_result_projection() {
+        let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+            link_id(75),
+            ReviewEventOrdinal::one(),
+            ReviewExternalObjectState::Current,
+        ));
+        let queued = ReviewPassEvidence::new(
+            pass_ref(76),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Queued,
+        );
+        let running = ReviewPassEvidence::new(
+            pass_ref(77),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Running { turn: turn_id(78) },
+        );
+        let failed = ReviewPassEvidence::new(
+            pass_ref(79),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Failed { turn: turn_id(80) },
+        );
+        let cancelled = ReviewPassEvidence::new(
+            pass_ref(81),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Cancelled {
+                turn: Some(turn_id(82)),
+            },
+        );
+
+        assert_eq!(queued.project_result(result.clone()), None);
+        assert_eq!(running.project_result(result.clone()), None);
+        assert_eq!(failed.project_result(result.clone()), None);
+        assert_eq!(cancelled.project_result(result), None);
+    }
+
     /// S29 / INV-040: a terminal canonical turn outcome always carries its
     /// checked terminal frontier.
     #[test]
@@ -6149,6 +7105,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6178,6 +7135,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6230,7 +7188,7 @@ mod tests {
             .expect("pending finding association supports a publication block");
 
         assert_eq!(blocked.finding(), finding);
-        assert_eq!(blocked.link(), link_id(30));
+        assert_eq!(blocked.link(), pending.id());
     }
 
     /// INV-040 / INV-041: an already attached object cannot be recorded as a
@@ -6390,6 +7348,36 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
+    /// INV-040: finding-event reconstitution preserves the event row's exact
+    /// pass identity instead of adopting compatible joined pass evidence.
+    #[test]
+    fn inv040_finding_history_rejects_substituted_event_pass_identity() {
+        let finding = finding_ref(10);
+        let ordinal = ReviewEventOrdinal::one();
+        let pass = pass_with_finding_event(
+            finding,
+            ordinal,
+            succeeded_pass(20, ReviewPassKind::Judge),
+            &ReviewFindingEventKind::Accepted,
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass_ref(21),
+            pass.clone(),
+            pass_run_evidence(&pass),
+            ReviewFindingEventKind::Accepted,
+        );
+        let error = ReviewFinding::new(proposal())
+            .apply(event)
+            .expect_err("canonical pass evidence must match the pass stored on the event");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::EventPassEvidenceMismatch
+        );
+    }
+
     /// INV-040: a referenced finding naming the aggregate's own identity is a
     /// self-reference even when its producing-pass ancestry is cross-wired.
     #[test]
@@ -6481,10 +7469,12 @@ mod tests {
             pass.reference().run(),
             ReviewWorkflowKind::PublishReview,
             pass.policy(),
+            pass_run_evidence(&pass).state(),
         );
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass,
             run,
             ReviewFindingEventKind::Accepted,
@@ -6492,6 +7482,44 @@ mod tests {
         let error = ReviewFinding::new(proposal())
             .apply(event)
             .expect_err("event pass workflow must come from its owning run");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::IncompatibleEventRunEvidence
+        );
+    }
+
+    /// INV-040: a successful finding event pass cannot be paired with a failed
+    /// canonical run projection.
+    #[test]
+    fn inv040_finding_history_rejects_event_run_lifecycle_mismatch() {
+        let finding = finding_ref(10);
+        let ordinal = ReviewEventOrdinal::one();
+        let pass = pass_with_finding_event(
+            finding,
+            ordinal,
+            succeeded_pass(20, ReviewPassKind::Judge),
+            &ReviewFindingEventKind::Accepted,
+        );
+        let run = ReviewRunEvidence::new(
+            pass.reference().run(),
+            ReviewWorkflowKind::JudgeFindings,
+            pass.policy(),
+            ReviewRunState::Failed {
+                failed_pass: pass.reference(),
+            },
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass.reference(),
+            pass,
+            run,
+            ReviewFindingEventKind::Accepted,
+        );
+        let error = ReviewFinding::new(proposal())
+            .apply(event)
+            .expect_err("a succeeded event pass contradicts a failed canonical run");
 
         assert_eq!(
             error.failure(),
@@ -6513,6 +7541,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ReviewEventOrdinal::one(),
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Accepted,
@@ -6546,6 +7575,29 @@ mod tests {
         assert_eq!(
             error.failure(),
             ReviewFindingTransitionFailure::IneligibleReferencedFinding
+        );
+    }
+
+    /// INV-040: reconstitution preserves the status frozen when a reference
+    /// was admitted, independently of the referenced finding's current state.
+    #[test]
+    fn inv040_referenced_finding_evidence_reconstitutes_only_admissible_status() {
+        let reference = finding_ref(11);
+        let frozen = ReviewReferencedFindingEvidence::try_reconstitute(
+            reference,
+            ReviewFindingStatus::Accepted,
+        )
+        .expect("an accepted finding is admissible reference evidence");
+
+        assert_eq!(frozen.reference(), reference);
+        assert_eq!(frozen.status(), ReviewFindingStatus::Accepted);
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Posted,
+            )
+            .is_none(),
+            "a terminal current status cannot be substituted for frozen evidence",
         );
     }
 
@@ -6702,6 +7754,44 @@ mod tests {
         );
     }
 
+    /// INV-040: complete history replay maintains indexed pass, run, and
+    /// publication claims instead of rescanning the growing event vector.
+    #[test]
+    fn inv040_finding_history_indexes_replay_claims() {
+        let finding = ReviewFinding::new(proposal())
+            .apply(finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::one(),
+                succeeded_pass(19, ReviewPassKind::Judge),
+                ReviewFindingEventKind::Accepted,
+            ))
+            .expect("finding may be accepted")
+            .apply(finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                blocked_pass(20, ReviewPassKind::Publish),
+                ReviewFindingEventKind::BlockedWithReason {
+                    reason: text("lost acknowledgement"),
+                    link: Some(Box::new(pending_finding_link_ref(
+                        finding_ref(10),
+                        link_id(31),
+                    ))),
+                },
+            ))
+            .expect("publication block retains its claim")
+            .apply(posted_finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                link_id(31),
+            ))
+            .expect("confirmed attachment reconciles the publication");
+
+        assert_eq!(finding.pass_claims.len(), 3);
+        assert_eq!(finding.run_claims.len(), 3);
+        assert_eq!(finding.publication_links, BTreeSet::from([link_id(31)]));
+    }
+
     /// INV-040: a compatible pass kind cannot author a finding event after a
     /// failed outcome.
     #[test]
@@ -6748,6 +7838,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Posted {
@@ -7017,6 +8108,7 @@ mod tests {
         let error = pending
             .attach(ReviewExternalLinkAttachment::new(
                 link_id(30),
+                succeeded_pass(20, ReviewPassKind::Judge).reference(),
                 succeeded_pass(20, ReviewPassKind::Judge),
                 pass_run_evidence(&succeeded_pass(20, ReviewPassKind::Judge)),
                 key("external-comment-42"),
@@ -7028,69 +8120,96 @@ mod tests {
         );
     }
 
-    /// INV-040 / INV-041: attachment evidence validates the complete nested
-    /// posted event rather than only its finding association.
+    /// INV-040 / INV-041: attachment evidence rejects a nested non-posted
+    /// finding event.
     #[test]
-    fn inv040_inv041_attachment_rejects_invalid_nested_event_payload() {
+    fn inv040_inv041_attachment_rejects_nested_non_posted_event() {
         let finding = finding_ref(10);
         let external_object = key("external-comment-42");
-        let cases = [
-            (
-                "non-posted event",
-                20,
-                ReviewFindingEventResult::new(
-                    finding,
-                    ReviewEventOrdinal::one(),
-                    ReviewFindingEventResultKind::Accepted,
-                ),
-            ),
-            (
-                "another reservation",
-                21,
-                ReviewFindingEventResult::new(
-                    finding,
-                    ReviewEventOrdinal::one(),
-                    ReviewFindingEventResultKind::Posted { link: link_id(31) },
-                ),
-            ),
-        ];
+        let pass = ReviewPassEvidence::new(
+            pass_ref(20),
+            ReviewPassKind::Publish,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(120),
+                output_frontier: frontier_id(220),
+                result: Some(ReviewPassResult::ExternalLinkAttachment(
+                    ReviewExternalLinkAttachmentResult::new(
+                        link_id(30),
+                        external_object.clone(),
+                        Some(ReviewFindingEventResult::new(
+                            finding,
+                            ReviewEventOrdinal::one(),
+                            ReviewFindingEventResultKind::Accepted,
+                        )),
+                    ),
+                )),
+            },
+        );
+        let error = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            link_id(30),
+            pass.reference(),
+            pass.clone(),
+            pass_run_evidence(&pass),
+            external_object,
+        ))
+        .expect_err("a publication attachment cannot carry an accepted event");
 
-        for (label, pass_seed, finding_event) in cases {
-            let pass = ReviewPassEvidence::new(
-                pass_ref(pass_seed),
-                ReviewPassKind::Publish,
-                ReviewPolicy::version_one(),
-                ReviewPassState::Succeeded {
-                    turn: turn_id(pass_seed + 100),
-                    output_frontier: frontier_id(pass_seed + 200),
-                    result: Some(ReviewPassResult::ExternalLinkAttachment(
-                        ReviewExternalLinkAttachmentResult::new(
-                            link_id(30),
-                            external_object.clone(),
-                            Some(finding_event),
-                        ),
-                    )),
-                },
-            );
-            let error = pending_link(
-                link_id(30),
-                ReviewExternalLinkAssociation::Finding(finding),
-                ReviewExternalObjectKind::ReviewComment,
-            )
-            .attach(ReviewExternalLinkAttachment::new(
-                link_id(30),
-                pass.clone(),
-                pass_run_evidence(&pass),
-                external_object.clone(),
-            ))
-            .expect_err(label);
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleAttachmentPass
+        );
+    }
 
-            assert_eq!(
-                error.failure(),
-                ReviewExternalLinkTransitionFailure::IncompatibleAttachmentPass,
-                "{label}"
-            );
-        }
+    /// INV-040 / INV-041: attachment evidence rejects a nested posted event
+    /// that names another reservation.
+    #[test]
+    fn inv040_inv041_attachment_rejects_nested_foreign_reservation() {
+        let finding = finding_ref(10);
+        let external_object = key("external-comment-42");
+        let pass = ReviewPassEvidence::new(
+            pass_ref(21),
+            ReviewPassKind::Publish,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(121),
+                output_frontier: frontier_id(221),
+                result: Some(ReviewPassResult::ExternalLinkAttachment(
+                    ReviewExternalLinkAttachmentResult::new(
+                        link_id(30),
+                        external_object.clone(),
+                        Some(ReviewFindingEventResult::new(
+                            finding,
+                            ReviewEventOrdinal::one(),
+                            ReviewFindingEventResultKind::Posted { link: link_id(31) },
+                        )),
+                    ),
+                )),
+            },
+        );
+        let error = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            link_id(30),
+            pass.reference(),
+            pass.clone(),
+            pass_run_evidence(&pass),
+            external_object,
+        ))
+        .expect_err("a nested posted event must name the attachment reservation");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleAttachmentPass
+        );
     }
 
     /// INV-041: external-state observations require successful import evidence.
@@ -7101,6 +8220,7 @@ mod tests {
             .observe(ReviewExternalLinkObservation::new(
                 link_id(30),
                 ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::Judge).reference(),
                 succeeded_pass(21, ReviewPassKind::Judge),
                 pass_run_evidence(&succeeded_pass(21, ReviewPassKind::Judge)),
                 ReviewExternalObjectState::Current,
@@ -7138,6 +8258,375 @@ mod tests {
         );
     }
 
+    /// INV-040 / INV-041: an unchanged external report consumes its import
+    /// pass without growing observation history.
+    #[test]
+    fn inv040_inv041_external_link_accepts_exact_no_change_result() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let pass = no_change_pass(
+            reservation,
+            succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let confirmed = link
+            .confirm_unchanged(pass.clone(), pass_run_evidence(&pass))
+            .expect("the exact latest state consumes the import pass");
+
+        assert_eq!(confirmed.observations().len(), 1);
+        assert_eq!(confirmed.claims().len(), 1);
+        assert_eq!(confirmed.claims()[0].pass_evidence(), &pass);
+        assert_eq!(
+            confirmed
+                .observations()
+                .last()
+                .expect("fixture retains its one observation")
+                .state(),
+            ReviewExternalObjectState::Current
+        );
+        let reconstituted = reconstitute_link(&confirmed);
+        assert_eq!(reconstituted, confirmed);
+        let error = reconstituted
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect_err("a no-change pass cannot later claim a changed observation");
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ConflictingPassEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: reconstitution validates an unchanged claim against
+    /// its recorded historical frontier after a later changed observation.
+    #[test]
+    fn inv040_inv041_external_link_reconstitutes_historical_no_change_frontier() {
+        let reservation = link_id(30);
+        let first = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let no_change = no_change_pass(
+            reservation,
+            succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let advanced = first
+            .confirm_unchanged(no_change.clone(), pass_run_evidence(&no_change))
+            .expect("the exact first frontier consumes its import pass")
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(23, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect("a later changed state advances the durable frontier");
+
+        assert_eq!(reconstitute_link(&advanced), advanced);
+    }
+
+    /// INV-040 / INV-041: a no-change claim authenticates the exact latest
+    /// observation, not an equal historical state.
+    #[test]
+    fn inv040_inv041_external_link_rejects_stale_no_change_frontier() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first state is meaning-bearing")
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect("changed state advances the observation frontier");
+        let pass = no_change_pass(
+            reservation,
+            succeeded_pass(23, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+
+        let error = link
+            .confirm_unchanged(pass.clone(), pass_run_evidence(&pass))
+            .expect_err("a historical matching state cannot authenticate no-change");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleObservationPass
+        );
+    }
+
+    /// INV-040 / INV-041: an unchanged report also retains its owning run
+    /// claim against a later pass substitution.
+    #[test]
+    fn inv040_inv041_external_link_no_change_retains_run_claim() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let no_change = no_change_pass(
+            reservation,
+            succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let reused_run = ReviewPassEvidence::new(
+            ReviewPassRef::new(no_change.reference().run(), pass_id(23)),
+            ReviewPassKind::ImportExternalContext,
+            no_change.policy(),
+            succeeded_pass(23, ReviewPassKind::ImportExternalContext)
+                .state()
+                .clone(),
+        );
+        let confirmed = link
+            .confirm_unchanged(no_change.clone(), pass_run_evidence(&no_change))
+            .expect("the exact latest state consumes the import pass");
+        let error = confirmed
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                reused_run,
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect_err("one run cannot move to another pass after no-change");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ConflictingRunEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: a no-change result cannot name a different
+    /// reservation.
+    #[test]
+    fn inv040_inv041_external_link_rejects_foreign_no_change_result() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let pass = no_change_pass(
+            link_id(31),
+            succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let error = link
+            .confirm_unchanged(pass.clone(), pass_run_evidence(&pass))
+            .expect_err("an unchanged report must name the aggregate reservation");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleObservationPass
+        );
+    }
+
+    /// INV-040 / INV-041: an observation-producing pass cannot later be
+    /// reinterpreted as an unchanged report.
+    #[test]
+    fn inv040_inv041_external_link_rejects_reused_no_change_pass() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let pass = no_change_pass(
+            reservation,
+            succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let error = link
+            .confirm_unchanged(pass.clone(), pass_run_evidence(&pass))
+            .expect_err("one pass cannot bind both an observation and no-change result");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ConflictingPassEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: a target-associated pending reservation can consume
+    /// one blocked publication pass.
+    #[test]
+    fn inv040_inv041_external_link_accepts_target_publication_block() {
+        let target = target_id(CANONICAL_TARGET_SEED);
+        let pending = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Target(target),
+            ReviewExternalObjectKind::Review,
+        );
+        let pass = publication_blocked_pass(
+            pending.id(),
+            blocked_pass(20, ReviewPassKind::Publish),
+            text("external acknowledgement was lost"),
+        );
+        let blocked = pending
+            .block_publication(pass.clone(), pass_run_evidence(&pass))
+            .expect("the exact pending reservation authenticates the publication block");
+
+        assert_eq!(
+            blocked.association(),
+            ReviewExternalLinkAssociation::Target(target)
+        );
+        assert!(blocked.attachment().is_none());
+        assert_eq!(blocked.claims().len(), 1);
+        assert_eq!(blocked.claims()[0].pass_evidence(), &pass);
+        let reconstituted = reconstitute_link(&blocked);
+        assert_eq!(reconstituted, blocked);
+        let error = reconstituted
+            .attach(attachment_evidence(
+                link_id(30),
+                succeeded_pass(20, ReviewPassKind::Publish),
+                key("external-review"),
+            ))
+            .expect_err("reconstitution retains the blocked pass claim");
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ConflictingPassEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: a finding-associated pending reservation accepts
+    /// the blocked lifecycle event committed by its publication pass.
+    #[test]
+    fn inv040_inv041_external_link_accepts_finding_publication_block() {
+        let finding = finding_ref(10);
+        let reservation = link_id(30);
+        let pending = pending_link(
+            reservation,
+            ReviewExternalLinkAssociation::Finding(finding),
+            ReviewExternalObjectKind::ReviewComment,
+        );
+        let event_kind = ReviewFindingEventKind::BlockedWithReason {
+            reason: text("external acknowledgement was lost"),
+            link: Some(Box::new(pending_finding_link_ref(finding, reservation))),
+        };
+        let pass = pass_with_finding_event(
+            finding,
+            ReviewEventOrdinal::one(),
+            blocked_pass(20, ReviewPassKind::Publish),
+            &event_kind,
+        );
+        let blocked = pending
+            .block_publication(pass.clone(), pass_run_evidence(&pass))
+            .expect("the finding event authenticates its exact pending reservation");
+
+        assert_eq!(blocked.claims().len(), 1);
+        assert_eq!(blocked.claims()[0].pass_evidence(), &pass);
+    }
+
+    /// INV-040 / INV-041: a blocked publication cannot name another pending
+    /// reservation.
+    #[test]
+    fn inv040_inv041_external_link_rejects_foreign_publication_block() {
+        let pending = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Run(pass_ref(20).run()),
+            ReviewExternalObjectKind::Review,
+        );
+        let pass = publication_blocked_pass(
+            link_id(31),
+            blocked_pass(20, ReviewPassKind::Publish),
+            text("external acknowledgement was lost"),
+        );
+        let error = pending
+            .block_publication(pass.clone(), pass_run_evidence(&pass))
+            .expect_err("a publication block must name the aggregate reservation");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockPass
+        );
+    }
+
+    /// INV-040 / INV-041: an attachment row retains its independently stored
+    /// producing-pass identity.
+    #[test]
+    fn inv040_inv041_external_link_rejects_substituted_attachment_pass_identity() {
+        let pass = pass_with_attachment_result(
+            succeeded_pass(20, ReviewPassKind::Publish),
+            link_id(30),
+            &key("external-comment-42"),
+        );
+        let substituted = ReviewPassRef::new(pass.reference().run(), pass_id(99));
+        let error = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding_ref(10)),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            link_id(30),
+            substituted,
+            pass.clone(),
+            pass_run_evidence(&pass),
+            key("external-comment-42"),
+        ))
+        .expect_err("stored attachment pass identity cannot be reattributed");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::AttachmentPassEvidenceMismatch
+        );
+    }
+
+    /// INV-040 / INV-041: an observation row retains its independently stored
+    /// observing-pass identity.
+    #[test]
+    fn inv040_inv041_external_link_rejects_substituted_observation_pass_identity() {
+        let observation = observation_evidence(
+            link_id(30),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let substituted = ReviewPassRef::new(observation.pass().run(), pass_id(99));
+        let error = attached_finding_link(finding_ref(10), link_id(30))
+            .observe(ReviewExternalLinkObservation::new(
+                observation.link(),
+                observation.ordinal(),
+                substituted,
+                observation.pass_evidence().clone(),
+                observation.run_evidence(),
+                observation.state(),
+            ))
+            .expect_err("stored observation pass identity cannot be reattributed");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ObservationPassEvidenceMismatch
+        );
+    }
+
     /// INV-041: attachment evidence must be joined to the exact canonical run
     /// that owns its pass.
     #[test]
@@ -7151,6 +8640,7 @@ mod tests {
             pass.reference().run(),
             ReviewWorkflowKind::JudgeFindings,
             pass.policy(),
+            pass_run_evidence(&pass).state(),
         );
         let error = pending_link(
             link_id(30),
@@ -7159,11 +8649,49 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link_id(30),
+            pass.reference(),
             pass,
             run,
             key("external-comment-42"),
         ))
         .expect_err("attachment pass workflow must come from its owning run");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleAttachmentRunEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: a successful attachment pass cannot be paired with a
+    /// failed canonical run projection.
+    #[test]
+    fn inv040_inv041_external_link_rejects_attachment_run_lifecycle_mismatch() {
+        let pass = pass_with_attachment_result(
+            succeeded_pass(20, ReviewPassKind::Publish),
+            link_id(30),
+            &key("external-comment-42"),
+        );
+        let run = ReviewRunEvidence::new(
+            pass.reference().run(),
+            ReviewWorkflowKind::PublishReview,
+            pass.policy(),
+            ReviewRunState::Failed {
+                failed_pass: pass.reference(),
+            },
+        );
+        let error = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding_ref(10)),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            link_id(30),
+            pass.reference(),
+            pass,
+            run,
+            key("external-comment-42"),
+        ))
+        .expect_err("a succeeded pass contradicts a failed canonical run");
 
         assert_eq!(
             error.failure(),
@@ -7180,16 +8708,55 @@ mod tests {
             pass.reference().run(),
             ReviewWorkflowKind::PublishReview,
             pass.policy(),
+            pass_run_evidence(&pass).state(),
         );
         let error = attached_finding_link(finding_ref(10), link_id(30))
             .observe(ReviewExternalLinkObservation::new(
                 link_id(30),
                 ReviewEventOrdinal::one(),
+                pass.reference(),
                 pass,
                 run,
                 ReviewExternalObjectState::Current,
             ))
             .expect_err("observation pass workflow must come from its owning run");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleObservationRunEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: a successful observation pass cannot be paired with
+    /// a still-running canonical run projection.
+    #[test]
+    fn inv040_inv041_external_link_rejects_observation_run_lifecycle_mismatch() {
+        let pass = observation_evidence(
+            link_id(30),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        )
+        .pass_evidence
+        .clone();
+        let run = ReviewRunEvidence::new(
+            pass.reference().run(),
+            ReviewWorkflowKind::ImportExternalContext,
+            pass.policy(),
+            ReviewRunState::Running {
+                active_pass: pass.reference(),
+            },
+        );
+        let error = attached_finding_link(finding_ref(10), link_id(30))
+            .observe(ReviewExternalLinkObservation::new(
+                link_id(30),
+                ReviewEventOrdinal::one(),
+                pass.reference(),
+                pass,
+                run,
+                ReviewExternalObjectState::Current,
+            ))
+            .expect_err("a succeeded pass contradicts a running canonical run");
 
         assert_eq!(
             error.failure(),
@@ -7329,6 +8896,7 @@ mod tests {
             .observe(ReviewExternalLinkObservation::new(
                 link_id(31),
                 ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext).reference(),
                 succeeded_pass(21, ReviewPassKind::ImportExternalContext),
                 pass_run_evidence(&succeeded_pass(21, ReviewPassKind::ImportExternalContext)),
                 ReviewExternalObjectState::Current,
@@ -7352,6 +8920,7 @@ mod tests {
         let error = pending
             .attach(ReviewExternalLinkAttachment::new(
                 link_id(31),
+                succeeded_pass(20, ReviewPassKind::Publish).reference(),
                 succeeded_pass(20, ReviewPassKind::Publish),
                 pass_run_evidence(&succeeded_pass(20, ReviewPassKind::Publish)),
                 key("external-comment-42"),
@@ -7388,13 +8957,15 @@ mod tests {
     /// INV-040: a produced-finding inventory is bounded to 32 identities.
     #[test]
     fn inv040_produced_findings_reject_over_budget_inventory() {
-        let error = ReviewProducedFindings::try_new(over_budget_finding_inventory())
+        let inventory = over_budget_finding_inventory();
+        let actual = inventory.len();
+        let error = ReviewProducedFindings::try_new(inventory)
             .expect_err("the defensive result budget is exact");
 
         assert_eq!(
             error,
             ReviewProducedFindingsError::TooMany {
-                actual: 33,
+                actual,
                 maximum: REVIEW_PRODUCED_FINDINGS_MAXIMUM,
             }
         );
@@ -7431,6 +9002,74 @@ mod tests {
         );
     }
 
+    /// INV-040: a proposal rejects a result inventory containing a finding
+    /// attributed to another producing pass.
+    #[test]
+    fn inv040_finding_proposal_rejects_cross_wired_producing_inventory() {
+        let reference = finding_ref(10);
+        let foreign = ReviewFindingRef::new(pass_ref(4), finding_id(11));
+        let producing_pass = ReviewPassEvidence::new(
+            reference.pass(),
+            ReviewPassKind::ReadOnlyReview,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Succeeded {
+                turn: turn_id(103),
+                output_frontier: frontier_id(203),
+                result: Some(ReviewPassResult::ProducedFindings(
+                    ReviewProducedFindings::try_new(vec![reference, foreign])
+                        .expect("distinct finding identities are canonical"),
+                )),
+            },
+        );
+        let error = ReviewFindingProposal::try_new(
+            reference,
+            producing_pass,
+            run_evidence(),
+            &target_with_base(),
+            finding_content(Some(ReviewFindingDiffSide::Right)),
+        )
+        .expect_err("every inventory member must belong to the producing pass");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::IncompatibleProducingPassEvidence
+        );
+    }
+
+    /// INV-040: a durably reconstituted completed review always carries its
+    /// exact produced-finding inventory, including the empty inventory.
+    #[test]
+    fn inv040_read_only_pass_reconstitution_requires_produced_findings() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                run_ref(),
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassAcceptedInputEvidence::new(
+                    accepted_input_id(5),
+                    session_id(4),
+                    Some(turn_id(6)),
+                ),
+                ReviewPassState::Succeeded {
+                    turn: turn_id(6),
+                    output_frontier: frontier_id(8),
+                    result: None,
+                },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::Completed,
+                    Some(frontier_id(8)),
+                )),
+            ),
+            ReviewPassReconstitutionFailure::IncompatibleResult,
+        );
+    }
+
     /// INV-040: a pass result cannot name a finding from another target.
     #[test]
     fn inv040_pass_reconstitution_rejects_foreign_result_target() {
@@ -7445,6 +9084,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -7467,6 +9107,58 @@ mod tests {
                 )),
             ),
             ReviewPassReconstitutionFailure::ForeignResultTarget,
+        );
+    }
+
+    /// INV-040: nested finding references in a pass result must preserve the
+    /// owning run, producing pass, distinct identity, and eligible status.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_incompatible_nested_finding_reference() {
+        let finding = finding_ref(10);
+        let referenced = ReviewReferencedFindingEvidence {
+            reference: ReviewFindingRef::new(
+                ReviewPassRef::new(finding.run(), pass_id(99)),
+                finding_id(11),
+            ),
+            status: ReviewFindingStatus::Open,
+        };
+        let input = ReviewPassReconstitutionInput::new(
+            pass_ref(3),
+            ReviewPassKind::Dedupe,
+            run_ref(),
+            ReviewWorkflowKind::DedupeFindings,
+            session_id(4),
+            accepted_input_id(5),
+            ReviewPassAcceptedInputEvidence::new(
+                accepted_input_id(5),
+                session_id(4),
+                Some(turn_id(6)),
+            ),
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: Some(ReviewPassResult::FindingEvent(
+                    ReviewFindingEventResult::new(
+                        finding,
+                        ReviewEventOrdinal::one(),
+                        ReviewFindingEventResultKind::Duplicate {
+                            canonical: referenced,
+                        },
+                    ),
+                )),
+            },
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::Completed,
+                Some(frontier_id(8)),
+            )),
+        );
+
+        assert_pass_reconstitution_rejects(
+            input,
+            ReviewPassReconstitutionFailure::IncompatibleResult,
         );
     }
 
@@ -7659,6 +9351,94 @@ mod tests {
         );
     }
 
+    /// INV-041: a blocked publication transition must consume one exact
+    /// reservation-bearing result.
+    #[test]
+    fn inv041_publish_block_transition_requires_result() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::PublishReview,
+            ReviewPolicy::version_one(),
+        );
+        let running = ReviewPass::try_new(
+            pass_ref(3),
+            ReviewPassKind::Publish,
+            &mut run,
+            session_id(4),
+            ReviewPassAcceptedInputEvidence::new(
+                accepted_input_id(5),
+                session_id(4),
+                Some(turn_id(6)),
+            ),
+        )
+        .expect("canonical input admits the publish pass")
+        .transition(
+            ReviewPassState::Running { turn: turn_id(6) },
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::Active,
+                None,
+            )),
+        )
+        .expect("active canonical turn starts the publish pass");
+        let error = running
+            .transition(
+                ReviewPassState::Blocked {
+                    turn: turn_id(6),
+                    result: None,
+                },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::ReconciliationRequired,
+                    Some(frontier_id(8)),
+                )),
+            )
+            .expect_err("blocked publication must bind its exact reservation");
+        assert_eq!(
+            error.failure(),
+            ReviewPassTransitionFailure::IncompatibleResult
+        );
+    }
+
+    /// INV-041: reconstitution also fails closed when a blocked publication
+    /// row omits its reservation-bearing result.
+    #[test]
+    fn inv041_publish_block_reconstitution_requires_result() {
+        let state = ReviewPassState::Blocked {
+            turn: turn_id(6),
+            result: None,
+        };
+        let input = ReviewPassReconstitutionInput::new(
+            pass_ref(3),
+            ReviewPassKind::Publish,
+            run_ref(),
+            ReviewWorkflowKind::PublishReview,
+            session_id(4),
+            accepted_input_id(5),
+            ReviewPassAcceptedInputEvidence::new(
+                accepted_input_id(5),
+                session_id(4),
+                Some(turn_id(6)),
+            ),
+            state,
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::ReconciliationRequired,
+                Some(frontier_id(8)),
+            )),
+        );
+        assert_pass_reconstitution_rejects(
+            input,
+            ReviewPassReconstitutionFailure::IncompatibleResult,
+        );
+    }
+
     /// INV-040: pass construction requires an accepted input with a canonical
     /// origin turn.
     #[test]
@@ -7694,6 +9474,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(accepted_input_id(5), session_id(4), None),
                 ReviewPassState::Queued,
                 None,
@@ -7719,6 +9500,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Rejected {
@@ -7753,6 +9535,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Duplicate {
@@ -7787,6 +9570,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Duplicate {
@@ -7883,6 +9667,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -7943,6 +9728,37 @@ mod tests {
         first
             .validate_reassociation(&next)
             .expect("same change request may retain the provider object");
+    }
+
+    /// INV-041: independently loaded target evidence cannot contradict the
+    /// provider frozen by the external-link reservation.
+    #[test]
+    fn inv041_external_object_claim_rejects_cross_wired_target_provider() {
+        let target = target_with_base();
+        let link = attached_target_link(
+            &target,
+            AttachedTargetLinkFixture {
+                link_seed: 30,
+                run_seed: 40,
+                pass_seed: 50,
+                external_object: "review-42",
+            },
+        );
+        let cross_wired = ReviewTarget::try_new(
+            target.id(),
+            key("other-code-host"),
+            target.repository().clone(),
+            target.subject(),
+            target.head_revision().clone(),
+            target.base_revision().cloned(),
+            None,
+        )
+        .expect("the independently loaded target shape is otherwise canonical");
+
+        assert_eq!(
+            ReviewExternalObjectClaim::try_new(&link, &cross_wired),
+            Err(ReviewExternalObjectClaimError::ProviderMismatch)
+        );
     }
 
     /// INV-041: one canonical object cannot move to an unrelated change
@@ -8107,7 +9923,7 @@ mod tests {
         let error = ReviewPolicy::try_new(
             ReviewPolicyVersion::try_new(2).expect("positive version"),
             ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
-            ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+            ReviewConfidence::try_from_basis_points(8_000).expect("bounded confidence"),
         )
         .expect_err("unknown policy versions fail closed");
         assert_eq!(
@@ -8115,7 +9931,7 @@ mod tests {
             (
                 ReviewPolicyVersion::try_new(2).expect("positive version"),
                 ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
-                ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+                ReviewConfidence::try_from_basis_points(8_000).expect("bounded confidence"),
             )
         );
     }

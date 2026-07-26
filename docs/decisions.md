@@ -10,6 +10,63 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Renumber the review-workflow migration after main advanced
+
+**Context.** The review-workflow foundation reserved the `2026072602xx` block
+when its specification stack opened. Before the persistence pull request merged,
+its ultimate `main` parent acquired migrations `202607270001` and
+`202607280001`. Retaining the lower reserved version would make a database
+upgraded through that parent apply a newly introduced migration out of ledger
+order.
+
+**Decision.** The merged review-workflow persistence artifact is
+`202607280002_review_workflow.sql`, strictly after the highest migration on its
+ultimate `main` parent. References to `2026072602xx` in earlier decision entries
+record the stack's original reservation; this entry records the required
+renumber, and the
+[persistence protocol](spec/persistence-protocol.md#migrations) owns the current
+implemented inventory.
+
+**Rejected alternatives.** Keeping `2026072602xx` preserves the initial
+reservation but violates strictly increasing migration history. Renumbering or
+editing migrations already on `main` violates forward-only migration discipline.
+Rewriting the earlier decisions would erase the sequence that explains why the
+reservation and merged filename differ.
+
+**Affects.** The review-workflow migration filename, the provenance of PR #227,
+and interpretation of the earlier review-workflow decision entries' affected
+slice.
+
+## 2026-07-26 — Make runner lease authority single-use and tool-bound
+
+**Context.** An authorized physical attempt identifies its request, session,
+turn, and attempt but does not itself expose the approved request's selected
+tool. A cloneable authorization or lease also permits two independent domain
+transitions to present the same capability. Placement reconstitution must prove
+the complete pinned catalog snapshot without mistaking a later narrowed
+registration for the historical facts that created the pin.
+
+**Decision.** Runner dispatch consumes one non-cloneable
+`RunnerToolAttemptAuthorization` that binds an `ApprovedToolRequest`, including
+its selected tool, to the exact non-cloneable `AuthorizedToolAttempt`.
+`RunnerLease` is likewise non-cloneable, and loss retains a private checked
+source snapshot rather than duplicating the lease aggregate. Initial dispatch
+creates the pin, any requested grant, and generation-one lease together;
+subsequent dispatch requires the current pin and grant. Placement reconstitution
+recomputes and exactly compares the pin from its historical validated
+registration snapshot; current re-registration is reconciled separately.
+
+**Rejected alternatives.** Comparing only the attempt's request identity cannot
+prove the selected tool. Cloning a capability and relying on callers to consume
+only one copy does not enforce single use. Validating only that stored required
+tools remain individually runner-only accepts an incomplete inventory.
+Reconstituting from current availability conflates historical integrity with
+forward narrowing.
+
+**Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
+`RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
+the [runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
 
 **Context.** The recorded Tier 1 catalog direction calls for ten daemon-held
@@ -40,6 +97,206 @@ violate result admission.
 `apps/signalboxd` code-host modules and composition root, and their mocked
 offline tests. Library-documentation lookup remains deferred until its provider
 is selected.
+
+## 2026-07-25 — Scoped verification references on specification pages
+
+**Context.** Every `docs/spec/` page names the pull request its claims were last
+verified against, and pages narrow that claim to the surface the pull request
+actually settled whenever one reference no longer covers the whole page —
+[configuration-and-credentials](spec/configuration-and-credentials.md) and
+[persistence-protocol](spec/persistence-protocol.md) both carry per-surface
+references today. Those narrowings were written as prose outside the
+parenthetical because `scripts/check_docs_consistency.py` recognized nothing but
+a bare `` PR #N (`branch-ref`) `` token. The practice grew by imitation, and no
+documentation statement owned the reference format at all: the checker's
+docstring was the only place it appeared.
+
+**Decision.** [The specification index](spec/README.md) owns the format. A
+verification reference is `` PR #N (`branch-ref`) ``, optionally narrowed by a
+semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) ``. The
+scope is free-form prose that must render as more than whitespace and
+block-quote markers (an empty, whitespace-only, or marker-only tail is rejected)
+and must stay inside the reference's own block, ending at a blank line or a
+sibling list item in either raw or block-quoted form. A scope may name code in
+backticks, and the parentheses inside such a span do not close the reference.
+`scripts/check_docs_consistency.py` enforces the format and captures nothing
+from the tail, so no consumer can come to depend on its wording.
+
+**Rejected alternatives.** Admitting only the scope-outside-the-parentheses form
+the pages use today: it separates the narrowing from the reference it narrows
+and reads as page prose rather than as part of the reference. Both forms stay
+valid and no existing page changes; the choice is which shapes an author may
+write. Validating the tail's content — requiring a path, a symbol, or a section
+link: it would freeze a prose vocabulary the pages have not settled and turn
+wording edits into checker changes. Leaving the convention to the checker alone:
+a repo-wide documentation format stated only in a script's docstring has no
+owner a page author would read.
+
+**Affects.** [The specification index](spec/README.md),
+`scripts/check_docs_consistency.py`, and the verification reference on every
+`docs/spec/` page.
+
+## 2026-07-25 — Keep runner credentials local and daemon policy authoritative
+
+**Context.** Sessions need to select machine-local credentials without sending
+their values through a daemon-controlled runner channel. Tool-only approval
+cannot distinguish a read-only credential from an administrator credential for
+the same operation. Profile rotation and revocation also need inspectable
+forward behavior without altering work already executing.
+
+**Decision.** A runner holds named credential profiles provisioned out of band;
+credential values have no runner-protocol control representation. The daemon
+owns profile-name validation, session selection, durable grant and audit facts,
+and approval posture for exact `(tool, credential profile)` pairs. After the
+dangerous session blanket, `Automatic` authorizes only its exact catalog pair;
+`SessionPolicy` or absence requires confirmation and cannot be overridden by a
+tool-only automatic default. Session creation records the profile request, and
+pinning snapshots it with the now-exact runner and advertised tool inventory.
+Replacement is a checked forward-only complete snapshot that emits typed change
+facts for later frontier injection. Runner replacement consumes a prior
+pinned-profile grant and creates a checked successor revision rather than
+recreating revision one. Revocation gates later lease creation but does not
+cancel or rewrite an already offered lease; its prior revision remains terminal.
+Arbitrary tool output is a separate result-egress boundary and carries no
+no-disclosure claim in this slice.
+
+**Rejected alternatives.** Sending values from the daemon creates a second
+credential-distribution system. Letting a runner advertise approval posture
+permits self-widening. Tool-only approval ignores credential scope. Mutating an
+active snapshot hides which profile authorized earlier work. Yank-on-revocation
+cannot honestly establish whether an in-flight external effect occurred.
+
+**Affects.** `CredentialProfileName`, runner catalog policy,
+`CredentialProfileGrant`, session placement, approval resolution, INV-035 and
+INV-045, the [runner-protocol specification](spec/runner-protocol.md), and later
+application, persistence, and transport stacks.
+
+## 2026-07-25 — Pin a session after first runner execution
+
+**Context.** A session may select either a capability class or exact runner and
+may request a working directory or repository workspace. After execution,
+workspace and ambient process state make another runner with the same declared
+class non-equivalent. Silent rescheduling would change both the execution
+boundary and the model's available tools without extending conversation context.
+
+**Decision.** Session placement begins with a class-or-identity selector,
+working-directory selection, optional credential profile, and workspace
+requirement. The first eligible execution consumes its exact authorized
+tool-attempt fence and atomically pins the exact runner, its validated
+capability snapshot, and the initial runner lease; mere attachment cannot pin.
+Ordinary dispatch cannot move the session. Runner loss is explicit and disables
+future leasing. Owner-directed replacement checks one complete new placement,
+advances a positive revision, and emits complete before-and-after change facts
+for mandatory later frontier injection. A repository workspace requires the
+runner-advertised `WorktreePerSession` capability; its provisioned path is
+runner-owned and a replacement cannot inherit it across runners.
+
+**Rejected alternatives.** Re-evaluating a class before every call permits
+silent migration. Pinning only a working-directory string treats paths on
+different runners as the same workspace. Automatic failover hides changed tools,
+credentials, and filesystem state. Daemon-owned cleanup crosses the placement
+boundary and cannot clean a disconnected runner reliably.
+
+**Affects.** `SessionRunnerPlacement`, workspace requirement and provisioning
+types, runner replacement change facts, INV-044, S30 and S32, the
+[runner-protocol specification](spec/runner-protocol.md), and later context
+assembly and runner-workspace stacks.
+
+## 2026-07-25 — Make effect class control runner re-leasing
+
+**Context.** Runner dispatch adds a loss boundary after work has been offered or
+claimed. The current two-way effect metadata distinguishes no-effect from
+possibly external effect, but cannot express state-changing work that is safe to
+repeat. Treating every disconnect alike either strands safe work or silently
+duplicates unsafe work.
+
+**Decision.** Every tool declaration has exactly one required effect class:
+`Pure`, `Idempotent`, or `SideEffecting`; pure implies idempotent. Tool
+placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
+or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
+the combined case and daemon fallback retained if that runner later omits the
+combined tool. Runner leases consume the tool loop's exact authorized
+physical-attempt dispatch correlation and bind it to an exact pinned runner,
+tool, and positive lease-lineage generation; active enrollment, current
+placement, registration, and grant jointly authorize the lease, and effect is
+derived from the validated declaration. Loss before claim may advance every
+class while retaining the never-executed attempt. Loss after claim produces
+re-lease authority only for pure or idempotent work and requires a fresh
+authorized physical attempt identity; the lease-lineage generation advances
+while that new physical attempt's own dispatch generation starts at its required
+first value. Side-effecting loss produces exact crash-classification authority
+and cannot produce re-lease authority. Undeclared advertised tools are rejected;
+an untrusted pre-validation boundary classifies an absent effect declaration as
+side-effecting.
+
+The later runner transport uses one runner-initiated held outbound streaming
+connection and runners accept no inbound connection. The channel carries offers,
+claims, and results but is never their authority: registration and lease
+aggregates are independent of connection state, and later persistence must
+reconstitute them before reconnect synchronization. The later transport must
+durably commit and acknowledge an exact claim before that acknowledgement
+becomes the runner's execution capability; absence of a claim frame alone never
+proves that an offered operation did not execute.
+
+**Rejected alternatives.** A default effect class hides missing policy. Treating
+all state-changing work as ambiguous throws away idempotency. Re-leasing side
+effects on disconnect risks duplication. One boolean `runner_allowed` cannot
+state daemon fallback or its selector. Per-call model-selected placement permits
+a call to widen the registry. Treating the stream as truth loses claims on
+reconnect.
+
+**Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
+INV-004, INV-021, INV-025, INV-026, INV-043, S16 and S31, the
+[tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
+specifications, and later store and wire stacks.
+
+## 2026-07-25 — Give logical enrollments daemon-validated advertisements
+
+**Context.** Runners range from long-lived owner-machine processes to ephemeral
+processes created shortly before registration. Hardware fingerprints cannot
+provide stable identity for both. A runner must advertise current tools,
+credential-profile names, and workspace capabilities, but trusting those claims
+as policy would let re-registration widen authorization or weaken approval.
+
+**Decision.** A runner identity is logical and enrollment-issued, never derived
+from hardware or network properties. Enrollment binds distinct enrollment,
+runner, and opaque authentication-reference identities plus owner-allowed
+capability classes, and has terminal revocation. Registration carries
+availability names only. The complete advertisement is validated against the
+active enrollment and one daemon-side owner-editable catalog parsed into typed
+domain, including its allowed capability classes. Unknown or disallowed claims
+reject registration. The validated result attaches daemon declarations for
+model-facing description and argument schema, permission, placement, effect,
+credential-pair approval, and workspace capability. The runner declaration is
+authoritative for runner dispatch, including runner-only tools; a later adapter
+must compile its schema and reject any shared daemon-local definition whose
+description, schema, permission, or mapped effect disagrees. Re-registration can
+change availability but carries no field capable of changing policy. It cannot
+widen an established session snapshot; narrowing a runner-required capability
+disables lease creation and is reconciled as explicit runner loss, while
+omission of a combined-locus tool retains placement and daemon fallback.
+Enrollment revocation also disables later lease creation through a registration
+it previously validated.
+
+Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
+letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
+Working-directory and repository keys retain exact nonempty, U+0000-free UTF-8
+up to 4,096 bytes without host-platform parsing in the domain. Catalog file
+syntax, authentication exchange, rotation, and durable registration storage are
+later boundaries.
+
+**Rejected alternatives.** Hardware fingerprints exclude ephemeral runners and
+silently change identity when machines are replaced. Hostnames and network
+addresses are neither stable nor authentication. Trusting full declarations from
+advertisements lets runners self-authorize. Silently dropping unknown claims
+makes a registration appear healthier than the runner's actual configuration.
+Embedding TOML or host path semantics in domain values crosses representation
+boundaries.
+
+**Affects.** Runner identities, enrollment, advertised and validated catalogs,
+INV-001 and INV-042, S30, the
+[runner-protocol specification](spec/runner-protocol.md), and later
+configuration, authentication, persistence, and transport stacks.
 
 ## 2026-07-25 — Attribute metadata writes initiated by tools
 
@@ -131,6 +388,85 @@ vocabulary sweep the backlog scopes separately.
 and `Cargo.lock`, `.github/workflows/rust.yml`,
 `config/signalboxd.example.toml`, and the living documents naming the server
 process.
+
+## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
+
+**Context.** [tool-loop](spec/tool-loop.md) and S07 fix the caller protocol for
+ending a turn whose approval wait is parked: record the denial first, then
+submit the interrupt once decision progression opens execution; an interrupt
+alone is not a denial and does not bypass the decision command. What the hub
+records for an interrupt that arrives while the wait is still parked was
+unspecified: the domain accepted it, persistence closure routing then demanded a
+live `Running` execution, and the whole submit transaction failed with a
+bug-classed `NoLiveExecution` error — a misleading outcome for every owner stop
+issued while a confirm request was pending, unlike every sibling
+invalid-interrupt condition, which records an authoritative typed rejection.
+
+**Decision.** The domain rejects the interrupt with
+`InterruptUnavailableWhileAwaitingApproval { session, active_turn }`, recorded
+durably as rejection kind `interrupt_unavailable_while_awaiting_approval`
+(migration `202607280001`) with replay reconstitution, exactly like the sibling
+invalid-interrupt rejections. The wait remains parked; the caller resolves the
+approval obligation through the decision command first.
+
+**Rejected alternatives.** Park-and-defer (hold the interrupt and apply it once
+decision progression opens execution): it converts one command into a delayed
+effect with no typed receipt, contradicts the two-independent-commands shape the
+specification fixes for deny-and-end, and needs new durable state for the parked
+interrupt. Keeping the transaction failure under a friendlier classification: a
+rollback still records nothing durable, so replay of the command stays
+undefined.
+
+**Affects.** `crates/domain/src/submit_input.rs`,
+`crates/persistence/src/submit_input.rs` and migration `202607280001`,
+`apps/hubd/src/process_runtime.rs`, and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
+
+## 2026-07-25 — Consume passes whose external observation is unchanged
+
+**Context.** Omitting both the observation row and pass result preserves compact
+state history, but leaves the succeeded import pass eligible for later result
+binding. After another pass changes the external state, replaying that old pass
+could turn its formerly unchanged report into a new durable transition.
+
+**Decision.** An unchanged report still appends no observation row. Its
+succeeded external-context-import pass instead binds one immutable
+`ExternalLinkNoChange` result naming the exact reservation and reported state.
+That result consumes the pass exactly once without treating the poll as
+meaning-bearing external history. This supersedes only the earlier
+[unchanged-observation decision's](#2026-07-25--do-not-record-unchanged-external-observations)
+choice to leave that pass result absent.
+
+**Rejected alternatives.** Leaving the result absent permits later reuse.
+Appending every unchanged report makes history grow with polling frequency.
+Rejecting an equal report loses successful orchestration evidence without
+consuming the pass.
+
+**Affects.** Review-pass results, external-link observation admission, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind every blocked publication to its reservation
+
+**Context.** Publication may use target-, run-, or finding-associated
+reservations. A finding-event result can authenticate only the last form, so a
+blocked write through either other association otherwise retains no durable
+connection between its pass and attempted reservation.
+
+**Decision.** Every blocked external-publication pass binds its exact pending
+reservation and nonempty reason. A finding-associated operation that also blocks
+the finding uses the reservation-bearing `FindingEvent` result. Other blocked
+publications use `ExternalLinkPublicationBlocked`, which admits every
+reservation association. Later reconciliation must attach that same reservation.
+
+**Rejected alternatives.** Restricting publication to finding associations
+removes target- and run-level publication already admitted by the external-link
+model. Leaving a blocked result absent cannot authenticate retry or
+reconciliation. Binding two results to one pass defeats result immutability.
+
+**Affects.** Review-pass result shapes, publication reconciliation, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
 
 ## 2026-07-25 — Bind blocked publication to its attempted reservation
 
@@ -627,6 +963,72 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Expose one-file conversation import to the owner
+
+**Context.** Conversation conversion and idempotent Postgres ingestion were
+reachable only through tests. The accepted converter seam consumes exact
+caller-supplied bytes and declares a fixed format version, while process
+protocol versions one through four are closed. The commissioned operational
+slice needs one owner-supplied file and a visible inserted-versus-existing
+outcome without selecting directory, watching, bulk, or session-seeding policy.
+
+**Decision.** Add process protocol version five and advance the terminal client
+to it. Add one `import_conversation` request carrying an explicit
+`ClaudeCodeSessionJsonlV2` or `CodexRolloutJsonlV1` selection and the complete
+source bytes as canonical padded base64. The terminal reads exactly one path,
+but the path does not cross the wire; hubd selects the fixed converter and calls
+`ImportConversationService`. Return distinct `conversation_import_inserted` and
+`conversation_import_already_imported` messages, each with the durable
+imported-conversation identity, and print distinct terminal labels. Use the
+small focused `base64` crate, already present transitively, rather than owning a
+wire codec. The existing frame cap remains the only transport bound; no
+independent source-size policy or migration is added. Bound the client read at
+one byte beyond the maximum decoded payload the frame could possibly carry. Hubd
+retains queued decoded sources under the aggregate inbound-frame budget, admits
+one expanded import aggregate and store operation at a time, and runs the
+service away from asynchronous runtime workers. Decode canonical base64 once
+under the existing inbound-frame permit; do not allocate a second full-size
+canonical encoding for validation.
+
+**Rejected alternatives.** Sending a filesystem path would make the daemon
+interpret client filesystem context and add path encoding and access semantics
+to the wire. Format detection would obscure the converter version the digest
+binds. Adding a directory or bulk verb would decide discovery and failure policy
+outside this slice. Reusing a closed protocol version would reinterpret captured
+frames. Unbounded concurrent conversion would let owner-local peers multiply
+expanded aggregate and database-pool pressure.
+
+**Affects.** [conversation-import](spec/conversation-import.md),
+[process-protocol](spec/process-protocol.md), `crates/process-protocol`,
+`apps/hubd`, `apps/client`, and their PostgreSQL and boundary tests.
+
+## 2026-07-25 — Bound isolated PostgreSQL integration concurrency to four tests
+
+**Context.** Across the latest fifteen successful `main` runs after the
+cross-suite matrix landed, the Rust workflow took a median 8m44s. Persistence
+was the critical path at 8m36s, versus 2m32s for validation, 2m37s for hubd, and
+50s for the terminal client; its test step consumed about 95 percent of the job
+while cache handling took about 18s. Harness inspection found no shared database
+to protect: 214 ignored tests start fresh pinned PostgreSQL containers, use
+Docker-assigned ports, migrate their own databases, and retain their container
+handles for the test scope. The single-thread setting was conservative.
+
+**Decision.** Run up to four tests concurrently inside each PostgreSQL
+integration binary, matching the four CPUs of the public Ubuntu runner while
+keeping an explicit resource bound. Retain every per-test container and
+migration call, including migration-prefix tests, so SQLx checksum validation
+and test isolation remain unchanged.
+
+**Rejected alternatives.** Additional matrix shards repeat checkout and cache
+setup without improving isolation. A shared server with template databases would
+require database-scoping cluster-wide lock probes and dedicated handling for
+server-loss and migration-prefix tests. Cache changes target seconds rather than
+the eight-minute critical path. Libtest's runner-dependent default would leave
+Docker concurrency implicit.
+
+**Affects.** `.github/workflows/rust.yml` test scheduling only; no test,
+database, schema, migration, or checksum semantics change.
+
 ## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
 
 **Context.** The specification states that hubd reads exactly four deployment
@@ -702,6 +1104,30 @@ process-configuration section of
 [configuration and credentials](spec/configuration-and-credentials.md), and a
 direct `url` dependency for `signalbox-persistence` — already in the tree as
 SQLx's own URL parser, so it adds an edge rather than a crate.
+
+## 2026-07-25 — Check living-spec consistency deterministically in CI
+
+**Context.** Reviews have repeatedly found dead file and heading citations,
+premature invariant-enforcement references, misplaced decision entries, and
+missing specification verification references. These checks depend only on the
+checked-out repository but were still performed by reviewers.
+
+**Decision.** Add one Python-standard-library checker to the validate job. It
+checks invariant enforcement citations and explicitly named tests, every
+relative Markdown target and heading anchor under `docs/` and in `AGENTS.md`,
+newest-first decision dates, and the presence and local format of subsystem-page
+verification references. Output is stable and per violation; the check performs
+no network access or semantic PR verification.
+
+**Rejected alternatives.** Keep the checks reviewer-only, which preserves the
+repeated labor and late feedback. Add a third-party link checker, which adds a
+dependency without covering the repository-specific invariant and decision
+formats. Discover every INV-tagged test or judge whether a verification PR is
+fresh, which would exceed the mechanically decidable scope.
+
+**Affects.** `scripts/check_docs_consistency.py`, its regression tests,
+`AGENTS.md`, the Rust workflow's validate job, and future edits to the
+living-spec surface.
 
 ## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
 
