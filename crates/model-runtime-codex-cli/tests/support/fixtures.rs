@@ -5,8 +5,10 @@ pub const STREAM_ERROR_MESSAGE: &str = "quota exhausted for the active plan";
 pub const BUFFERED_ANSWER: &str = "buffered answer";
 pub const STREAMED_ANSWER: &str = "streamed answer";
 pub const REASONING_TEXT: &str = "considering";
+pub const PENDING_PROGRESS_TEXT: &str = "harmless";
 pub const REFUSAL_TEXT: &str = "request refused";
 pub const TOOL_NAME: &str = "lookup";
+pub const OTHER_TOOL_NAME: &str = "timezone";
 pub const TOOL_ARGUMENTS: &str = r#"{ "city" : "Oslo", "limit": 3 }"#;
 pub const STRUCTURED_ACCEPTED: bool = true;
 pub const INPUT_TOKENS: u64 = 11;
@@ -18,6 +20,38 @@ pub const SENSITIVE_REFRESH_TOKEN: &str = "sensitive-refresh";
 pub const SENSITIVE_STDERR_TOKEN: &str = "sensitive-stderr";
 pub const SENSITIVE_TOOL_ID_ONE: &str = "sk-sensitive-call-one";
 pub const SENSITIVE_TOOL_ID_TWO: &str = "API_KEY=sensitive-call-two";
+pub const SENSITIVE_ENVELOPE_TOKEN: &str = "authorization=Bearer sensitive-envelope-token";
+pub const SENSITIVE_SPLIT_STREAM_TOKEN: &str = "sk-sensitive-stream-token";
+pub const SENSITIVE_SPLIT_AUTHORIZATION: &str = "sensitive-split-authorization";
+pub const SENSITIVE_COMPOSITE_SECRET: &str = "sensitive-composite-secret";
+pub const EARLY_STDIN_EXIT_MARKER: &str = "fake-codex-exit-before-stdin";
+pub const EARLY_STDIN_COMPLETION_MARKER: &str = "fake-codex-complete-before-stdin";
+pub const EARLY_STDIN_FAILURE: &str = "unexpected status 400 Bad Request: context_length_exceeded";
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_MAX_OUTPUT_TOKENS: u32 = 17;
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_TEMPERATURE: f64 = 0.25;
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_TOP_P: f64 = 0.75;
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const ADVISORY_STOP_SEQUENCE: &str = "offline-stop";
+#[allow(
+    dead_code,
+    reason = "process-only expected values share this module with the fake executable"
+)]
+pub const PRECISE_JSON_NUMBER: &str = "123456789012345678901234567890";
 #[allow(
     dead_code,
     reason = "process-only expected values share this module with the fake executable"

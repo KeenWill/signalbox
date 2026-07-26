@@ -1,20 +1,22 @@
 # Process protocol
 
 The baseline Signalbox process protocol version one and the terminal client that
-consumes it were verified through PR #177 (`agent/terminal-client`). The
-conversation-import stack adds protocol version two for the conservative
-imported transcript-snapshot projection described here. The tool-loop stack adds
-protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. The session-metadata stack adds
-protocol version four for paginated metadata listing, single-session metadata
-reads, and durable complete-snapshot replacement; versions one through three
-retain their closed request and message vocabularies unchanged. The one-file
-conversation-import surface adds protocol version five; versions one through
-four remain unchanged, verified through PR #252 (`agent/import-surfaces`). The
-implementation in this stack speaks versions one through five, and its terminal
-client selects version five. This page is the normative boundary between a local
-client process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
-messages remain distinct representations.
+consumes it were verified through PR #177 (`agent/terminal-client`); the
+`signalboxd` binary name this page states for the serving process was verified
+through PR #258 (`agent/signalboxd-rename`). The conversation-import stack adds
+protocol version two for the conservative imported transcript-snapshot
+projection described here. The tool-loop stack adds protocol version three for
+tool-bearing projection; versions one and two retain their closed message
+vocabularies unchanged. The session-metadata stack adds protocol version four
+for paginated metadata listing, single-session metadata reads, and durable
+complete-snapshot replacement; versions one through three retain their closed
+request and message vocabularies unchanged. The one-file conversation-import
+surface adds protocol version five; versions one through four remain unchanged,
+verified through PR #252 (`agent/import-surfaces`). The implementation in this
+stack speaks versions one through five, and its terminal client selects version
+five. This page is the normative boundary between a local client process and
+`signalboxd`; domain values, PostgreSQL records, and wire messages remain
+distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -22,37 +24,37 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-All five versions use one Unix domain stream socket. The hub requires its path
-in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
+All five versions use one Unix domain stream socket. The daemon requires its
+path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
-`signalbox-hubd` binds the socket with owner-only `0600` permissions. The
-configured path must be absolute and must end in an explicit filename component;
-a trailing separator, `/.`, or `/..` is rejected rather than normalized. The hub
+`signalboxd` binds the socket with owner-only `0600` permissions. The configured
+path must be absolute and must end in an explicit filename component; a trailing
+separator, `/.`, or `/..` is rejected rather than normalized. The daemon
 canonicalizes its existing parent once and uses that resolved parent for the
-socket lifetime; the parent must be a directory owned by the hub's effective
+socket lifetime; the parent must be a directory owned by the daemon's effective
 user with traditional permission mode exactly `0700`. This owner-private
 immediate parent is required even when the socket node itself has mode `0600`;
 version one does not rely on every supported Unix implementation enforcing
 socket-node permissions. Every resolved ancestor up to the filesystem root must
 also resist same-machine replacement: a group- or other-writable ancestor is
 accepted only when it has the sticky bit and the next path component toward the
-socket is owned by the hub's effective user. Every ancestor must itself be owned
-by either root or the hub's effective user, so an unprivileged different owner
-cannot make a currently protected directory writable after validation. An
-untrusted owner, a non-sticky writable ancestor, or a sticky writable ancestor
-containing a component owned by another user fails startup.
+socket is owned by the daemon's effective user. Every ancestor must itself be
+owned by either root or the daemon's effective user, so an unprivileged
+different owner cannot make a currently protected directory writable after
+validation. An untrusted owner, a non-sticky writable ancestor, or a sticky
+writable ancestor containing a component owned by another user fails startup.
 
-Before inspecting the final path, the hub opens or creates the adjacent
+Before inspecting the final path, the daemon opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
 with exact `0600` permissions, takes its nonblocking exclusive advisory file
 lock, and holds that lock through final socket cleanup. Failure to open, verify,
 or lock the sidecar fails without touching the socket path. The sidecar remains
-after shutdown so a later hub can lock the same inode. While holding that
-lifetime path lock, the hub also reclaims a retained socket left at the reserved
-`<socket-path>.identity` name by an abrupt prior exit only when the public and
-reserved names still identify the same owned socket. An orphaned or differently
-paired entry at the reserved name fails startup without modification. It then
-handles the final path as follows:
+after shutdown so a later daemon can lock the same inode. While holding that
+lifetime path lock, the daemon also reclaims a retained socket left at the
+reserved `<socket-path>.identity` name by an abrupt prior exit only when the
+public and reserved names still identify the same owned socket. An orphaned or
+differently paired entry at the reserved name fails startup without
+modification. It then handles the final path as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
@@ -60,14 +62,14 @@ handles the final path as follows:
 4. a socket owned by the effective user is first retained by a hard link at the
    reserved identity name so its device and inode cannot be recycled, and a
    connection failure with `ConnectionRefused` proves it stale only if a second
-   `lstat` still observes that retained identity. The hub removes only that
+   `lstat` still observes that retained identity. The daemon removes only that
    revalidated entry and then binds; every other ownership, connection, or
    metadata result fails startup without modification.
 
 The path lock makes the final revalidation and removal indivisible with respect
-to another conforming hub. The bind itself must still create a new socket and
-never replace another entry. The hub binds a new unlistening Unix stream socket
-inside the verified owner-private parent, captures its socket type,
+to another conforming daemon. The bind itself must still create a new socket and
+never replace another entry. The daemon binds a new unlistening Unix stream
+socket inside the verified owner-private parent, captures its socket type,
 effective-user ownership, device, and inode with `lstat`, and retains that inode
 with a hard link at the reserved identity name. Without changing the
 process-wide creation mask, it sets exact owner-only `0600` permissions through
@@ -78,16 +80,16 @@ completes. The identity link remains for the listener lifetime so the device and
 inode cannot be recycled. Any address, identity, ownership, or permission
 mismatch fails startup and removes no raced entry. Graceful shutdown keeps the
 listener and identity link live while a final `lstat` proves the public path
-still names this hub's socket and removes that path, then releases the identity
-link and path lock.
+still names this daemon's socket and removes that path, then releases the
+identity link and path lock.
 
 The transport is local-machine and single-user only. The process protocol's lack
 of authentication is provisional; none of the versions has an authorization
 exchange or remote transport. Socket filesystem access is the deployment
 boundary; it is not represented as application-level owner proof.
 
-The hub owns at most 128 accepted connection tasks. At that limit it leaves new
-connections in the bounded listener backlog until an active task exits, then
+The daemon owns at most 128 accepted connection tasks. At that limit it leaves
+new connections in the bounded listener backlog until an active task exits, then
 resumes accepting. The limit counts long-lived follow connections and ordinary
 request connections alike. At most eight connection tasks may accumulate an
 inbound frame simultaneously. An idle connection holds no frame slot: each
@@ -252,16 +254,16 @@ tool-only event, a version-one or version-two follower receives that same error
 and the connection closes before the event is emitted. A version-one or
 version-two `submit_input` request targeting a session whose existing history
 contains a tool-only state or entry returns that same error naming version three
-before mutation. This gate lets an upgraded hub continue serving old clients
+before mutation. This gate lets an upgraded daemon continue serving old clients
 without sending a tagged variant their accepted version requires them to reject.
 Version three adds tool observation but no approval, cancellation, or other
 mutation request.
 
-Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
-before application construction or mutation and returns `invalid_request` when
-it is exceeded. This leaves enough space for worst-case JSON escaping when the
-same accepted content is projected in a queued turn or durable update event. The
-exact capacity choice is recorded in the
+Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
+boundary before application construction or mutation and returns
+`invalid_request` when it is exceeded. This leaves enough space for worst-case
+JSON escaping when the same accepted content is projected in a queued turn or
+durable update event. The exact capacity choice is recorded in the
 [input-bound decision](../decisions.md#2026-07-23--bound-process-protocol-input-at-1-mib).
 
 An import `source` is the complete exact byte sequence encoded with RFC 4648
@@ -369,7 +371,7 @@ The error-code set in all five versions is:
 | `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                      |
 | `unavailable`         | Infrastructure failed; no requested mutation may have committed.                                     |
 | `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                    |
-| `internal`            | Fail-closed corruption or a hub defect stopped the request.                                          |
+| `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                       |
 
 For `create_session`, `submit_input`, and `replace_session_metadata`, a lost
 commit response maps to `commit_ambiguous`; the client retries the exact command
@@ -417,12 +419,12 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 3. the entry messages below in frontier-member order; and
 4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
 
-The hub builds that complete sequence in a secure unnamed temporary file before
-writing its first snapshot frame to the connection. Persistence validates the
-execution lineage in PostgreSQL and yields one turn or frontier member at a time
-from the same read-only repeatable-read transaction; hubd encodes each item
-directly to the spool, commits the transaction after the final item, rewinds,
-and streams the completed file. A slow client therefore holds neither a
+The daemon builds that complete sequence in a secure unnamed temporary file
+before writing its first snapshot frame to the connection. Persistence validates
+the execution lineage in PostgreSQL and yields one turn or frontier member at a
+time from the same read-only repeatable-read transaction; signalboxd encodes
+each item directly to the spool, commits the transaction after the final item,
+rewinds, and streams the completed file. A slow client therefore holds neither a
 PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
 is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
 temporary disk usage follows the complete encoded transcript size. Projection or
@@ -550,7 +552,7 @@ endpoint. Transaction- and statement-pooled proxy modes are unsupported because
 the guard and generation fences below use locks owned by one PostgreSQL server
 session.
 
-Before migration or recovery, `signalbox-hubd` acquires
+Before migration or recovery, `signalboxd` acquires
 `pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
 connection and retains that connection—and therefore the session-level
 lock—until shutdown. Failure to acquire the fixed database-scoped guard fails
@@ -558,30 +560,30 @@ startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`.
 
 The singleton `hub_fence_state` stores a positive generation. Every application
 pool connection acquires and retains a shared session advisory lock keyed by the
-ASCII namespace `SBF1` (`1396852273`) and this hub's generation, then requires
-the durable singleton still to equal that generation before the connection
-becomes usable. A mismatch rejects the connection. A successor holding the
-singleton guard takes and retains the exclusive prior-generation fence, then
-transactionally advances the row before constructing its fenced pool. That
-exclusive request waits for all prior pooled sessions and prevents the old
-process from opening another usable connection: an older generation that tries
-again after a failed intermediate successor can acquire only its old shared
-lock, then fails the current-generation check. Pool construction requires a
-non-cloneable capability borrowing the still-live fence session; the copyable
+ASCII namespace `SBF1` (`1396852273`) and this daemon's generation, then
+requires the durable singleton still to equal that generation before the
+connection becomes usable. A mismatch rejects the connection. A successor
+holding the singleton guard takes and retains the exclusive prior-generation
+fence, then transactionally advances the row before constructing its fenced
+pool. That exclusive request waits for all prior pooled sessions and prevents
+the old process from opening another usable connection: an older generation that
+tries again after a failed intermediate successor can acquire only its old
+shared lock, then fails the current-generation check. Pool construction requires
+a non-cloneable capability borrowing the still-live fence session; the copyable
 generation value is observational and cannot construct work after guard release.
 The first migration creates and initializes the row for a database that cannot
-have a prior fenced hub; later startups fence before running any newer
+have a prior fenced daemon; later startups fence before running any newer
 migration. This fence migration belongs to Signalbox's initial deployment: the
-owner confirms that no deployed database or hub predates it, so there is no
+owner confirms that no deployed database or daemon predates it, so there is no
 legacy unfenced writer to drain during the first installation. Importing or
 upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
 startup rather than wrapping.
 
-Together these guards enforce one active hub process—and therefore one
+Together these guards enforce one active daemon process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a
-successor's migration or recovery from overlapping an old hub's authoritative
+successor's migration or recovery from overlapping an old daemon's authoritative
 work. Guard-session monitoring and fatal-loss behavior are owned by
-[Hub runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#hub-runtime-startup-order-and-shutdown).
+[Daemon runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#daemon-runtime-startup-order-and-shutdown).
 For each attempt, the dispatcher:
 
 1. starts a PostgreSQL transaction and locks the singleton
@@ -689,9 +691,9 @@ side snapshot.
 ## Terminal client
 
 The `signalbox` binary in this stack uses version five; version four's metadata
-operations remain core protocol and hub capabilities without new terminal-client
-UX. Older clients remain supported for representations admitted by their
-declared version as described above. The client accepts a global
+operations remain core protocol and daemon capabilities without new
+terminal-client UX. Older clients remain supported for representations admitted
+by their declared version as described above. The client accepts a global
 `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;

@@ -2,21 +2,24 @@
 
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
-(`agent/credential-reference-total`). This includes hubd configuration loading
-in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
-catalog, and the provider bridge in `crates/model-provider-runtime`, together
-with the model-runtime crates it composes
-(`crates/model-runtime/src/credential.rs` and the redaction pipeline in
+(`agent/credential-reference-total`). This includes signalboxd configuration
+loading in `apps/signalboxd/src/configuration.rs` and
+`apps/signalboxd/src/main.rs`, the static TOML catalog, and the provider bridge
+in `crates/model-provider-runtime`, together with the model-runtime crates it
+composes (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`); the database-channel refusals
 in [process configuration](#process-configuration) were verified through PR #237
 (`agent/fix-pg-env-surface`), in `production_connection_options` under
-`crates/persistence/src/lib.rs`. Invariant law lives in
+`crates/persistence/src/lib.rs`; the `signalboxd` binary name, its
+`apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
+checked-in example path were verified through PR #258
+(`agent/signalboxd-rename`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
 
-`signalbox-hubd` reads exactly four deployment values from the process
-environment at startup:
+`signalboxd` reads exactly four deployment values from the process environment
+at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -73,14 +76,14 @@ invalid limit (see Open edges). The two file paths are accepted without I/O at
 configuration time; only the catalog file is actually read during startup. The
 key file is never read at startup (see credential lifecycle below).
 
-The deployed hub supplies no Anthropic endpoint or timeout knob; it constructs
-the adapter with its defaults. The [runtime-substrate](runtime-substrate.md)
-page owns those transport defaults, positive caller-level exchange-timeout
-overrides, and the whole-exchange bound. Startup ordering, recovery scanning,
-and shutdown policy are
+The deployed daemon supplies no Anthropic endpoint or timeout knob; it
+constructs the adapter with its defaults. The
+[runtime-substrate](runtime-substrate.md) page owns those transport defaults,
+positive caller-level exchange-timeout overrides, and the whole-exchange bound.
+Startup ordering, recovery scanning, and shutdown policy are
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope;
 migration behavior is [persistence-protocol](persistence-protocol.md) scope, and
-the socket boundary and single-hub guard are
+the socket boundary and single-daemon guard are
 [process-protocol](process-protocol.md) material.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` plus
@@ -90,7 +93,8 @@ driver, not the client protocol.
 ## The static model and alias catalog
 
 The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
-(`config/hubd.example.toml` is the checked-in example). Parsing is fail-closed:
+(`config/signalboxd.example.toml` is the checked-in example). Parsing is
+fail-closed:
 
 - The root must carry `version = 1`; any other or absent version is rejected.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
@@ -100,7 +104,7 @@ The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
   silently ignored key would let a typo change model meaning invisibly, so
   unrecognized content fails explicitly instead.
 - Parse errors are typed, sanitized values; no file content appears in error
-  text. (hubd erases the type before logging, as described above.)
+  text. (signalboxd erases the type before logging, as described above.)
 
 Each `[[models]]` entry defines one direct selection:
 
@@ -170,7 +174,7 @@ selection against the catalog before creating a session.
 
 ## Credential lifecycle
 
-The hub-side credential contract is implemented as follows, and the
+The daemon-side credential contract is implemented as follows, and the
 deployment-side rules that code cannot enforce are stated in
 [Credential operations policy](#credential-operations-policy) below.
 
@@ -183,12 +187,12 @@ deployment-side rules that code cannot enforce are stated in
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the reference to the `ANTHROPIC_API_KEY_FILE` path and reads the file for
   every request preparation; nothing is cached. Why: atomic file replacement
-  rotates the key without restarting hubd, and an in-flight call keeps the value
-  it authenticated with. Resolution is reference-scoped: a foreign reference
-  fails typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
-  `Unreadable` — all reference-only errors.
-- **No startup preflight.** hubd never reads the key file at boot, so a missing
-  or unsynced credential cannot block startup or the recovery scan. Why:
+  rotates the key without restarting signalboxd, and an in-flight call keeps the
+  value it authenticated with. Resolution is reference-scoped: a foreign
+  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
+  unreadable file is `Unreadable` — all reference-only errors.
+- **No startup preflight.** signalboxd never reads the key file at boot, so a
+  missing or unsynced credential cannot block startup or the recovery scan. Why:
   recovery of acknowledged work must not depend on any provider's credential
   (INV-034).
 - **Resolution timing.** The adapter resolves the pinned reference during send
@@ -216,8 +220,8 @@ deployment-side rules that code cannot enforce are stated in
 The following never appear in logs, error text, or durable records: credential
 values, the key file path, `DATABASE_URL`, and raw catalog file content. Full
 user content never appears in logs: every tracing site logs phase, failure
-class, counts, and hub-minted aggregate identifiers, never conversation content
-(which identifiers may appear is
+class, counts, and daemon-minted aggregate identifiers, never conversation
+content (which identifiers may appear is
 [identity-and-commands](identity-and-commands.md) material). For
 provider-controlled evidence the guarantee is mechanism-bounded: text is
 scrubbed of the exact preparation-time credential value, as described below.
@@ -228,8 +232,8 @@ Enforcement as implemented:
   sensitive. `FileCredentialAccess`'s `Debug` redacts its path;
   `AnthropicRuntime`'s `Debug` redacts its credential source and version header.
   Access errors carry reference and typed failure class only.
-- hubd logging is a compact INFO tracing subscriber; startup and runtime errors
-  log phase, failure class, counts, and aggregate ids only. The
+- signalboxd logging is a compact INFO tracing subscriber; startup and runtime
+  errors log phase, failure class, counts, and aggregate ids only. The
   `crates/application` tracing sites emit the same typed fields; no call site in
   the codebase passes accepted-input or assistant content to `tracing`.
 - Every provider-controlled text that leaves the Anthropic adapter — stream text
@@ -247,12 +251,12 @@ Enforcement as implemented:
   (base64, say) is outside these code paths. INV-035-tagged tests in
   `crates/model-runtime/src/credential.rs`,
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
-  `apps/hubd/src/configuration.rs` enforce this boundary.
+  `apps/signalboxd/src/configuration.rs` enforce this boundary.
 
 ## Credential operations policy
 
 Operational rules the deployment must honor; code cannot enforce them (retained
-here because the surviving hub-side mechanics depend on them):
+here because the surviving daemon-side mechanics depend on them):
 
 - **One source of truth per secret.** 1Password owns runtime credentials: the
   vault item a reference resolves to is the source of truth, and rotation is an
@@ -269,13 +273,13 @@ here because the surviving hub-side mechanics depend on them):
 - **Acyclic bootstrap chain.** The owner-held age identity (custodied outside
   git and outside operator sync) decrypts the sops channel; the sops channel
   delivers the operator's credential; the operator syncs the 1Password channel;
-  the hub consumes mounted artifacts. No cluster workload may reach the age
+  the daemon consumes mounted artifacts. No cluster workload may reach the age
   identity through the 1Password channel.
 - **Mounted-volume delivery, never environment variables.** Runtime credentials
   arrive as an operator-synced Secret mounted as a volume and read per use
   (`subPath` mounts are prohibited — they never refresh). Rotation therefore
   propagates within the operator polling interval plus the kubelet sync period,
-  without a restart. The hub deployment must explicitly set
+  without a restart. The daemon deployment must explicitly set
   `operator.1password.io/auto-restart: "false"` — the operator inherits
   auto-restart from wider scopes, and a restart-per-rotation deployment
   terminalizes in-flight work as `Lost` on every rotation.
@@ -284,14 +288,14 @@ here because the surviving hub-side mechanics depend on them):
   starts even when the Secret object is absent or a first sync has not completed
   — during a restore, a deleted Secret, or bootstrap. A required volume would
   turn a missing or unsynced credential into a boot failure and so block the
-  startup recovery scan that hubd's no-startup-preflight behavior protects
+  startup recovery scan that signalboxd's no-startup-preflight behavior protects
   (INV-034); an absent credential surfaces at the effect boundary that needs it.
   The deployment likewise verifies that the operator retains last-synced Secrets
   across a manager outage, so a paused sync delays rotation propagation only,
   never startup.
 - **Least-privilege Secret access.** The synced credential Secret's RBAC is
-  scoped to the hub's identity; no other cluster principal may be able to read
-  it.
+  scoped to the daemon's identity; no other cluster principal may be able to
+  read it.
 - **Revoke-last rotation.** Install the new value at the source of truth, wait
   out the propagation bound plus the longest expected in-flight provider call,
   then revoke the old value at the provider. Where a provider allows only one
@@ -312,9 +316,10 @@ here because the surviving hub-side mechanics depend on them):
   caught by any test.
 - `DATABASE_URL` via process environment is explicitly provisional; the
   database-credential delivery channel remains an open decision.
-- hubd erases typed configuration diagnostics before logging: catalog-parse and
-  Anthropic-construction variants (and connection and migration errors) collapse
-  to a generic `Infrastructure` class plus phase, so startup logs cannot
-  distinguish failure causes within the `Configuration` phase.
+- signalboxd erases typed configuration diagnostics before logging:
+  catalog-parse and Anthropic-construction variants (and connection and
+  migration errors) collapse to a generic `Infrastructure` class plus phase, so
+  startup logs cannot distinguish failure causes within the `Configuration`
+  phase.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns the unresolved in-memory credential-hygiene question.

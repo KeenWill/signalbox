@@ -252,7 +252,7 @@ impl fmt::Display for HubModelConfigurationError {
 impl Error for HubModelConfigurationError {}
 
 /// Credential source that rereads one deployment-owned secret file for every
-/// request preparation so rotation is visible without restarting hubd.
+/// request preparation so rotation is visible without restarting signalboxd.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     path: Arc<PathBuf>,

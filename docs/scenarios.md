@@ -2,8 +2,9 @@
 
 These scenarios test architectural boundaries; quoted commands and state names
 are descriptive pseudocode, not final APIs. “Durable commands” means owner
-intent the hub must commit before acknowledging, not a prescribed event-sourcing
-design. Invariant identifiers link to [the catalog](invariants.md).
+intent the daemon must commit before acknowledging, not a prescribed
+event-sourcing design. Invariant identifiers link to
+[the catalog](invariants.md).
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
@@ -32,7 +33,7 @@ those tests.
   turn → queued origin turn with derived eligibility → atomically fixed starting
   frontier plus `Active(Running)` and initial prepared attempt.
 - **Transient updates:** Optimistic client placeholder and scheduling progress.
-- **Owning component:** Hub owns creation and acceptance; Postgres stores the
+- **Owning component:** Daemon owns creation and acceptance; Postgres stores the
   result; the client owns presentation.
 - **Failure behavior:** A malformed transport, pre-authority, unconstructible
   typed-command, or pre-commit infrastructure failure that does not reach
@@ -80,8 +81,8 @@ those tests.
   [process-protocol](spec/process-protocol.md#follow-synchronization).
   Provider-token relay remains
   [open](open-questions.md#protocols-and-persistence).
-- **Owning component:** The hub resolves and calls the provider; Postgres owns
-  durable provenance and final content; clients render drafts.
+- **Owning component:** The daemon resolves and calls the provider; Postgres
+  owns durable provenance and final content; clients render drafts.
 - **Failure behavior:** A client disconnect does not cancel the call.
   Target-resolution failure creates no model call. Send preparation failure
   leaves the already-created call known-failed. Version one performs no
@@ -93,7 +94,7 @@ those tests.
   introduced, streaming checkpoints, transient provider-delta relay, browser
   transport, rich assistant content, and provider/client rendering.
 
-## S03 — Hub restarts after accepting queued work
+## S03 — Daemon restarts after accepting queued work
 
 - **User intent:** Trust an acknowledgement even if the service restarts before
   work starts.
@@ -110,7 +111,7 @@ those tests.
   frozen configuration cannot execute.
 - **Transient updates:** Pre-restart queue position and process-local wakeups
   disappear and are reconstructed.
-- **Owning component:** Hub recovery and scheduler coordinate from Postgres.
+- **Owning component:** Daemon recovery and scheduler coordinate from Postgres.
 - **Failure behavior:** Work eventually continues, fails explicitly, is
   canceled, or requests reconciliation; it never silently vanishes. Duplicate
   recovery scans do not create duplicate turns.
@@ -122,12 +123,12 @@ those tests.
   issue boundary is classified by its own evidence; an attempt still in
   `Prepared` has not crossed the orchestration boundary.
 
-## S04 — Hub restarts during a provider call
+## S04 — Daemon restarts during a provider call
 
 - **User intent:** Recover honestly without claiming to resume the lost network
   stream.
 - **Durable commands:** Before send, persist model-call identity, exact
-  hub-resolved provider/model target, frontier, and in-flight state; after
+  daemon-resolved provider/model target, frontier, and in-flight state; after
   restart, an idempotent startup scan records the recovered outcome
   classification. Definitive recovered success that terminalizes the turn
   commits the complete assistant sequence and completed-turn marker under the
@@ -157,8 +158,8 @@ those tests.
   duplicate risk only when no fatal invalidation exists.
 - **Transient updates:** Uncommitted deltas and the live provider connection are
   lost; clients replace drafts from an authoritative snapshot.
-- **Owning component:** Hub provider adapter reports evidence; hub recovery
-  classifies it; Postgres records it.
+- **Owning component:** Daemon provider adapter reports evidence; daemon
+  recovery classifies it; Postgres records it.
 - **Failure behavior:** Do not imply exact-token continuation. Startup creates
   no cancellation-only or classification-only attempt. It classifies an
   uncertain call `Ambiguous` while ending the abandoned attempt in the matching
@@ -211,7 +212,7 @@ those tests.
   every request without an ordinary result.
 - **Transient updates:** Runner heartbeat, command progress, and partial stdout
   may disappear.
-- **Owning component:** Hub owns policy and recovery; runner owns physical
+- **Owning component:** Daemon owns policy and recovery; runner owns physical
   execution; scheduler owns dispatch selection.
 - **Failure behavior:** Version one performs no automatic retry, even for an
   effect-free operation. A late result is stale and cannot overwrite terminal
@@ -229,18 +230,18 @@ those tests.
   be established.
 - **State transitions:** When classified while orchestration is live, tool
   attempt in flight → terminal/ambiguous and current turn attempt → the matching
-  `...Ambiguous` branch. If the hub crashes before classification, startup makes
-  the tool attempt terminal/ambiguous while ending the abandoned turn attempt in
-  the matching `...Lost` branch. The physical tool outcome remains `Ambiguous`
-  in both cases. When neither an applied interrupt nor fatal mismatch prohibits
-  continuation, the turn retains its slot in `AwaitingRecoveryDecision` carrying
-  that tool-attempt reference. The implemented applied-interrupt path preserves
-  the ambiguity while terminalizing as `ReconciliationRequired` with the exact
-  attempt and proof.
+  `...Ambiguous` branch. If the daemon crashes before classification, startup
+  makes the tool attempt terminal/ambiguous while ending the abandoned turn
+  attempt in the matching `...Lost` branch. The physical tool outcome remains
+  `Ambiguous` in both cases. When neither an applied interrupt nor fatal
+  mismatch prohibits continuation, the turn retains its slot in
+  `AwaitingRecoveryDecision` carrying that tool-attempt reference. The
+  implemented applied-interrupt path preserves the ambiguity while terminalizing
+  as `ReconciliationRequired` with the exact attempt and proof.
 - **Transient updates:** Last progress text may be shown only as
   non-authoritative evidence.
-- **Owning component:** Hub classifies and blocks automatic retry; the selected
-  runner may later provide evidence; the owner resolves uncertainty.
+- **Owning component:** Daemon classifies and blocks automatic retry; the
+  selected runner may later provide evidence; the owner resolves uncertainty.
 - **Failure behavior:** No blind retry and no claim that interrupt or disconnect
   undid the effect. Version one has no writer for resolving evidence or
   accepted-risk continuation; the parked wait retains its slot until an applied
@@ -292,16 +293,16 @@ those tests.
   exists in the baseline.
 - **Transient updates:** Cancellation signals to provider or runner and
   “stopping” progress.
-- **Owning component:** Hub owns ordering and state; adapters attempt prompt
+- **Owning component:** Daemon owns ordering and state; adapters attempt prompt
   cancellation; client states intent.
 - **Failure behavior:** Issued effects are not rolled back. The interrupted turn
   retains the progressing slot until every issued operation is classified, its
-  current attempt ends, and any wait is closed. If the hub restarts, the startup
-  scan ends the abandoned attempt and classifies operations without creating a
-  replacement; the applied interrupt plus unacknowledged ambiguity produces a
-  proof-bearing reconciliation marker, while previously accepted risk remains
-  explicitly marked under an ordinary terminal outcome. Before releasing the
-  slot, terminalization durably inserts any reclassified steering after the
+  current attempt ends, and any wait is closed. If the daemon restarts, the
+  startup scan ends the abandoned attempt and classifies operations without
+  creating a replacement; the applied interrupt plus unacknowledged ambiguity
+  produces a proof-bearing reconciliation marker, while previously accepted risk
+  remains explicitly marked under an ordinary terminal outcome. Before releasing
+  the slot, terminalization durably inserts any reclassified steering after the
   interrupt successor by original acceptance order. No queued successor has
   fixed a direct predecessor yet, so each later frontier includes every inserted
   turn.
@@ -329,7 +330,7 @@ those tests.
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
 - **Transient updates:** Client shows “will apply at next safe point”; no
   mutation of the current provider stream.
-- **Owning component:** Hub decides safe-point boundaries and builds context;
+- **Owning component:** Daemon decides safe-point boundaries and builds context;
   clients only request and display treatment.
 - **Failure behavior:** Restart preserves the single steering binding. It cannot
   be consumed while an earlier call or tool attempt is unclassified. If an
@@ -360,7 +361,7 @@ those tests.
   which may be an interrupt or reclassified-steering turn inserted after B's
   acceptance.
 - **Transient updates:** Queue position and projected start time may change.
-- **Owning component:** Hub owns durable ordering and scheduler eligibility.
+- **Owning component:** Daemon owns durable ordering and scheduler eligibility.
 - **Failure behavior:** Restart preserves order facts, identity, and
   configuration. Cancellation of A does not erase B. An interrupt-created
   successor precedes B and all reclassified steering; after the interrupt,
@@ -389,9 +390,9 @@ those tests.
   approval with no live attempt → approval atomically creates a new turn attempt
   → tool dispatched/completed.
 - **Transient updates:** Confirmation prompt delivery and executor progress.
-- **Owning component:** Hub owns policy and approval record; client
+- **Owning component:** Daemon owns policy and approval record; client
   authenticates and presents; selected executor performs the attempt.
-- **Failure behavior:** A hub restart leaves the request waiting without
+- **Failure behavior:** A daemon restart leaves the request waiting without
   inventing a decision. Duplicate approval is idempotent. Changed arguments or
   placement constraints require reevaluation and cannot reuse approval. After
   approval, an authorized request remains a blocking logical dependency while
@@ -414,8 +415,8 @@ those tests.
   the continuation boundary commits proposal-ordered result history without a
   tool attempt → orchestration later reaches an ordinary terminal disposition.
 - **Transient updates:** Prompt closes and clients receive status.
-- **Owning component:** Hub owns denial and prevents dispatch; client captures
-  the owner's decision.
+- **Owning component:** Daemon owns denial and prevents dispatch; client
+  captures the owner's decision.
 - **Failure behavior:** No physical tool attempt is created. The new turn
   attempt exists only to continue conversational orchestration with the denial
   outcome. Duplicate or delayed approval messages cannot reverse the denial
@@ -434,18 +435,20 @@ those tests.
 
 - **User intent:** Trust current state despite delayed or retried transport
   delivery.
-- **Durable commands:** Validate result envelope against tool-attempt identity
-  and dispatch generation; record duplicate/stale evidence if audit policy
-  requires, without applying it again.
+- **Durable commands:** For daemon-local execution, validate the result envelope
+  against the authorized tool-attempt dispatch correlation. For runner
+  execution, additionally validate the exact runner lease identity, runner
+  identity, tool name, and lease-lineage generation; record duplicate/stale
+  evidence if audit policy requires, without applying it again.
 - **State transitions:** Current work remains unchanged; a first valid current
   result may advance exactly once.
 - **Transient updates:** Runner acknowledgement may state “duplicate” or
   “stale.”
-- **Owning component:** Hub transaction and database constraints enforce
+- **Owning component:** Daemon transaction and database constraints enforce
   fencing; runner retries delivery until acknowledged.
 - **Failure behavior:** A stale success cannot overwrite a newer failure,
   result, cancellation, or reconciliation state.
-- **Required invariants:** INV-011, INV-012, INV-021.
+- **Required invariants:** INV-011, INV-012, INV-021, INV-043.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   result acknowledgement, compatibility, and subscriber observation remain
   [open](open-questions.md#scheduling-and-runners): the retired protocol designs
@@ -464,8 +467,8 @@ those tests.
   authorized/denied → attempted.
 - **Transient updates:** UI warning and runner availability.
 - **Owning component:** Runner declares its properties; deployment configuration
-  and any accepted verification supply other evidence; hub derives placement and
-  policy; client displays only the effective boundary it may rely on.
+  and any accepted verification supply other evidence; daemon derives placement
+  and policy; client displays only the effective boundary it may rely on.
 - **Failure behavior:** An unsupported isolation claim does not change the
   effective ambient boundary, and the system never labels this runner isolated
   on the strength of that claim. Loss or side effects follow the same ambiguity
@@ -486,7 +489,7 @@ those tests.
 - **Transient updates:** Resource use and progress reported by the runner.
 - **Owning component:** Deployment supplies the controls and trusted
   configuration; runner declares properties; accepted mechanisms may verify
-  them; hub derives and records effective properties; client explains the
+  them; daemon derives and records effective properties; client explains the
   effective boundary and evidence level.
 - **Failure behavior:** A missing or insufficiently evidenced property fails
   restricted placement explicitly. A “restricted” label or runner declaration
@@ -495,23 +498,23 @@ those tests.
 - **Remaining questions:** Capability schema, attestation, minimum profiles,
   resource limits, and whether constraints can change during a connection.
 
-## S15 — Execute a hub-local tool
+## S15 — Execute a daemon-local tool
 
 - **User intent:** Use a centrally available integration such as documentation
   lookup.
-- **Durable commands:** Create a logical tool request, evaluate hub policy,
-  create and fence a hub-local attempt, and persist its result/outcome once. The
-  initial `current_time` tool defaults to auto approval and is effect-free.
-- **State transitions:** Tool request → authorized/denied → hub-local in flight
-  → terminal; turn consumes the durable logical result.
+- **Durable commands:** Create a logical tool request, evaluate daemon policy,
+  create and fence a daemon-local attempt, and persist its result/outcome once.
+  The initial `current_time` tool defaults to auto approval and is effect-free.
+- **State transitions:** Tool request → authorized/denied → daemon-local in
+  flight → terminal; turn consumes the durable logical result.
 - **Transient updates:** Search progress or partial presentation that is not
   conversation truth.
-- **Owning component:** Hub owns policy and history; a hub-local adapter
+- **Owning component:** Daemon owns policy and history; a daemon-local adapter
   executes under central credentials.
 - **Failure behavior:** Adapter loss is classified with the same known/ambiguous
   distinction; central placement does not imply safe automatic retry.
 - **Required invariants:** INV-019, INV-024–INV-027, INV-035.
-- **Remaining questions:** Credential scoping, hub executor isolation, and
+- **Remaining questions:** Credential scoping, daemon executor isolation, and
   whether centrally hosted MCP is one adapter type.
 
 ## S16 — Execute a runner-local tool
@@ -525,12 +528,12 @@ those tests.
   known failed when evidence proves no effect, otherwise
   completed/cancelled/ambiguous according to evidence.
 - **Transient updates:** Connection heartbeat, stdout, and progress.
-- **Owning component:** Hub coordinates; scheduler places; runner-local executor
-  acts; Postgres stores authoritative state.
+- **Owning component:** Daemon coordinates; scheduler places; runner-local
+  executor acts; Postgres stores authoritative state.
 - **Failure behavior:** Runner unavailability is visible and does not silently
   move locality-sensitive work. Stale results fail fencing.
 - **Required invariants:** INV-011, INV-019, INV-021–INV-026.
-- **Remaining questions:** Pinning/affinity, multi-runner turns, result-size
+- **Remaining questions:** Durable lease/affinity orchestration, result-size
   handling, and local MCP capability discovery.
 
 ## S17 — Fork from previous transcript state
@@ -547,7 +550,7 @@ those tests.
   the new session-owned context snapshot while activating or recording eligible
   failure. The source remains unchanged.
 - **Transient updates:** Client may preview the fork point.
-- **Owning component:** The hub validates and atomically creates the session
+- **Owning component:** The daemon validates and atomically creates the session
   with its source reference; the later eligibility transition derives and binds
   the first context snapshot. Postgres preserves both durable boundaries.
 - **Failure behavior:** Invalid or inaccessible frontier fails before creation.
@@ -575,7 +578,7 @@ those tests.
   not part of the first implementable turn state machine; the delegation
   decision must add a typed child-wait phase before delegation ships.
 - **Transient updates:** Child progress summaries and presence indicators.
-- **Owning component:** Hub owns relationships and scheduling; each session
+- **Owning component:** Daemon owns relationships and scheduling; each session
   retains independent history.
 - **Failure behavior:** Once the delegation decision defines the feature,
   restart must restore both child state and parent wait, and child failure must
@@ -600,7 +603,7 @@ those tests.
   state machine has no `AwaitingChild` phase and therefore no incomplete
   cancellation edge.
 - **Transient updates:** Cancellation progress for each physical attempt.
-- **Owning component:** Hub applies the eventual delegation policy; executors
+- **Owning component:** Daemon applies the eventual delegation policy; executors
   only respond to cancellation requests.
 - **Failure behavior:** A future policy may keep or cancel the child, but
   already-issued effects are never undone, the child never silently disappears,
@@ -619,14 +622,14 @@ those tests.
 - **Durable commands:** At input acceptance, persist the requested alias plus an
   immutable definition selecting exactly one canonical direct model choice in
   effective configuration. Before creating the first call, validate and resolve
-  that frozen meaning and pin the exact hub-resolved provider/model target;
+  that frozen meaning and pin the exact daemon-resolved provider/model target;
   append observable provider identity or mismatch when available.
 - **State transitions:** Turn with frozen alias meaning → exact target pinned →
   model call prepared → in flight → terminal.
 - **Transient updates:** Client may show current alias target, clearly separate
   from historical call facts.
-- **Owning component:** Hub model resolver and provider adapter; Postgres stores
-  per-call provenance.
+- **Owning component:** Daemon model resolver and provider adapter; Postgres
+  stores per-call provenance.
 - **Failure behavior:** Alias changes after input acceptance never alter queued
   or active work. Resolution failure creates no targetless call and fails the
   attempt and turn; it does not silently choose another model. A reported
@@ -651,8 +654,8 @@ those tests.
 - **User intent:** Call one exact provider/model reference for reproducibility
   or control.
 - **Durable commands:** Persist the exact requested selection, exact
-  hub-resolved provider/model target, frontier, and model-call record; capture
-  observable provider-reported model identity and mismatch metadata when
+  daemon-resolved provider/model target, frontier, and model-call record;
+  capture observable provider-reported model identity and mismatch metadata when
   available.
 - **State transitions:** Frozen exact selection → resolution succeeds and a
   pinned call is prepared, or resolution fails before any call exists →
@@ -662,14 +665,14 @@ those tests.
   immediately selects known failure and requests best-effort cancellation, while
   resolving mismatch evidence cannot reopen an already ambiguous call.
 - **Transient updates:** Provider stream and timing.
-- **Owning component:** Hub validates selection and calls provider; adapter
+- **Owning component:** Daemon validates selection and calls provider; adapter
   reports observed metadata.
 - **Failure behavior:** An unavailable or otherwise unresolvable exact selection
   is an error: it creates no targetless model call and fails the attempt and
-  turn. Hub-controlled fallback does not occur unless separately and explicitly
-  authorized. Provider-reported substitution is recorded rather than rewritten
-  as the pinned target. First observed while the outcome-eligible call is
-  nonterminal, it selects known failure and makes response/refusal material
+  turn. Daemon-controlled fallback does not occur unless separately and
+  explicitly authorized. Provider-reported substitution is recorded rather than
+  rewritten as the pinned target. First observed while the outcome-eligible call
+  is nonterminal, it selects known failure and makes response/refusal material
   non-authoritative; after terminal ambiguity it preserves physical state, adds
   the typed fatal cause to any still-live attempt without losing prior causes,
   and after outstanding classification fails the turn when no other
@@ -697,14 +700,14 @@ those tests.
 - **User intent:** If explicitly configured, continue through a classified
   capacity/availability failure using an allowed alternate model.
 - **Durable commands:** Record the primary call's requested selection, exact
-  hub-resolved target, provider-reported identity when available, and failure
+  daemon-resolved target, provider-reported identity when available, and failure
   classification; evaluate explicit fallback policy; create a distinct model
-  call with an exact hub-resolved fallback target and reason. Each call appends
-  provider-reported identity or mismatch when available.
+  call with an exact daemon-resolved fallback target and reason. Each call
+  appends provider-reported identity or mismatch when available.
 - **State transitions:** Primary call → known availability failure; turn/attempt
   → fallback eligible; fallback call → terminal.
 - **Transient updates:** Client shows that fallback is being considered/applied.
-- **Owning component:** Hub policy authorizes; provider adapters classify
+- **Owning component:** Daemon policy authorizes; provider adapters classify
   evidence but do not silently select targets.
 - **Failure behavior:** If version one has no accepted fallback policy, stop
   explicitly instead. If fallback is later authorized, the alternate target is
@@ -722,9 +725,9 @@ those tests.
 - **User intent:** Understand that the selected model refused and avoid hidden
   policy evasion.
 - **Durable commands:** Persist the model call, requested selection, exact
-  hub-resolved target, observable provider identity or mismatch when available,
-  provider response classification, and refusal outcome; create any follow-up
-  only through an explicit user/policy decision.
+  daemon-resolved target, observable provider identity or mismatch when
+  available, provider response classification, and refusal outcome; create any
+  follow-up only through an explicit user/policy decision.
 - **State transitions:** Without fatal stop, model call in flight → call
   refused, attempt turn-refused, and turn terminal/refused in one aggregate
   transition when target evidence does not mismatch. Serial orchestration
@@ -742,7 +745,7 @@ those tests.
   may add a typed wait or continuation policy.
 - **Transient updates:** Refusal text may stream but becomes authoritative only
   when committed.
-- **Owning component:** Provider adapter reports; hub classifies and exposes
+- **Owning component:** Provider adapter reports; daemon classifies and exposes
   provenance.
 - **Failure behavior:** An ordinary authoritative refusal is not treated as
   successful completion or availability failure, does not automatically fall
@@ -777,7 +780,7 @@ those tests.
 - **Transient updates:** Previously seen draft may be replaced. Version one
   resumes durable progress events; future provider-delta relay must add draft
   identity and sequencing without making deltas authoritative.
-- **Owning component:** Hub reconstructs durable truth and streams; client
+- **Owning component:** Daemon reconstructs durable truth and streams; client
   reconciles presentation.
 - **Failure behavior:** A bounded-fan-out overrun causes an explicit
   `resync_required` and another snapshot, not guessed updates. If the call
@@ -801,7 +804,7 @@ those tests.
 - **State transitions:** The organizational metadata snapshot changes between
   archived and non-archived. Session and turn lifecycle state does not change.
 - **Transient updates:** Client list filtering and confirmation.
-- **Owning component:** Hub validates metadata; Postgres preserves history;
+- **Owning component:** Daemon validates metadata; Postgres preserves history;
   clients present archive state.
 - **Failure behavior:** Restart preserves archive status. Archiving never
   cancels, pauses, rejects, or rewrites work and never cascades to another
@@ -826,9 +829,9 @@ those tests.
   encode a half-defined regeneration transition.
 - **Transient updates:** A future client may visually group alternatives, but
   grouping never replaces durable identities.
-- **Owning component:** When introduced, the hub validates the source relation
-  and creates new logical work; Postgres preserves both histories; clients
-  choose presentation.
+- **Owning component:** When introduced, the daemon validates the source
+  relation and creates new logical work; Postgres preserves both histories;
+  clients choose presentation.
 - **Failure behavior:** When introduced, duplicate command delivery must create
   at most one regeneration turn. A changed model or any changed
   effective-configuration field belongs to that new turn and is never disguised
@@ -866,7 +869,7 @@ those tests.
 - **Transient updates:** Delivery and acknowledgement of best-effort
   cancellation may continue after direct terminalization; progress text and late
   provider or runner observations are not outcome authority.
-- **Owning component:** The hub derives F, U, and every terminal guard from
+- **Owning component:** The daemon derives F, U, and every terminal guard from
   authoritative aggregate state and atomically commits the result; adapters only
   deliver cancellation intent and report evidence.
 - **Failure behavior:** A crash exposes either the prior running aggregate or
@@ -944,12 +947,112 @@ those tests.
   pending external reservation does not prove absence of an external effect and
   is not retried automatically. No transcript content or general-purpose
   artifact is copied into workflow rows.
-- **Required invariants:** INV-002, INV-007, INV-025, INV-026.
+- **Required invariants:** INV-001, INV-002, INV-007, INV-025, INV-026, INV-040,
+  INV-041.
 - **Remaining questions:** Application commands, scheduling, prompts,
   automation, repair, and stack propagation remain in
   [review-workflow orchestration](open-questions.md#destination-features-target-model);
   a general artifact aggregate remains
   [open](open-questions.md#general-purpose-artifacts).
+
+## S30 — Enroll a runner and pin a session
+
+- **User intent:** Target either one exact runner or a capability class and know
+  which logical runner, working directory, tools, credential profile, and
+  workspace boundary the session actually received.
+- **Durable commands:** A later application stack records logical enrollment and
+  validates the runner's advertised names against active enrollment and the
+  daemon catalog. Session creation records its class-or-identity selector,
+  optional working directory, optional credential-profile selection, and
+  workspace requirement. The first runner execution records one exact validated
+  registration, pins that runner, and creates any requested initial
+  credential-profile grant from that exact registration.
+- **State transitions:** Enrollment active → validated registration; placement
+  unpinned → pinned on the first eligible runner. The domain foundation in
+  [runner protocol and placement](spec/runner-protocol.md) implements these
+  transitions without transport or storage.
+- **Transient updates:** Connection and registration progress are not
+  enrollment, placement, or approval authority.
+- **Owning component:** The daemon owns enrollment and policy; the runner
+  reports availability; session placement owns affinity.
+- **Failure behavior:** Revoked enrollment, unknown or disallowed catalog
+  claims, selector mismatch, unavailable credential profile, missing workspace
+  capability, or a second ordinary runner fails explicitly without changing
+  placement. Hardware or network changes never derive a new identity implicitly.
+- **Required invariants:** INV-001, INV-002, INV-022, INV-023, INV-024, INV-035,
+  INV-042, INV-044, INV-045.
+- **Remaining questions:** Authentication exchange, store transactions,
+  streaming transport, application session creation, and client presentation
+  remain under
+  [runner authentication](open-questions.md#identity-credentials-and-resource-governance)
+  and [runner transport](open-questions.md#protocols-and-persistence).
+
+## S31 — Recover a lost runner lease
+
+- **User intent:** Resume work that is known safe to repeat without silently
+  duplicating a side effect.
+- **Durable commands:** A later store stack persists an offered lease before
+  streaming it, then persists its exact runner/generation claim before
+  acknowledging execution capability or accepting a result. Domain transition
+  inputs retain the runner, lease, physical tool attempt, session, tool,
+  declaration-derived effect class, and lease-lineage generation. A fresh
+  physical attempt begins at its own first tool-dispatch generation.
+- **State transitions:** An unclaimed lost lease advances to a checked successor
+  generation for every class while retaining the never-executed attempt. A
+  claimed lost pure or idempotent lease produces re-lease authority that
+  requires a fresh physical attempt identity. A claimed lost side-effecting
+  lease produces crash-classification authority and cannot produce re-lease
+  authority.
+- **Transient updates:** Connection loss, reconnect, and repeated frames do not
+  themselves advance the lease.
+- **Owning component:** The daemon owns lease and physical-attempt outcomes; the
+  runner carries only correlated offers, claims, and observations.
+- **Failure behavior:** A stale generation, wrong runner, wrong attempt,
+  duplicate completion, or exhausted generation fails closed. Side-effecting
+  loss follows the existing ambiguity and reconciliation law and is never
+  converted to ordinary tool output or silently dispatched again.
+- **Required invariants:** INV-004, INV-006, INV-011, INV-021, INV-024–INV-026,
+  INV-034, INV-043.
+- **Remaining questions:** Store schema and transactions, exact reconnect
+  inventory, transport framing, heartbeat, and stale-evidence retention remain
+  in [runner transport](open-questions.md#protocols-and-persistence).
+
+## S32 — Replace a lost runner and credential grant
+
+- **User intent:** Continue a pinned session on an explicitly selected
+  replacement while ensuring the model learns the changed logical runner,
+  directory, tools, credential profile, and workspace.
+- **Durable commands:** A later owner command marks the runner lost and supplies
+  one complete validated replacement placement. When the placement selects a
+  credential profile, runner replacement consumes the prior grant and creates
+  its checked successor revision in that same replacement. A separate
+  credential-profile replacement changes the selected profile on the same pinned
+  runner. Each transition produces exact before-and-after change facts for a
+  later injected semantic message and frontier extension.
+- **State transitions:** Pinned → runner lost → explicitly replaced and pinned
+  at the checked successor revision. Active or revoked prior credential grant →
+  checked active successor grant during runner replacement; the consumed prior
+  revision remains terminal. On the same pinned runner, active credential grant
+  → replaced active grant or revoked terminal grant. A repository-worktree
+  requirement creates a new runner-owned provisioned workspace; the old runner's
+  workspace is never inherited.
+- **Transient updates:** UI progress and connection discovery are not
+  replacement authority.
+- **Owning component:** The daemon validates and records owner intent; the
+  selected runner provisions and cleans its workspace; context assembly later
+  appends the typed placement-change message.
+- **Failure behavior:** Automatic migration is absent. An ineligible runner,
+  stale placement or grant revision, unavailable profile, wider tool set,
+  missing workspace capability, or attempt to reactivate a revoked grant fails
+  unchanged. Revocation gates later lease creation but does not yank or rewrite
+  an already offered lease.
+- **Required invariants:** INV-005, INV-008, INV-024–INV-026, INV-035, INV-036,
+  INV-042, INV-044, INV-045.
+- **Remaining questions:** Owner command shape, atomic store boundaries, exact
+  injected semantic content, cleanup recovery, and recovery when no eligible
+  replacement exists remain under
+  [scheduling and runners](open-questions.md#scheduling-and-runners) and
+  [tool safety](open-questions.md#tool-safety).
 
 ## Coverage note
 

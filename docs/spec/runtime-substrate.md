@@ -5,18 +5,20 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
 against the implementing stack through PR #183
 (`agent/provider-call-security-parser`) plus the Codex CLI adapter stack (PR
-#264, `agent/codex-cli-wrap`). It covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the three provider adapters; and their credential
-boundaries. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+#264, `agent/codex-cli-wrap`). The `signalboxd` names this page states for the
+composition root, its telemetry, and the production `FileCredentialAccess` were
+verified through PR #258 (`agent/signalboxd-rename`). It covers the
+provider-neutral operation, observation, and evidence vocabulary; SSE framing;
+structured-output and tool decode; `ScriptedModel`; the three provider adapters;
+and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
 companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
-`crates/application` and consumed by hubd telemetry.
+`crates/application` and consumed by signalboxd telemetry.
 
 ## Boundary and crate layout
 
@@ -35,10 +37,10 @@ adapter crates, the `crates/model-provider-runtime` bridge — whose
 `RuntimeModelCallProvider` implements the application's `ModelCallProvider` port
 over any `ModelRuntime<ModelCallId>`, depending on both crates so the dependency
 arrow points from the bridge into application, never from application into the
-runtime — and the hub composition root (see Open edges). The Cargo manifest is
-the enforcement mechanism: an undeclared dependency fails the workspace build.
-Why: manifest-visible boundaries make a boundary violation a reviewable diff
-instead of a silent import.
+runtime — and the daemon composition root (see Open edges). The Cargo manifest
+is the enforcement mechanism: an undeclared dependency fails the workspace
+build. Why: manifest-visible boundaries make a boundary violation a reviewable
+diff instead of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final
@@ -55,7 +57,10 @@ no durable state, makes no lifecycle decisions, and performs no logging.
 or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
 optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
 `ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
-a `DeliveryMode` (buffered or streamed).
+a `DeliveryMode` (buffered or streamed). Settings are provider-enforced request
+controls unless an adapter's owning section records a capability-limited
+advisory exception; an adapter never silently presents prompt instructions as
+hard transport controls.
 
 `ModelOperation::validate` rejects, before any send: duplicate ordinary tool
 names, a named tool choice matching no declared tool, and an ordinary tool
@@ -367,68 +372,114 @@ exported version constant is the contract a later composition must pin before
 wiring the adapter. The model dispatch itself performs no separate version
 probe. Preparation validates and renders the complete operation, writes the
 non-secret response-envelope schema to a private temporary file, and returns a
-one-shot capability without starting a process. Execution consumes it as exactly
-one `codex exec --json --ephemeral` spawn, passes the full rendered frontier on
-stdin, requires an absolute configured executable path, selects the exact
-resolved model, ignores user configuration and rule files, and uses the
-read-only CLI sandbox. It neither resumes nor persists a Codex thread. Why: a
-fresh ephemeral invocation keeps provider session state out of memory and makes
-the caller's complete handed context the sole semantic input.
+one-shot capability without starting a process. Admitted schemas and replayed
+tool arguments remain raw JSON through prompt serialization; a shallow raw
+member scan still requires each schema to declare an object root. Execution
+consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
+Unix, passes the full rendered frontier on stdin, requires absolute configured
+executable and working-root paths, selects the exact resolved model, ignores
+user configuration and rule files, disables the shell and unified-exec features,
+sets the project-instruction byte budget to zero, and uses the read-only CLI
+sandbox. Strict configuration turns an unavailable control into a closed failure
+instead of silently relaxing this invocation boundary. Before spawn it clears
+the parent environment, then copies only its explicit home/Codex-home,
+executable and temporary path, XDG, locale/terminal, certificate, and proxy
+allowlist; unrelated service variables do not reach the CLI. It neither resumes
+nor persists a Codex thread. Why: a fresh ephemeral invocation keeps provider
+session state out of memory, and the caller supplies the complete conversation
+frontier instead of an in-memory resume pointer. The read-only sandbox and
+working root are the adapter's filesystem boundary; Unix process-group
+supervision bounds descendant lifetime, so construction rejects hosts where that
+supervision is unavailable. Stronger host isolation is later composition work,
+not an adapter claim.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
 The first `thread.started` establishes the exchange and its thread id becomes
 the provider request id. Unknown top-level events and unsupported item kinds are
-additively tolerated within the byte and JSON-depth bounds. Known events with
-invalid shapes, non-UTF-8 or undecodable JSONL, nonzero or signal process exits,
-and `turn.failed` fail closed as provider error evidence; the rendered CLI
-message classifier gives credential rejection first precedence and maps only
-explicit native phrases, with all other material `Unrecognized`. The CLI reports
-a failed exchange as a stream-level `error` event followed by its `turn.failed`
-lifecycle echo; the decoder accepts exactly that one trailer and keeps the
-stream-level message as the typed provider error, while any other post-terminal
-event — including one contradicting the recorded failure — remains a fail-closed
-protocol violation. Exit zero without `turn.completed` is
+additively tolerated within the byte and JSON-depth bounds. Known item lifecycle
+events must carry a nonempty item identity and type even when the adapter does
+not otherwise interpret them. Known events with invalid shapes, non-UTF-8 or
+undecodable JSONL, nonzero or signal process exits, and `turn.failed` fail
+closed as provider error evidence; the rendered CLI message classifier gives
+credential rejection first precedence and maps only explicit native phrases,
+with all other material `Unrecognized`. The CLI reports a failed exchange as a
+stream-level `error` event followed by its `turn.failed` lifecycle echo; the
+decoder accepts exactly that one trailer and keeps the stream-level message as
+the typed provider error, while any other post-terminal event — including one
+contradicting the recorded failure — remains a fail-closed protocol violation.
+Exit zero without `turn.completed` is
 `BoundaryLoss(StreamEndedWithoutTerminalMarker)`, never completion.
 
 `turn.completed` is success evidence only when the last completed agent-message
-item decodes as the adapter's response envelope and satisfies the declared tool
-and structured-output constraints. The decoded envelope is checked against the
-shared JSON nesting bound independently of the escaped outer event. The envelope
-distinguishes completion from refusal. Within the envelope each tool call
-carries its argument object as JSON text inside a string: strict
+item decodes as the adapter's response envelope and satisfies the declared-tool
+constraints. A named ordinary-tool choice admits at least one proposal and
+requires every proposal to carry that selected name. For a structured-output
+contract, zero or several contract-named proposals remain definitive completion
+material for the provider-independent structured decoder above to classify. The
+decoded envelope is checked against the shared JSON nesting bound independently
+of the escaped outer event; envelope decode errors are content-silent. The
+envelope distinguishes completion from refusal. Within the envelope each tool
+call carries its argument object as JSON text inside a string: strict
 structured-output validation refuses any schema object that does not supply
 `additionalProperties: false` and require all its properties, so a free-form
 argument object is not expressible in the output schema and the live API rejects
 one as `invalid_json_schema`. The adapter parses the string, requires exactly
 one JSON object within the provider nesting bound, and passes the contained text
 onward, so tool argument JSON still reaches the caller byte-verbatim when it is
-credential-shape clean. Buffered delivery retains its content without deltas;
-streamed delivery emits bounded CLI reasoning items and the final envelope
-content as ordered deltas before the same terminal evidence. Usage comes only
-from `turn.completed`; an omitted cache counter remains unreported rather than
-becoming a reported zero. Preparation rejects a zero output-token limit,
-non-finite sampling values, temperature outside zero through two, and top-p
-outside zero through one. The offline fake CLI applies the same strict-schema
+credential-shape clean. Caller JSON remains raw through serialization,
+preserving deep admitted values and their numeric lexemes. Buffered delivery
+retains its content without deltas; streamed delivery feeds raw bounded CLI
+reasoning and final-envelope text through the stateful redactor before emitting
+ordered deltas and the same terminal evidence. Usage comes only from
+`turn.completed`; an omitted cache counter remains unreported rather than
+becoming a reported zero.
+
+The pinned CLI exposes no argv, configuration, or subscription request controls
+for output-token ceiling, temperature, top-p, or stop sequences. This adapter is
+therefore the narrow exception to the provider-enforced settings rule: it
+renders all four values into the model-visible operation prompt as advisory
+context, and neither claims nor supplies hard enforcement. A caller that
+requires provider-enforced generation settings must not select this adapter.
+Preparation still rejects a zero output-token limit, malformed replayed
+tool-call JSON, non-finite sampling values, temperature outside zero through
+two, and top-p outside zero through one as unsupported caller input. The offline
+fake CLI verifies the advisory rendering and applies the same strict-schema
 validation to every spawned exchange, so a schema shape the live API refuses
 cannot pass the fixture corpus.
 
 The adapter bounds every stdout event while copying and drains stderr while
-retaining only a bounded prefix. Cancellation before spawn is proven unsent.
-After spawn it sends an interrupt to the dedicated process group, waits a
-positive grace, and force-kills only as fallback; either path is
-`BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
-starts immediately after successful spawn, governs stdin transfer, stdout
-decoding, and process exit, then force-kills the original process as typed
-boundary loss. Ready stdout is polled before simultaneous control signals, then
-the decoder drains only the current bounded reader batch before synchronously
-rechecking control, so continuously ready stdout cannot starve it. Once a
-provider terminal marker is observed, a later cancellation cannot replace that
-definitive evidence, but the process deadline continues to govern exit and
-cleanup. The adapter also bounds stderr cleanup after the direct child exits and
-terminates the original process group when an inherited stderr handle outlives
-the deadline. The offline test binary exercises all process and evidence paths
-without a live CLI or network.
+retaining only a bounded prefix. Streamed credential lookbehind retains at most
+64 KiB; exceeding that bound emits redaction under each held observation's
+original metadata and suppresses later text through the terminal flush. A
+credential-bearing JSON member at the start of CLI-controlled text is recognized
+without requiring an enclosing object delimiter. Construction rejects a zero or
+runtime-clock-unrepresentable process timeout. Cancellation before spawn is
+proven unsent. After spawn it sends an interrupt to the dedicated process group,
+retains the unreaped leader through a positive grace, and kills the group before
+reaping the leader; cancellation is `BoundaryLoss(CancellationRequested)` and
+never causes another spawn. Timeout starts immediately after successful spawn,
+governs stdin transfer, stdout decoding, and process exit, then force-kills the
+original process as typed boundary loss; interrupt grace is capped at the time
+remaining before that deadline. Dropping or aborting execution synchronously
+kills the still-owned original process group before the direct child drops. A
+stdin write failure continues draining and decoding bounded JSONL stdout
+alongside bounded stderr, then observes process status under the same controls,
+preserving definitive CLI evidence instead of discarding it as transport loss or
+blocking on a full stdout pipe. A provider failure remains definitive after such
+a write failure, but a nominal completion is boundary loss because the adapter
+cannot prove the full authorized frontier reached the CLI. Ready stdout is
+polled before simultaneous control signals, then the decoder drains only the
+current bounded reader batch before synchronously rechecking control, so
+continuously ready stdout cannot starve it. Once a provider terminal marker is
+observed, a later cancellation cannot replace that definitive evidence, but the
+process deadline continues to govern exit and cleanup. The adapter also bounds
+stderr cleanup before reaping the direct child and terminates the original
+process group when an inherited stderr handle outlives the deadline. On every
+ordinary exit it likewise keeps the leader waitable until it has killed
+remaining group descendants, then reaps the leader, so cleanup never signals
+through a reusable process identity. The offline test binary exercises all
+process and evidence paths without a live CLI or network.
 
 ### Version pin and compatibility smoke
 
@@ -491,12 +542,12 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   provider-controlled output.
 - Direct HTTP adapters call `CredentialAccess::resolve` during preparation of
   each physical request; nothing is cached. Why: per-request resolution makes
-  mounted-secret rotation visible without a hub restart. Resolution races the
-  cancellation signal so a blocked read cannot hold a cancelled operation.
-  Failures are reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and
-  never contain secret bytes.
-- The production implementation is hubd's `FileCredentialAccess`: each resolve
-  rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
+  rotation visible without a daemon restart. Resolution races the cancellation
+  signal so a blocked read cannot hold a cancelled operation. Failures are
+  reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
+  secret bytes.
+- The production implementation is signalboxd's `FileCredentialAccess`: each
+  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
   production `AnthropicRuntime`.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
@@ -516,16 +567,18 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   text and JSON are recursively scrubbed by credential-bearing member names and
   credential token shapes before observations or evidence leave the crate;
   credential-bearing authorization and cookie header shapes consume their whole
-  line value. Why: subscription authentication remains wholly inside the
-  intended CLI control surface while credential-shaped reflection still fails
-  closed.
+  line value; quoted credential values consume through their matching unescaped
+  quote, and JSON identity/session-token members are included. Envelope-decode
+  errors are content-silent rather than embedding a rejected provider value.
+  Why: subscription authentication remains wholly inside the intended CLI
+  control surface while credential-shaped reflection still fails closed.
 
 ## Operator failure taxonomy
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and hubd telemetry: the scheduling and model-call error
-families (startup scan, turn activation, eligibility sweep, model-call
+persistence adapters, and signalboxd telemetry: the scheduling and model-call
+error families (startup scan, turn activation, eligibility sweep, model-call
 repository) map into `OperatorFailureClass` through the
 `ClassifyOperatorFailure` trait, exposing a user-content-free classification to
 shared telemetry while the underlying error keeps its diagnostic detail
@@ -537,8 +590,8 @@ internally. The four classes:
 - **`FailClosedCorruption`** — committed rows cannot construct the accepted
   domain value (fail-closed reconstitution:
   [persistence-protocol](persistence-protocol.md)).
-- **`IdentityCollision`** — a fresh hub-minted candidate identity collided with
-  a durable identity (per-stage retry rule:
+- **`IdentityCollision`** — a fresh daemon-minted candidate identity collided
+  with a durable identity (per-stage retry rule:
   [model-call-execution](model-call-execution.md)).
 - **`CallerOrHubBug`** — a request or internal guard that can fail only because
   of a defect, kept distinct from corruption.
@@ -558,7 +611,7 @@ failures after staleness handling.
 - `CancellationConfirmed` and `SendIncompleteProvenUnacceptable` are
   vocabulary-total variants no in-repository adapter constructs today.
 - The three-kind consumer allowlist (provider adapters, the
-  `model-provider-runtime` bridge, the hub composition root) is a review-time
+  `model-provider-runtime` bridge, the daemon composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns controlled provider-proxy and private-root support.

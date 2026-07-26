@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "apps/client",
-    "apps/hubd",
+    "apps/signalboxd",
     "crates/application",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",

@@ -1,8 +1,6 @@
 import Combine
 import Foundation
-@testable import SignalboxApp
-import SignalboxClient
-import SignalboxModels
+@testable import SignalboxNative
 import XCTest
 
 @MainActor
@@ -606,10 +604,10 @@ private final class ArtifactRefreshStreamSignalboxService: SignalboxClientProtoc
     func listMonitorSessions() async throws -> [SignalboxMonitorSessionSummary] { [] }
 
     func listArtifacts(sessionID: SignalboxSessionID) async throws -> [SignalboxArtifact] {
-        lock.lock()
-        lockedArtifactListCallCount += 1
-        let callCount = lockedArtifactListCallCount
-        lock.unlock()
+        let callCount = lock.withLock {
+            lockedArtifactListCallCount += 1
+            return lockedArtifactListCallCount
+        }
         return callCount == 1 ? [] : [artifactAfterStreamHello]
     }
 

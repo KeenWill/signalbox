@@ -10,11 +10,12 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionFinish, CredentialReference, DeliveryMode,
-    LossCause, ModelOperation, ModelRuntime, Observation, ObservationFact, PreparationFailure,
-    PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget, StreamInterruption,
-    StructuredOutputContract, TerminalEvidence, TokenUsage, ToolChoice, ToolDefinition, ToolName,
-    decode_structured,
+    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
+    CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
+    Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
+    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
+    StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -25,6 +26,7 @@ mod fixtures;
 
 const CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 const RESOLVED_TARGET: &str = "gpt-offline-exact";
+const OFFLINE_HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 enum OperationShape {
@@ -86,6 +88,9 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("exec\n--json\n--ephemeral"));
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
+    assert!(result.argv.contains("--disable\nshell_tool"));
+    assert!(result.argv.contains("--disable\nunified_exec"));
+    assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
 }
@@ -122,6 +127,67 @@ async fn streamed_completion_emits_redacted_progress_in_order() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential token split across reasoning items cannot be
+/// reconstructed by concatenating streamed provider text.
+#[tokio::test]
+async fn inv_035_split_credential_across_reasoning_items_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_credential_between_reasoning_items",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(streamed.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: changing from reasoning to final text cannot flush a held
+/// credential prefix as provider-controlled bytes.
+#[tokio::test]
+async fn inv_035_split_credential_before_final_text_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_credential_before_final_text",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(streamed.contains("[redacted]"));
+    assert!(result.observations.iter().any(|observation| {
+        observation.fact
+            == ObservationFact::TextDelta {
+                index: 1,
+                text: "[redacted]".to_string(),
+            }
+    }));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a credential header split between reasoning and final text keeps
+/// redacting through the value, not just through the marker.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_final_text",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(streamed.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn only_the_last_agent_message_is_decoded_as_the_terminal_envelope() {
     let result = execute_scenario(
@@ -151,6 +217,24 @@ async fn an_undecodable_last_agent_message_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause)
             .contains("last agent message")
+    );
+}
+
+#[tokio::test]
+async fn credential_shaped_envelope_errors_are_content_silent() {
+    let result = execute_scenario(
+        "credential_envelope_error",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let detail = response_unintelligible(&boundary_loss(&result.evidence).cause);
+
+    assert!(!detail.contains(fixtures::SENSITIVE_ENVELOPE_TOKEN));
+    assert_eq!(
+        detail,
+        "last agent message does not match the response envelope"
     );
 }
 
@@ -302,6 +386,49 @@ async fn structured_output_uses_the_shared_forced_tool_decode() {
 }
 
 #[tokio::test]
+async fn missing_structured_output_reaches_the_shared_typed_decode() {
+    let result = execute_scenario(
+        "structured_output_missing",
+        DeliveryMode::Buffered,
+        OperationShape::Structured,
+        CancellationSignal::never(),
+    )
+    .await;
+    let contract = StructuredOutputContract::of_type::<Verdict>("verdict", "verdict");
+    let failure = decode_structured::<Verdict, _>(
+        &completed(&result.evidence).content,
+        &contract,
+        &signalbox_model_runtime::NoDomainConstraints,
+    )
+    .expect_err("the shared decoder classifies a missing structured value");
+
+    assert_eq!(failure, StructuredDecodeFailure::NoStructuredValue);
+}
+
+#[tokio::test]
+async fn multiple_structured_outputs_reach_the_shared_typed_decode() {
+    let result = execute_scenario(
+        "structured_output_multiple",
+        DeliveryMode::Buffered,
+        OperationShape::Structured,
+        CancellationSignal::never(),
+    )
+    .await;
+    let contract = StructuredOutputContract::of_type::<Verdict>("verdict", "verdict");
+    let failure = decode_structured::<Verdict, _>(
+        &completed(&result.evidence).content,
+        &contract,
+        &signalbox_model_runtime::NoDomainConstraints,
+    )
+    .expect_err("the shared decoder classifies multiple structured values");
+
+    assert_eq!(
+        failure,
+        StructuredDecodeFailure::MultipleStructuredValues { count: 2 }
+    );
+}
+
+#[tokio::test]
 async fn structured_output_can_end_in_explicit_refusal() {
     let result = execute_scenario(
         "structured_refused",
@@ -328,7 +455,7 @@ async fn tool_choice_is_ignored_when_no_tools_or_contract_exist() {
     let result = execute_operation_with_timeout(
         operation,
         CancellationSignal::never(),
-        Duration::from_secs(5),
+        OFFLINE_HARNESS_TIMEOUT,
     )
     .await;
 
@@ -337,6 +464,36 @@ async fn tool_choice_is_ignored_when_no_tools_or_contract_exist() {
         vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
     );
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn named_tool_choice_rejects_an_extra_declared_tool_proposal() {
+    let mut operation = operation(
+        "named_choice_extra_tool",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+    );
+    operation.tools.push(ToolDefinition::with_schema(
+        fixtures::OTHER_TOOL_NAME,
+        fixtures::OTHER_TOOL_NAME,
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    ));
+    operation.tool_choice = ToolChoice::Named(ToolName::new(fixtures::TOOL_NAME));
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        OFFLINE_HARNESS_TIMEOUT,
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains(fixtures::TOOL_NAME)
+    );
 }
 
 #[tokio::test]
@@ -474,6 +631,77 @@ async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
 #[tokio::test]
 async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
+}
+
+#[tokio::test]
+async fn decoded_progress_is_flushed_before_a_later_event_fails() {
+    let result = execute_scenario(
+        "reasoning_then_malformed_event",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        provider_error(&result.evidence).kind,
+        ProviderErrorKind::Unrecognized
+    );
+    assert!(result.observations.iter().any(|observation| {
+        observation.fact
+            == ObservationFact::ThinkingDelta {
+                index: 0,
+                text: fixtures::PENDING_PROGRESS_TEXT.to_string(),
+            }
+    }));
+}
+
+#[tokio::test]
+async fn malformed_known_lifecycle_event_fails_closed() {
+    let result = execute_scenario(
+        "malformed_known_lifecycle",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        provider_error(&result.evidence).kind,
+        ProviderErrorKind::Unrecognized
+    );
+    assert!(
+        provider_error(&result.evidence)
+            .native
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("known event has invalid shape")
+    );
+}
+
+#[tokio::test]
+async fn empty_completed_item_identity_fails_closed() {
+    let result = execute_scenario(
+        "empty_completed_item_identity",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        provider_error(&result.evidence).kind,
+        ProviderErrorKind::Unrecognized
+    );
+    assert!(
+        provider_error(&result.evidence)
+            .native
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("empty item identity")
+    );
 }
 
 #[tokio::test]
@@ -713,17 +941,266 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
         timed_out(&boundary_loss(&report.evidence).cause).detail,
         "Codex CLI process exceeded its exchange timeout"
     );
+}
+
+#[tokio::test]
+async fn nonzero_exit_while_writing_stdin_preserves_provider_error() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(
+        temporary.path().join(fixtures::EARLY_STDIN_EXIT_MARKER),
+        "exit",
+    )
+    .expect("the early-exit marker is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let failure = provider_error(&report.evidence);
+
+    assert_eq!(failure.kind, ProviderErrorKind::RequestTooLarge);
+    assert!(
+        failure
+            .native
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(fixtures::EARLY_STDIN_FAILURE))
+    );
+    assert_eq!(
+        failure
+            .exchange
+            .provider_request_id
+            .as_ref()
+            .map(signalbox_model_runtime::ProviderRequestId::as_str),
+        Some(fixtures::THREAD_ID)
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
+async fn completion_after_an_incomplete_stdin_upload_is_boundary_loss() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(
+        temporary
+            .path()
+            .join(fixtures::EARLY_STDIN_COMPLETION_MARKER),
+        "complete",
+    )
+    .expect("the early-completion marker is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    let failure = transport_failed(&boundary_loss(&report.evidence).cause);
+
+    assert!(
+        failure
+            .detail
+            .contains("before the full request upload completed")
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_kills_descendants_after_the_group_leader_exits() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::from_secs(5);
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "interrupt_with_descendant",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let descendant_path = temporary
+        .path()
+        .join("fake-codex-interrupt-descendant-process-group");
+    let cancellation = cancel_after_record(descendant_path.clone());
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::CancellationRequested
+    );
+    assert_recorded_process_group_exited(descendant_path);
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_execution_kills_the_spawned_process_group() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "interrupt_with_descendant",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let descendant_path = temporary
+        .path()
+        .join("fake-codex-interrupt-descendant-process-group");
+    let execution = tokio::spawn(async move {
+        let mut observations = Vec::new();
+        runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await
+    });
+
+    wait_for_record(descendant_path.clone()).await;
+    execution.abort();
+    let aborted = execution
+        .await
+        .expect_err("the execution task was explicitly aborted");
+
+    assert!(aborted.is_cancelled());
+    assert_recorded_process_group_exited(descendant_path);
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
+async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::from_secs(5);
+    config.interrupt_grace = Duration::from_secs(10);
+    let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation("hang", DeliveryMode::Buffered, OperationShape::Text),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-spawns"));
+    let started = std::time::Instant::now();
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::CancellationRequested
+    );
+    assert!(started.elapsed() < Duration::from_secs(7));
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
 #[tokio::test]
 async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
-    let result = execute_scenario_with_timeout(
-        "inherited_stderr",
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let result = execute_operation_in_directory(
+        temporary.path(),
+        operation(
+            "inherited_stderr",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+        CancellationSignal::never(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+    assert_recorded_process_group_exited(
+        temporary
+            .path()
+            .join("fake-codex-inherited-stderr-process-group"),
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn successful_exit_kills_a_detached_process_group_descendant() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let result = execute_operation_in_directory(
+        temporary.path(),
+        operation(
+            "completed_with_detached_descendant",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+        CancellationSignal::never(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+    assert_recorded_process_group_exited(
+        temporary
+            .path()
+            .join("fake-codex-detached-descendant-process-group"),
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stderr_cleanup_timeout_preserves_boundary_loss_evidence() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stdout_closing_cli(temporary.path());
+    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_millis(100));
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        timed_out(&boundary_loss(&report.evidence).cause).detail,
+        "Codex CLI process exceeded its exchange timeout"
+    );
+}
+
+#[tokio::test]
+async fn subprocess_environment_is_allowlisted() {
+    let result = execute_scenario(
+        "filtered_environment",
         DeliveryMode::Buffered,
         OperationShape::Text,
         CancellationSignal::never(),
-        Duration::from_secs(1),
     )
     .await;
 
@@ -749,7 +1226,62 @@ async fn inv_035_cli_output_is_credential_shape_redacted() {
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_OUTPUT_TOKEN));
     assert!(!diagnostic.contains(fixtures::SENSITIVE_REFRESH_TOKEN));
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
     assert!(diagnostic.contains("[redacted]"));
+}
+
+/// INV-035: a bare JSON credential member at the start of CLI-controlled text
+/// is still recognized without an enclosing object delimiter.
+#[tokio::test]
+async fn inv_035_bare_credential_member_is_redacted() {
+    let result = execute_scenario(
+        "bare_credential_text",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}", result.evidence);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn synchronous_preparation_wins_over_ready_cancellation() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let _prepared = prepare_with_cancellation(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+        CancellationSignal::already_cancelled(),
+    )
+    .await;
+
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+async fn prepare_with_cancellation(
+    runtime: &CodexCliRuntime,
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+) -> signalbox_model_runtime_codex_cli::CodexCliPreparedRequest<String> {
+    match runtime.prepare(operation, cancellation).await {
+        PreparationOutcome::Prepared(prepared) => prepared,
+        PreparationOutcome::Cancelled { .. } => {
+            panic!("synchronous offline preparation must win over cancellation")
+        }
+        PreparationOutcome::Failed { failure, .. } => {
+            panic!("offline preparation failed: {failure:?}")
+        }
+        PreparationOutcome::Defect { defect, .. } => {
+            panic!("offline preparation found a defect: {defect:?}")
+        }
+    }
 }
 
 /// INV-035: distinct credential-shaped provider ids remain distinct without
@@ -822,6 +1354,98 @@ async fn undeclared_named_choice_fails_before_spawn() {
 
     assert!(unsupported_detail(failure).contains("no declared tool"));
     assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn malformed_replayed_tool_json_is_unsupported_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.messages = vec![ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: vec![MessagePart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("call-invalid-json"),
+            name: ToolName::new(fixtures::TOOL_NAME),
+            arguments_json: "{not json".to_string(),
+        })],
+    }];
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("not valid JSON"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn precision_sensitive_replayed_json_number_is_preserved_in_the_prompt() {
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+    );
+    operation.messages.push(ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: vec![MessagePart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("call-precise-json"),
+            name: ToolName::new(fixtures::TOOL_NAME),
+            arguments_json: format!(r#"{{"value":{}}}"#, fixtures::PRECISE_JSON_NUMBER),
+        })],
+    });
+
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        OFFLINE_HARNESS_TIMEOUT,
+    )
+    .await;
+
+    assert!(result.prompt.contains(fixtures::PRECISE_JSON_NUMBER));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn generation_settings_are_rendered_as_advisory_prompt_context() {
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.max_output_tokens = fixtures::ADVISORY_MAX_OUTPUT_TOKENS;
+    operation.settings.temperature = Some(fixtures::ADVISORY_TEMPERATURE);
+    operation.settings.top_p = Some(fixtures::ADVISORY_TOP_P);
+    operation.settings.stop_sequences = vec![fixtures::ADVISORY_STOP_SEQUENCE.to_string()];
+
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        OFFLINE_HARNESS_TIMEOUT,
+    )
+    .await;
+    let request = rendered_request(&result.prompt);
+
+    assert_eq!(
+        request["settings"]["max_output_tokens"],
+        fixtures::ADVISORY_MAX_OUTPUT_TOKENS
+    );
+    assert_eq!(
+        request["settings"]["temperature"],
+        fixtures::ADVISORY_TEMPERATURE
+    );
+    assert_eq!(request["settings"]["top_p"], fixtures::ADVISORY_TOP_P);
+    assert_eq!(
+        request["settings"]["stop_sequences"][0],
+        fixtures::ADVISORY_STOP_SEQUENCE
+    );
+    assert!(result.prompt.contains("advisory intent"));
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
@@ -902,6 +1526,51 @@ fn relative_executable_is_rejected_at_construction() {
     assert_eq!(error, CodexCliConstructionError::RelativeExecutable);
 }
 
+#[test]
+fn relative_working_directory_is_rejected_at_construction() {
+    let config = CodexCliConfig::new(
+        fake_cli(),
+        ".",
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("a relative working root would be resolved by both cwd and --cd");
+
+    assert_eq!(error, CodexCliConstructionError::RelativeWorkingDirectory);
+}
+
+#[test]
+fn unrepresentable_exchange_timeout_is_rejected_at_construction() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = CodexCliConfig::new(
+        fake_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::MAX;
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("execution must never panic while constructing its process deadline");
+
+    assert_eq!(error, CodexCliConstructionError::InvalidExchangeTimeout);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn unsupported_platform_is_rejected_at_construction() {
+    let config = CodexCliConfig::new(
+        "/codex",
+        "/",
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("process descendants cannot be supervised on this platform");
+
+    assert_eq!(error, CodexCliConstructionError::UnsupportedPlatform);
+}
+
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
     let result = execute_scenario(
         scenario,
@@ -926,7 +1595,7 @@ async fn execute_scenario(
         delivery,
         shape,
         cancellation,
-        Duration::from_secs(5),
+        OFFLINE_HARNESS_TIMEOUT,
     )
     .await
 }
@@ -952,26 +1621,36 @@ async fn execute_operation_with_timeout(
     exchange_timeout: Duration,
 ) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
-    let runtime = runtime_with_timeout(temporary.path(), fake_cli(), exchange_timeout);
+    execute_operation_in_directory(temporary.path(), operation, cancellation, exchange_timeout)
+        .await
+}
+
+async fn execute_operation_in_directory(
+    directory: &Path,
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+    exchange_timeout: Duration,
+) -> ExecutionResult {
+    let runtime = runtime_with_timeout(directory, fake_cli(), exchange_timeout);
     let prepared = prepare(&runtime, operation).await;
     let mut observations = Vec::new();
     let report = runtime
         .execute(prepared, &mut observations, cancellation)
         .await;
-    let argv = read_optional(temporary.path().join("fake-codex-argv"));
-    let prompt = read_optional(temporary.path().join("fake-codex-prompt"));
+    let argv = read_optional(directory.join("fake-codex-argv"));
+    let prompt = read_optional(directory.join("fake-codex-prompt"));
 
     ExecutionResult {
         evidence: report.evidence,
         observations,
-        spawns: spawn_count(temporary.path()),
+        spawns: spawn_count(directory),
         argv,
         prompt,
     }
 }
 
 fn runtime(working_directory: &Path, executable: impl Into<std::path::PathBuf>) -> CodexCliRuntime {
-    runtime_with_timeout(working_directory, executable, Duration::from_secs(5))
+    runtime_with_timeout(working_directory, executable, OFFLINE_HARNESS_TIMEOUT)
 }
 
 fn runtime_with_timeout(
@@ -1067,6 +1746,41 @@ fn fake_cli() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-codex-cli"))
 }
 
+#[cfg(unix)]
+fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = directory.join("stdout-closing-codex");
+    std::fs::write(&executable, "#!/bin/sh\nexec 1>&-\nsleep 60\n")
+        .expect("the stdout-closing fake CLI is written");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("the stdout-closing fake CLI has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions)
+        .expect("the stdout-closing fake CLI is executable");
+    executable
+}
+
+fn rendered_request(prompt: &str) -> serde_json::Value {
+    let request = prompt
+        .rsplit_once("\n\n")
+        .map(|(_, request)| request.trim())
+        .expect("the adapter prompt ends with rendered request JSON");
+    serde_json::from_str(request).expect("the adapter prompt request is JSON")
+}
+
+fn streamed_provider_text(observations: &[Observation<String>]) -> String {
+    observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            ObservationFact::TextDelta { text, .. }
+            | ObservationFact::ThinkingDelta { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn spawn_count(directory: &Path) -> usize {
     std::fs::read_to_string(directory.join("fake-codex-spawns"))
         .map(|content| content.lines().count())
@@ -1077,29 +1791,81 @@ fn read_optional(path: std::path::PathBuf) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
+#[cfg(unix)]
+fn assert_recorded_process_group_exited(path: std::path::PathBuf) {
+    const PROCESS_EXIT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let record = std::fs::read_to_string(path)
+        .expect("the fake CLI records its process group and descendant identities");
+    let raw_process_group = record
+        .lines()
+        .find_map(|line| line.strip_prefix("process_group="))
+        .expect("the process-group record names the process group")
+        .parse::<i32>()
+        .expect("the recorded process-group identity is a process id");
+    let process_group = rustix::process::Pid::from_raw(raw_process_group)
+        .expect("the process-group identity is nonzero");
+    let deadline = std::time::Instant::now() + PROCESS_EXIT_OBSERVATION_TIMEOUT;
+    while process_group_exists(process_group) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_group_exists(process_group),
+        "the recorded process group remains alive after cleanup"
+    );
+}
+
+#[cfg(not(unix))]
+fn assert_recorded_process_group_exited(_path: std::path::PathBuf) {}
+
+#[cfg(unix)]
+fn process_group_exists(process_group: rustix::process::Pid) -> bool {
+    rustix::process::test_kill_process_group(process_group).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ")
+        .is_some_and(|(_, fields)| fields.starts_with("Z "))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_zombie_is_an_exited_process_state() {
+    assert!(proc_stat_is_zombie("42 (sleep) Z 1 42 42 0"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_running_is_not_an_exited_process_state() {
+    assert!(!proc_stat_is_zombie("42 (sleep) S 1 42 42 0"));
+}
+
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
-    let watcher = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if tokio::fs::read_to_string(&path)
-                    .await
-                    .map(|content| content.lines().count())
-                    .unwrap_or_default()
-                    > 0
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the fake CLI records the awaited marker before cancellation");
-    });
+    let watcher = tokio::spawn(wait_for_record(path));
     CancellationSignal::when(async move {
         watcher
             .await
             .expect("the cancellation-record watcher completes");
     })
+}
+
+async fn wait_for_record(path: std::path::PathBuf) {
+    tokio::time::timeout(OFFLINE_HARNESS_TIMEOUT, async {
+        loop {
+            if tokio::fs::read_to_string(&path)
+                .await
+                .map(|content| content.lines().count())
+                .unwrap_or_default()
+                > 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fake CLI records the awaited marker");
 }
 
 fn completed(evidence: &TerminalEvidence) -> &signalbox_model_runtime::CompletionEvidence {
@@ -1159,6 +1925,13 @@ fn boundary_loss(evidence: &TerminalEvidence) -> &signalbox_model_runtime::Bound
 fn timed_out(cause: &LossCause) -> &signalbox_model_runtime::TransportFacts {
     let LossCause::TimedOut(facts) = cause else {
         panic!("expected timeout loss, got {cause:?}");
+    };
+    facts
+}
+
+fn transport_failed(cause: &LossCause) -> &signalbox_model_runtime::TransportFacts {
+    let LossCause::TransportFailed(facts) = cause else {
+        panic!("expected transport-failure loss, got {cause:?}");
     };
     facts
 }

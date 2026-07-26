@@ -32,9 +32,6 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
         _ if contains_any(&normalized, &["permission denied", "forbidden"]) => {
             ProviderErrorKind::PermissionDenied
         }
-        _ if contains_any(&normalized, &["invalid request", "bad request"]) => {
-            ProviderErrorKind::InvalidRequest
-        }
         _ if contains_any(
             &normalized,
             &["model not found", "unknown model", "target not found"],
@@ -58,6 +55,7 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
             &[
                 "quota exhausted",
                 "insufficient quota",
+                "insufficient_quota",
                 "usage limit reached",
             ],
         ) =>
@@ -80,6 +78,9 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
         ) =>
         {
             ProviderErrorKind::ProviderInternal
+        }
+        _ if contains_any(&normalized, &["invalid request", "bad request"]) => {
+            ProviderErrorKind::InvalidRequest
         }
         _ => ProviderErrorKind::Unrecognized,
     }
@@ -122,7 +123,7 @@ mod tests {
             ProviderErrorKind::RateLimited
         );
         assert_eq!(
-            classify_error("quota exhausted"),
+            classify_error("insufficient_quota"),
             ProviderErrorKind::QuotaExhausted
         );
         assert_eq!(
@@ -160,6 +161,34 @@ mod tests {
         assert_eq!(
             classify_error("refresh token request timed out"),
             ProviderErrorKind::Unrecognized
+        );
+    }
+
+    #[test]
+    fn specific_native_errors_precede_a_generic_bad_request_wrapper() {
+        assert_eq!(
+            classify_error("400 Bad Request: context_length_exceeded"),
+            ProviderErrorKind::RequestTooLarge
+        );
+        assert_eq!(
+            classify_error("400 Bad Request: model not found"),
+            ProviderErrorKind::TargetNotFound
+        );
+        assert_eq!(
+            classify_error("400 Bad Request: insufficient_quota"),
+            ProviderErrorKind::QuotaExhausted
+        );
+        assert_eq!(
+            classify_error("400 Bad Request: rate_limit"),
+            ProviderErrorKind::RateLimited
+        );
+        assert_eq!(
+            classify_error("400 Bad Request: provider overloaded"),
+            ProviderErrorKind::Overloaded
+        );
+        assert_eq!(
+            classify_error("400 Bad Request: server_error"),
+            ProviderErrorKind::ProviderInternal
         );
     }
 }

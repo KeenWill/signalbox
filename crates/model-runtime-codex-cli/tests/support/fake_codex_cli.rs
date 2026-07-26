@@ -12,6 +12,28 @@ mod fixtures;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
     let output_schema = validate_argv()?;
+    if Path::new(fixtures::EARLY_STDIN_EXIT_MARKER).exists() {
+        eprintln!("Codex rejected stdin");
+        emit(&format!(
+            r#"{{"type":"thread.started","thread_id":"{}"}}"#,
+            fixtures::THREAD_ID
+        ));
+        emit(r#"{"type":"turn.started"}"#);
+        failed(fixtures::EARLY_STDIN_FAILURE);
+    }
+    if Path::new(fixtures::EARLY_STDIN_COMPLETION_MARKER).exists() {
+        emit(&format!(
+            r#"{{"type":"thread.started","thread_id":"{}"}}"#,
+            fixtures::THREAD_ID
+        ));
+        emit(r#"{"type":"turn.started"}"#);
+        envelope(&format!(
+            r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+            fixtures::BUFFERED_ANSWER
+        ));
+        completed();
+        return Ok(());
+    }
     if Path::new("fake-codex-block-stdin").exists() {
         std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
         std::thread::sleep(Duration::from_secs(60));
@@ -47,13 +69,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             completed();
         }
         "streamed_completed" => {
-            emit(&format!(
-                r#"{{"type":"item.completed","item":{{"id":"reason-1","type":"reasoning","text":"{}"}}}}"#,
-                fixtures::REASONING_TEXT
-            ));
+            reasoning("reason-1", fixtures::REASONING_TEXT);
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
                 fixtures::STREAMED_ANSWER
+            ));
+            completed();
+        }
+        "split_stream_credential_between_reasoning_items" => {
+            reasoning(
+                "reason-split-1",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
+            );
+            reasoning(
+                "reason-split-2",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..],
+            );
+            envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
+            completed();
+        }
+        "split_stream_credential_before_final_text" => {
+            reasoning(
+                "reason-split-final",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..]
+            ));
+            completed();
+        }
+        "split_stream_authorization_before_final_text" => {
+            reasoning("reason-split-authorization", "Authorization:");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
             ));
             completed();
         }
@@ -71,6 +121,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             agent_message("message-last", "not a response envelope");
+            completed();
+        }
+        "credential_envelope_error" => {
+            envelope(&format!(
+                r#"{{"outcome":"{}","text":"","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_ENVELOPE_TOKEN
+            ));
             completed();
         }
         "deep_agent_message" => {
@@ -114,6 +171,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "structured_output_missing" => {
+            envelope(r#"{"outcome":"completed","text":"","tool_calls":[]}"#);
+            completed();
+        }
+        "structured_output_multiple" => {
+            let arguments = json_escape(&format!(
+                r#"{{ "accepted" : {} }}"#,
+                fixtures::STRUCTURED_ACCEPTED
+            ));
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"structured-offline-1","name":"verdict","arguments":"{arguments}"}},{{"id":"structured-offline-2","name":"verdict","arguments":"{arguments}"}}]}}"#
+            ));
+            completed();
+        }
+        "named_choice_extra_tool" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"named-offline-1","name":"{}","arguments":"{}"}},{{"id":"named-offline-2","name":"{}","arguments":"{{}}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(fixtures::TOOL_ARGUMENTS),
+                fixtures::OTHER_TOOL_NAME
+            ));
+            completed();
+        }
+        "bare_credential_text" => {
+            let text = json_escape(&format!(
+                r#"  "client_secret":"{}""#,
+                fixtures::SENSITIVE_COMPOSITE_SECRET
+            ));
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{text}","tool_calls":[]}}"#
+            ));
+            completed();
+        }
         "structured_refused" => {
             envelope(&format!(
                 r#"{{"outcome":"refused","text":"{}","tool_calls":[]}}"#,
@@ -140,7 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "error_target_not_found" => failed("model not found"),
         "error_request_too_large" => failed("request too large"),
         "error_rate_limited" => failed("rate limit exceeded"),
-        "error_quota_exhausted" => failed("quota exhausted"),
+        "error_quota_exhausted" => failed("insufficient_quota"),
         "error_overloaded" => failed("provider overloaded"),
         "error_provider_internal" => failed("internal server error"),
         "error_unrecognized" => failed("future failure shape"),
@@ -153,10 +243,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }
         "malformed_event" => emit("{not-json"),
-        "redaction" => {
+        "reasoning_then_malformed_event" => {
+            reasoning("reason-before-malformed", fixtures::PENDING_PROGRESS_TEXT);
+            emit("{not-json");
+        }
+        "malformed_known_lifecycle" => {
+            emit(r#"{"type":"item.started"}"#);
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"Bearer {}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":"{}"}}]}}"#,
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
+        "empty_completed_item_identity" => {
+            agent_message(
+                "",
+                &format!(
+                    r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                    fixtures::BUFFERED_ANSWER
+                ),
+            );
+            completed();
+        }
+        "redaction" => {
+            let text = format!(
+                r#"Bearer {} and {{"client_secret":"{}"}}"#,
                 fixtures::SENSITIVE_OUTPUT_TOKEN,
+                fixtures::SENSITIVE_COMPOSITE_SECRET
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":"{}"}}]}}"#,
+                json_escape(&text),
                 fixtures::TOOL_NAME,
                 json_escape(&format!(
                     r#"{{"access_token":"{}","city":"Oslo"}}"#,
@@ -196,13 +313,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed();
-            std::process::Command::new("sh")
+            let descendant = std::process::Command::new("sh")
                 .arg("-c")
                 .arg("sleep 60")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
                 .spawn()?;
+            record_process_group("fake-codex-inherited-stderr-process-group", descendant.id())?;
+        }
+        "completed_with_detached_descendant" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            let descendant = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            record_process_group(
+                "fake-codex-detached-descendant-process-group",
+                descendant.id(),
+            )?;
+        }
+        "interrupt_with_descendant" => {
+            let descendant = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("trap '' INT; sleep 60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            record_process_group(
+                "fake-codex-interrupt-descendant-process-group",
+                descendant.id(),
+            )?;
+            std::thread::sleep(Duration::from_secs(60));
+        }
+        "filtered_environment" => {
+            if std::env::var_os("PWD").is_some() || std::env::var_os("PATH").is_none() {
+                failed("subprocess environment was not filtered");
+            } else {
+                envelope(&format!(
+                    r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                    fixtures::BUFFERED_ANSWER
+                ));
+                completed();
+            }
         }
         "stderr_redaction" => {
             eprintln!(
@@ -216,12 +377,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "busy_stdout" => {
             std::fs::write("fake-codex-busy-stdout", "ready\n")?;
             loop {
-                emit(r#"{"type":"item.updated"}"#);
+                emit(
+                    r#"{"type":"item.updated","item":{"id":"busy-progress","type":"future_item"}}"#,
+                );
             }
         }
         _ => failed("invalid request: unknown offline fixture"),
     }
     Ok(())
+}
+
+fn record_process_group(path: &str, descendant: u32) -> std::io::Result<()> {
+    std::fs::write(
+        path,
+        format!(
+            "process_group={}\ndescendant={descendant}\n",
+            std::process::id()
+        ),
+    )
 }
 
 fn record_spawn() -> std::io::Result<()> {
@@ -269,6 +442,13 @@ fn agent_message(id: &str, value: &str) {
     let escaped = json_escape(value);
     emit(&format!(
         r#"{{"type":"item.completed","item":{{"id":"{id}","type":"agent_message","text":"{escaped}"}}}}"#
+    ));
+}
+
+fn reasoning(id: &str, text: &str) {
+    emit(&format!(
+        r#"{{"type":"item.completed","item":{{"id":"{id}","type":"reasoning","text":"{}"}}}}"#,
+        json_escape(text)
     ));
 }
 

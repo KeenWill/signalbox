@@ -7,7 +7,7 @@ links, and their relational store. Session execution remains owned by
 [sessions and transcript](sessions-and-transcript.md), turn evidence by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution by [tool loop](tool-loop.md), and relational mechanics shared with the
-rest of the hub by [persistence protocol](persistence-protocol.md). Invariant
+rest of the daemon by [persistence protocol](persistence-protocol.md). Invariant
 tags cite [the invariant catalog](../invariants.md).
 
 ## Bounded-context boundary
@@ -26,7 +26,7 @@ run and target; and a `ReviewFindingRef` binds a finding to its exact producing
 pass and therefore its run and target. Child records carry those complete
 references. Why: complete typed ownership facts make a cross-wired
 target/run/pass/finding combination unconstructible in normal domain use and
-rejectable during reconstitution.
+rejectable during reconstitution (INV-001, INV-040).
 
 Key-like and narrative values preserve their exact UTF-8 content without
 trimming or normalization. Construction rejects empty values, U+0000, and values
@@ -157,9 +157,9 @@ The optional `result` is one closed `ReviewPassResult`:
   same result.
 - `ExternalLinkObservation` names the exact reservation, observation ordinal,
   and observed state.
-- `ExternalLinkNoChange` names the exact reservation and unchanged reported
-  state. It consumes a succeeded external-context-import pass without appending
-  a meaning-bearing observation.
+- `ExternalLinkNoChange` names the exact reservation, consumed observation
+  ordinal, and unchanged reported state. It consumes a succeeded
+  external-context-import pass without appending a meaning-bearing observation.
 - `ExternalLinkPublicationBlocked` names the exact pending reservation and
   nonempty reason for a blocked publication that does not use the
   reservation-bearing finding event.
@@ -266,7 +266,7 @@ ineligible finding references, reuse of a link consumed by an earlier posted
 event, or a publication event whose external link is not an attached link
 associated with that finding or whose external object kind is not review,
 review-thread, inline-review-comment, or general change-request-comment. A
-posted event's pass is the attachment's exact producing pass.
+posted event's pass is the attachment's exact producing pass (INV-040).
 
 ## External links and posting reservations
 
@@ -309,20 +309,21 @@ uses its own reservation and succeeded import or publication pass. A reservation
 without an attachment is explicitly pending; it is never interpreted as proof
 that the external effect did not occur and is not automatically retried
 (INV-025, INV-026). Read-only import may reserve and attach in one local
-transaction because it issues no external write.
+transaction because it issues no external write (INV-041).
 
 After attachment, append-only observations record `Current`, `Outdated`, or
 `Resolved` with the owning reservation identity, a same-target pass, and a
 contiguous ordinal. The observing pass and its canonical run agree on a
 succeeded external-context-import operation. A report equal to the latest
 recorded state is a semantic no-op: it appends no observation but binds the
-observing pass's exact reservation and reported state as `ExternalLinkNoChange`,
-making that pass ineligible for any later effect. A changed report appends the
-next ordinal and binds that exact effect. Reconstitution rejects another
-reservation even when both share a target and rejects contradictory evidence
-reused under one pass identity across the attachment or observations.
-Observations describe the external object's reported state; they do not rewrite
-finding status.
+observing pass's exact reservation, latest durable observation ordinal, and
+reported state as `ExternalLinkNoChange`, making that pass ineligible for any
+later effect. A changed report appends the next ordinal and binds that exact
+effect. Reconstitution validates a no-change claim against its consumed
+observation ordinal, rejects another reservation even when both share a target,
+and rejects contradictory evidence reused under one pass identity across the
+attachment or observations. Observations describe the external object's reported
+state; they do not rewrite finding status.
 
 ## Store and reconstitution
 
@@ -343,7 +344,8 @@ Store loaders read a complete aggregate projection. The adapter decodes closed
 discriminators and assembles domain reconstitution inputs; the domain validates
 ownership, state shape, event order, and transitions. A missing referenced
 record, unknown discriminator, incomplete history, or failed domain check is
-reported as corruption rather than normalized into a plausible aggregate state.
+reported as corruption rather than normalized into a plausible aggregate
+(INV-040, INV-041).
 
 The first store surface creates and loads complete aggregates, idempotently
 reserves external links, attaches external identifiers, and appends external
