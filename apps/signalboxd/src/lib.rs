@@ -23,6 +23,7 @@ use signalbox_persistence::model_execution::{
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use tokio::sync::watch;
 
+mod code_host;
 mod configuration;
 mod current_time;
 mod daemon_tools;
@@ -34,6 +35,24 @@ mod session_status;
 mod single_hub;
 mod web_fetch;
 
+pub use code_host::{
+    CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
+    CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME, CHANGE_REQUEST_FILE_PATCH_NAME,
+    CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_REVIEW_THREADS_NAME,
+    CHANGE_REQUEST_SUMMARY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
+    CHANGE_REQUEST_THREAD_RESOLVE_NAME, CODE_HOST_CREDENTIAL_REFERENCE, CODE_HOST_TOOL_NAMES,
+    ChangeRequestCommentArguments, ChangeRequestCommentResult, ChangeRequestSummaryArguments,
+    ChangeRequestSummaryFields, ChangeRequestSummaryResult, ChangedFile, ChangedFilesArguments,
+    ChangedFilesResult, CheckStatus, ChecksStatusArguments, ChecksStatusResult, CiJobLogArguments,
+    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCommentBody, CodeHostExecutor,
+    CodeHostExecutorError, CodeHostFilePath, CodeHostOpaqueId, CodeHostOperation,
+    CodeHostRepository, CodeHostResult, CodeHostResultCompleteness, CodeHostRevision,
+    CodeHostTools, CodeHostToolsConstructionError, CodeHostTransport, CodeHostTransportFailure,
+    FilePatchArguments, FilePatchResult, GitHubCodeHostConstructionError, GitHubCodeHostTransport,
+    RerunFailedJobsArguments, RerunFailedJobsResult, ReviewThread, ReviewThreadComment,
+    ReviewThreadFields, ReviewThreadResolution, ReviewThreadsArguments, ReviewThreadsResult,
+    ThreadReplyArguments, ThreadReplyResult, ThreadResolveArguments, ThreadResolveResult,
+};
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
