@@ -21,11 +21,11 @@ no lost live end to classify, and every later `submit_input` recorded
 protocol's event taxonomy already defines `turn_reconciliation_required`, but no
 request could drive a turn to that terminal.
 
-**Decision.** Protocol version six adds one additive request, `reconcile_turn`,
-naming the exact parked turn and carrying the successor input. The daemon admits
-it only when a narrow precondition read observes that turn parked on the
-model-call recovery wait, then submits the `Interrupt` delivery the accepted
-turn lifecycle already defines; the parked turn terminalizes
+**Decision.** Protocol version seven adds one additive request,
+`reconcile_turn`, naming the exact parked turn and carrying the successor input.
+The daemon admits it only when a narrow precondition read observes that turn
+parked on the model-call recovery wait, then submits the `Interrupt` delivery
+the accepted turn lifecycle already defines; the parked turn terminalizes
 `reconciliation_required` over its exact ambiguous call. The startup scan
 additionally reports sessions holding their slot for such a decision rather than
 returning them as `NoActiveTurn`.
@@ -45,7 +45,7 @@ INV-029 and the standalone-cancellation open question keep out of the baseline.
 Placing the precondition in the durable aggregate would need a new typed
 rejection kind, and therefore a migration, for a refusal that records nothing.
 
-**Affects.** `crates/process-protocol` (version six, `reconcile_turn`, two
+**Affects.** `crates/process-protocol` (version seven, `reconcile_turn`, three
 rejection details), the daemon request adapter and its narrow precondition read,
 the terminal client's `reconcile` verb and its version selection, the startup
 scan's reported outcome, and the process-protocol and

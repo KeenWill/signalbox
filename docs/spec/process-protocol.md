@@ -248,11 +248,17 @@ interrupt, steering, or after-current treatment.
 narrow by construction. The daemon reads whether the named turn is the session's
 active turn parked in the `awaiting_model_call_recovery` phase and refuses
 anything else with `rejected` and a `turn_not_awaiting_reconciliation` detail,
-before any durable command is recorded. Only an admitted request reaches the
-authoritative transaction, which applies the accepted `Interrupt` delivery in
+before any durable command is recorded. That precondition is skipped in exactly
+the two cases the durable boundary owns the answer to: a command identity that
+already names durable intent replays its recorded result unconditionally
+(INV-012), because the first handling already released the wait it would now be
+refused for; and an absent session is left to the transaction's recorded
+`session_not_found`. Every other request reaches the authoritative transaction,
+which applies the accepted `Interrupt` delivery in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
-and revalidates the expected active turn under the scheduler lock; a caller that
-loses a race there receives the recorded `active_turn_mismatch` rejection. The
+and revalidates the expected active turn under the scheduler lock. A caller that
+loses a race there receives `active_turn_mismatch` when another turn took the
+slot, or `no_active_turn` when the winning decision left the slot empty. The
 verb therefore supplies the interrupt authority a reconciliation-required
 terminal already requires and never becomes a standalone active-turn stop.
 
@@ -413,13 +419,14 @@ rejection admits `session_not_found { session_id }`,
 `defaults_version_mismatch`, `unknown_model_alias`, and
 `acceptance_position_exhausted` as above, plus
 `active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`
-for a decision that lost its race and
-`turn_not_awaiting_reconciliation { session_id, turn_id }` for the refused
-precondition. That one detail reports a refusal made before command recording,
-so unlike every other `rejected` detail it names no durable command result and
-has no replay projection; a caller that repeats the request observes the current
-state, not a recorded outcome. Other error codes have no `detail`. An equal
-replay returns the same success or rejection projection as the first handling.
+and `no_active_turn { session_id, expected_active_turn_id }` for a decision that
+lost its race, and `turn_not_awaiting_reconciliation { session_id, turn_id }`
+for the refused precondition. That one detail reports a refusal made before
+command recording, so unlike every other `rejected` detail it names no durable
+command result and has no replay projection; a caller that repeats the request
+observes the current state, not a recorded outcome. Other error codes have no
+`detail`. An equal replay returns the same success or rejection projection as
+the first handling.
 
 The error-code set in all seven versions is:
 
@@ -726,10 +733,12 @@ version exits with a typed nonzero recovery-required diagnostic after observing
 transition followed by that authoritative state.
 
 Version three applies the same behavior to `active_awaiting_tool_recovery` and
-to `tool_batch_transition { recovery_required }` followed by that state. Neither
-recovery wait has a process-protocol writer that can complete it. An
-`active_awaiting_tool_approval` turn remains an ordinary nonterminal wait. A
-client disconnect never cancels model or tool work.
+to `tool_batch_transition { recovery_required }` followed by that state. A
+model-call recovery wait has one process-protocol writer that completes it —
+version seven's `reconcile_turn`, which the diagnostic's operator runs next; the
+tool recovery wait still has none. An `active_awaiting_tool_approval` turn
+remains an ordinary nonterminal wait. A client disconnect never cancels model or
+tool work.
 
 Version three rereads after each `tool_batch_transition { proposed }` and
 `tool_batch_transition { results_projected }`; every version rereads after a

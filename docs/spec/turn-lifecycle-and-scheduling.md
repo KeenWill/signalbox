@@ -400,12 +400,13 @@ delivery outcomes implemented here are:
   returns to a live phase, an admitted wait can only remain parked or
   terminalize before the authoritative transaction runs; that transaction
   revalidates the exact expected active turn under the scheduler lock and
-  records `ActiveTurnMismatch` when a racing decision won. A next-safe-point
-  request against a stopping turn records `SafePointUnavailableWhileStopping`;
-  equal interrupt replay returns the original applied result. A distinct later
-  interrupt records `InterruptAlreadyApplied { active_turn, existing_command }`
-  without accepting an input or replacing the existing proof. An interrupt
-  delivered while the active turn is parked on a tool-approval wait records
+  records `ActiveTurnMismatch`, or `NoActiveTurn` when the winning decision left
+  the slot empty, if a racing decision won. A next-safe-point request against a
+  stopping turn records `SafePointUnavailableWhileStopping`; equal interrupt
+  replay returns the original applied result. A distinct later interrupt records
+  `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
+  an input or replacing the existing proof. An interrupt delivered while the
+  active turn is parked on a tool-approval wait records
   `InterruptUnavailableWhileAwaitingApproval { active_turn }` without accepting
   an input: the wait remains parked until its canonical decision command
   resolves the approval obligation, and the interrupt is neither a denial nor a
