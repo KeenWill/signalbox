@@ -123,10 +123,14 @@ impl GitHubCodeHostTransport {
         let object = required_object(&value)?;
         let base = required_object(required(object, "base")?)?;
         let head = required_object(required(object, "head")?)?;
+        let number: u32 = required_u64(object, "number")?
+            .try_into()
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        if number != arguments.number().get() {
+            return Err(CodeHostTransportFailure::InvalidResponse);
+        }
         let result = ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
-            number: required_u64(object, "number")?
-                .try_into()
-                .map_err(|_| CodeHostTransportFailure::InvalidResponse)?,
+            number,
             title: required_string(object, "title")?,
             body: optional_string(object, "body")?,
             state: required_string(object, "state")?,
@@ -375,12 +379,16 @@ impl GitHubCodeHostTransport {
         let result = (|| {
             let thread = nested(&value, &["data", "resolveReviewThread", "thread"])?;
             let object = required_object(thread)?;
+            let returned_id = required_string(object, "id")?;
+            if returned_id != arguments.thread_id().as_str() {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
             let resolution = if required_bool(object, "isResolved")? {
                 ReviewThreadResolution::Resolved
             } else {
                 ReviewThreadResolution::Open
             };
-            ThreadResolveResult::try_new(required_string(object, "id")?, resolution)
+            ThreadResolveResult::try_new(returned_id, resolution)
                 .ok_or(CodeHostTransportFailure::InvalidResponse)
         })()
         .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;

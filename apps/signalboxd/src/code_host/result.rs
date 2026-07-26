@@ -465,10 +465,11 @@ pub struct ThreadResolveResult {
 impl ThreadResolveResult {
     /// Validates the resolved thread identity.
     pub fn try_new(thread_id: String, resolution: ReviewThreadResolution) -> Option<Self> {
-        valid_required_text(&thread_id).then_some(Self {
-            thread_id,
-            resolution,
-        })
+        (valid_required_text(&thread_id) && resolution == ReviewThreadResolution::Resolved)
+            .then_some(Self {
+                thread_id,
+                resolution,
+            })
     }
 
     fn into_value(self) -> Value {

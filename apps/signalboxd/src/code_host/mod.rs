@@ -825,4 +825,14 @@ mod tests {
             None
         );
     }
+
+    /// A resolve result exists only for an acknowledgement that establishes
+    /// the requested terminal posture.
+    #[test]
+    fn thread_resolve_result_rejects_open_acknowledgement() {
+        assert_eq!(
+            ThreadResolveResult::try_new(String::from("PRRT_node"), ReviewThreadResolution::Open,),
+            None
+        );
+    }
 }
