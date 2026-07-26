@@ -163,7 +163,7 @@ incur cost. It runs only when all three opt-in values are supplied:
 ```console
 SIGNALBOX_E2E_CONFIG_FILE=config/signalboxd.example.toml \
 SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
-SIGNALBOX_E2E_SELECTION_ID=10000000-0000-4000-8000-000000000001 \
+SIGNALBOX_E2E_SELECTION_ID=a5fec003-0edd-4118-96d1-18af31157bd3 \
   cargo test -p signalbox-client --test end_to_end \
     terminal_client_completes_the_real_anthropic_path \
     -- --ignored --nocapture
@@ -196,7 +196,7 @@ SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox 
 SIGNALBOX_CONFIG_FILE=config/signalboxd.example.toml \
 ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
   cargo run -p signalboxd --bin signalbox-debug -- \
-  --anthropic 10000000-0000-4000-8000-000000000001 \
+  --anthropic a5fec003-0edd-4118-96d1-18af31157bd3 \
   "Reply with exactly: signalbox smoke ok"
 ```
 
