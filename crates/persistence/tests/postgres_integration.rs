@@ -115,6 +115,233 @@ fn model_credential_reference() -> ModelCallCredentialReference {
     ModelCallCredentialReference::new("fixture-provider-primary")
 }
 
+async fn complete_text_turn(
+    pool: &PgPool,
+    session: SessionId,
+    targets: ModelTargetCatalog,
+    credential_reference: ModelCallCredentialReference,
+    seed: u128,
+    response: &str,
+) -> Result<Box<[ModelConversationMessage]>, Box<dyn Error>> {
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference);
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 1));
+    let mut service = ModelCallExecutionService::new(
+        FixedModelCallExecutionIds::new(
+            [
+                call,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 16)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 17)),
+            ],
+            [
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 2)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 3)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 4)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 5)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 6)),
+            ],
+            [
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 7)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 8)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 9)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 10)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 11)),
+            ],
+            [
+                TurnId::from_uuid(Uuid::from_u128(seed + 12)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 13)),
+            ],
+            [ToolRequestId::from_uuid(Uuid::from_u128(seed + 14))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(seed + 15))],
+        ),
+        repository.clone(),
+        repository.clone(),
+        repository.clone(),
+        repository,
+        ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new(response.to_owned())
+                        .expect("fixture assistant text is valid"),
+                ],
+            },
+        )]),
+        InProcessAttemptDispatchGate::default(),
+    );
+    assert_eq!(
+        service.execute(session).await?,
+        ModelCallExecutionOutcome::Checkpointed(call)
+    );
+    let ModelCallExecutionOutcome::ObservationCommitted(outcome) = service.execute(session).await?
+    else {
+        return Err("scripted model completion did not commit".into());
+    };
+    if !matches!(*outcome, ModelCallTerminalOutcome::Completed(_)) {
+        return Err("scripted model completion did not complete the turn".into());
+    }
+    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    Ok(provider
+        .last_prepared_messages()
+        .expect("scripted provider observed prepared messages")
+        .to_vec()
+        .into_boxed_slice())
+}
+
+struct TwoValueTail<'a, Value> {
+    penultimate: &'a Value,
+    last: &'a Value,
+}
+
+#[track_caller]
+fn last_two<Value>(values: &[Value]) -> TwoValueTail<'_, Value> {
+    let [.., penultimate, last] = values else {
+        panic!("fixture must carry a two-value tail");
+    };
+    TwoValueTail { penultimate, last }
+}
+
+#[track_caller]
+fn application_user_message(message: &ModelConversationMessage) -> (AcceptedInputId, &str) {
+    match message {
+        ModelConversationMessage::User {
+            accepted_input,
+            content,
+            ..
+        } => (*accepted_input, content.text().as_str()),
+        _ => panic!("fixture message must be an application user message"),
+    }
+}
+
+#[track_caller]
+fn application_model_identity(message: &ModelConversationMessage) -> (u64, DirectModelSelection) {
+    match message {
+        ModelConversationMessage::ModelIdentityChanged {
+            defaults_version,
+            selected,
+            ..
+        } => (defaults_version.as_u64(), *selected),
+        _ => panic!("fixture message must be an application model-identity boundary"),
+    }
+}
+
+#[track_caller]
+fn submit_input_database_error(error: SubmitInputRepositoryError) -> sqlx::Error {
+    match error {
+        SubmitInputRepositoryError::Database(error) => error,
+        error => panic!("fixture expected a submit-input database error, got {error:?}"),
+    }
+}
+
+#[track_caller]
+fn process_user_entry(entry: &ProcessTranscriptEntry) -> (AcceptedInputId, TurnId, &str) {
+    match entry {
+        ProcessTranscriptEntry::User {
+            accepted_input,
+            turn,
+            content,
+            ..
+        } => (*accepted_input, *turn, content.as_str()),
+        _ => panic!("fixture entry must be a process user entry"),
+    }
+}
+
+#[track_caller]
+fn process_model_identity(entry: &ProcessTranscriptEntry) -> (TurnId, u64, DirectModelSelection) {
+    match entry {
+        ProcessTranscriptEntry::ModelIdentityChanged {
+            turn,
+            defaults_version,
+            selected,
+            ..
+        } => (*turn, *defaults_version, *selected),
+        _ => panic!("fixture entry must be a process model-identity boundary"),
+    }
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct ModelCallPinFacts {
+    direct_model_selection_id: Uuid,
+    resolved_provider_model_identity_id: Uuid,
+    credential_reference: String,
+}
+
+#[track_caller]
+fn assert_ambiguous_tool_recovery(outcome: StartupScanSessionOutcome) {
+    match outcome {
+        StartupScanSessionOutcome::RecoveredToolAttempt(outcome) => {
+            assert!(matches!(*outcome, ToolAttemptCrashOutcome::Ambiguous(_)));
+        }
+        _ => panic!("fixture startup recovery must classify an ambiguous tool attempt"),
+    }
+}
+
+#[track_caller]
+fn process_tool_reconciliation_operation(
+    state: &ProcessTurnState,
+) -> (TurnAttemptId, ToolAttemptId) {
+    match state {
+        ProcessTurnState::ReconciliationRequired {
+            terminal_attempt,
+            operation: ProcessReconciliationOperation::ToolAttempt(attempt),
+            ..
+        } => (*terminal_attempt, *attempt),
+        _ => panic!("fixture turn must require tool-attempt reconciliation"),
+    }
+}
+
+#[track_caller]
+fn assistant_tool_request(entries: &[ProcessTranscriptEntry]) -> ToolRequestId {
+    entries
+        .iter()
+        .find_map(|entry| match entry {
+            ProcessTranscriptEntry::AssistantToolUse { request, .. } => Some(*request),
+            _ => None,
+        })
+        .expect("fixture transcript must carry assistant tool use")
+}
+
+#[track_caller]
+fn closed_tool_request(entries: &[ProcessTranscriptEntry]) -> ToolRequestId {
+    entries
+        .iter()
+        .find_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolClosed { request, .. } => Some(*request),
+            _ => None,
+        })
+        .expect("fixture transcript must carry tool closure")
+}
+
+async fn dispatched_tool_reconciliation(
+    pool: &PgPool,
+    expected_turn: TurnId,
+    expected_attempt: ToolAttemptId,
+) -> Result<bool, OutboxDispatchError> {
+    let mut dispatched = false;
+    drain_outbox(pool, |event| {
+        if matches!(
+            event.kind(),
+            DispatchedOutboxEventKind::TurnReconciliationRequired {
+                turn,
+                operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
+                ..
+            } if *turn == expected_turn && *attempt == expected_attempt
+        ) {
+            dispatched = true;
+        }
+    })
+    .await?;
+    Ok(dispatched)
+}
+
+#[track_caller]
+fn activated_turn(outcome: StartEligibleTurnOutcome) -> TurnId {
+    match outcome {
+        StartEligibleTurnOutcome::Activated(activated) => activated.turn(),
+        StartEligibleTurnOutcome::NoEligibleTurn => {
+            panic!("fixture successor must be eligible for activation")
+        }
+    }
+}
+
 fn decide_tool_request(
     command_id: DurableCommandId,
     request: signalbox_domain::ToolRequestId,
@@ -934,6 +1161,7 @@ impl SubmitInputIdGenerator for FixedSubmitInputIds {
 
 #[derive(Debug)]
 struct FixedStartEligibleTurnIds {
+    model_identity_entries: VecDeque<SemanticTranscriptEntryId>,
     origin_entries: VecDeque<SemanticTranscriptEntryId>,
     starting_frontiers: VecDeque<ContextFrontierId>,
     initial_attempts: VecDeque<TurnAttemptId>,
@@ -946,14 +1174,29 @@ impl FixedStartEligibleTurnIds {
         initial_attempts: impl IntoIterator<Item = TurnAttemptId>,
     ) -> Self {
         Self {
+            model_identity_entries: VecDeque::new(),
             origin_entries: origin_entries.into_iter().collect(),
             starting_frontiers: starting_frontiers.into_iter().collect(),
             initial_attempts: initial_attempts.into_iter().collect(),
         }
     }
+
+    fn with_model_identity_entries(
+        mut self,
+        entries: impl IntoIterator<Item = SemanticTranscriptEntryId>,
+    ) -> Self {
+        self.model_identity_entries = entries.into_iter().collect();
+        self
+    }
 }
 
 impl StartEligibleTurnIdGenerator for FixedStartEligibleTurnIds {
+    fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        self.model_identity_entries
+            .pop_front()
+            .unwrap_or_else(|| SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()))
+    }
+
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
         self.origin_entries
             .pop_front()
@@ -2422,7 +2665,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
     let mut recovery_ids = FixedStartupScanIds::new([], []);
-    assert!(matches!(
+    assert_ambiguous_tool_recovery(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
                 fixture.session,
@@ -2433,9 +2676,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
                 &mut recovery_ids,
             )
             .await?,
-        StartupScanSessionOutcome::RecoveredToolAttempt(outcome)
-            if matches!(*outcome, ToolAttemptCrashOutcome::Ambiguous(_))
-    ));
+    );
 
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 30));
     let outcome = SubmitInputRepository::new(pool.clone())
@@ -2458,7 +2699,14 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
 
-    let durable: (String, Option<Uuid>, Option<Uuid>, i64) = sqlx::query_as(
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct DurableToolReconciliationFacts {
+        terminal_disposition_kind: String,
+        terminal_model_call_id: Option<Uuid>,
+        terminal_tool_attempt_id: Option<Uuid>,
+        outbox_event_count: i64,
+    }
+    let durable: DurableToolReconciliationFacts = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind,
                 lifecycle.terminal_model_call_id,
                 lifecycle.terminal_tool_attempt_id,
@@ -2469,7 +2717,7 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
                     AND event.model_call_id IS NULL
                     AND event.tool_attempt_id = $3
                     AND event.terminal_frontier_id =
-                        lifecycle.terminal_frontier_id)
+                        lifecycle.terminal_frontier_id) AS outbox_event_count
            FROM turn_lifecycle AS lifecycle
           WHERE lifecycle.session_id = $1
             AND lifecycle.turn_id = $2",
@@ -2481,68 +2729,45 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     .await?;
     assert_eq!(
         durable,
-        (
-            String::from("reconciliation_required"),
-            None,
-            Some(tool_attempt.into_uuid()),
-            1,
-        )
+        DurableToolReconciliationFacts {
+            terminal_disposition_kind: String::from("reconciliation_required"),
+            terminal_model_call_id: None,
+            terminal_tool_attempt_id: Some(tool_attempt.into_uuid()),
+            outbox_event_count: 1,
+        }
     );
 
     let snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(fixture.session)
         .await?
         .expect("tool reconciliation remains process-readable");
-    assert!(matches!(
-        snapshot.turns()[0].state(),
-        ProcessTurnState::ReconciliationRequired {
-            terminal_attempt,
-            operation: ProcessReconciliationOperation::ToolAttempt(attempt),
-            ..
-        } if *terminal_attempt == issuing_attempt && *attempt == tool_attempt
-    ));
-    assert!(snapshot.entries().iter().any(|entry| matches!(
-        entry,
-        ProcessTranscriptEntry::AssistantToolUse { request: stored, .. }
-            if *stored == request
-    )));
-    assert!(snapshot.entries().iter().any(|entry| matches!(
-        entry,
-        ProcessTranscriptEntry::ToolClosed { request: stored, .. }
-            if *stored == request
-    )));
-    let mut dispatched = false;
-    drain_outbox(&pool, |event| {
-        if matches!(
-            event.kind(),
-            DispatchedOutboxEventKind::TurnReconciliationRequired {
-                turn,
-                operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
-                ..
-            } if *turn == fixture.turn && *attempt == tool_attempt
-        ) {
-            dispatched = true;
-        }
-    })
-    .await?;
+    assert_eq!(
+        process_tool_reconciliation_operation(snapshot.turns()[0].state()),
+        (issuing_attempt, tool_attempt)
+    );
+    assert_eq!(assistant_tool_request(snapshot.entries()), request);
+    assert_eq!(closed_tool_request(snapshot.entries()), request);
     assert!(
-        dispatched,
+        dispatched_tool_reconciliation(&pool, fixture.turn, tool_attempt).await?,
         "the tool reconciliation event must not block dispatch"
     );
 
-    assert!(matches!(
-        StartEligibleTurnRepository::new(pool.clone())
-            .handle(
-                fixture.session,
-                AcceptedInputTurnActivationIdentities::new(
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
-                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
-                    TurnAttemptId::from_uuid(Uuid::from_u128(seed + 33)),
-                ),
-            )
-            .await?,
-        StartEligibleTurnOutcome::Activated(ref activated) if activated.turn() == successor
-    ));
+    assert_eq!(
+        activated_turn(
+            StartEligibleTurnRepository::new(pool.clone())
+                .handle(
+                    fixture.session,
+                    AcceptedInputTurnActivationIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 34)),
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+                        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 33)),
+                    ),
+                )
+                .await?,
+        ),
+        successor
+    );
 
     pool.close().await;
     drop(container);
@@ -3532,17 +3757,16 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
         .handle(
             fixture.session,
             AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 34)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
                 TurnAttemptId::from_uuid(Uuid::from_u128(seed + 33)),
             ),
         )
         .await?;
-    assert!(
-        matches!(
-            activation,
-            StartEligibleTurnOutcome::Activated(ref activated) if activated.turn() == successor
-        ),
+    assert_eq!(
+        activated_turn(activation),
+        successor,
         "the committed stopped tool round must reload as a terminal predecessor"
     );
 
@@ -8191,6 +8415,283 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
     Ok(())
 }
 
+/// S33 / INV-008 / INV-015 / INV-046: replacing defaults while a turn is
+/// active leaves that turn bound to its accepted epoch, while the next origin
+/// freezes the successor and starts behind an injected model-identity entry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x731));
+    let first_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x831));
+    let second_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x832));
+    let first_target = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x833));
+    let second_target = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x834));
+    let first_credential = ModelCallCredentialReference::new("fixture-provider-first");
+    let second_credential = ModelCallCredentialReference::new("fixture-provider-second");
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0x231,
+            0x731,
+            ModelSelectionRequest::Direct(first_selection),
+        ))
+        .await?;
+
+    let first_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x931));
+    let first_turn = TurnId::from_uuid(Uuid::from_u128(0xa31));
+    let mut first_submit = SubmitInputService::new(
+        FixedSubmitInputIds::new([first_input], [first_turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let first_content = "before model replacement";
+    first_submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x232)),
+            session,
+            UserContent::try_text(first_content.to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?;
+    let false_boundary_requirement = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id,
+             acceptance_position, state_kind,
+             model_identity_boundary_required)
+         SELECT turn_id, session_id, origin_accepted_input_id,
+                acceptance_position, state_kind, false
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a newly queued turn cannot claim pre-boundary compatibility");
+    let false_boundary_database_error = false_boundary_requirement
+        .as_database_error()
+        .expect("the compatibility-shape check returns a database error");
+    assert_eq!(false_boundary_database_error.code(), Some("23514".into()));
+    assert_eq!(
+        false_boundary_database_error.constraint(),
+        Some("turn_lifecycle_model_identity_boundary_requirement_state")
+    );
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xd31),
+            starting_frontier: Uuid::from_u128(0xe31),
+            initial_attempt: Uuid::from_u128(0xb31),
+        },
+    )
+    .await?;
+
+    let mut defaults_service =
+        ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
+    defaults_service
+        .execute(ReplaceSessionDefaultsRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x233)),
+            session,
+            SessionConfigurationDefaultsVersion::first(),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(second_selection)),
+        )?)
+        .await?;
+
+    let targets = ModelTargetCatalog::try_from_definitions([
+        ModelTargetDefinition::new(
+            first_selection,
+            ResolvedProviderTarget::naming(first_target),
+        ),
+        ModelTargetDefinition::new(
+            second_selection,
+            ResolvedProviderTarget::naming(second_target),
+        ),
+    ])
+    .expect("two exact selections form one immutable target catalog");
+    let first_messages = complete_text_turn(
+        &pool,
+        session,
+        targets.clone(),
+        first_credential.clone(),
+        0x10_000,
+        "first reply",
+    )
+    .await?;
+    assert_eq!(
+        application_user_message(
+            first_messages
+                .first()
+                .expect("the first call carries its owner input")
+        ),
+        (first_input, first_content)
+    );
+
+    let second_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x932));
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(0xa32));
+    let mut second_submit = SubmitInputService::new(
+        FixedSubmitInputIds::new([second_input], [second_turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let second_content = "after model replacement";
+    second_submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x234)),
+            session,
+            UserContent::try_text(second_content.to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(2, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?;
+    let mut colliding_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd33))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe33))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb33))],
+        )
+        .with_model_identity_entries([SemanticTranscriptEntryId::from_uuid(
+            Uuid::from_u128(0xd31),
+        )]),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        colliding_activation
+            .execute(session)
+            .await
+            .expect_err("the reused model-boundary identity must fail before activation"),
+        StartEligibleTurnRepositoryError::IdentityCollision(
+            StartEligibleTurnIdentityCollision::ModelIdentityEntry
+        )
+    ));
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xd32),
+            starting_frontier: Uuid::from_u128(0xe32),
+            initial_attempt: Uuid::from_u128(0xb32),
+        },
+    )
+    .await?;
+
+    let active_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the active successor has a transcript");
+    let process_tail = last_two(active_snapshot.entries());
+    assert_eq!(
+        process_model_identity(process_tail.penultimate),
+        (second_turn, 2, second_selection)
+    );
+    assert_eq!(
+        process_user_entry(process_tail.last),
+        (second_input, second_turn, second_content)
+    );
+
+    let second_messages = complete_text_turn(
+        &pool,
+        session,
+        targets,
+        second_credential.clone(),
+        0x20_000,
+        "second reply",
+    )
+    .await?;
+    let application_tail = last_two(&second_messages);
+    assert_eq!(
+        application_model_identity(application_tail.penultimate),
+        (2, second_selection)
+    );
+    assert_eq!(
+        application_user_message(application_tail.last),
+        (second_input, second_content)
+    );
+
+    let first_pin: ModelCallPinFacts = sqlx::query_as(
+        "SELECT direct_model_selection_id,
+                resolved_provider_model_identity_id,
+                credential_reference
+           FROM model_call
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let second_pin: ModelCallPinFacts = sqlx::query_as(
+        "SELECT direct_model_selection_id,
+                resolved_provider_model_identity_id,
+                credential_reference
+           FROM model_call
+          WHERE turn_id = $1",
+    )
+    .bind(second_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        first_pin,
+        ModelCallPinFacts {
+            direct_model_selection_id: first_selection.into_uuid(),
+            resolved_provider_model_identity_id: first_target.into_uuid(),
+            credential_reference: first_credential.as_str().to_owned(),
+        }
+    );
+    assert_eq!(
+        second_pin,
+        ModelCallPinFacts {
+            direct_model_selection_id: second_selection.into_uuid(),
+            resolved_provider_model_identity_id: second_target.into_uuid(),
+            credential_reference: second_credential.as_str().to_owned(),
+        }
+    );
+
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+            DROP CONSTRAINT semantic_transcript_entry_payload_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry
+            SET failed_turn_id = $1
+          WHERE model_identity_turn_id = $1",
+    )
+    .bind(second_turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    let mut corrupt_read = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd34))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe34))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb34))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        corrupt_read
+            .execute(session)
+            .await
+            .expect_err("a mixed model-boundary payload must fail closed"),
+        StartEligibleTurnRepositoryError::Corruption(StartEligibleTurnCorruption::Scheduling(
+            SubmitInputCorruption::Inconsistent("semantic entry payload")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-012: registry dispatch remains owner-global across command kinds while
 /// purpose-specific loads distinguish a valid other-kind claim from absence.
 #[tokio::test(flavor = "multi_thread")]
@@ -8442,7 +8943,7 @@ async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result
             .execute(fails_after_claim)
             .await
             .expect_err("the colliding immutable successor aborts the transaction"),
-        ReplaceSessionDefaultsRepositoryError::Database(_)
+        ReplaceSessionDefaultsRepositoryError::Database { .. }
     ));
     assert!(
         defaults_repository
@@ -12577,19 +13078,17 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
-        !pending_acceptance.is_finished(),
-        "pending acceptance must wait for the source lifecycle row"
+        blocked_backends_reached(&pool, 1).await?,
+        "pending acceptance must remain blocked on the source lifecycle row"
     );
 
     terminalize_source.commit().await?;
-    let pending_error = pending_acceptance
-        .await?
-        .expect_err("steering must fail after racing source terminalization commits");
-    let SubmitInputRepositoryError::Database(pending_database_error) = pending_error else {
-        panic!("the rejected racing commit must report its database constraint");
-    };
+    let pending_database_error = submit_input_database_error(
+        pending_acceptance
+            .await?
+            .expect_err("steering must fail after racing source terminalization commits"),
+    );
     assert_eq!(
         pending_database_error
             .as_database_error()

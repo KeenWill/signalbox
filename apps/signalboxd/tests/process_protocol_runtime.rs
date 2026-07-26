@@ -18,18 +18,25 @@ use signalbox_application::{
     CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
     ImportConversationOutcome, ImportConversationService, ImportedConversationIdGenerator,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, ModelCallExecutionOutcome, ModelCallExecutionService,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
+    StartEligibleTurnService, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversationFormat,
-    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
-    ModelSelectionRequest, SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
+    AssistantText, ContextFrontierId, DirectModelSelection, DurableCommandId,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelSelectionRequest, ModelTargetCatalog, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionId,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
+    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
+    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
@@ -72,6 +79,13 @@ selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000003"
 provider = "anthropic"
 provider_model = "fixture-model"
+max_output_tokens = 256
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000004"
+target_id = "00000000-0000-0000-0000-000000000005"
+provider = "anthropic"
+provider_model = "fixture-model-next"
 max_output_tokens = 256
 
 [[aliases]]
@@ -410,6 +424,84 @@ async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box
     timeout(Duration::from_secs(5), connection.response()).await?
 }
 
+#[track_caller]
+fn submitted_session(message: &ServerMessage) -> CanonicalUuid {
+    match message {
+        ServerMessage::InputSubmitted { session_id, .. } => *session_id,
+        message => panic!("fixture expected input-submitted, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn replaced_defaults(message: &ServerMessage) -> (CanonicalUuid, u64) {
+    match message {
+        ServerMessage::SessionDefaultsReplaced {
+            session_id,
+            defaults_version,
+            ..
+        } => (*session_id, defaults_version.value()),
+        message => panic!("fixture expected defaults-replaced, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn protocol_error_code(message: &ServerMessage) -> ErrorCode {
+    match message {
+        ServerMessage::Error { code, .. } => *code,
+        message => panic!("fixture expected protocol error, got {message:?}"),
+    }
+}
+
+async fn activate_turn(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
+    let mut service = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        service.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+    Ok(())
+}
+
+async fn complete_active_text_turn(
+    pool: &PgPool,
+    session: SessionId,
+    targets: ModelTargetCatalog,
+) -> Result<(), Box<dyn Error>> {
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("process-runtime-fixture"),
+    );
+    let mut service = ModelCallExecutionService::new(
+        UuidV7ModelCallExecutionIdGenerator,
+        repository.clone(),
+        repository.clone(),
+        repository.clone(),
+        repository,
+        ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new(String::from("fixture response"))
+                        .expect("fixture assistant content is valid"),
+                ],
+            },
+        )]),
+        InProcessAttemptDispatchGate::default(),
+    );
+    assert!(matches!(
+        service.execute(session).await?,
+        ModelCallExecutionOutcome::Checkpointed(_)
+    ));
+    assert!(matches!(
+        service.execute(session).await?,
+        ModelCallExecutionOutcome::ObservationCommitted(outcome)
+            if matches!(*outcome, ModelCallTerminalOutcome::Completed(_))
+    ));
+    Ok(())
+}
+
 /// S28 / INV-038: the owner-visible operation distinguishes first insertion
 /// from exact-snapshot reimport while retaining the winner's identity.
 #[tokio::test]
@@ -556,6 +648,205 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
         end.message(),
         ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
     ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S33 / INV-008 / INV-012 / INV-046: version six maps one complete replacement
+/// request through the durable command boundary and validates catalog input
+/// before claiming a new command identity.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_defaults()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let replacement_command = command()?;
+    let replacement_selection = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+    let replacement = ClientRequest::ReplaceSessionDefaults {
+        command_id: replacement_command,
+        session_id,
+        expected_defaults_version: CanonicalU64::new(1),
+        model_selection: ModelSelection::Direct {
+            selection_id: replacement_selection,
+        },
+        dangerous_tool_auto_approval: false,
+    };
+
+    connection
+        .request_version(ProtocolVersion::Six, 2, replacement.clone())
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaultsReplaced {
+            session_id,
+            defaults_version: CanonicalU64::new(2),
+            model_selection: ModelSelection::Direct {
+                selection_id: replacement_selection,
+            },
+            dangerous_tool_auto_approval: false,
+        }
+    );
+
+    connection
+        .request_version(ProtocolVersion::Six, 3, replacement)
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::SessionDefaultsReplaced {
+            session_id,
+            defaults_version: CanonicalU64::new(2),
+            model_selection: ModelSelection::Direct {
+                selection_id: replacement_selection,
+            },
+            dangerous_tool_auto_approval: false,
+        }
+    );
+
+    let unknown_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            4,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: unknown_command,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(2),
+                model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(999)),
+                },
+                dangerous_tool_auto_approval: false,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    let unknown_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(unknown_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(unknown_claim_count, 0);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S33 / INV-012 / INV-033 / INV-046: a durable submit receipt remains
+/// replayable by its original protocol after later history raises the selected
+/// session's minimum representable version; an unseen command remains gated.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
+-> Result<(), Box<dyn Error>> {
+    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            2,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("first model turn")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        submitted_session(response_within(&mut connection).await?.message()),
+        session_id
+    );
+    activate_turn(&runtime.pool, session).await?;
+    complete_active_text_turn(&runtime.pool, session, targets).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            3,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                },
+                dangerous_tool_auto_approval: false,
+            },
+        )
+        .await?;
+    assert_eq!(
+        replaced_defaults(response_within(&mut connection).await?.message()),
+        (session_id, 2)
+    );
+
+    let replayed_command = command()?;
+    let replayed_request = ClientRequest::SubmitInput {
+        command_id: replayed_command,
+        session_id,
+        content: InputContent::new(String::from("second model turn")),
+        expected_defaults_version: CanonicalU64::new(2),
+    };
+    connection
+        .request_version(ProtocolVersion::Five, 4, replayed_request.clone())
+        .await?;
+    let first_receipt = response_within(&mut connection).await?;
+    assert_eq!(submitted_session(first_receipt.message()), session_id);
+
+    activate_turn(&runtime.pool, session).await?;
+    let boundary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'model_identity_changed'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(boundary_count, 1);
+
+    connection
+        .request_version(ProtocolVersion::Five, 5, replayed_request)
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        first_receipt.message()
+    );
+
+    let unseen_command = command()?;
+    connection
+        .request_version(
+            ProtocolVersion::Five,
+            6,
+            ClientRequest::SubmitInput {
+                command_id: unseen_command,
+                session_id,
+                content: InputContent::new(String::from("must remain gated")),
+                expected_defaults_version: CanonicalU64::new(2),
+            },
+        )
+        .await?;
+    assert_eq!(
+        protocol_error_code(response_within(&mut connection).await?.message()),
+        ErrorCode::UnsupportedVersion
+    );
+    let unseen_claim_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(unseen_command.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(unseen_claim_count, 0);
 
     drop(connection);
     runtime.stop().await

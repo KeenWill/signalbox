@@ -67,6 +67,57 @@ forward narrowing.
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
 
+## 2026-07-25 — Grandfather pre-boundary started frontiers
+
+**Context.** Before durable model-identity boundaries existed, per-input model
+replacement could start adjacent turns with different frozen direct selections.
+Those immutable historical frontiers contain no boundary entry. The new law must
+apply to work that can still start without fabricating or rewriting
+already-executed history.
+
+**Decision.** Give each turn lifecycle an immutable boundary-requirement bit.
+The migration marks existing active and terminal turns false, existing queued
+turns true, and defaults every new turn to true. Reconstitution permits a
+marker-free changed-model start only when that durable bit is false and rejects
+a boundary entry on such a grandfathered start.
+
+**Rejected alternatives.** Rewriting immutable prefix frontiers would invent
+historical conversation events and alter every descendant snapshot. Treating all
+pre-migration turns alike would let queued work start after deployment without
+the newly implemented boundary.
+
+**Affects.** Turn-lifecycle storage, scheduling reconstitution, the
+model-identity boundary constraint, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Render model-identity boundaries as injected user-role events
+
+**Context.** The recorded mid-session model-selection direction fixes
+forward-only defaults replacement and requires the new model to learn its
+identity through the conversation frontier. The existing provider-neutral
+runtime message algebra has user and assistant roles but no system-event role.
+The remaining implementation choice was the exact durable boundary and its
+provider-visible projection.
+
+**Decision.** When a started turn's frozen direct selection differs from its
+immediate predecessor's, one durable `ModelIdentityChanged` semantic entry sits
+immediately before that turn's origin. It names the turn, defaults epoch, and
+direct selection. The application preserves that distinct entry kind; the
+provider bridge projects it as a user-role message with the fixed
+`Signalbox session event:` prefix and exact selected-model UUID and epoch. No
+entry is created for the first turn, an equal-selection successor, or a defaults
+epoch no turn ever binds.
+
+**Rejected alternatives.** An assistant-role message would fabricate model
+authorship. A silent switch would leave the new model unaware of context
+identity. Recording every replacement would put unused configuration history in
+the conversation frontier. Adding a new provider-runtime role would broaden the
+runtime contract beyond this boundary.
+
+**Affects.** Semantic transcript entries, turn-start frontier construction,
+provider-neutral conversation rendering, protocol version six, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
 ## 2026-07-25 — Scoped verification references on specification pages
 
 **Context.** Every `docs/spec/` page names the pull request its claims were last
