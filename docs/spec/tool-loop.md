@@ -130,26 +130,31 @@ remaining tool work and the interrupt applies.
 
 ## Registry, placement, and effect metadata
 
-The application `ToolCatalog` port supplies immutable `ToolDefinition` values:
-name, model-facing description, argument JSON Schema, permission default (`Auto`
-or `Confirm`), one required effect class, and one nonempty set of admissible
-loci. The effect classes are `Pure`, `Idempotent`, and `SideEffecting`, with no
-default. Pure implies idempotent; idempotent work may change state but is safe
-to repeat. Admissible loci are `DaemonOnly`, `RunnerOnly { selector }`, or
-`DaemonOrRunner { selector }`. The latter prefers the session's attached runner
-when it satisfies the selector and currently advertises the tool, falling back
-to daemon-local execution. Declarations are static per tool; a model or runner
-cannot select another locus per call. The typed placement and runner-dispatch
-law is owned by [runner protocol and placement](runner-protocol.md).
+The application `ToolCatalog` port supplies immutable daemon-local
+`ToolDefinition` values: name, model-facing description, argument JSON Schema,
+permission default (`Auto` or `Confirm`), and the stored two-class crash
+classification used by the implemented local attempt machinery.
+
+The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
+per runner-advertisable name. It carries the required three-way
+`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`) and one
+nonempty `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
+`DaemonOrRunner { selector }`). Pure implies idempotent; idempotent work may
+change state but is safe to repeat. The combined locus prefers the session's
+attached eligible runner, falling back to daemon-local execution. Declarations
+are static per tool; a model or runner cannot select another locus per call. The
+typed placement and runner-dispatch law is owned by
+[runner protocol and placement](runner-protocol.md).
 
 The current daemon-local application catalog remains one process-lifetime
-immutable compiled value. Its existing `EffectFree` declaration is the `Pure`
-class, and its existing `ExternalEffect` declaration is the `SideEffecting`
-class; no current tool declares `Idempotent` or runner admissibility. Catalog
-lookup and iteration are ports rather than a static global, but runtime
-rebinding and deployment compatibility for outstanding requests are not
-implemented; they require the durable definition-revision decision recorded
-under Open edges.
+immutable compiled value. Conceptually, its existing `EffectFree` declaration
+maps to `Pure`, and `ExternalEffect` maps to `SideEffecting`; no current tool
+declares idempotent runner behavior or runner admissibility. Consolidating the
+two typed declarations requires the later application and persistence stack and
+no migration is introduced here. Catalog lookup and iteration are ports rather
+than a static global, but runtime rebinding and deployment compatibility for
+outstanding requests are not implemented; they require the durable
+definition-revision decision recorded under Open edges.
 
 Each provider operation carries one exact definition snapshot. Initial approval
 for proposals returned by that operation is derived from that same advertised

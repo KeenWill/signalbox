@@ -1,0 +1,1661 @@
+//! Runner enrollment, catalog, lease, placement, and credential grants.
+//!
+//! The normative specification is `docs/spec/runner-protocol.md`.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
+
+use crate::{
+    RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId, ToolAttemptId,
+    ToolName, ToolPermissionDefault,
+};
+
+const NAME_MAX_BYTES: usize = 64;
+const EXACT_VALUE_MAX_BYTES: usize = 4_096;
+
+/// Why runner domain input or stored facts fail closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunnerDomainError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    InvalidName,
+    DuplicateTool(ToolName),
+    DuplicateProfile(CredentialProfileName),
+    UndeclaredProfileTool(ToolName),
+    EnrollmentRevoked,
+    CapabilityClassNotAllowed(RunnerCapabilityClass),
+    ToolUndeclared(ToolName),
+    CredentialProfileUndeclared(CredentialProfileName),
+    WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    InvalidState,
+    CorrelationMismatch,
+    GenerationExhausted,
+    SelectorMismatch,
+    CredentialProfileUnavailable,
+    WorkingDirectoryMismatch,
+    WorkspaceCapabilityUnavailable,
+    WorkspaceMismatch,
+    ToolUnavailable,
+    GrantRevoked,
+    CorruptStoredFacts,
+}
+
+fn validate_name(value: String) -> Result<String, RunnerDomainError> {
+    if value.is_empty() {
+        return Err(RunnerDomainError::Empty);
+    }
+    if value.contains('\0') {
+        return Err(RunnerDomainError::ContainsNull);
+    }
+    if value.len() > NAME_MAX_BYTES {
+        return Err(RunnerDomainError::TooLong);
+    }
+    if !value
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(RunnerDomainError::InvalidName);
+    }
+    Ok(value)
+}
+
+fn validate_exact(value: String) -> Result<String, RunnerDomainError> {
+    if value.is_empty() {
+        return Err(RunnerDomainError::Empty);
+    }
+    if value.contains('\0') {
+        return Err(RunnerDomainError::ContainsNull);
+    }
+    if value.len() > EXACT_VALUE_MAX_BYTES {
+        return Err(RunnerDomainError::TooLong);
+    }
+    Ok(value)
+}
+
+/// A daemon-defined class used to target an unpinned runner.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RunnerCapabilityClass(String);
+
+impl RunnerCapabilityClass {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        validate_name(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A runner-local credential profile represented to the daemon by name only.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CredentialProfileName(String);
+
+impl CredentialProfileName {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        validate_name(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Exact runner-interpreted working-directory text.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RunnerWorkingDirectory(String);
+
+impl RunnerWorkingDirectory {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        validate_exact(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Exact repository key used for worktree provisioning.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceRepositoryKey(String);
+
+impl WorkspaceRepositoryKey {
+    pub fn try_new(value: String) -> Result<Self, RunnerDomainError> {
+        validate_exact(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Class-or-identity runner targeting.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RunnerSelector {
+    Identity(RunnerId),
+    CapabilityClass(RunnerCapabilityClass),
+}
+
+/// Static nonempty admissible placement for one tool.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ToolAdmissibleLoci {
+    DaemonOnly,
+    RunnerOnly { selector: RunnerSelector },
+    DaemonOrRunner { selector: RunnerSelector },
+}
+
+/// Required effect class for runner-admissible tool declarations.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RunnerToolEffectClass {
+    Pure,
+    Idempotent,
+    SideEffecting,
+}
+
+impl ToolAdmissibleLoci {
+    pub const fn allows_daemon(&self) -> bool {
+        matches!(self, Self::DaemonOnly | Self::DaemonOrRunner { .. })
+    }
+
+    pub const fn runner_selector(&self) -> Option<&RunnerSelector> {
+        match self {
+            Self::DaemonOnly => None,
+            Self::RunnerOnly { selector } | Self::DaemonOrRunner { selector } => Some(selector),
+        }
+    }
+}
+
+/// Complete daemon-owned policy for an advertisable runner tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerToolDeclaration {
+    name: ToolName,
+    permission: ToolPermissionDefault,
+    effect: RunnerToolEffectClass,
+    loci: ToolAdmissibleLoci,
+}
+
+impl RunnerToolDeclaration {
+    pub const fn new(
+        name: ToolName,
+        permission: ToolPermissionDefault,
+        effect: RunnerToolEffectClass,
+        loci: ToolAdmissibleLoci,
+    ) -> Self {
+        Self {
+            name,
+            permission,
+            effect,
+            loci,
+        }
+    }
+
+    pub const fn name(&self) -> &ToolName {
+        &self.name
+    }
+
+    pub const fn permission(&self) -> ToolPermissionDefault {
+        self.permission
+    }
+
+    pub const fn effect(&self) -> RunnerToolEffectClass {
+        self.effect
+    }
+
+    pub const fn loci(&self) -> &ToolAdmissibleLoci {
+        &self.loci
+    }
+}
+
+/// Approval posture for an exact tool/profile pair.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CredentialToolApproval {
+    Automatic,
+    SessionPolicy,
+}
+
+/// Daemon-owned approval policy for one profile name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfilePolicy {
+    name: CredentialProfileName,
+    approvals: BTreeMap<ToolName, CredentialToolApproval>,
+}
+
+impl CredentialProfilePolicy {
+    pub fn try_new(
+        name: CredentialProfileName,
+        approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
+    ) -> Result<Self, RunnerDomainError> {
+        let mut checked = BTreeMap::new();
+        for (tool, approval) in approvals {
+            if checked.insert(tool.clone(), approval).is_some() {
+                return Err(RunnerDomainError::DuplicateTool(tool));
+            }
+        }
+        Ok(Self {
+            name,
+            approvals: checked,
+        })
+    }
+
+    pub const fn name(&self) -> &CredentialProfileName {
+        &self.name
+    }
+
+    pub fn approval_for(&self, tool: &ToolName) -> CredentialToolApproval {
+        self.approvals
+            .get(tool)
+            .copied()
+            .unwrap_or(CredentialToolApproval::SessionPolicy)
+    }
+}
+
+/// Closed workspace capabilities advertised by runners.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum WorkspaceCapability {
+    WorktreePerSession,
+}
+
+/// One complete daemon-authoritative catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerCatalog {
+    tools: BTreeMap<ToolName, RunnerToolDeclaration>,
+    profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
+    workspaces: BTreeSet<WorkspaceCapability>,
+}
+
+impl RunnerCatalog {
+    pub fn try_new(
+        tools: impl IntoIterator<Item = RunnerToolDeclaration>,
+        profiles: impl IntoIterator<Item = CredentialProfilePolicy>,
+        workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+    ) -> Result<Self, RunnerDomainError> {
+        let mut checked_tools = BTreeMap::new();
+        for tool in tools {
+            let name = tool.name.clone();
+            if checked_tools.insert(name.clone(), tool).is_some() {
+                return Err(RunnerDomainError::DuplicateTool(name));
+            }
+        }
+        let mut checked_profiles = BTreeMap::new();
+        for profile in profiles {
+            let name = profile.name.clone();
+            if checked_profiles.insert(name.clone(), profile).is_some() {
+                return Err(RunnerDomainError::DuplicateProfile(name));
+            }
+        }
+        for profile in checked_profiles.values() {
+            if let Some(tool) = profile
+                .approvals
+                .keys()
+                .find(|tool| !checked_tools.contains_key(*tool))
+            {
+                return Err(RunnerDomainError::UndeclaredProfileTool(tool.clone()));
+            }
+        }
+        Ok(Self {
+            tools: checked_tools,
+            profiles: checked_profiles,
+            workspaces: workspaces.into_iter().collect(),
+        })
+    }
+}
+
+/// Availability-only runner advertisement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerAdvertisement {
+    classes: BTreeSet<RunnerCapabilityClass>,
+    tools: BTreeSet<ToolName>,
+    profiles: BTreeSet<CredentialProfileName>,
+    workspaces: BTreeSet<WorkspaceCapability>,
+}
+
+impl RunnerAdvertisement {
+    pub fn new(
+        classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        tools: impl IntoIterator<Item = ToolName>,
+        profiles: impl IntoIterator<Item = CredentialProfileName>,
+        workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+    ) -> Self {
+        Self {
+            classes: classes.into_iter().collect(),
+            tools: tools.into_iter().collect(),
+            profiles: profiles.into_iter().collect(),
+            workspaces: workspaces.into_iter().collect(),
+        }
+    }
+}
+
+/// Active or terminally revoked logical enrollment.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerEnrollmentState {
+    Active,
+    Revoked,
+}
+
+/// Logical enrollment; identity never derives from machine properties.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerEnrollment {
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    authentication: RunnerAuthenticationId,
+    allowed_classes: BTreeSet<RunnerCapabilityClass>,
+    state: RunnerEnrollmentState,
+}
+
+impl RunnerEnrollment {
+    pub fn new(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+    ) -> Self {
+        Self {
+            enrollment,
+            runner,
+            authentication,
+            allowed_classes: allowed_classes.into_iter().collect(),
+            state: RunnerEnrollmentState::Active,
+        }
+    }
+
+    pub const fn enrollment(&self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    pub const fn authentication(&self) -> RunnerAuthenticationId {
+        self.authentication
+    }
+
+    pub const fn state(&self) -> RunnerEnrollmentState {
+        self.state
+    }
+
+    pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
+        if self.state != RunnerEnrollmentState::Active {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = RunnerEnrollmentState::Revoked;
+        Ok(self)
+    }
+
+    pub fn register(
+        &self,
+        advertisement: RunnerAdvertisement,
+        catalog: &RunnerCatalog,
+    ) -> Result<ValidatedRunnerRegistration, RunnerDomainError> {
+        if self.state != RunnerEnrollmentState::Active {
+            return Err(RunnerDomainError::EnrollmentRevoked);
+        }
+        if let Some(class) = advertisement
+            .classes
+            .iter()
+            .find(|class| !self.allowed_classes.contains(*class))
+        {
+            return Err(RunnerDomainError::CapabilityClassNotAllowed(class.clone()));
+        }
+        if let Some(tool) = advertisement
+            .tools
+            .iter()
+            .find(|tool| !catalog.tools.contains_key(*tool))
+        {
+            return Err(RunnerDomainError::ToolUndeclared(tool.clone()));
+        }
+        if let Some(profile) = advertisement
+            .profiles
+            .iter()
+            .find(|profile| !catalog.profiles.contains_key(*profile))
+        {
+            return Err(RunnerDomainError::CredentialProfileUndeclared(
+                profile.clone(),
+            ));
+        }
+        if let Some(workspace) = advertisement
+            .workspaces
+            .iter()
+            .find(|workspace| !catalog.workspaces.contains(*workspace))
+        {
+            return Err(RunnerDomainError::WorkspaceCapabilityNotAllowed(*workspace));
+        }
+        let mut tools = BTreeMap::new();
+        for name in advertisement.tools {
+            let Some(declaration) = catalog.tools.get(&name) else {
+                return Err(RunnerDomainError::ToolUndeclared(name));
+            };
+            tools.insert(name, declaration.clone());
+        }
+        let mut profiles = BTreeMap::new();
+        for name in advertisement.profiles {
+            let Some(policy) = catalog.profiles.get(&name) else {
+                return Err(RunnerDomainError::CredentialProfileUndeclared(name));
+            };
+            profiles.insert(name, policy.clone());
+        }
+        Ok(ValidatedRunnerRegistration {
+            enrollment: self.enrollment,
+            runner: self.runner,
+            authentication: self.authentication,
+            classes: advertisement.classes,
+            tools,
+            profiles,
+            workspaces: advertisement.workspaces,
+        })
+    }
+
+    pub fn reconstitute(
+        input: RunnerEnrollmentReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError> {
+        if input.enrollment != input.recorded_enrollment
+            || input.runner != input.recorded_runner
+            || input.authentication != input.recorded_authentication
+        {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        Ok(Self {
+            enrollment: input.enrollment,
+            runner: input.runner,
+            authentication: input.authentication,
+            allowed_classes: input.allowed_classes,
+            state: input.state,
+        })
+    }
+}
+
+/// Complete independently stored enrollment facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerEnrollmentReconstitutionInput {
+    pub enrollment: RunnerEnrollmentId,
+    pub recorded_enrollment: RunnerEnrollmentId,
+    pub runner: RunnerId,
+    pub recorded_runner: RunnerId,
+    pub authentication: RunnerAuthenticationId,
+    pub recorded_authentication: RunnerAuthenticationId,
+    pub allowed_classes: BTreeSet<RunnerCapabilityClass>,
+    pub state: RunnerEnrollmentState,
+}
+
+/// Validated availability paired with daemon-owned policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedRunnerRegistration {
+    enrollment: RunnerEnrollmentId,
+    runner: RunnerId,
+    authentication: RunnerAuthenticationId,
+    classes: BTreeSet<RunnerCapabilityClass>,
+    tools: BTreeMap<ToolName, RunnerToolDeclaration>,
+    profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
+    workspaces: BTreeSet<WorkspaceCapability>,
+}
+
+impl ValidatedRunnerRegistration {
+    pub const fn enrollment(&self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    pub const fn authentication(&self) -> RunnerAuthenticationId {
+        self.authentication
+    }
+
+    pub fn satisfies(&self, selector: &RunnerSelector) -> bool {
+        match selector {
+            RunnerSelector::Identity(runner) => self.runner == *runner,
+            RunnerSelector::CapabilityClass(class) => self.classes.contains(class),
+        }
+    }
+
+    pub fn tool(&self, tool: &ToolName) -> Option<&RunnerToolDeclaration> {
+        self.tools.get(tool)
+    }
+
+    pub fn profile(&self, profile: &CredentialProfileName) -> Option<&CredentialProfilePolicy> {
+        self.profiles.get(profile)
+    }
+
+    pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool {
+        self.workspaces.contains(&capability)
+    }
+
+    pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
+        self.tools.keys()
+    }
+}
+
+/// Positive runner lease, placement, or grant generation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RunnerGeneration(NonZeroU64);
+
+impl RunnerGeneration {
+    pub const fn one() -> Self {
+        Self(NonZeroU64::MIN)
+    }
+
+    pub const fn try_from_u64(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.get().checked_add(1) {
+            Some(value) => match NonZeroU64::new(value) {
+                Some(value) => Some(Self(value)),
+                None => None,
+            },
+            None => None,
+        }
+    }
+}
+
+/// Exact lease claim/result fence.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RunnerLeaseCorrelation {
+    pub lease: RunnerLeaseId,
+    pub runner: RunnerId,
+    pub attempt: ToolAttemptId,
+    pub generation: RunnerGeneration,
+}
+
+/// Runner lease stage independent of a streaming connection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RunnerLeaseState {
+    Offered,
+    Claimed,
+    Completed,
+    LostUnclaimed,
+    LostClaimed,
+}
+
+/// One fenced runner lease.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLease {
+    lease: RunnerLeaseId,
+    attempt: ToolAttemptId,
+    session: SessionId,
+    runner: RunnerId,
+    effect: RunnerToolEffectClass,
+    generation: RunnerGeneration,
+    state: RunnerLeaseState,
+}
+
+impl RunnerLease {
+    pub const fn offer(
+        lease: RunnerLeaseId,
+        attempt: ToolAttemptId,
+        session: SessionId,
+        runner: RunnerId,
+        effect: RunnerToolEffectClass,
+        generation: RunnerGeneration,
+    ) -> Self {
+        Self {
+            lease,
+            attempt,
+            session,
+            runner,
+            effect,
+            generation,
+            state: RunnerLeaseState::Offered,
+        }
+    }
+
+    pub const fn correlation(&self) -> RunnerLeaseCorrelation {
+        RunnerLeaseCorrelation {
+            lease: self.lease,
+            runner: self.runner,
+            attempt: self.attempt,
+            generation: self.generation,
+        }
+    }
+
+    pub const fn state(&self) -> RunnerLeaseState {
+        self.state
+    }
+
+    pub const fn generation(&self) -> RunnerGeneration {
+        self.generation
+    }
+
+    pub const fn attempt(&self) -> ToolAttemptId {
+        self.attempt
+    }
+
+    pub fn claim(mut self, correlation: RunnerLeaseCorrelation) -> Result<Self, RunnerDomainError> {
+        if self.state != RunnerLeaseState::Offered {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        if self.correlation() != correlation {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        self.state = RunnerLeaseState::Claimed;
+        Ok(self)
+    }
+
+    pub fn complete(
+        mut self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<Self, RunnerDomainError> {
+        if self.state != RunnerLeaseState::Claimed {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        if self.correlation() != correlation {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        self.state = RunnerLeaseState::Completed;
+        Ok(self)
+    }
+
+    pub fn lose(mut self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        let claimed = match self.state {
+            RunnerLeaseState::Offered => false,
+            RunnerLeaseState::Claimed => true,
+            _ => return Err(RunnerDomainError::InvalidState),
+        };
+        self.state = if claimed {
+            RunnerLeaseState::LostClaimed
+        } else {
+            RunnerLeaseState::LostUnclaimed
+        };
+        if claimed && self.effect == RunnerToolEffectClass::SideEffecting {
+            let attempt = self.attempt;
+            return Ok(RunnerLeaseLoss::CrashClassificationRequired {
+                lost: self,
+                attempt,
+            });
+        }
+        let generation = self
+            .generation
+            .checked_next()
+            .ok_or(RunnerDomainError::GenerationExhausted)?;
+        let replacement = Self::offer(
+            self.lease,
+            self.attempt,
+            self.session,
+            self.runner,
+            self.effect,
+            generation,
+        );
+        Ok(RunnerLeaseLoss::Releasable {
+            lost: self,
+            replacement,
+        })
+    }
+
+    pub fn reconstitute(input: RunnerLeaseReconstitutionInput) -> Result<Self, RunnerDomainError> {
+        if input.lease.correlation() != input.recorded_correlation {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        Ok(input.lease)
+    }
+}
+
+/// Complete lease projection plus independently stored fence facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseReconstitutionInput {
+    pub lease: RunnerLease,
+    pub recorded_correlation: RunnerLeaseCorrelation,
+}
+
+/// Typed consequence of lease loss.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunnerLeaseLoss {
+    Releasable {
+        lost: RunnerLease,
+        replacement: RunnerLease,
+    },
+    CrashClassificationRequired {
+        lost: RunnerLease,
+        attempt: ToolAttemptId,
+    },
+}
+
+impl RunnerLeaseLoss {
+    pub const fn replacement(&self) -> Option<&RunnerLease> {
+        match self {
+            Self::Releasable { replacement, .. } => Some(replacement),
+            Self::CrashClassificationRequired { .. } => None,
+        }
+    }
+
+    pub const fn crash_attempt(&self) -> Option<ToolAttemptId> {
+        match self {
+            Self::Releasable { .. } => None,
+            Self::CrashClassificationRequired { attempt, .. } => Some(*attempt),
+        }
+    }
+}
+
+/// Working-directory selection at placement.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum WorkingDirectorySelection {
+    RunnerDefault,
+    Exact(RunnerWorkingDirectory),
+}
+
+/// Workspace requirement at placement.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum WorkspaceRequirement {
+    None,
+    RepositoryWorktree { repository: WorkspaceRepositoryKey },
+}
+
+/// Runner-owned workspace; the runner field is also cleanup ownership.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProvisionedWorkspace {
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub repository: WorkspaceRepositoryKey,
+    pub working_directory: RunnerWorkingDirectory,
+}
+
+/// Complete requested placement axes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRunnerPlacementRequest {
+    pub selector: RunnerSelector,
+    pub working_directory: WorkingDirectorySelection,
+    pub credential_profile: Option<CredentialProfileName>,
+    pub workspace: WorkspaceRequirement,
+}
+
+/// Complete exact pinned facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedRunnerPlacement {
+    pub runner: RunnerId,
+    pub working_directory: RunnerWorkingDirectory,
+    pub credential_profile: Option<CredentialProfileName>,
+    pub tools: BTreeSet<ToolName>,
+    pub workspace: Option<ProvisionedWorkspace>,
+}
+
+/// Session affinity lifecycle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionRunnerPlacementState {
+    Unpinned,
+    Pinned(PinnedRunnerPlacement),
+    RunnerLost(PinnedRunnerPlacement),
+}
+
+/// Session placement and affinity aggregate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRunnerPlacement {
+    session: SessionId,
+    revision: RunnerGeneration,
+    request: SessionRunnerPlacementRequest,
+    state: SessionRunnerPlacementState,
+}
+
+impl SessionRunnerPlacement {
+    pub const fn new(session: SessionId, request: SessionRunnerPlacementRequest) -> Self {
+        Self {
+            session,
+            revision: RunnerGeneration::one(),
+            request,
+            state: SessionRunnerPlacementState::Unpinned,
+        }
+    }
+
+    pub const fn state(&self) -> &SessionRunnerPlacementState {
+        &self.state
+    }
+
+    pub const fn revision(&self) -> RunnerGeneration {
+        self.revision
+    }
+
+    pub fn pin(
+        mut self,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+    ) -> Result<Self, RunnerDomainError> {
+        if self.state != SessionRunnerPlacementState::Unpinned {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = SessionRunnerPlacementState::Pinned(validate_placement(
+            self.session,
+            &self.request,
+            registration,
+            directory,
+            workspace,
+        )?);
+        Ok(self)
+    }
+
+    pub fn mark_runner_lost(mut self) -> Result<Self, RunnerDomainError> {
+        let SessionRunnerPlacementState::Pinned(pinned) = self.state else {
+            return Err(RunnerDomainError::InvalidState);
+        };
+        self.state = SessionRunnerPlacementState::RunnerLost(pinned);
+        Ok(self)
+    }
+
+    pub fn replace_lost_runner(
+        self,
+        request: SessionRunnerPlacementRequest,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+    ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
+        let SessionRunnerPlacementState::RunnerLost(before) = self.state else {
+            return Err(RunnerDomainError::InvalidState);
+        };
+        let revision = self
+            .revision
+            .checked_next()
+            .ok_or(RunnerDomainError::GenerationExhausted)?;
+        let after = validate_placement(self.session, &request, registration, directory, workspace)?;
+        Ok(RunnerPlacementReplacement {
+            placement: Self {
+                session: self.session,
+                revision,
+                request,
+                state: SessionRunnerPlacementState::Pinned(after.clone()),
+            },
+            change: RunnerPlacementChange {
+                session: self.session,
+                prior_revision: self.revision,
+                replacement_revision: revision,
+                before,
+                after,
+            },
+        })
+    }
+
+    pub fn reconstitute(
+        self,
+        registration: Option<&ValidatedRunnerRegistration>,
+    ) -> Result<Self, RunnerDomainError> {
+        match &self.state {
+            SessionRunnerPlacementState::Unpinned if self.revision == RunnerGeneration::one() => {
+                Ok(self)
+            }
+            SessionRunnerPlacementState::Pinned(stored)
+            | SessionRunnerPlacementState::RunnerLost(stored) => {
+                let registration = registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
+                let checked = validate_placement(
+                    self.session,
+                    &self.request,
+                    registration,
+                    stored.working_directory.clone(),
+                    stored.workspace.clone(),
+                )?;
+                if checked == *stored {
+                    Ok(self)
+                } else {
+                    Err(RunnerDomainError::CorruptStoredFacts)
+                }
+            }
+            _ => Err(RunnerDomainError::CorruptStoredFacts),
+        }
+    }
+}
+
+fn validate_placement(
+    session: SessionId,
+    request: &SessionRunnerPlacementRequest,
+    registration: &ValidatedRunnerRegistration,
+    directory: RunnerWorkingDirectory,
+    workspace: Option<ProvisionedWorkspace>,
+) -> Result<PinnedRunnerPlacement, RunnerDomainError> {
+    if !registration.satisfies(&request.selector) {
+        return Err(RunnerDomainError::SelectorMismatch);
+    }
+    if request
+        .credential_profile
+        .as_ref()
+        .is_some_and(|profile| registration.profile(profile).is_none())
+    {
+        return Err(RunnerDomainError::CredentialProfileUnavailable);
+    }
+    if let WorkingDirectorySelection::Exact(required) = &request.working_directory
+        && required != &directory
+    {
+        return Err(RunnerDomainError::WorkingDirectoryMismatch);
+    }
+    match (&request.workspace, &workspace) {
+        (WorkspaceRequirement::None, None) => {}
+        (WorkspaceRequirement::RepositoryWorktree { repository }, Some(actual))
+            if registration.supports_workspace(WorkspaceCapability::WorktreePerSession)
+                && actual.session == session
+                && actual.runner == registration.runner
+                && &actual.repository == repository
+                && actual.working_directory == directory => {}
+        (WorkspaceRequirement::RepositoryWorktree { .. }, _)
+            if !registration.supports_workspace(WorkspaceCapability::WorktreePerSession) =>
+        {
+            return Err(RunnerDomainError::WorkspaceCapabilityUnavailable);
+        }
+        _ => return Err(RunnerDomainError::WorkspaceMismatch),
+    }
+    Ok(PinnedRunnerPlacement {
+        runner: registration.runner,
+        working_directory: directory,
+        credential_profile: request.credential_profile.clone(),
+        tools: registration.tools.keys().cloned().collect(),
+        workspace,
+    })
+}
+
+/// Successful explicit placement replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerPlacementReplacement {
+    pub placement: SessionRunnerPlacement,
+    pub change: RunnerPlacementChange,
+}
+
+/// Complete before-and-after facts for frontier injection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerPlacementChange {
+    pub session: SessionId,
+    pub prior_revision: RunnerGeneration,
+    pub replacement_revision: RunnerGeneration,
+    pub before: PinnedRunnerPlacement,
+    pub after: PinnedRunnerPlacement,
+}
+
+/// Active or terminally revoked credential grant.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CredentialProfileGrantState {
+    Active,
+    Revoked,
+}
+
+/// Daemon grant snapshot for one runner-local profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfileGrant {
+    session: SessionId,
+    runner: RunnerId,
+    revision: RunnerGeneration,
+    profile: CredentialProfileName,
+    tools: BTreeSet<ToolName>,
+    approvals: BTreeMap<ToolName, CredentialToolApproval>,
+    state: CredentialProfileGrantState,
+}
+
+impl CredentialProfileGrant {
+    pub fn try_new(
+        session: SessionId,
+        registration: &ValidatedRunnerRegistration,
+        profile: CredentialProfileName,
+        tools: impl IntoIterator<Item = ToolName>,
+    ) -> Result<Self, RunnerDomainError> {
+        build_grant(
+            session,
+            RunnerGeneration::one(),
+            registration,
+            profile,
+            tools,
+            CredentialProfileGrantState::Active,
+        )
+    }
+
+    pub const fn state(&self) -> CredentialProfileGrantState {
+        self.state
+    }
+
+    pub const fn revision(&self) -> RunnerGeneration {
+        self.revision
+    }
+
+    pub const fn profile(&self) -> &CredentialProfileName {
+        &self.profile
+    }
+
+    pub fn authorize(
+        &self,
+        tool: &ToolName,
+    ) -> Result<CredentialDispatchAuthorization, RunnerDomainError> {
+        if self.state != CredentialProfileGrantState::Active {
+            return Err(RunnerDomainError::GrantRevoked);
+        }
+        if !self.tools.contains(tool) {
+            return Err(RunnerDomainError::ToolUnavailable);
+        }
+        Ok(CredentialDispatchAuthorization {
+            session: self.session,
+            runner: self.runner,
+            grant_revision: self.revision,
+            profile: self.profile.clone(),
+            tool: tool.clone(),
+            approval: self.approvals[tool],
+        })
+    }
+
+    pub fn replace(
+        self,
+        registration: &ValidatedRunnerRegistration,
+        profile: CredentialProfileName,
+        tools: impl IntoIterator<Item = ToolName>,
+    ) -> Result<CredentialProfileGrantReplacement, RunnerDomainError> {
+        if self.state != CredentialProfileGrantState::Active {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        let revision = self
+            .revision
+            .checked_next()
+            .ok_or(RunnerDomainError::GenerationExhausted)?;
+        let replacement = build_grant(
+            self.session,
+            revision,
+            registration,
+            profile,
+            tools,
+            CredentialProfileGrantState::Active,
+        )?;
+        Ok(CredentialProfileGrantReplacement {
+            change: CredentialProfileChange {
+                session: self.session,
+                prior_revision: self.revision,
+                replacement_revision: revision,
+                before_profile: self.profile,
+                after_profile: replacement.profile.clone(),
+                before_tools: self.tools,
+                after_tools: replacement.tools.clone(),
+            },
+            grant: replacement,
+        })
+    }
+
+    pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
+        if self.state != CredentialProfileGrantState::Active {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = CredentialProfileGrantState::Revoked;
+        Ok(self)
+    }
+
+    pub fn reconstitute(
+        self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError> {
+        let checked = build_grant(
+            self.session,
+            self.revision,
+            registration,
+            self.profile.clone(),
+            self.tools.clone(),
+            self.state,
+        )?;
+        if checked == self {
+            Ok(self)
+        } else {
+            Err(RunnerDomainError::CorruptStoredFacts)
+        }
+    }
+}
+
+fn build_grant(
+    session: SessionId,
+    revision: RunnerGeneration,
+    registration: &ValidatedRunnerRegistration,
+    profile: CredentialProfileName,
+    tools: impl IntoIterator<Item = ToolName>,
+    state: CredentialProfileGrantState,
+) -> Result<CredentialProfileGrant, RunnerDomainError> {
+    let policy = registration
+        .profile(&profile)
+        .ok_or(RunnerDomainError::CredentialProfileUnavailable)?;
+    let tools: BTreeSet<_> = tools.into_iter().collect();
+    if tools.iter().any(|tool| registration.tool(tool).is_none()) {
+        return Err(RunnerDomainError::ToolUnavailable);
+    }
+    let approvals = tools
+        .iter()
+        .map(|tool| (tool.clone(), policy.approval_for(tool)))
+        .collect();
+    Ok(CredentialProfileGrant {
+        session,
+        runner: registration.runner,
+        revision,
+        profile,
+        tools,
+        approvals,
+        state,
+    })
+}
+
+/// Exact future-dispatch authority resolved from a tool/profile pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialDispatchAuthorization {
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub grant_revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tool: ToolName,
+    pub approval: CredentialToolApproval,
+}
+
+/// Successful forward-only credential grant replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfileGrantReplacement {
+    pub grant: CredentialProfileGrant,
+    pub change: CredentialProfileChange,
+}
+
+/// Complete before-and-after profile/tool facts for frontier injection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfileChange {
+    pub session: SessionId,
+    pub prior_revision: RunnerGeneration,
+    pub replacement_revision: RunnerGeneration,
+    pub before_profile: CredentialProfileName,
+    pub after_profile: CredentialProfileName,
+    pub before_tools: BTreeSet<ToolName>,
+    pub after_tools: BTreeSet<ToolName>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        runner_authentication_id, runner_enrollment_id, runner_id, runner_lease_id, session_id,
+        tool_attempt_id,
+    };
+
+    const ENROLLMENT: u128 = 0x7100;
+    const RUNNER: u128 = 0x7200;
+    const REPLACEMENT_RUNNER: u128 = 0x7201;
+    const AUTHENTICATION: u128 = 0x7300;
+    const LEASE: u128 = 0x7400;
+    const ATTEMPT: u128 = 0x7500;
+    const SESSION: u128 = 0x7600;
+
+    fn class() -> RunnerCapabilityClass {
+        RunnerCapabilityClass::try_new("linux.workspace".to_owned())
+            .expect("the canonical class name is valid")
+    }
+
+    fn profile(name: &str) -> CredentialProfileName {
+        CredentialProfileName::try_new(name.to_owned()).expect("fixture profile names are valid")
+    }
+
+    fn tool(name: &str) -> ToolName {
+        ToolName::try_new(name.to_owned()).expect("fixture tool names are valid")
+    }
+
+    fn catalog() -> RunnerCatalog {
+        let inspect = RunnerToolDeclaration::new(
+            tool("inspect"),
+            ToolPermissionDefault::Auto,
+            RunnerToolEffectClass::Pure,
+            ToolAdmissibleLoci::DaemonOrRunner {
+                selector: RunnerSelector::CapabilityClass(class()),
+            },
+        );
+        let deploy = RunnerToolDeclaration::new(
+            tool("deploy"),
+            ToolPermissionDefault::Confirm,
+            RunnerToolEffectClass::SideEffecting,
+            ToolAdmissibleLoci::RunnerOnly {
+                selector: RunnerSelector::CapabilityClass(class()),
+            },
+        );
+        let readonly = CredentialProfilePolicy::try_new(
+            profile("readonly"),
+            [(tool("inspect"), CredentialToolApproval::Automatic)],
+        )
+        .expect("the profile references a declared fixture tool");
+        let admin = CredentialProfilePolicy::try_new(
+            profile("admin"),
+            [(tool("deploy"), CredentialToolApproval::SessionPolicy)],
+        )
+        .expect("the profile references a declared fixture tool");
+        RunnerCatalog::try_new(
+            [inspect, deploy],
+            [readonly, admin],
+            [WorkspaceCapability::WorktreePerSession],
+        )
+        .expect("the canonical catalog is internally consistent")
+    }
+
+    fn registration_for(runner: RunnerId) -> ValidatedRunnerRegistration {
+        let enrollment = RunnerEnrollment::new(
+            runner_enrollment_id(ENROLLMENT),
+            runner,
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+        enrollment
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect"), tool("deploy")],
+                    [profile("readonly"), profile("admin")],
+                    [WorkspaceCapability::WorktreePerSession],
+                ),
+                &catalog(),
+            )
+            .expect("the advertisement is a subset of daemon policy")
+    }
+
+    fn registration() -> ValidatedRunnerRegistration {
+        registration_for(runner_id(RUNNER))
+    }
+
+    fn placement_request(profile: CredentialProfileName) -> SessionRunnerPlacementRequest {
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile),
+            workspace: WorkspaceRequirement::None,
+        }
+    }
+
+    fn directory(value: &str) -> RunnerWorkingDirectory {
+        RunnerWorkingDirectory::try_new(value.to_owned())
+            .expect("fixture working directories are valid")
+    }
+
+    #[test]
+    fn s30_runner_catalog_names_are_portable_and_bounded() {
+        assert_eq!(
+            RunnerCapabilityClass::try_new("-leading".to_owned()),
+            Err(RunnerDomainError::InvalidName)
+        );
+        assert_eq!(
+            CredentialProfileName::try_new("contains space".to_owned()),
+            Err(RunnerDomainError::InvalidName)
+        );
+        assert_eq!(
+            RunnerCapabilityClass::try_new("x".repeat(NAME_MAX_BYTES + 1)),
+            Err(RunnerDomainError::TooLong)
+        );
+    }
+
+    #[test]
+    fn s30_inv001_logical_enrollment_retains_distinct_typed_identities() {
+        let enrollment = RunnerEnrollment::new(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+
+        assert_eq!(enrollment.enrollment(), runner_enrollment_id(ENROLLMENT));
+        assert_eq!(enrollment.runner(), runner_id(RUNNER));
+        assert_eq!(
+            enrollment.authentication(),
+            runner_authentication_id(AUTHENTICATION)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_unknown_advertised_tool_rejects_the_complete_registration() {
+        let enrollment = RunnerEnrollment::new(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+        let advertisement = RunnerAdvertisement::new([class()], [tool("unknown")], [], []);
+
+        assert_eq!(
+            enrollment.register(advertisement, &catalog()),
+            Err(RunnerDomainError::ToolUndeclared(tool("unknown")))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_revoked_enrollment_cannot_register() {
+        let enrollment = RunnerEnrollment::new(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        )
+        .revoke()
+        .expect("an active enrollment can be revoked");
+
+        assert_eq!(
+            enrollment.register(RunnerAdvertisement::new([], [], [], []), &catalog()),
+            Err(RunnerDomainError::EnrollmentRevoked)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_registration_attaches_daemon_policy_not_runner_policy() {
+        let registration = registration();
+        let declaration = registration
+            .tool(&tool("deploy"))
+            .expect("the advertised tool is validated");
+
+        assert_eq!(declaration.permission(), ToolPermissionDefault::Confirm);
+        assert_eq!(declaration.effect(), RunnerToolEffectClass::SideEffecting);
+    }
+
+    #[test]
+    fn s30_inv001_enrollment_reconstitution_rejects_cross_wired_runner() {
+        let input = RunnerEnrollmentReconstitutionInput {
+            enrollment: runner_enrollment_id(ENROLLMENT),
+            recorded_enrollment: runner_enrollment_id(ENROLLMENT),
+            runner: runner_id(RUNNER),
+            recorded_runner: runner_id(REPLACEMENT_RUNNER),
+            authentication: runner_authentication_id(AUTHENTICATION),
+            recorded_authentication: runner_authentication_id(AUTHENTICATION),
+            allowed_classes: BTreeSet::from([class()]),
+            state: RunnerEnrollmentState::Active,
+        };
+
+        assert_eq!(
+            RunnerEnrollment::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_unclaimed_side_effecting_loss_is_releasable() {
+        let lease = RunnerLease::offer(
+            runner_lease_id(LEASE),
+            tool_attempt_id(ATTEMPT),
+            session_id(SESSION),
+            runner_id(RUNNER),
+            RunnerToolEffectClass::SideEffecting,
+            RunnerGeneration::one(),
+        );
+
+        let loss = lease.lose().expect("an offered lease can be lost");
+
+        assert_eq!(
+            loss.replacement()
+                .expect("unclaimed loss is safe to re-lease")
+                .generation(),
+            RunnerGeneration::try_from_u64(2).expect("two is positive")
+        );
+    }
+
+    #[test]
+    fn s31_inv043_claimed_pure_loss_is_releasable() {
+        let offered = RunnerLease::offer(
+            runner_lease_id(LEASE),
+            tool_attempt_id(ATTEMPT),
+            session_id(SESSION),
+            runner_id(RUNNER),
+            RunnerToolEffectClass::Pure,
+            RunnerGeneration::one(),
+        );
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact fence claims the offered lease");
+
+        let loss = claimed.lose().expect("a claimed lease can be lost");
+
+        assert_eq!(
+            loss.replacement()
+                .expect("pure claimed work is safe to re-lease")
+                .attempt(),
+            tool_attempt_id(ATTEMPT)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_claimed_idempotent_loss_is_releasable() {
+        let offered = RunnerLease::offer(
+            runner_lease_id(LEASE),
+            tool_attempt_id(ATTEMPT),
+            session_id(SESSION),
+            runner_id(RUNNER),
+            RunnerToolEffectClass::Idempotent,
+            RunnerGeneration::one(),
+        );
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact fence claims the offered lease");
+
+        let loss = claimed.lose().expect("a claimed lease can be lost");
+
+        assert!(loss.replacement().is_some());
+    }
+
+    #[test]
+    fn s31_inv025_inv026_inv043_claimed_side_effecting_loss_requires_crash_classification() {
+        let offered = RunnerLease::offer(
+            runner_lease_id(LEASE),
+            tool_attempt_id(ATTEMPT),
+            session_id(SESSION),
+            runner_id(RUNNER),
+            RunnerToolEffectClass::SideEffecting,
+            RunnerGeneration::one(),
+        );
+        let correlation = offered.correlation();
+        let claimed = offered
+            .claim(correlation)
+            .expect("the exact fence claims the offered lease");
+
+        let loss = claimed.lose().expect("a claimed lease can be lost");
+
+        assert_eq!(loss.replacement(), None);
+        assert_eq!(loss.crash_attempt(), Some(tool_attempt_id(ATTEMPT)));
+    }
+
+    #[test]
+    fn s31_inv021_inv043_stale_generation_cannot_claim() {
+        let offered = RunnerLease::offer(
+            runner_lease_id(LEASE),
+            tool_attempt_id(ATTEMPT),
+            session_id(SESSION),
+            runner_id(RUNNER),
+            RunnerToolEffectClass::Pure,
+            RunnerGeneration::try_from_u64(2).expect("two is positive"),
+        );
+        let stale = RunnerLeaseCorrelation {
+            generation: RunnerGeneration::one(),
+            ..offered.correlation()
+        };
+
+        assert_eq!(
+            offered.claim(stale),
+            Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s31_inv043_lease_reconstitution_rejects_cross_wired_fence() {
+        let lease = RunnerLease::offer(
+            runner_lease_id(LEASE),
+            tool_attempt_id(ATTEMPT),
+            session_id(SESSION),
+            runner_id(RUNNER),
+            RunnerToolEffectClass::Pure,
+            RunnerGeneration::one(),
+        );
+        let recorded_correlation = RunnerLeaseCorrelation {
+            runner: runner_id(REPLACEMENT_RUNNER),
+            ..lease.correlation()
+        };
+
+        assert_eq!(
+            RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
+                lease,
+                recorded_correlation,
+            }),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s30_inv044_first_execution_pins_the_exact_runner() {
+        let registration = registration();
+        let placement = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        );
+
+        let pinned = placement
+            .pin(&registration, directory("/workspace/session"), None)
+            .expect("the registration satisfies every requested axis");
+
+        let expected = SessionRunnerPlacementState::Pinned(PinnedRunnerPlacement {
+            runner: runner_id(RUNNER),
+            working_directory: directory("/workspace/session"),
+            credential_profile: Some(profile("readonly")),
+            tools: BTreeSet::from([tool("deploy"), tool("inspect")]),
+            workspace: None,
+        });
+        assert_eq!(pinned.state(), &expected);
+    }
+
+    #[test]
+    fn s32_inv044_replacement_is_explicit_and_advances_revision() {
+        let initial = registration();
+        let replacement = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let placement = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin(&initial, directory("/workspace/old"), None)
+        .expect("the initial registration satisfies placement")
+        .mark_runner_lost()
+        .expect("the pinned runner can be marked lost");
+
+        let replaced = placement
+            .replace_lost_runner(
+                placement_request(profile("admin")),
+                &replacement,
+                directory("/workspace/new"),
+                None,
+            )
+            .expect("explicit replacement validates every new axis");
+
+        assert_eq!(
+            replaced.placement.revision(),
+            RunnerGeneration::try_from_u64(2).expect("two is positive")
+        );
+        assert_eq!(replaced.change.before.runner, runner_id(RUNNER));
+        assert_eq!(replaced.change.after.runner, runner_id(REPLACEMENT_RUNNER));
+    }
+
+    #[test]
+    fn s32_inv044_workspace_cannot_cross_runner_ownership() {
+        let registration = registration();
+        let request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: WorkspaceRepositoryKey::try_new("signalbox".to_owned())
+                    .expect("the repository key is valid"),
+            },
+        };
+        let foreign_workspace = ProvisionedWorkspace {
+            session: session_id(SESSION),
+            runner: runner_id(REPLACEMENT_RUNNER),
+            repository: WorkspaceRepositoryKey::try_new("signalbox".to_owned())
+                .expect("the repository key is valid"),
+            working_directory: directory("/workspace/session"),
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::new(session_id(SESSION), request).pin(
+                &registration,
+                directory("/workspace/session"),
+                Some(foreign_workspace),
+            ),
+            Err(RunnerDomainError::WorkspaceMismatch)
+        );
+    }
+
+    #[test]
+    fn s32_inv035_inv045_profile_pair_resolves_automatic_without_a_value() {
+        let registration = registration();
+        let grant = CredentialProfileGrant::try_new(
+            session_id(SESSION),
+            &registration,
+            profile("readonly"),
+            [tool("inspect")],
+        )
+        .expect("the runner advertised the profile and tool");
+
+        let authorization = grant
+            .authorize(&tool("inspect"))
+            .expect("the active exact pair is authorized");
+
+        assert_eq!(authorization.approval, CredentialToolApproval::Automatic);
+        assert_eq!(authorization.profile, profile("readonly"));
+    }
+
+    #[test]
+    fn s32_inv045_revocation_gates_future_dispatch() {
+        let registration = registration();
+        let revoked = CredentialProfileGrant::try_new(
+            session_id(SESSION),
+            &registration,
+            profile("readonly"),
+            [tool("inspect")],
+        )
+        .expect("the runner advertised the profile and tool")
+        .revoke()
+        .expect("an active grant can be revoked");
+
+        assert_eq!(
+            revoked.authorize(&tool("inspect")),
+            Err(RunnerDomainError::GrantRevoked)
+        );
+    }
+
+    #[test]
+    fn s32_inv045_replacement_snapshots_new_profile_and_tools() {
+        let registration = registration();
+        let grant = CredentialProfileGrant::try_new(
+            session_id(SESSION),
+            &registration,
+            profile("readonly"),
+            [tool("inspect")],
+        )
+        .expect("the initial grant is valid");
+
+        let replaced = grant
+            .replace(&registration, profile("admin"), [tool("deploy")])
+            .expect("the replacement profile and tool were advertised");
+
+        assert_eq!(replaced.grant.profile(), &profile("admin"));
+        assert_eq!(
+            replaced.grant.revision(),
+            RunnerGeneration::try_from_u64(2).expect("two is positive")
+        );
+        assert_eq!(
+            replaced.change.before_tools,
+            BTreeSet::from([tool("inspect")])
+        );
+        assert_eq!(
+            replaced.change.after_tools,
+            BTreeSet::from([tool("deploy")])
+        );
+    }
+
+    #[test]
+    fn s32_inv045_grant_reconstitution_rejects_changed_pair_policy() {
+        let registration = registration();
+        let mut grant = CredentialProfileGrant::try_new(
+            session_id(SESSION),
+            &registration,
+            profile("readonly"),
+            [tool("inspect")],
+        )
+        .expect("the grant is valid");
+        grant
+            .approvals
+            .insert(tool("inspect"), CredentialToolApproval::SessionPolicy);
+
+        assert_eq!(
+            grant.reconstitute(&registration),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+}

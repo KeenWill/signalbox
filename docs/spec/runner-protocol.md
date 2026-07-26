@@ -70,7 +70,7 @@ Each `RunnerToolDeclaration` contains:
 
 - the existing checked `ToolName`;
 - one required `ToolPermissionDefault`;
-- one required `ToolEffectClass`; and
+- one required `RunnerToolEffectClass`; and
 - one nonempty `ToolAdmissibleLoci` value.
 
 `ToolAdmissibleLoci` is closed typed vocabulary:
@@ -206,10 +206,10 @@ before-and-after profile and tool inventories for later frontier injection.
 Revocation is also forward-only and gates future dispatch authorization.
 Authorization already captured by a claimed lease remains valid for that
 in-flight attempt; revocation neither rewrites nor cancels it. A revoked grant
-cannot become active again. Complete reconstitution rejects revision gaps,
-foreign session or runner facts, a profile absent from the validated
-registration, a tool set wider than the advertisement, or a revoked projection
-with active-dispatch authority (INV-045).
+cannot become active again. Complete reconstitution rejects foreign session or
+runner facts, a profile absent from the validated registration, a tool set wider
+than the advertisement, or a revoked projection with active-dispatch authority
+(INV-045).
 
 ## Workspace provisioning
 

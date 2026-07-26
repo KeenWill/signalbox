@@ -20,6 +20,7 @@ mod model_execution;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod runner;
 mod semantic_entry;
 mod session;
 mod session_metadata;
@@ -117,6 +118,19 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsReconstitutionFailure, ReplaceSessionDefaultsReconstitutionInput,
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
+};
+pub use runner::{
+    CredentialDispatchAuthorization, CredentialProfileChange, CredentialProfileGrant,
+    CredentialProfileGrantReplacement, CredentialProfileGrantState, CredentialProfileName,
+    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
+    RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
+    RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseState,
+    RunnerPlacementChange, RunnerPlacementReplacement, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerWorkingDirectory, SessionRunnerPlacement,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
+    WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
@@ -297,6 +311,26 @@ define_identity!(
     ToolAttemptId
 );
 
+define_identity!(
+    /// Identifies one logical runner enrollment.
+    RunnerEnrollmentId
+);
+
+define_identity!(
+    /// Identifies one enrollment-issued logical runner.
+    RunnerId
+);
+
+define_identity!(
+    /// Identifies one daemon-owned runner authentication reference.
+    RunnerAuthenticationId
+);
+
+define_identity!(
+    /// Identifies one runner-dispatch lease across fenced generations.
+    RunnerLeaseId
+);
+
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Behavior-irrelevant test plumbing shared across unit-test modules.
@@ -333,6 +367,10 @@ pub(crate) mod test_support {
         semantic_transcript_entry_id -> crate::SemanticTranscriptEntryId,
         tool_request_id -> crate::ToolRequestId,
         tool_attempt_id -> crate::ToolAttemptId,
+        runner_enrollment_id -> crate::RunnerEnrollmentId,
+        runner_id -> crate::RunnerId,
+        runner_authentication_id -> crate::RunnerAuthenticationId,
+        runner_lease_id -> crate::RunnerLeaseId,
         direct -> crate::DirectModelSelection,
         alias -> crate::ModelAlias,
     }
@@ -346,8 +384,9 @@ pub(crate) mod test_support {
 mod tests {
     use super::{
         AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId,
-        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RunnerAuthenticationId,
+        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
+        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
     };
     use uuid::Uuid;
 
@@ -381,5 +420,9 @@ mod tests {
         assert_uuid_contract!(SemanticTranscriptEntryId);
         assert_uuid_contract!(ToolRequestId);
         assert_uuid_contract!(ToolAttemptId);
+        assert_uuid_contract!(RunnerEnrollmentId);
+        assert_uuid_contract!(RunnerId);
+        assert_uuid_contract!(RunnerAuthenticationId);
+        assert_uuid_contract!(RunnerLeaseId);
     }
 }

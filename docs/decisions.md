@@ -93,10 +93,10 @@ state daemon fallback or its selector. Per-call model-selected placement permits
 a call to widen the registry. Treating the stream as truth loses claims on
 reconnect.
 
-**Affects.** `ToolEffectClass`, `ToolAdmissibleLoci`, runner leases, INV-021,
-INV-025, INV-026, INV-043, S12, S16 and S31, the [tool-loop](spec/tool-loop.md)
-and [runner-protocol](spec/runner-protocol.md) specifications, and later store
-and wire stacks.
+**Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
+INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
+[tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
+specifications, and later store and wire stacks.
 
 ## 2026-07-25 — Give logical enrollments daemon-validated advertisements
 

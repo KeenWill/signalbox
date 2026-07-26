@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The eleven identities defined in `lib.rs`:
+The fifteen identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -68,6 +68,10 @@ pub struct ModelCallId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
+pub struct RunnerEnrollmentId(/* private */);
+pub struct RunnerId(/* private */);
+pub struct RunnerAuthenticationId(/* private */);
+pub struct RunnerLeaseId(/* private */);
 ```
 
 Five more identities with the same shape are defined in their owning modules and
@@ -5195,11 +5199,171 @@ pub trait ToolExecutionTransaction {
 }
 ```
 
+## domain: runner
+
+```rust
+pub enum RunnerDomainError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    InvalidName,
+    DuplicateTool(ToolName),
+    DuplicateProfile(CredentialProfileName),
+    UndeclaredProfileTool(ToolName),
+    EnrollmentRevoked,
+    CapabilityClassNotAllowed(RunnerCapabilityClass),
+    ToolUndeclared(ToolName),
+    CredentialProfileUndeclared(CredentialProfileName),
+    WorkspaceCapabilityNotAllowed(WorkspaceCapability),
+    InvalidState,
+    CorrelationMismatch,
+    GenerationExhausted,
+    SelectorMismatch,
+    CredentialProfileUnavailable,
+    WorkingDirectoryMismatch,
+    WorkspaceCapabilityUnavailable,
+    WorkspaceMismatch,
+    ToolUnavailable,
+    GrantRevoked,
+    CorruptStoredFacts,
+}
+
+pub struct RunnerCapabilityClass(/* private */);
+pub struct CredentialProfileName(/* private */);
+pub struct RunnerWorkingDirectory(/* private */);
+pub struct WorkspaceRepositoryKey(/* private */);
+// each checked string exposes try_new(String) and as_str()
+
+pub enum RunnerSelector {
+    Identity(RunnerId),
+    CapabilityClass(RunnerCapabilityClass),
+}
+
+pub enum ToolAdmissibleLoci {
+    DaemonOnly,
+    RunnerOnly { selector: RunnerSelector },
+    DaemonOrRunner { selector: RunnerSelector },
+}
+// accessors: allows_daemon(), runner_selector()
+
+pub enum RunnerToolEffectClass {
+    Pure,
+    Idempotent,
+    SideEffecting,
+}
+
+pub struct RunnerToolDeclaration { /* private */ }
+impl RunnerToolDeclaration {
+    pub const fn new(
+        name: ToolName,
+        permission: ToolPermissionDefault,
+        effect: RunnerToolEffectClass,
+        loci: ToolAdmissibleLoci,
+    ) -> Self;
+    // accessors: name(), permission(), effect(), loci()
+}
+
+pub enum CredentialToolApproval {
+    Automatic,
+    SessionPolicy,
+}
+
+pub struct CredentialProfilePolicy { /* private */ }
+pub enum WorkspaceCapability {
+    WorktreePerSession,
+}
+pub struct RunnerCatalog { /* private */ }
+pub struct RunnerAdvertisement { /* private */ }
+
+pub enum RunnerEnrollmentState {
+    Active,
+    Revoked,
+}
+pub struct RunnerEnrollment { /* private */ }
+pub struct RunnerEnrollmentReconstitutionInput {
+    /* public complete typed facts */
+}
+pub struct ValidatedRunnerRegistration { /* private */ }
+
+pub struct RunnerGeneration(/* private NonZeroU64 */);
+pub struct RunnerLeaseCorrelation {
+    /* public exact fence fields */
+}
+pub enum RunnerLeaseState {
+    Offered,
+    Claimed,
+    Completed,
+    LostUnclaimed,
+    LostClaimed,
+}
+pub struct RunnerLease { /* private */ }
+pub struct RunnerLeaseReconstitutionInput {
+    /* public lease and independent fence */
+}
+pub enum RunnerLeaseLoss {
+    Releasable {
+        lost: RunnerLease,
+        replacement: RunnerLease,
+    },
+    CrashClassificationRequired {
+        lost: RunnerLease,
+        attempt: ToolAttemptId,
+    },
+}
+
+pub enum WorkingDirectorySelection {
+    RunnerDefault,
+    Exact(RunnerWorkingDirectory),
+}
+pub enum WorkspaceRequirement {
+    None,
+    RepositoryWorktree {
+        repository: WorkspaceRepositoryKey,
+    },
+}
+pub struct ProvisionedWorkspace {
+    /* public typed ownership facts */
+}
+pub struct SessionRunnerPlacementRequest {
+    /* public complete requested axes */
+}
+pub struct PinnedRunnerPlacement {
+    /* public complete pinned facts */
+}
+pub enum SessionRunnerPlacementState {
+    Unpinned,
+    Pinned(PinnedRunnerPlacement),
+    RunnerLost(PinnedRunnerPlacement),
+}
+pub struct SessionRunnerPlacement { /* private */ }
+pub struct RunnerPlacementReplacement {
+    /* public placement and change */
+}
+pub struct RunnerPlacementChange {
+    /* public before-and-after facts */
+}
+
+pub enum CredentialProfileGrantState {
+    Active,
+    Revoked,
+}
+pub struct CredentialProfileGrant { /* private */ }
+pub struct CredentialDispatchAuthorization {
+    /* public exact tool/profile authority */
+}
+pub struct CredentialProfileGrantReplacement {
+    /* public grant and change */
+}
+pub struct CredentialProfileChange {
+    /* public before-and-after facts */
+}
+```
+
 ## Inventory
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 11                   |
+| domain: lib.rs identities                          | 15                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 29                   |
 | domain: session                                    | 21                   |
@@ -5225,7 +5389,8 @@ pub trait ToolExecutionTransaction {
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **365 (+1 free fn)** |
+| domain: runner                                     | 38                   |
+| **signalbox-domain total**                         | **407 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
