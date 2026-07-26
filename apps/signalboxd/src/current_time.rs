@@ -9,27 +9,16 @@ use jiff::{
 };
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolArgumentValidator, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault,
+    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 
+use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+
 pub(crate) const CURRENT_TIME_NAME: &str = "current_time";
-const CURRENT_TIME_DESCRIPTION: &str =
-    "Returns the current time in UTC or an optional IANA time zone.";
-const CURRENT_TIME_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "timezone": {
-            "type": "string",
-            "description": "Optional IANA time-zone name; defaults to UTC."
-        }
-    },
-    "additionalProperties": false
-}"#;
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object with one optional IANA timezone string";
 const CLOCK_OUT_OF_RANGE_DETAIL: &str = "current time is outside the supported range";
 const OFFSET_NOT_RFC3339_DETAIL: &str =
@@ -97,13 +86,16 @@ pub struct CurrentTimeTool<Clock> {
     executor: CurrentTimeExecutor<Clock>,
 }
 
+impl<Clock> ToolContract for CurrentTimeTool<Clock> {
+    type Arguments = CurrentTimeArguments;
+    const NAME: &'static str = CURRENT_TIME_NAME;
+    const DESCRIPTION: &'static str =
+        "Returns the current time in UTC or an optional IANA time zone.";
+}
+
 impl<Clock> CurrentTimeTool<Clock> {
     /// Compiles immutable metadata and validation around one injected clock.
     pub fn try_new(clock: Clock) -> Result<Self, CurrentTimeToolConstructionError> {
-        let name = ToolName::try_new(String::from(CURRENT_TIME_NAME))
-            .map_err(|_| CurrentTimeToolConstructionError::Name)?;
-        let schema = ToolInputSchema::try_new(String::from(CURRENT_TIME_SCHEMA))
-            .map_err(|_| CurrentTimeToolConstructionError::Schema)?;
         let invalid_arguments_detail =
             ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
                 .map_err(|_| CurrentTimeToolConstructionError::ErrorDetail)?;
@@ -113,13 +105,14 @@ impl<Clock> CurrentTimeTool<Clock> {
         let offset_not_rfc3339_detail =
             ToolExecutionErrorDetail::try_new(String::from(OFFSET_NOT_RFC3339_DETAIL))
                 .map_err(|_| CurrentTimeToolConstructionError::ErrorDetail)?;
-        let definition = ToolDefinition::new(
-            name,
-            String::from(CURRENT_TIME_DESCRIPTION),
-            schema,
+        let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Auto,
             ToolEffectClass::EffectFree,
-        );
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => CurrentTimeToolConstructionError::Name,
+            ToolContractCompileError::Schema => CurrentTimeToolConstructionError::Schema,
+        })?;
         let compiled = CompiledTool::new(
             definition,
             CurrentTimeArgumentValidator {
@@ -224,6 +217,85 @@ where
     }
 }
 
+/// Typed `current_time` argument shape; decoder and rendered schema share it.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CurrentTimeArguments {
+    /// Optional IANA time-zone name; defaults to UTC.
+    #[serde(default, deserialize_with = "present_time_zone_only")]
+    #[schemars(with = "IanaTimeZone")]
+    timezone: Option<IanaTimeZone>,
+}
+
+/// Decodes a present `timezone` member, rejecting explicit `null`: the
+/// declared schema types the member as a plain string, and omitting the
+/// member is the one way to select the UTC default.
+fn present_time_zone_only<'de, D>(deserializer: D) -> Result<Option<IanaTimeZone>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// One recognized IANA zone or link identifier resolved against the installed
+/// time-zone database.
+///
+/// Admission is the contract the executor relies on: auxiliary TZif paths
+/// (`localtime`, `posixrules`, `posix/…`, `right/…`) and the unknown-zone
+/// sentinel are not IANA identifiers and never construct this value.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(try_from = "String")]
+struct IanaTimeZone {
+    name: String,
+    time_zone: TimeZone,
+}
+
+impl schemars::JsonSchema for IanaTimeZone {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("IanaTimeZone")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+/// A supplied time-zone value is not one recognized IANA identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnrecognizedIanaTimeZone;
+
+impl fmt::Display for UnrecognizedIanaTimeZone {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("not a recognized IANA time-zone name")
+    }
+}
+
+impl TryFrom<String> for IanaTimeZone {
+    type Error = UnrecognizedIanaTimeZone;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let database = tz::db();
+        if matches!(name.as_str(), "localtime" | "posixrules")
+            || !database
+                .available()
+                .any(|available| available.as_str() == name)
+        {
+            return Err(UnrecognizedIanaTimeZone);
+        }
+        let time_zone = database.get(&name).map_err(|_| UnrecognizedIanaTimeZone)?;
+        if time_zone.is_unknown() {
+            return Err(UnrecognizedIanaTimeZone);
+        }
+        Ok(Self { name, time_zone })
+    }
+}
+
 struct ResolvedArguments {
     time_zone: TimeZone,
     selected_name: String,
@@ -235,40 +307,17 @@ struct InvalidCurrentTimeArguments;
 fn resolve_arguments(
     arguments: &NormalizedToolArguments,
 ) -> Result<ResolvedArguments, InvalidCurrentTimeArguments> {
-    let serde_json::Value::Object(mut object) =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidCurrentTimeArguments)?
-    else {
-        return Err(InvalidCurrentTimeArguments);
-    };
-    if object.keys().any(|key| key != "timezone") {
-        return Err(InvalidCurrentTimeArguments);
-    }
-    let Some(value) = object.remove("timezone") else {
-        return Ok(ResolvedArguments {
+    let decoded: CurrentTimeArguments =
+        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidCurrentTimeArguments)?;
+    Ok(match decoded.timezone {
+        Some(zone) => ResolvedArguments {
+            time_zone: zone.time_zone,
+            selected_name: zone.name,
+        },
+        None => ResolvedArguments {
             time_zone: TimeZone::UTC,
             selected_name: String::from("UTC"),
-        });
-    };
-    let serde_json::Value::String(name) = value else {
-        return Err(InvalidCurrentTimeArguments);
-    };
-    let database = tz::db();
-    if matches!(name.as_str(), "localtime" | "posixrules")
-        || !database
-            .available()
-            .any(|available| available.as_str() == name)
-    {
-        return Err(InvalidCurrentTimeArguments);
-    }
-    let time_zone = database
-        .get(&name)
-        .map_err(|_| InvalidCurrentTimeArguments)?;
-    if time_zone.is_unknown() {
-        return Err(InvalidCurrentTimeArguments);
-    }
-    Ok(ResolvedArguments {
-        time_zone,
-        selected_name: name,
+        },
     })
 }
 
@@ -321,8 +370,8 @@ mod tests {
         InProcessToolDispatchGate, PrepareToolContinuationOutcome,
         RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus, ToolCatalog,
         ToolCatalogValidationFailure, ToolContinuationIdentities, ToolCrashClosureIdentities,
-        ToolExecutionService, ToolExecutionServiceOutcome, ToolExecutionTransaction,
-        UuidV7ToolLoopIdGenerator,
+        ToolDefinition, ToolExecutionService, ToolExecutionServiceOutcome,
+        ToolExecutionTransaction, UuidV7ToolLoopIdGenerator,
     };
     use signalbox_domain::{
         AcceptedInputId, AuthorizedToolAttempt, ContextFrontierId,
@@ -331,8 +380,8 @@ mod tests {
         SemanticTranscriptEntryId, SessionId, ToolApprovalResolutionReconstitutionInput,
         ToolAttemptCrashOutcome, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-        ToolExecutionError, ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnAttemptId,
-        TurnId,
+        ToolExecutionError, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        TurnAttemptId, TurnId,
     };
     use uuid::Uuid;
 
@@ -540,6 +589,49 @@ mod tests {
         assert_eq!(definition.name().as_str(), CURRENT_TIME_NAME);
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
+    }
+
+    /// S15: the complete rendered wire schema. The pretty golden is the
+    /// review surface; the byte-exact assertion pins the canonical compact
+    /// form the registry stores and providers receive as its exact
+    /// serialization.
+    #[test]
+    fn s15_current_time_rendered_schema_is_the_exact_wire_artifact() {
+        let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
+            .expect("static current_time tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+        let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
+            .expect("registry schema is valid JSON");
+
+        expect_test::expect![[r#"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "timezone": {
+                  "description": "Optional IANA time-zone name; defaults to UTC.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }"#]]
+        .assert_eq(&format!("{schema:#}"));
+        assert_eq!(definition.input_schema().as_str(), schema.to_string());
+    }
+
+    /// S15: an explicit `timezone: null` is not the omitted-member default;
+    /// the declared plain-string schema and the decoder reject it together.
+    #[test]
+    fn s15_current_time_rejects_explicit_null_timezone() {
+        let (catalog, _executor) = CurrentTimeTool::try_new(|| SystemTime::UNIX_EPOCH)
+            .expect("static current_time tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+
+        assert!(matches!(
+            catalog.validate_arguments(definition.name(), &arguments(r#"{"timezone":null}"#)),
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+        ));
     }
 
     /// S15: the declaration schema accepts the empty object and rejects
