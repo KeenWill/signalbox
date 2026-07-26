@@ -50,6 +50,11 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		48F676792FAD7000007FA401 /* Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,6 +88,7 @@
 				48F676502FAD5A49007FA401 /* SignalboxNative */,
 				48F676782FAD7000007FA401 /* Sources */,
 				48F6765E2FAD5A4C007FA401 /* SignalboxNativeTests */,
+				48F676792FAD7000007FA401 /* Tests */,
 				48F676682FAD5A4C007FA401 /* SignalboxNativeUITests */,
 				48F6764F2FAD5A49007FA401 /* Products */,
 			);
@@ -139,6 +145,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				48F6765E2FAD5A4C007FA401 /* SignalboxNativeTests */,
+				48F676792FAD7000007FA401 /* Tests */,
 			);
 			name = SignalboxNativeTests;
 			packageProductDependencies = (
