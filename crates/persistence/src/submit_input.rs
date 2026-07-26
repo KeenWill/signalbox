@@ -3871,6 +3871,26 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             last_position: None,
             existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
         },
+        SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                session,
+                active_turn,
+            },
+        ) => EncodedResult {
+            kind: REJECTED,
+            rejection_kind: Some("interrupt_unavailable_while_awaiting_approval"),
+            session: *session,
+            accepted_input: None,
+            turn: None,
+            actual_active_turn: Some(turn_id_to_uuid(*active_turn)),
+            expected_active_turn: None,
+            expected_defaults_version: None,
+            current_defaults_version: None,
+            unknown_alias: None,
+            selected_defaults_version: None,
+            last_position: None,
+            existing_interrupt_command: None,
+        },
     }
 }
 
@@ -4084,7 +4104,8 @@ fn related_turn_origin_key(
                 "active_turn_present"
                 | "active_turn_mismatch"
                 | "safe_point_unavailable_while_stopping"
-                | "interrupt_already_applied",
+                | "interrupt_already_applied"
+                | "interrupt_unavailable_while_awaiting_approval",
             ),
             _,
         ) => required(row, "result_actual_active_turn_id")?,
@@ -5262,6 +5283,33 @@ fn decode_rejected(
                     active_turn_origin
                         .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
                     interrupt,
+                ),
+            )
+        }
+        "interrupt_unavailable_while_awaiting_approval" => {
+            if expected_turn.is_some()
+                || expected_defaults.is_some()
+                || current_defaults.is_some()
+                || unknown_alias.is_some()
+                || selected_defaults.is_some()
+                || last_position.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "parked-approval interrupt result fields",
+                )
+                .into());
+            }
+            let active_turn = turn_id_from_uuid(actual_turn.ok_or(
+                SubmitInputCorruption::Missing("result_actual_active_turn_id"),
+            )?);
+            Ok(
+                SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_approval(
+                    command,
+                    stored_actor,
+                    result_session,
+                    active_turn,
+                    active_turn_origin
+                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
                 ),
             )
         }

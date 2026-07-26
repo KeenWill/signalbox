@@ -130,6 +130,7 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             workflow_pass.result_external_object_key,
             workflow_pass.result_observation_state,
             canonical_input.session_id AS accepted_input_session_id,
+            canonical_input.origin_turn_id AS accepted_input_origin_turn_id,
             canonical_turn.turn_id AS evidence_turn_id,
             canonical_turn.session_id AS turn_session_id,
             canonical_turn.origin_accepted_input_id
@@ -153,3 +154,14 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             COALESCE(workflow_pass.turn_id, $2)
       WHERE workflow_pass.pass_id = $1
       FOR UPDATE OF workflow_pass";
+
+pub(crate) const REVIEW_FINDINGS_TRANSITION: &str = "SELECT finding_id
+       FROM review_finding
+      WHERE finding_id = ANY($1)
+      ORDER BY finding_id
+      FOR NO KEY UPDATE";
+
+pub(crate) const REVIEW_EXTERNAL_LINK_TRANSITION: &str = "SELECT external_link_id
+       FROM review_external_link
+      WHERE external_link_id = $1
+      FOR NO KEY UPDATE";

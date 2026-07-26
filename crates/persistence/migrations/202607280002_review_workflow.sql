@@ -96,6 +96,34 @@ BEGIN
             'review target stack parent does not match repository and base'
             USING ERRCODE = '23514';
     END IF;
+    IF NEW.subject_kind = 'change_request'
+       AND EXISTS (
+           WITH RECURSIVE ancestors AS (
+               SELECT target_id, stack_parent_target_id,
+                      provider_key, repository_key,
+                      subject_kind, change_request_number
+                 FROM review_target
+                WHERE target_id = NEW.stack_parent_target_id
+               UNION ALL
+               SELECT parent.target_id, parent.stack_parent_target_id,
+                      parent.provider_key, parent.repository_key,
+                      parent.subject_kind, parent.change_request_number
+                 FROM review_target AS parent
+                 JOIN ancestors
+                   ON parent.target_id = ancestors.stack_parent_target_id
+           )
+           SELECT 1
+             FROM ancestors
+            WHERE provider_key = NEW.provider_key
+              AND repository_key = NEW.repository_key
+              AND subject_kind = 'change_request'
+              AND change_request_number = NEW.change_request_number
+       )
+    THEN
+        RAISE EXCEPTION
+            'review target stack repeats a logical change request'
+            USING ERRCODE = '23514';
+    END IF;
     RETURN NEW;
 END;
 $$;
@@ -275,7 +303,9 @@ CREATE TABLE review_pass (
                 'produced_findings',
                 'finding_event',
                 'external_link_attachment',
-                'external_link_observation'
+                'external_link_observation',
+                'external_link_no_change',
+                'external_link_publication_blocked'
             )
         ),
     CONSTRAINT review_pass_result_event_ordinal_positive_u32
@@ -363,6 +393,7 @@ CREATE TABLE review_pass (
                 AND result_finding_run_id IS NOT NULL
                 AND result_finding_pass_id IS NOT NULL
                 AND result_event_ordinal IS NOT NULL
+                AND result_event_kind IS NOT NULL
                 AND result_event_kind <> 'posted'
                 AND result_external_object_key IS NULL
                 AND result_observation_state IS NULL
@@ -406,6 +437,7 @@ CREATE TABLE review_pass (
                         AND result_referenced_finding_id IS NOT NULL
                         AND result_referenced_finding_run_id IS NOT NULL
                         AND result_referenced_finding_pass_id IS NOT NULL
+                        AND result_referenced_finding_status IS NOT NULL
                         AND result_referenced_finding_status
                             IN ('open', 'accepted')
                         AND result_external_link_id IS NULL
@@ -435,6 +467,7 @@ CREATE TABLE review_pass (
                         AND result_finding_run_id IS NOT NULL
                         AND result_finding_pass_id IS NOT NULL
                         AND result_event_ordinal IS NOT NULL
+                        AND result_event_kind IS NOT NULL
                         AND result_event_kind = 'posted'
                         AND result_reason IS NULL
                         AND result_referenced_finding_id IS NULL
@@ -459,6 +492,38 @@ CREATE TABLE review_pass (
                 AND result_external_link_id IS NOT NULL
                 AND result_external_object_key IS NULL
                 AND result_observation_state IS NOT NULL
+            )
+            OR (
+                result_kind = 'external_link_no_change'
+                AND result_finding_id IS NULL
+                AND result_finding_run_id IS NULL
+                AND result_finding_pass_id IS NULL
+                AND result_event_ordinal IS NOT NULL
+                AND result_event_kind IS NULL
+                AND result_reason IS NULL
+                AND result_referenced_finding_id IS NULL
+                AND result_referenced_finding_run_id IS NULL
+                AND result_referenced_finding_pass_id IS NULL
+                AND result_referenced_finding_status IS NULL
+                AND result_external_link_id IS NOT NULL
+                AND result_external_object_key IS NULL
+                AND result_observation_state IS NOT NULL
+            )
+            OR (
+                result_kind = 'external_link_publication_blocked'
+                AND result_finding_id IS NULL
+                AND result_finding_run_id IS NULL
+                AND result_finding_pass_id IS NULL
+                AND result_event_ordinal IS NULL
+                AND result_event_kind IS NULL
+                AND result_reason IS NOT NULL
+                AND result_referenced_finding_id IS NULL
+                AND result_referenced_finding_run_id IS NULL
+                AND result_referenced_finding_pass_id IS NULL
+                AND result_referenced_finding_status IS NULL
+                AND result_external_link_id IS NOT NULL
+                AND result_external_object_key IS NULL
+                AND result_observation_state IS NULL
             )
         ),
     CONSTRAINT review_pass_run_fk
@@ -510,6 +575,9 @@ CREATE TABLE review_pass (
 
 CREATE INDEX review_pass_run_index
     ON review_pass (run_id, target_id, pass_id);
+CREATE INDEX review_pass_external_link_result_index
+    ON review_pass (result_external_link_id, pass_id)
+    WHERE result_external_link_id IS NOT NULL;
 ALTER TABLE review_run
     ADD CONSTRAINT review_run_state_pass_fk
     FOREIGN KEY (state_pass_id, run_id, target_id)
@@ -766,6 +834,16 @@ BEGIN
                    NEW.result_kind = 'external_link_observation'
                    AND NEW.state_kind = 'succeeded'
                    AND NEW.pass_kind = 'import_external_context'
+               )
+               OR (
+                   NEW.result_kind = 'external_link_no_change'
+                   AND NEW.state_kind = 'succeeded'
+                   AND NEW.pass_kind = 'import_external_context'
+               )
+               OR (
+                   NEW.result_kind = 'external_link_publication_blocked'
+                   AND NEW.state_kind = 'blocked'
+                   AND NEW.pass_kind = 'publish'
                )
            )
         THEN
@@ -1036,6 +1114,13 @@ CREATE TABLE review_finding (
 
 CREATE INDEX review_finding_run_index
     ON review_finding (run_id, target_id, finding_id);
+CREATE INDEX review_finding_producing_pass_index
+    ON review_finding (
+        producing_pass_id,
+        target_id,
+        run_id,
+        finding_id
+    );
 
 ALTER TABLE review_finding
     ADD CONSTRAINT review_finding_complete_ancestry_key
@@ -1119,6 +1204,96 @@ BEFORE UPDATE OR DELETE ON review_pass_produced_finding
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TABLE review_pass_finding_inventory_seal (
+    pass_id uuid PRIMARY KEY,
+    finding_count integer NOT NULL,
+
+    CONSTRAINT review_pass_finding_inventory_seal_count
+        CHECK (finding_count BETWEEN 0 AND 32),
+    CONSTRAINT review_pass_finding_inventory_seal_pass_fk
+        FOREIGN KEY (pass_id)
+        REFERENCES review_pass (pass_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+);
+
+CREATE FUNCTION guard_review_pass_finding_inventory_seal()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    canonical_kind text;
+    canonical_findings integer;
+    inventory_members integer;
+BEGIN
+    SELECT result_kind
+      INTO canonical_kind
+      FROM review_pass
+     WHERE pass_id = NEW.pass_id;
+    SELECT count(*)
+      INTO canonical_findings
+      FROM review_finding
+     WHERE producing_pass_id = NEW.pass_id;
+    SELECT count(*)
+      INTO inventory_members
+      FROM review_pass_produced_finding
+     WHERE pass_id = NEW.pass_id;
+    IF canonical_kind IS DISTINCT FROM 'produced_findings'
+       OR NEW.finding_count IS DISTINCT FROM canonical_findings
+       OR NEW.finding_count IS DISTINCT FROM inventory_members
+    THEN
+        RAISE EXCEPTION
+            'review pass finding inventory seal differs from canonical findings'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER review_pass_finding_inventory_seal_insert_is_guarded
+BEFORE INSERT ON review_pass_finding_inventory_seal
+FOR EACH ROW
+EXECUTE FUNCTION guard_review_pass_finding_inventory_seal();
+
+CREATE TRIGGER review_pass_finding_inventory_seal_is_append_only
+BEFORE UPDATE OR DELETE ON review_pass_finding_inventory_seal
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION reject_sealed_review_finding_inventory_expansion()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_pass uuid;
+BEGIN
+    checked_pass := COALESCE(
+        (to_jsonb(NEW) ->> 'pass_id')::uuid,
+        (to_jsonb(NEW) ->> 'producing_pass_id')::uuid
+    );
+    IF EXISTS (
+        SELECT 1
+          FROM review_pass_finding_inventory_seal
+         WHERE pass_id = checked_pass
+    )
+    THEN
+        RAISE EXCEPTION 'sealed review finding inventory cannot expand'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER review_pass_produced_finding_reject_sealed_expansion
+BEFORE INSERT ON review_pass_produced_finding
+FOR EACH ROW
+EXECUTE FUNCTION reject_sealed_review_finding_inventory_expansion();
+
+CREATE TRIGGER review_finding_reject_sealed_expansion
+BEFORE INSERT ON review_finding
+FOR EACH ROW
+EXECUTE FUNCTION reject_sealed_review_finding_inventory_expansion();
+
 CREATE FUNCTION require_review_pass_finding_inventory()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1126,6 +1301,7 @@ AS $$
 DECLARE
     checked_pass uuid;
     canonical_kind text;
+    sealed_count integer;
 BEGIN
     checked_pass := COALESCE(
         (to_jsonb(NEW) ->> 'pass_id')::uuid,
@@ -1135,6 +1311,10 @@ BEGIN
     SELECT result_kind
       INTO canonical_kind
       FROM review_pass
+     WHERE pass_id = checked_pass;
+    SELECT finding_count
+      INTO sealed_count
+      FROM review_pass_finding_inventory_seal
      WHERE pass_id = checked_pass;
 
     IF canonical_kind IS DISTINCT FROM 'produced_findings'
@@ -1149,6 +1329,7 @@ BEGIN
                  FROM review_pass_produced_finding
                 WHERE pass_id = checked_pass
            )
+           OR sealed_count IS NOT NULL
        )
     THEN
         RAISE EXCEPTION
@@ -1158,6 +1339,18 @@ BEGIN
 
     IF canonical_kind = 'produced_findings'
        AND (
+           sealed_count IS NULL
+           OR sealed_count IS DISTINCT FROM (
+               SELECT count(*)
+                 FROM review_finding
+                WHERE producing_pass_id = checked_pass
+           )
+           OR sealed_count IS DISTINCT FROM (
+               SELECT count(*)
+                 FROM review_pass_produced_finding
+                WHERE pass_id = checked_pass
+           )
+           OR
            EXISTS (
                SELECT finding_id, run_id, target_id, producing_pass_id
                  FROM review_finding
@@ -1216,6 +1409,12 @@ EXECUTE FUNCTION require_review_pass_finding_inventory();
 
 CREATE CONSTRAINT TRIGGER review_pass_finding_inventory_from_member
 AFTER INSERT ON review_pass_produced_finding
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_pass_finding_inventory();
+
+CREATE CONSTRAINT TRIGGER review_pass_finding_inventory_from_seal
+AFTER INSERT ON review_pass_finding_inventory_seal
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_review_pass_finding_inventory();
@@ -1376,6 +1575,31 @@ CREATE INDEX review_external_link_association_index
         finding_producing_pass_id
     );
 
+CREATE FUNCTION guard_review_external_link_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    canonical_provider text;
+BEGIN
+    SELECT provider_key
+      INTO canonical_provider
+      FROM review_target
+     WHERE target_id = NEW.target_id;
+    IF canonical_provider IS DISTINCT FROM NEW.provider_key THEN
+        RAISE EXCEPTION
+            'external-link provider differs from canonical target provider'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER review_external_link_insert_is_guarded
+BEFORE INSERT ON review_external_link
+FOR EACH ROW
+EXECUTE FUNCTION guard_review_external_link_insert();
+
 CREATE TRIGGER review_external_link_is_append_only
 BEFORE UPDATE OR DELETE ON review_external_link
 FOR EACH ROW
@@ -1386,6 +1610,15 @@ CREATE TABLE review_external_object_identity (
     object_kind text NOT NULL,
     external_object_key text NOT NULL,
     logical_target_id uuid NOT NULL,
+    identity_digest text GENERATED ALWAYS AS (
+        md5(
+            provider_key
+                || chr(31)
+                || object_kind
+                || chr(31)
+                || external_object_key
+        )
+    ) STORED,
 
     CONSTRAINT review_external_object_identity_provider_bound
         CHECK (octet_length(provider_key) BETWEEN 1 AND 1024),
@@ -1408,6 +1641,9 @@ CREATE TABLE review_external_object_identity (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
+
+CREATE INDEX review_external_object_identity_digest_index
+    ON review_external_object_identity (identity_digest);
 
 CREATE FUNCTION guard_review_external_object_identity_insert()
 RETURNS trigger
@@ -1439,8 +1675,15 @@ BEGIN
 
     IF EXISTS (
         SELECT 1
-          FROM review_external_object_identity
-         WHERE provider_key = NEW.provider_key
+         FROM review_external_object_identity
+         WHERE identity_digest = md5(
+                   NEW.provider_key
+                       || chr(31)
+                       || NEW.object_kind
+                       || chr(31)
+                       || NEW.external_object_key
+               )
+           AND provider_key = NEW.provider_key
            AND object_kind = NEW.object_kind
            AND external_object_key = NEW.external_object_key
     )
@@ -1471,6 +1714,15 @@ CREATE TABLE review_external_link_attachment (
     provider_key text NOT NULL,
     object_kind text NOT NULL,
     external_object_key text NOT NULL,
+    identity_digest text GENERATED ALWAYS AS (
+        md5(
+            provider_key
+                || chr(31)
+                || object_kind
+                || chr(31)
+                || external_object_key
+        )
+    ) STORED,
 
     CONSTRAINT review_external_link_attachment_target_key
         UNIQUE (external_link_id, target_id),
@@ -1498,6 +1750,9 @@ CREATE TABLE review_external_link_attachment (
         ON DELETE RESTRICT
 );
 
+CREATE INDEX review_external_link_attachment_identity_index
+    ON review_external_link_attachment (identity_digest, target_id);
+
 CREATE FUNCTION guard_review_external_link_attachment_insert()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1508,13 +1763,20 @@ DECLARE
     canonical_result_kind text;
     canonical_result_link uuid;
     canonical_result_object text;
+    canonical_result_event_kind text;
     logical_target uuid;
 BEGIN
+    PERFORM 1
+      FROM review_external_link
+     WHERE external_link_id = NEW.external_link_id
+     FOR NO KEY UPDATE;
+
     SELECT pass_kind, state_kind, result_kind,
-           result_external_link_id, result_external_object_key
+           result_external_link_id, result_external_object_key,
+           result_event_kind
       INTO canonical_pass_kind, canonical_pass_state,
            canonical_result_kind, canonical_result_link,
-           canonical_result_object
+           canonical_result_object, canonical_result_event_kind
       FROM review_pass
      WHERE pass_id = NEW.pass_id
        AND run_id = NEW.pass_run_id
@@ -1532,6 +1794,27 @@ BEGIN
             'external attachment requires a succeeded attaching pass'
             USING ERRCODE = '23514';
     END IF;
+    IF canonical_result_event_kind IS DISTINCT FROM 'posted'
+       AND EXISTS (
+           SELECT 1
+             FROM review_external_link AS link
+             JOIN LATERAL (
+                 SELECT event_kind, external_link_id
+                   FROM review_finding_event
+                  WHERE finding_id = link.finding_id
+                  ORDER BY event_ordinal DESC
+                  LIMIT 1
+             ) AS latest ON true
+            WHERE link.external_link_id = NEW.external_link_id
+              AND link.association_kind = 'finding'
+              AND latest.event_kind = 'blocked_with_reason'
+              AND latest.external_link_id = NEW.external_link_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'blocked publication attachment requires an atomic posted event'
+            USING ERRCODE = '23514';
+    END IF;
 
     PERFORM pg_advisory_xact_lock(
         hashtextextended(
@@ -1546,7 +1829,14 @@ BEGIN
     IF EXISTS (
         SELECT 1
           FROM review_external_link_attachment
-         WHERE target_id = NEW.target_id
+         WHERE identity_digest = md5(
+                   NEW.provider_key
+                       || chr(31)
+                       || NEW.object_kind
+                       || chr(31)
+                       || NEW.external_object_key
+               )
+           AND target_id = NEW.target_id
            AND provider_key = NEW.provider_key
            AND object_kind = NEW.object_kind
            AND external_object_key = NEW.external_object_key
@@ -1559,7 +1849,14 @@ BEGIN
     SELECT logical_target_id
       INTO logical_target
       FROM review_external_object_identity
-     WHERE provider_key = NEW.provider_key
+     WHERE identity_digest = md5(
+               NEW.provider_key
+                   || chr(31)
+                   || NEW.object_kind
+                   || chr(31)
+                   || NEW.external_object_key
+           )
+       AND provider_key = NEW.provider_key
        AND object_kind = NEW.object_kind
        AND external_object_key = NEW.external_object_key;
     IF NOT FOUND THEN
@@ -1601,6 +1898,51 @@ CREATE TRIGGER review_external_link_attachment_is_append_only
 BEFORE UPDATE OR DELETE ON review_external_link_attachment
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION require_review_external_identity_attachment()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM review_external_link_attachment AS attachment
+          JOIN review_target AS attached_target
+            ON attached_target.target_id = attachment.target_id
+         JOIN review_target AS logical_target
+            ON logical_target.target_id = NEW.logical_target_id
+         WHERE attachment.identity_digest = NEW.identity_digest
+           AND attachment.provider_key = NEW.provider_key
+           AND attachment.object_kind = NEW.object_kind
+           AND attachment.external_object_key = NEW.external_object_key
+           AND (
+               attachment.target_id = NEW.logical_target_id
+               OR (
+                   attached_target.subject_kind = 'change_request'
+                   AND logical_target.subject_kind = 'change_request'
+                   AND attached_target.provider_key =
+                       logical_target.provider_key
+                   AND attached_target.repository_key =
+                       logical_target.repository_key
+                   AND attached_target.change_request_number =
+                       logical_target.change_request_number
+               )
+           )
+    )
+    THEN
+        RAISE EXCEPTION
+            'external object identity lacks an establishing attachment'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER review_external_identity_attachment_is_required
+AFTER INSERT ON review_external_object_identity
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_external_identity_attachment();
 
 CREATE TABLE review_finding_event (
     finding_id uuid NOT NULL,
@@ -1665,6 +2007,7 @@ CREATE TABLE review_finding_event (
                     )
                     OR (
                         external_link_id IS NOT NULL
+                        AND external_link_association_kind IS NOT NULL
                         AND external_link_association_kind = 'finding'
                     )
                 )
@@ -1684,6 +2027,7 @@ CREATE TABLE review_finding_event (
                 AND referenced_finding_id IS NULL
                 AND referenced_finding_status IS NULL
                 AND external_link_id IS NOT NULL
+                AND external_link_association_kind IS NOT NULL
                 AND external_link_association_kind = 'finding'
             )
         ),
@@ -1730,6 +2074,11 @@ CREATE UNIQUE INDEX review_finding_event_publication_link_once
     ON review_finding_event (finding_id, external_link_id)
     WHERE event_kind = 'posted';
 
+CREATE INDEX review_finding_event_blocked_link_index
+    ON review_finding_event (external_link_id)
+    WHERE event_kind = 'blocked_with_reason'
+      AND external_link_id IS NOT NULL;
+
 CREATE INDEX review_finding_event_pass_index
     ON review_finding_event (
         event_pass_run_id,
@@ -1762,6 +2111,7 @@ DECLARE
     finding_policy_version bigint;
     finding_judge_confidence integer;
     finding_publication_confidence integer;
+    finding_confidence integer;
     previous_kind text;
     previous_pass_kind text;
     previous_external_link uuid;
@@ -1778,10 +2128,12 @@ BEGIN
      ORDER BY finding_id
      FOR NO KEY UPDATE;
 
-    SELECT producing_run.policy_version,
+    SELECT finding.confidence,
+           producing_run.policy_version,
            producing_run.minimum_judge_confidence,
            producing_run.minimum_publication_confidence
-      INTO finding_policy_version,
+      INTO finding_confidence,
+           finding_policy_version,
            finding_judge_confidence,
            finding_publication_confidence
       FROM review_finding AS finding
@@ -1838,6 +2190,21 @@ BEGIN
     THEN
         RAISE EXCEPTION
             'finding event pass policy differs from finding policy'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_kind = 'accepted'
+       AND finding_confidence < finding_judge_confidence
+    THEN
+        RAISE EXCEPTION
+            'finding confidence is below the judge threshold'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.event_kind = 'posted'
+       AND finding_confidence < finding_publication_confidence
+    THEN
+        RAISE EXCEPTION
+            'finding confidence is below the publication threshold'
             USING ERRCODE = '23514';
     END IF;
 
@@ -2158,6 +2525,48 @@ BEFORE UPDATE OR DELETE ON review_finding_event
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE FUNCTION require_review_attachment_posted_event()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    canonical_event_kind text;
+    canonical_finding uuid;
+    canonical_ordinal bigint;
+BEGIN
+    SELECT result_event_kind, result_finding_id, result_event_ordinal
+      INTO canonical_event_kind, canonical_finding, canonical_ordinal
+      FROM review_pass
+     WHERE pass_id = NEW.pass_id
+       AND run_id = NEW.pass_run_id
+       AND target_id = NEW.target_id;
+    IF canonical_event_kind = 'posted'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_finding_event
+            WHERE finding_id = canonical_finding
+              AND event_ordinal = canonical_ordinal
+              AND target_id = NEW.target_id
+              AND event_pass_id = NEW.pass_id
+              AND event_pass_run_id = NEW.pass_run_id
+              AND event_kind = 'posted'
+              AND external_link_id = NEW.external_link_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'external attachment omitted its exact posted finding event'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER review_attachment_posted_event_is_required
+AFTER INSERT ON review_external_link_attachment
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_attachment_posted_event();
+
 CREATE TABLE review_external_link_observation (
     external_link_id uuid NOT NULL,
     observation_ordinal bigint NOT NULL,
@@ -2270,6 +2679,143 @@ BEFORE UPDATE OR DELETE ON review_external_link_observation
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE FUNCTION require_review_pass_external_result()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.result_kind = 'finding_event'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_finding_event AS event
+             JOIN review_finding AS finding
+               ON finding.finding_id = event.finding_id
+              AND finding.run_id = event.finding_run_id
+              AND finding.target_id = event.target_id
+             LEFT JOIN review_finding AS referenced
+               ON referenced.finding_id = event.referenced_finding_id
+              AND referenced.run_id = event.finding_run_id
+              AND referenced.target_id = event.target_id
+            WHERE event.finding_id = NEW.result_finding_id
+              AND event.finding_run_id = NEW.result_finding_run_id
+              AND finding.producing_pass_id =
+                    NEW.result_finding_pass_id
+              AND event.target_id = NEW.target_id
+              AND event.event_pass_id = NEW.pass_id
+              AND event.event_pass_run_id = NEW.run_id
+              AND event.event_ordinal = NEW.result_event_ordinal
+              AND event.event_kind = NEW.result_event_kind
+              AND event.reason IS NOT DISTINCT FROM NEW.result_reason
+              AND event.referenced_finding_id IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_id
+              AND referenced.run_id IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_run_id
+              AND referenced.producing_pass_id IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_pass_id
+              AND event.referenced_finding_status IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_status
+              AND event.external_link_id IS NOT DISTINCT FROM
+                    NEW.result_external_link_id
+              AND event.external_link_association_kind IS NOT DISTINCT FROM
+                    CASE
+                        WHEN NEW.result_external_link_id IS NULL THEN NULL
+                        ELSE 'finding'
+                    END
+       )
+    THEN
+        RAISE EXCEPTION
+            'finding-event result omitted its exact child row'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.result_kind = 'external_link_attachment'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_external_link_attachment
+            WHERE external_link_id = NEW.result_external_link_id
+              AND target_id = NEW.target_id
+              AND pass_run_id = NEW.run_id
+              AND pass_id = NEW.pass_id
+              AND external_object_key =
+                    NEW.result_external_object_key
+       )
+    THEN
+        RAISE EXCEPTION
+            'external attachment result omitted its exact child row'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.result_kind = 'external_link_observation'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_external_link_observation
+            WHERE external_link_id = NEW.result_external_link_id
+              AND observation_ordinal = NEW.result_event_ordinal
+              AND target_id = NEW.target_id
+              AND pass_run_id = NEW.run_id
+              AND pass_id = NEW.pass_id
+              AND object_state =
+                    NEW.result_observation_state
+       )
+    THEN
+        RAISE EXCEPTION
+            'external observation result omitted its exact child row'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.result_kind = 'external_link_no_change'
+       AND (
+           NOT EXISTS (
+               SELECT 1
+                 FROM review_external_link_attachment
+                WHERE external_link_id = NEW.result_external_link_id
+                  AND target_id = NEW.target_id
+           )
+           OR NEW.result_observation_state IS DISTINCT FROM (
+               SELECT object_state
+                 FROM review_external_link_observation
+                WHERE external_link_id = NEW.result_external_link_id
+                ORDER BY observation_ordinal DESC
+                LIMIT 1
+           )
+           OR NEW.result_event_ordinal IS DISTINCT FROM (
+               SELECT observation_ordinal
+                 FROM review_external_link_observation
+                WHERE external_link_id = NEW.result_external_link_id
+                ORDER BY observation_ordinal DESC
+                LIMIT 1
+           )
+       )
+    THEN
+        RAISE EXCEPTION
+            'unchanged external result differs from latest durable state'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.result_kind = 'external_link_publication_blocked' THEN
+        PERFORM 1
+          FROM review_external_link
+         WHERE external_link_id = NEW.result_external_link_id
+         FOR NO KEY UPDATE;
+    END IF;
+    IF NEW.result_kind = 'external_link_publication_blocked'
+       AND EXISTS (
+           SELECT 1
+             FROM review_external_link_attachment
+            WHERE external_link_id = NEW.result_external_link_id
+              AND target_id = NEW.target_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'blocked publication result requires a pending reservation'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER review_pass_external_result_is_guarded
+AFTER UPDATE OF result_kind ON review_pass
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_review_pass_external_result();
+
 CREATE FUNCTION reject_review_workflow_truncate()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2302,6 +2848,11 @@ EXECUTE FUNCTION reject_review_workflow_truncate();
 
 CREATE TRIGGER review_pass_produced_finding_reject_truncate
 BEFORE TRUNCATE ON review_pass_produced_finding
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_review_workflow_truncate();
+
+CREATE TRIGGER review_pass_finding_inventory_seal_reject_truncate
+BEFORE TRUNCATE ON review_pass_finding_inventory_seal
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_review_workflow_truncate();
 

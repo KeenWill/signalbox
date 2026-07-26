@@ -74,7 +74,16 @@ implemented decision sources are:
 have no storage encoding or producer. In particular, an automated source never
 constructs `OwnerCommand` or claims owner agency (INV-020).
 
-Policy resolution uses this accepted precedence:
+The implemented precedence below governs daemon-local execution and sessions
+without a credential profile. Runner dispatch under a selected credential
+profile first resolves the pair posture specified by
+[runner protocol and placement](runner-protocol.md#credential-profiles-and-approval):
+after the frozen dangerous blanket, pair-level `Automatic` authorizes the exact
+pair and `SessionPolicy` or an absent pair requires confirmation. The later
+application stack must add a distinct durable credential-policy decision source;
+this foundation does not encode one into the current persistence vocabulary.
+
+Daemon-local policy resolution uses this accepted precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
 2. a future exact per-tool session override;
@@ -131,16 +140,41 @@ two independently durable commands, not one atomic deny-and-end command; after
 decision progression opens execution, the ordinary dispatch-gate race between
 remaining tool work and the interrupt applies.
 
-## Registry and effect metadata
+## Registry, placement, and effect metadata
 
-The application `ToolCatalog` port supplies immutable `ToolDefinition` values:
-name, model-facing description, argument JSON Schema, permission default (`Auto`
-or `Confirm`), and effect class (`EffectFree` or `ExternalEffect`). signalboxd
-wires the only implemented catalog as one process-lifetime immutable compiled
-value. Catalog lookup and iteration are ports rather than a static global, but
-runtime rebinding and deployment compatibility for outstanding requests are not
-implemented; they require the durable definition-revision decision recorded
-under Open edges.
+The application `ToolCatalog` port supplies immutable daemon-local
+`ToolDefinition` values: name, model-facing description, argument JSON Schema,
+permission default (`Auto` or `Confirm`), and the stored two-class crash
+classification used by the implemented local attempt machinery.
+
+The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
+per runner-advertisable name. It carries a required checked model-facing
+description and canonical JSON-object argument schema, the required three-way
+`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`), and one
+nonempty `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
+`DaemonOrRunner { selector }`). Pure implies idempotent; idempotent work may
+change state but is safe to repeat. The combined locus prefers the session's
+attached eligible runner, falling back to daemon-local execution. Declarations
+are static per tool; a model or runner cannot select another locus per call.
+Every runner-only tool therefore still has one authoritative definition for
+model advertisement and argument validation. The typed placement and
+runner-dispatch law is owned by
+[runner protocol and placement](runner-protocol.md).
+
+The current daemon-local application catalog remains one process-lifetime
+immutable compiled value. Its existing `EffectFree` declaration maps to
+`RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
+`RunnerToolEffectClass::SideEffecting`; no current local declaration can project
+`Idempotent`. Before a shared name can use a daemon locus, the later application
+adapter must validate exact model-facing description and schema, permission
+equality, and this effect mapping against the authoritative runner declaration;
+it also compiles the schema into the executable validator used before dispatch.
+A mismatch is unavailable, never a choice between two policies. Consolidating
+the typed representations requires the later application and persistence stack
+and no migration is introduced here. Catalog lookup and iteration are ports
+rather than a static global, but runtime rebinding and deployment compatibility
+for outstanding requests are not implemented; they require the durable
+definition-revision decision recorded under Open edges.
 
 Each provider operation carries one exact definition snapshot. Initial approval
 for proposals returned by that operation is derived from that same advertised
@@ -159,13 +193,17 @@ executor boundary; the sentinel is not a claim that an unknown tool is safe to
 run. A declaration added or removed after the request was recorded does not
 rewrite its name or arguments.
 
-Effect class controls crash classification, not permission identity. A
-crash-lost prepared attempt, or an in-flight attempt declared `EffectFree`,
-closes `KnownFailed` and fails the current turn honestly; version one performs
-no automatic retry. A crash-lost in-flight `ExternalEffect` attempt closes
-`Ambiguous`, ends the abandoned turn attempt `Lost`, and parks the turn in
-`AwaitingRecoveryDecision` naming that exact tool attempt (INV-025, INV-026,
-INV-034).
+Effect class controls crash classification, not permission identity. In the
+current daemon-local executor, a crash-lost prepared attempt, or an in-flight
+attempt declared `EffectFree`, closes `KnownFailed` and fails the current turn
+honestly; version one performs no automatic local retry. A crash-lost in-flight
+attempt declared `ExternalEffect` closes `Ambiguous`, ends the abandoned turn
+attempt `Lost`, and parks the turn in `AwaitingRecoveryDecision` naming that
+exact tool attempt (INV-025, INV-026, INV-034). Runner lease loss uses the
+separate re-lease law in
+[runner protocol and placement](runner-protocol.md#effect-classes-and-runner-leases);
+re-leasing one fenced runner attempt is not the current local executor
+fabricating a new physical attempt.
 
 ## Serialized staged execution
 
@@ -522,8 +560,12 @@ version constant.
   requests are recorded in [Tool safety](../open-questions.md#tool-safety).
 - Tool-attempt retry and ambiguous-wait resolution are recorded in
   [Tool safety](../open-questions.md#tool-safety).
-- Runner placement, authentication, and protocol are recorded under
-  [Scheduling and runners](../open-questions.md#scheduling-and-runners) and
+- Runner placement and domain lease law are owned by
+  [runner protocol and placement](runner-protocol.md); its later transport,
+  persistence, and authentication edges remain recorded under
+  [Scheduling and runners](../open-questions.md#scheduling-and-runners),
+  [Protocols and persistence](../open-questions.md#protocols-and-persistence),
+  and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Client approval presentation is recorded under
   [Client scope](../open-questions.md#client-scope).

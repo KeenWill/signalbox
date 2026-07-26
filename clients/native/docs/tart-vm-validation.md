@@ -134,7 +134,9 @@ image.
 ## Real Server Smoke
 
 The `real-smoke` shard uses the native app UI test
-`testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured`.
+`testRealServerConnectionListsRunnerAndCreatesSessionWhenConfigured`. It is the
+only shard that runs this test. The `xcode` shard excludes it while continuing
+to run the remaining Xcode tests, and `real-smoke` selects it explicitly.
 
 The VM can read `clients/native/.env` through the shared worktree mount for
 `SIGNALBOX_API_KEY`, but `http://127.0.0.1:8000` inside the VM points at the

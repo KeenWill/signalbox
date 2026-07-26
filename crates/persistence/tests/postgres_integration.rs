@@ -813,6 +813,64 @@ async fn insert_cross_wired_occupied_rejection(
     transaction.commit().await
 }
 
+/// Clones one recorded submission into a well-formed parked-approval interrupt
+/// rejection naming `named_active_turn_id`, bypassing every domain guard. The
+/// row satisfies each `submit_input_command` `CHECK` and foreign key, so only
+/// the deferred correlation trigger can refuse it at commit.
+async fn insert_parked_approval_interrupt_rejection(
+    pool: &PgPool,
+    command_id: Uuid,
+    source_command_id: Uuid,
+    named_active_turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(command_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_actual_active_turn_id, result_expected_active_turn_id,
+             result_expected_defaults_version, result_current_defaults_version,
+             result_unknown_alias_id, result_selected_defaults_version,
+             result_last_position, result_existing_interrupt_command_id)
+         SELECT
+             $1, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, 'interrupt',
+             $3, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             'rejected', 'interrupt_unavailable_while_awaiting_approval',
+             result_session_id,
+             NULL, NULL,
+             $3, NULL,
+             NULL, NULL,
+             NULL, NULL,
+             NULL, NULL
+           FROM submit_input_command
+          WHERE command_id = $2",
+    )
+    .bind(command_id)
+    .bind(source_command_id)
+    .bind(named_active_turn_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
 #[derive(Debug)]
 struct FixedSessionIds {
     remaining: VecDeque<SessionId>,
@@ -2092,6 +2150,236 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         ),
         "writer-produced cancelled tool history must reconstitute before the next submit"
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S07 / S10 / INV-012 / INV-028: an interrupt against a parked approval wait
+/// records the authoritative typed rejection instead of failing the submit
+/// transaction, the wait remains durably parked with no accepted input, and
+/// equal replay returns the recorded rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7e00;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let interrupt_command = Uuid::from_u128(seed + 23);
+    let parked_before: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT active_phase_kind, approval_tool_request_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        parked_before,
+        (
+            String::from("awaiting_tool_approval"),
+            Some(request.into_uuid()),
+        ),
+        "the confirmed tool round must be parked before the interrupt"
+    );
+
+    let interrupt = input_with_delivery(
+        seed + 23,
+        seed + 1,
+        "stop while confirm is pending",
+        DeliveryRequest::Interrupt {
+            expected_active_turn: fixture.turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            interrupt.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 24)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 25))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn,
+                },
+            )) if session == fixture.session && active_turn == fixture.turn
+        ),
+        "an interrupt alone must not bypass the decision command: {outcome:?}"
+    );
+
+    let parked_after: (String, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT active_phase_kind, approval_tool_request_id,
+                (SELECT count(*) FROM accepted_input
+                  WHERE accepting_command_id = $3)
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(interrupt_command)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        parked_after,
+        (
+            String::from("awaiting_tool_approval"),
+            Some(request.into_uuid()),
+            0,
+        ),
+        "the approval wait must remain parked and the rejection must accept no input"
+    );
+
+    let replayed = SubmitInputRepository::new(pool.clone())
+        .handle(
+            interrupt,
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 26)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 27))),
+        )
+        .await?;
+    assert!(
+        matches!(
+            replayed,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn,
+                },
+            )) if session == fixture.session && active_turn == fixture.turn
+        ),
+        "equal replay must return the recorded parked-approval rejection: {replayed:?}"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S07 / S10 / INV-012 / INV-028: a parked-approval interrupt rejection is
+/// authoritative only against a turn the database still records as active on
+/// its approval wait. The row shape proves only that the receipt names the
+/// turn the command expected, so the deferred correlation trigger proves the
+/// phase: a directly inserted receipt naming a running or a terminal turn
+/// cannot commit and therefore never replays as authoritative.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_approval_wait()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let running_seed = 0x7f00;
+    let running = checkpoint_restart_model_call(&pool, running_seed, false).await?;
+    let running_phase: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(running.session.into_uuid())
+    .bind(running.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        running_phase,
+        (String::from("active"), Some(String::from("running"))),
+        "the fixture turn must be running before the forged receipt names it"
+    );
+    let running_error = insert_parked_approval_interrupt_rejection(
+        &pool,
+        Uuid::from_u128(running_seed + 0x30),
+        Uuid::from_u128(running_seed + 8),
+        running.turn.into_uuid(),
+    )
+    .await
+    .expect_err("a parked-approval rejection naming a running turn is corruption");
+    assert_eq!(
+        running_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23503".into())
+    );
+    assert!(
+        running_error
+            .to_string()
+            .contains("incomplete or cross-wired effect"),
+        "the correlation trigger must refuse the running turn: {running_error}"
+    );
+
+    let terminal_seed = 0x7f80;
+    let terminal = checkpoint_restart_model_call(&pool, terminal_seed, false).await?;
+    let selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(terminal_seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(terminal_seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one restart fixture target forms a catalog");
+    PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+        .fail_prepared_call(
+            terminal.session,
+            terminal.call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(terminal_seed + 14)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(terminal_seed + 15)),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let terminal_phase: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(terminal.session.into_uuid())
+    .bind(terminal.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        terminal_phase,
+        (String::from("terminal"), None),
+        "the fixture turn must be terminal before the forged receipt names it"
+    );
+    let terminal_error = insert_parked_approval_interrupt_rejection(
+        &pool,
+        Uuid::from_u128(terminal_seed + 0x30),
+        Uuid::from_u128(terminal_seed + 8),
+        terminal.turn.into_uuid(),
+    )
+    .await
+    .expect_err("a parked-approval rejection naming a terminal turn is corruption");
+    assert_eq!(
+        terminal_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23503".into())
+    );
+    assert!(
+        terminal_error
+            .to_string()
+            .contains("incomplete or cross-wired effect"),
+        "the correlation trigger must refuse the terminal turn: {terminal_error}"
+    );
+
+    let forged: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM submit_input_command
+          WHERE rejection_kind = 'interrupt_unavailable_while_awaiting_approval'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(forged, 0, "no forged parked-approval receipt may survive");
 
     pool.close().await;
     drop(container);

@@ -2494,6 +2494,134 @@ mod tests {
         );
     }
 
+    /// The smallest executor result that exceeds the domain's 1 MiB
+    /// `ToolResultText` admission bound; any larger result is admitted
+    /// identically.
+    const OVERSIZED_RESULT_BYTES: usize = 1024 * 1024 + 1;
+
+    /// Admits one executor-completed text through the shared admission seam and
+    /// returns the durable observation the hub would commit for it.
+    #[track_caller]
+    fn completed_text_admission(text: String) -> CorrelatedToolAttemptObservation {
+        let effect_class = ToolEffectClass::EffectFree;
+        let (batch, _) = prepared_batch("{}", effect_class);
+        let current = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current,
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let authorized = batch
+            .authorize_attempt(current.attempt())
+            .expect("prepared fixture authorizes exactly once");
+        let invocation = ToolExecutionInvocation::try_new(
+            batch.requests()[0].clone(),
+            definition("known", ToolPermissionDefault::Auto, effect_class),
+            &authorized,
+        )
+        .expect("fixture invocation matches durable authority");
+
+        admit_executor_evidence(
+            invocation.bind(ToolExecutorEvidence::CompletedText(text)),
+            effect_class,
+        )
+    }
+
+    /// S15 / INV-024: a result past the admission bound is replaced by the
+    /// typed `ResultTooLarge` error. The observation compared here is the whole
+    /// value handed to the commit boundary, so equality with a detail-less
+    /// typed failure is also the proof that no oversized byte survives into it.
+    #[test]
+    fn s15_inv024_oversized_result_is_replaced_by_result_too_large() {
+        let observation = completed_text_admission("r".repeat(OVERSIZED_RESULT_BYTES));
+
+        assert_eq!(
+            observation.observation(),
+            &ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ResultTooLarge, None),
+            }
+        );
+    }
+
+    /// S15 / INV-024: a result carrying U+0000 is admitted as a detail-less
+    /// `ExecutionFailed`. The tool-loop specification names a replacement kind
+    /// for the size bound only, so this test pins the implemented mapping for
+    /// the null-bearing arm rather than a specified one.
+    #[test]
+    fn s15_inv024_result_containing_null_is_replaced_by_execution_failed() {
+        let observation = completed_text_admission(String::from("head\0tail"));
+
+        assert_eq!(
+            observation.observation(),
+            &ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+            }
+        );
+    }
+
+    /// S15 / INV-024: the substitution is what the hub durably commits — the
+    /// ended attempt carries the typed `ResultTooLarge` failure, so oversized
+    /// executor bytes never become durable result evidence.
+    #[tokio::test]
+    async fn s15_inv024_committed_oversized_result_ends_the_attempt_known_failed() {
+        let effect_class = ToolEffectClass::EffectFree;
+        let (batch, _) = prepared_batch("{}", effect_class);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared: prepared.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let definition = definition("known", ToolPermissionDefault::Auto, effect_class);
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition.clone(),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let authorized = batch
+            .authorize_attempt(prepared.attempt())
+            .expect("prepared fixture authorizes exactly once");
+        let invocation =
+            ToolExecutionInvocation::try_new(batch.requests()[0].clone(), definition, &authorized)
+                .expect("fixture invocation matches durable authority");
+        let executor = FixedEvidenceExecutor {
+            evidence: Some(invocation.bind(ToolExecutorEvidence::CompletedText(
+                "r".repeat(OVERSIZED_RESULT_BYTES),
+            ))),
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("an oversized result is an ordinary typed failure, not an error");
+        let ToolExecutionServiceOutcome::ObservationCommitted(ended) = outcome else {
+            panic!("an admitted observation commits");
+        };
+
+        assert_eq!(
+            ended.end(),
+            &signalbox_domain::ToolAttemptEnd::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ResultTooLarge, None),
+            }
+        );
+        assert_eq!(*events.lock().expect("event lock"), ["authorize", "commit"]);
+    }
+
     /// INV-011 / INV-024: the definition selected by successful preflight is
     /// the exact same-incarnation declaration carried across authorization.
     #[tokio::test]

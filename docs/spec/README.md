@@ -5,7 +5,15 @@ INV-tagged tests as the enforcement of record) and
 [domain-spine.md](../domain-spine.md) (public API shapes), are the normative
 specification of Signalbox's implemented behavior; `AGENTS.md` defines the
 authority model. Each page names the code ref it was last verified against and
-is updated in the same pull request as any behavior change it describes. The
+is updated in the same pull request as any behavior change it describes. A
+verification reference names that pull request as `` PR #N (`branch-ref`) `` and
+may narrow the claim to the surface the pull request settled, either as a
+semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) `` — or
+as prose following the parenthetical; a scope tail is free-form prose that must
+render as more than whitespace and block-quote markers, may name code in
+backticks without the span's own parentheses closing the reference, and must
+stay inside the reference's own block, and a page may carry one reference per
+verified surface. `scripts/check_docs_consistency.py` enforces this form. The
 historical ADR corpus these pages distilled is retired: the
 [ADR mapping](#adr-mapping) below resolves every record number to its
 destination, and git history is the archive.
@@ -24,6 +32,7 @@ linked, never restated.
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
 - [Model-call execution](model-call-execution.md)
 - [Tool loop](tool-loop.md)
+- [Runner protocol and placement](runner-protocol.md)
 - [Review workflows](review-workflows.md)
 - [Persistence protocol](persistence-protocol.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)

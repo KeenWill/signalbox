@@ -1,6 +1,5 @@
 import Foundation
-@testable import SignalboxApp
-import SignalboxModels
+@testable import SignalboxNative
 import XCTest
 
 final class TemplatePresentationTests: XCTestCase {
