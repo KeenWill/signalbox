@@ -335,9 +335,21 @@ final class SessionDetailViewModel: ObservableObject {
         case cancelled
     }
 
+    private struct InitialHistoryLoad: Sendable {
+        let events: Task<[SignalboxStoredEvent], Error>
+        let artifacts: Task<[SignalboxArtifact], Error>
+    }
+
+    private enum InitialEventsApplication: Equatable, Sendable {
+        case pending
+        case applied
+    }
+
     private struct StreamHistorySynchronization {
         let streamID: UUID
         var bufferedMessages: [SignalboxServerMessage]
+        let initialHistoryLoad: InitialHistoryLoad?
+        var initialEventsApplication: InitialEventsApplication
         let completion: CheckedContinuation<HistorySynchronizationResult, Never>?
     }
 
@@ -423,10 +435,20 @@ final class SessionDetailViewModel: ObservableObject {
             errorMessage = "Configure a server connection in Settings."
             return
         }
+        let sessionID = session.id
+        let initialHistoryLoad = InitialHistoryLoad(
+            events: Task {
+                try await service.listEvents(sessionID: sessionID)
+            },
+            artifacts: Task {
+                try await service.listArtifacts(sessionID: sessionID)
+            }
+        )
         let result: HistorySynchronizationResult = await withCheckedContinuation { continuation in
             let started = startStream(
                 service: service,
                 synchronizeHistory: true,
+                initialHistoryLoad: initialHistoryLoad,
                 completion: continuation
             )
             if !started {
@@ -434,7 +456,13 @@ final class SessionDetailViewModel: ObservableObject {
             }
         }
         if result == .recoverableFailure, !Task.isCancelled {
-            await load()
+            do {
+                replaceEvents(with: try await initialHistoryLoad.events.value)
+                artifacts = try await initialHistoryLoad.artifacts.value
+                errorMessage = nil
+            } catch {
+                await load()
+            }
             connectStream(synchronizeHistory: true)
         }
     }
@@ -452,6 +480,7 @@ final class SessionDetailViewModel: ObservableObject {
         _ = startStream(
             service: service,
             synchronizeHistory: synchronizeHistory,
+            initialHistoryLoad: nil,
             completion: nil
         )
     }
@@ -460,6 +489,7 @@ final class SessionDetailViewModel: ObservableObject {
     private func startStream(
         service: any SignalboxClientProtocol,
         synchronizeHistory: Bool,
+        initialHistoryLoad: InitialHistoryLoad?,
         completion: CheckedContinuation<HistorySynchronizationResult, Never>?
     ) -> Bool {
         guard streamTask == nil else {
@@ -471,6 +501,8 @@ final class SessionDetailViewModel: ObservableObject {
             streamHistorySynchronization = StreamHistorySynchronization(
                 streamID: streamID,
                 bufferedMessages: [],
+                initialHistoryLoad: initialHistoryLoad,
+                initialEventsApplication: .pending,
                 completion: completion
             )
         }
@@ -527,6 +559,14 @@ final class SessionDetailViewModel: ObservableObject {
                     return
                 }
                 self?.expireHistorySynchronization(streamID: streamID)
+            }
+        }
+        if let initialHistoryLoad {
+            Task { [weak self] in
+                await self?.displayInitialHistory(
+                    from: initialHistoryLoad,
+                    streamID: streamID
+                )
             }
         }
         return true
@@ -658,18 +698,30 @@ final class SessionDetailViewModel: ObservableObject {
         streamHelloTimeoutTask?.cancel()
         streamHelloTimeoutTask = nil
         do {
-            async let events = service.listEvents(sessionID: sessionID)
-            async let artifacts = service.listArtifacts(sessionID: sessionID)
-            let synchronizedEvents = try await events
-            let synchronizedArtifacts = try await artifacts
+            let initialHistoryLoad = streamHistorySynchronization?.streamID == streamID
+                ? streamHistorySynchronization?.initialHistoryLoad
+                : nil
+            let synchronizedEvents: [SignalboxStoredEvent]
+            let synchronizedArtifacts: [SignalboxArtifact]
+            if let initialHistoryLoad {
+                synchronizedEvents = try await initialHistoryLoad.events.value
+                synchronizedArtifacts = try await initialHistoryLoad.artifacts.value
+            } else {
+                async let events = service.listEvents(sessionID: sessionID)
+                async let artifacts = service.listArtifacts(sessionID: sessionID)
+                synchronizedEvents = try await events
+                synchronizedArtifacts = try await artifacts
+            }
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
                 return
             }
-            replaceEvents(with: synchronizedEvents)
-            self.artifacts = synchronizedArtifacts
             let preservedStreamError = errorMessage == latestStreamDiagnostic
                 ? errorMessage
                 : nil
+            if synchronization.initialEventsApplication == .pending {
+                replaceEvents(with: synchronizedEvents)
+            }
+            artifacts = synchronizedArtifacts
             errorMessage = nil
             synchronization.bufferedMessages.forEach(apply)
             if errorMessage == nil {
@@ -690,6 +742,43 @@ final class SessionDetailViewModel: ObservableObject {
                 return
             }
             completion.resume(returning: .recoverableFailure)
+        }
+    }
+
+    private func displayInitialHistory(
+        from historyLoad: InitialHistoryLoad,
+        streamID: UUID
+    ) async {
+        do {
+            let events = try await historyLoad.events.value
+            guard var synchronization = streamHistorySynchronization,
+                  synchronization.streamID == streamID
+            else {
+                return
+            }
+            replaceEvents(with: events)
+            errorMessage = nil
+            synchronization.initialEventsApplication = .applied
+            streamHistorySynchronization = synchronization
+        } catch {
+            guard streamHistorySynchronization?.streamID == streamID else {
+                return
+            }
+            errorMessage = error.localizedDescription
+            return
+        }
+        do {
+            let artifacts = try await historyLoad.artifacts.value
+            guard streamHistorySynchronization?.streamID == streamID else {
+                return
+            }
+            self.artifacts = artifacts
+            errorMessage = nil
+        } catch {
+            guard streamHistorySynchronization?.streamID == streamID else {
+                return
+            }
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -729,6 +818,10 @@ final class SessionDetailViewModel: ObservableObject {
               let synchronization = takeHistorySynchronization(streamID: streamID)
         else {
             return
+        }
+        if result == .cancelled {
+            synchronization.initialHistoryLoad?.events.cancel()
+            synchronization.initialHistoryLoad?.artifacts.cancel()
         }
         synchronization.completion?.resume(returning: result)
     }

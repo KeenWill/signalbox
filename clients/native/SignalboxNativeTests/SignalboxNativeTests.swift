@@ -258,6 +258,41 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
+    func testLoadAndConnectDisplaysHistoryBeforeStreamHello() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let historyRequested = expectation(description: "initial history requested")
+        let service = HistoryReuseStreamSignalboxService(
+            fixture: fixture,
+            onListEventsInvocation: {
+                historyRequested.fulfill()
+            }
+        )
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await fulfillment(
+            of: [historyRequested],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+        let historyDisplayed = observeNextViewModelChange(on: viewModel)
+        service.resumeHistoryEvents()
+        await fulfillment(
+            of: [historyDisplayed.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertEqual(viewModel.events, fixture.historyEvents)
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedListEventsCallCount
+        )
+        withExtendedLifetime(historyDisplayed.cancellable) {}
+        viewModel.disconnectStream()
+        await loadTask.value
+    }
+
     func testStreamHelloReusesLoadedHistoryAndReplaysConcurrentDeletion() async throws {
         let fixture = try await streamHelloHistoryReuseFixture()
         let service = HistoryReuseStreamSignalboxService(fixture: fixture)
@@ -365,7 +400,7 @@ final class SignalboxNativeTests: XCTestCase {
         )
         XCTAssertEqual(
             service.listEventsCallCount,
-            StreamHelloHistoryReuseFixture.noListEventsCallCount
+            StreamHelloHistoryReuseFixture.expectedCancelledInitialListEventsCallCount
         )
     }
 
@@ -556,6 +591,37 @@ final class SignalboxNativeTests: XCTestCase {
         XCTAssertEqual(viewModel.events, fixture.helloEvents)
         withExtendedLifetime(synchronizedStatus.cancellable) {}
         viewModel.disconnectStream()
+    }
+
+    func testMockStreamHandshakeAppliesSubsequentAssistantUpdate() async throws {
+        let service = MockSignalboxService()
+        let sessions = try await service.listSessions(archived: false)
+        let activeSessionID = SignalboxSessionID(
+            rawValue: MockSignalboxFixtures.activeSessionID
+        )
+        let session = try XCTUnwrap(
+            sessions.first { $0.id == activeSessionID }
+        )
+        let expectedEvent = try requireUpdatedEvent(
+            SignalboxJSONCoding.decoder().decode(
+                SignalboxServerMessage.self,
+                from: Data(
+                    MockSignalboxFixtures.completedAssistantStreamMessage.utf8
+                )
+            )
+        )
+        let viewModel = SessionDetailViewModel(session: session) { service }
+
+        await viewModel.loadAndConnect()
+        let streamStopped = observeCurrentStreamStopped(on: viewModel)
+        await fulfillment(
+            of: [streamStopped.expectation],
+            timeout: MockStreamFixture.completionObservationTimeout
+        )
+
+        XCTAssertEqual(viewModel.events.last, expectedEvent)
+        XCTAssertFalse(viewModel.isStreaming)
+        withExtendedLifetime(streamStopped.cancellable) {}
     }
 
     func testHistorySynchronizationPreservesBufferedDiagnostic() async throws {
@@ -1092,6 +1158,18 @@ final class SignalboxNativeTests: XCTestCase {
         return (kind, diagnostic)
     }
 
+    private func requireUpdatedEvent(
+        _ message: SignalboxServerMessage
+    ) throws -> SignalboxStoredEvent {
+        guard case .eventUpdated(let mutation) = message else {
+            throw SignalboxNativeTestExpectationError("Expected an updated event")
+        }
+        return SignalboxStoredEvent(
+            eventID: mutation.eventID,
+            event: mutation.event
+        )
+    }
+
     private func requireStringWebSocketMessage(
         _ message: SignalboxWebSocketMessage
     ) throws -> String {
@@ -1139,6 +1217,16 @@ final class SignalboxNativeTests: XCTestCase {
         let expectation = expectation(description: "unknown frame recorded")
         let cancellable = viewModel.$unhandledFrameKinds
             .filter { $0[kind] == 1 }
+            .first()
+            .sink { _ in expectation.fulfill() }
+        return PublishedObservation(expectation: expectation, cancellable: cancellable)
+    }
+
+    private func observeNextViewModelChange(
+        on viewModel: SessionDetailViewModel
+    ) -> PublishedObservation {
+        let expectation = expectation(description: "view model changed")
+        let cancellable = viewModel.objectWillChange
             .first()
             .sink { _ in expectation.fulfill() }
         return PublishedObservation(expectation: expectation, cancellable: cancellable)
@@ -1207,6 +1295,11 @@ private struct LongSequenceComparison {
     let incrementalMetrics: SignalboxEventNormalizationMetrics
 }
 
+private enum MockStreamFixture {
+    /// Five short-cadence fixture frames should complete comfortably in this bound.
+    static let completionObservationTimeout: TimeInterval = 2
+}
+
 private struct StreamHelloHistoryReuseFixture {
     /// The hello contains the changed invocation and its new response, while
     /// the preceding records exist only in the paginated history.
@@ -1224,8 +1317,8 @@ private struct StreamHelloHistoryReuseFixture {
     /// Initial load, failed reconnect synchronization, then successful retry.
     static let expectedRequestFailureListEventsCallCount = 3
 
-    /// An explicit disconnect must not fall back to a REST history request.
-    static let noListEventsCallCount = 0
+    /// An explicit disconnect retains the initial request without starting a fallback.
+    static let expectedCancelledInitialListEventsCallCount = 1
 
     /// The recovery fixture fails only its first history request.
     static let initialHistoryFailureCount = 1
@@ -1445,6 +1538,7 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
 
     private let fixture: StreamHelloHistoryReuseFixture
     private let historyEvents: [SignalboxStoredEvent]
+    private let onListEventsInvocation: (() -> Void)?
     private let lock = NSLock()
     private var lockedListEventsCallCount = 0
     private var lockedStreamInvocationCount = 0
@@ -1459,12 +1553,14 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         fixture: StreamHelloHistoryReuseFixture,
         historyEvents: [SignalboxStoredEvent]? = nil,
         historyFailureCount: Int = 0,
-        historyFailureCallNumbers: [Int] = []
+        historyFailureCallNumbers: [Int] = [],
+        onListEventsInvocation: (() -> Void)? = nil
     ) {
         self.fixture = fixture
         self.historyEvents = historyEvents ?? fixture.historyEvents
         self.lockedHistoryFailuresRemaining = historyFailureCount
         self.lockedHistoryFailureCallNumbers = Set(historyFailureCallNumbers)
+        self.onListEventsInvocation = onListEventsInvocation
     }
 
     var listEventsCallCount: Int {
@@ -1620,6 +1716,7 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
             }
             return false
         }
+        onListEventsInvocation?()
         if shouldFail {
             throw Self.historySynchronizationFailure
         }
