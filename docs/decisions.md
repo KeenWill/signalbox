@@ -10,6 +10,44 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Scoped verification references on specification pages
+
+**Context.** Every `docs/spec/` page names the pull request its claims were last
+verified against, and pages narrow that claim to the surface the pull request
+actually settled whenever one reference no longer covers the whole page —
+[configuration-and-credentials](spec/configuration-and-credentials.md) and
+[persistence-protocol](spec/persistence-protocol.md) both carry per-surface
+references today. Those narrowings were written as prose outside the
+parenthetical because `scripts/check_docs_consistency.py` recognized nothing but
+a bare `` PR #N (`branch-ref`) `` token. The practice grew by imitation, and no
+documentation statement owned the reference format at all: the checker's
+docstring was the only place it appeared.
+
+**Decision.** [The specification index](spec/README.md) owns the format. A
+verification reference is `` PR #N (`branch-ref`) ``, optionally narrowed by a
+semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) ``. The
+scope is free-form prose that must render as more than whitespace and
+block-quote markers (an empty, whitespace-only, or marker-only tail is rejected)
+and must stay inside the reference's own block, ending at a blank line or a
+sibling list item in either raw or block-quoted form. A scope may name code in
+backticks, and the parentheses inside such a span do not close the reference.
+`scripts/check_docs_consistency.py` enforces the format and captures nothing
+from the tail, so no consumer can come to depend on its wording.
+
+**Rejected alternatives.** Admitting only the scope-outside-the-parentheses form
+the pages use today: it separates the narrowing from the reference it narrows
+and reads as page prose rather than as part of the reference. Both forms stay
+valid and no existing page changes; the choice is which shapes an author may
+write. Validating the tail's content — requiring a path, a symbol, or a section
+link: it would freeze a prose vocabulary the pages have not settled and turn
+wording edits into checker changes. Leaving the convention to the checker alone:
+a repo-wide documentation format stated only in a script's docstring has no
+owner a page author would read.
+
+**Affects.** [The specification index](spec/README.md),
+`scripts/check_docs_consistency.py`, and the verification reference on every
+`docs/spec/` page.
+
 ## 2026-07-25 — Keep runner credentials local and daemon policy authoritative
 
 **Context.** Sessions need to select machine-local credentials without sending
@@ -91,8 +129,10 @@ registration, and grant jointly authorize the lease, and effect is derived from
 the validated declaration. Loss before claim may advance every class while
 retaining the never-executed attempt. Loss after claim produces re-lease
 authority only for pure or idempotent work and requires a fresh physical attempt
-identity; side-effecting loss produces exact crash-classification authority and
-cannot produce re-lease authority. Undeclared advertised tools are rejected; an
+identity; the lease-lineage generation advances while that new physical
+attempt's own dispatch generation starts at its required first value.
+Side-effecting loss produces exact crash-classification authority and cannot
+produce re-lease authority. Undeclared advertised tools are rejected; an
 untrusted pre-validation boundary classifies an absent effect declaration as
 side-effecting.
 
@@ -100,7 +140,10 @@ The later runner transport uses one runner-initiated held outbound streaming
 connection and runners accept no inbound connection. The channel carries offers,
 claims, and results but is never their authority: registration and lease
 aggregates are independent of connection state, and later persistence must
-reconstitute them before reconnect synchronization.
+reconstitute them before reconnect synchronization. The later transport must
+durably commit and acknowledge an exact claim before that acknowledgement
+becomes the runner's execution capability; absence of a claim frame alone never
+proves that an offered operation did not execute.
 
 **Rejected alternatives.** A default effect class hides missing policy. Treating
 all state-changing work as ambiguous throws away idempotency. Re-leasing side
@@ -110,7 +153,7 @@ a call to widen the registry. Treating the stream as truth loses claims on
 reconnect.
 
 **Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
-INV-004, INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
+INV-004, INV-021, INV-025, INV-026, INV-043, S16 and S31, the
 [tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
 specifications, and later store and wire stacks.
 

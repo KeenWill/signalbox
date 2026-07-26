@@ -11,7 +11,13 @@ The check is deterministic and offline. It verifies:
 3. every H2 in ``docs/decisions.md`` is a valid dated entry and entry dates are
    non-increasing, and
 4. every subsystem page under ``docs/spec/`` has an offline verification
-   reference whose PR token uses ``PR #N (`branch-ref`)``.
+   reference whose PR token uses ``PR #N (`branch-ref`)``, optionally narrowed
+   to the surface that PR settled by a semicolon tail: ``PR #N (`branch-ref`;
+   <scope>)``. The scope tail is free-form prose: its content is not validated,
+   but it must render as more than whitespace and quote markers, may name code
+   in backticks without the span's parentheses closing the reference, and may
+   not leave the reference's own block. ``docs/spec/README.md`` states this
+   format; this check enforces it.
 
 External links, semantic freshness of verification references, and reverse
 discovery of every INV-tagged test are deliberately outside this check. Run
@@ -54,7 +60,8 @@ AUTOLINK = re.compile(
 HEADING_CONTAINER = re.compile(
     r"^ {0,3}(?:>[ \t]?|(?:[-+*]|\d+[.)])[ \t]+)"
 )
-BLOCK_QUOTE_CONTAINER = re.compile(r"^ {0,3}>[ \t]?")
+BLOCK_QUOTE_PREFIX = r" {0,3}>[ \t]?"
+BLOCK_QUOTE_CONTAINER = re.compile(rf"^{BLOCK_QUOTE_PREFIX}")
 RAW_HTML_LITERAL_OPEN = re.compile(
     r"^ {0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t\r\n>]|$)",
     re.IGNORECASE,
@@ -112,15 +119,66 @@ REFERENCE_DEFINITION = re.compile(
 LIST_ITEM = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
 FENCE_LIST_CONTAINER = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
 DECISION_HEADING = re.compile(r"^(\d{4}-\d{2}-\d{2}) — (\S.*)$")
+# Block boundaries also occur in block-quoted form: inside a quote a blank line
+# is written ``>`` and a sibling list item ``> -``, at any nesting depth. Both
+# boundaries therefore admit the same repeated quote prefix the container
+# machinery strips elsewhere, so a block break is recognized whether or not the
+# block sits in a quote. With zero quote prefixes each pattern is exactly its
+# unquoted form.
+QUOTED_LINE_PREFIX = rf"(?:{BLOCK_QUOTE_PREFIX})*"
+PARAGRAPH_BOUNDARY = rf"\n{QUOTED_LINE_PREFIX}[ \t]*\n"
+LIST_ITEM_BOUNDARY = rf"\n{QUOTED_LINE_PREFIX}[ \t]*(?:[-+*]|\d+[.)])[ \t]"
+# A verification parenthetical may narrow its claim to the surface the PR
+# actually settled, after a semicolon: ``PR #N (`branch-ref`; <scope>)``. The
+# branch ref stays mandatory and is validated exactly as before; the scope tail
+# is free-form prose and is deliberately unvalidated beyond being non-empty as
+# rendered. It may wrap across lines but may not leave its own block, so it
+# stops at a blank line or a sibling list item, quoted or not — and at the
+# parenthetical's own closer.
+SCOPED_DETAIL_BOUNDARY = rf"{PARAGRAPH_BOUNDARY}|{LIST_ITEM_BOUNDARY}"
+# Scopes name code, and a code span may hold parentheses, so the tail reads a
+# complete code span as one unit before falling back to a single non-closer
+# character: the ``)`` in `` `handle()` `` neither closes the reference early
+# nor rescues an unterminated one by standing in for the missing closer.
+# Completeness is the rule ``inline_code_ranges`` applies — a backtick run
+# closed by a run of the same length, which the surrounding ``(?<!`)`` and
+# ``(?!`)`` guards pin — and the two branches are disjoint, since only the
+# code-span branch may begin with a backtick. An unpaired backtick therefore
+# ends the tail and the reference fails to parse: accepted, because a scope
+# whose span never closes bounds the reference no more clearly for a reader
+# than for the checker.
+SCOPED_DETAIL_CODE_SPAN = (
+    r"(?<!`)(?P<scope_code_delimiter>`+)(?!`)"
+    rf"(?:(?!{SCOPED_DETAIL_BOUNDARY})"
+    r"(?!(?<!`)(?P=scope_code_delimiter)(?!`))[\s\S])*?"
+    r"(?<!`)(?P=scope_code_delimiter)(?!`)"
+)
+SCOPED_DETAIL_UNIT = (
+    rf"(?:(?!{SCOPED_DETAIL_BOUNDARY})(?:{SCOPED_DETAIL_CODE_SPAN}|[^`)]))"
+)
+# Non-emptiness is measured on what the tail renders, not on what it spells: a
+# tail wrapped inside a block quote repeats a ``>`` marker on every
+# continuation line, so counting any non-whitespace character would let a scope
+# that renders as nothing but its own container scaffolding pass. The lookahead
+# therefore skips whitespace and quote markers while hunting for the first
+# content character, and — the closer being neither skipped nor content — never
+# hunts past the closer, so ``(`branch`;)``, a whitespace-only tail, and a
+# quoted tail whose continuation line carries only ``> )`` are all rejected.
+SCOPED_DETAIL_SCAFFOLD = r"[\s>]*"
+SCOPED_DETAIL_CONTENT = r"[^\s>)]"
+SCOPED_DETAIL_TAIL = (
+    rf";(?={SCOPED_DETAIL_SCAFFOLD}{SCOPED_DETAIL_CONTENT})"
+    rf"{SCOPED_DETAIL_UNIT}*"
+)
 PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
     r"`([^\s`]+)`"
+    rf"(?:{SCOPED_DETAIL_TAIL})?"
     r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
-LIST_ITEM_BOUNDARY = r"\n[ \t]*(?:[-+*]|\d+[.)])[ \t]"
 CLAUSE_BOUNDARY = (
-    r"\n[ \t]*\n"
+    rf"{PARAGRAPH_BOUNDARY}"
     rf"|{LIST_ITEM_BOUNDARY}"
     rf"|[.!?][ \t\r\n]+{INLINE_MARKUP_OPENERS}(?-i:[A-Z])"
     r"|;"
@@ -1567,8 +1625,10 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     line_number(text, candidate_start),
                     "spec-verification",
                     "verification reference must use "
-                    "`PR #N (`branch-ref`)` with a positive decimal PR "
-                    "number and a non-whitespace branch ref",
+                    "`PR #N (`branch-ref`)`, optionally with a `;` scope "
+                    "tail that renders as more than whitespace and quote "
+                    "markers and closes its own code spans, and a positive "
+                    "decimal PR number with a non-whitespace branch ref",
                 )
             )
 
