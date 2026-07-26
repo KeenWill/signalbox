@@ -354,6 +354,37 @@ public final class SignalboxTimelineCollection: RandomAccessCollection {
     }
 }
 
+public enum SignalboxEventNormalizerError: Error, Equatable, Sendable, LocalizedError {
+    /// A whole-history snapshot named the same event more than once.
+    ///
+    /// Event IDs identify a record, so a single snapshot cannot legitimately
+    /// carry one twice; the client refuses such a snapshot rather than pick a
+    /// winner it cannot justify.
+    case duplicateEventIDs([SignalboxEventID])
+
+    public var errorDescription: String? {
+        switch self {
+        case .duplicateEventIDs(let eventIDs):
+            let list = eventIDs.map { "\($0.rawValue)" }.joined(separator: ", ")
+            return "The session history repeated event \(list) and could not be loaded."
+        }
+    }
+}
+
+/// Maintains a normalized timeline across incremental event mutations.
+///
+/// The stored records, the event-ID index, and the timeline are three views of
+/// one history, and every mutation keeps them in agreement:
+///
+/// - A mutation for an event ID the normalizer already holds is an *update*:
+///   the later record replaces the stored one and its timeline item is
+///   renormalized in place. Stream replay depends on this — a frame buffered
+///   behind a history resynchronization may restate an event the authoritative
+///   snapshot already delivered, and the later frame is the correction.
+/// - A whole-history snapshot that names the same event ID twice is corrupt
+///   input, not a correction: `replaceAll(with:)` rejects it and leaves the
+///   previously loaded history untouched, so the caller can fail the refresh
+///   and recover instead of rendering a history no structure agrees on.
 public final class SignalboxIncrementalEventNormalizer {
     public private(set) var records: [SignalboxStoredEvent] = []
     public let timeline = SignalboxTimelineCollection()
@@ -367,18 +398,28 @@ public final class SignalboxIncrementalEventNormalizer {
         Array(timeline)
     }
 
-    public init(records: [SignalboxStoredEvent] = []) {
-        replaceAll(with: records)
+    public init() {}
+
+    public init(records: [SignalboxStoredEvent]) throws {
+        try replaceAll(with: records)
     }
 
-    public func replaceAll(with records: [SignalboxStoredEvent]) {
-        self.records = records.sorted { $0.eventID < $1.eventID }
+    /// Replaces the whole history with an authoritative snapshot.
+    ///
+    /// - Throws: ``SignalboxEventNormalizerError/duplicateEventIDs(_:)`` when
+    ///   the snapshot names an event ID more than once. Nothing is mutated in
+    ///   that case, so the previously loaded history stays renderable while the
+    ///   caller fails the refresh.
+    public func replaceAll(with records: [SignalboxStoredEvent]) throws {
+        let sortedRecords = records.sorted { $0.eventID < $1.eventID }
+        // Index before storing anything: a snapshot cannot be applied halfway,
+        // and only the index can tell a duplicate ID from a fresh one.
+        let recordsByID = try Self.eventsByID(in: sortedRecords)
+
+        self.records = sortedRecords
+        self.recordsByID = recordsByID
         timeline.items = []
         metrics = SignalboxEventNormalizationMetrics()
-        recordsByID = Dictionary(
-            self.records.map { ($0.eventID, $0.event) },
-            uniquingKeysWith: { first, _ in first }
-        )
         invocationEventIDsByFunctionCallEventID = [:]
         invocationEventIDsByFunctionResponseEventID = [:]
 
@@ -390,6 +431,33 @@ public final class SignalboxIncrementalEventNormalizer {
         }
     }
 
+    /// Indexes a snapshot sorted by event ID, rejecting any repeated ID.
+    private static func eventsByID(
+        in sortedRecords: [SignalboxStoredEvent]
+    ) throws -> [SignalboxEventID: SignalboxConversationEvent] {
+        var eventsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
+        eventsByID.reserveCapacity(sortedRecords.count)
+        var duplicateEventIDs: [SignalboxEventID] = []
+        for record in sortedRecords {
+            guard eventsByID.updateValue(record.event, forKey: record.eventID) != nil else {
+                continue
+            }
+            // The sort groups repeats, so reporting each ID once needs no set.
+            if duplicateEventIDs.last != record.eventID {
+                duplicateEventIDs.append(record.eventID)
+            }
+        }
+        guard duplicateEventIDs.isEmpty else {
+            throw SignalboxEventNormalizerError.duplicateEventIDs(duplicateEventIDs)
+        }
+        return eventsByID
+    }
+
+    /// Stores `record`, replacing any record already held under its event ID.
+    ///
+    /// A repeated event ID is a correction, not a second event: the stored
+    /// record, the event-ID index, and the timeline item are all updated in
+    /// place, so no structure can retain a stale copy.
     public func upsert(_ record: SignalboxStoredEvent) {
         let eventID = record.eventID
         let oldEvent = recordsByID[eventID]
