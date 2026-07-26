@@ -795,27 +795,27 @@ sends exactly one request and prints exactly one page. `--title` is the exact
 case-sensitive substring query, each `--tag` adds one required tag to the exact
 AND-filter, `--include-archived` selects the archived-inclusive view, `--limit`
 is the page size and defaults to 50, and `--after` is the exclusive
-session-identity cursor. Empty filter text, a repeated `--tag` value, a limit
-outside one through 100, more than 256 required tags, a tag beyond 1,024 UTF-8
-bytes, and a title query plus tags beyond 262,144 aggregate UTF-8 bytes are all
-rejected as usage errors before socket I/O, so every metadata-filter bound this
-page states reaches the user as a named diagnostic rather than a generic local
-encode failure. Each result is one line carrying the summary's session identity,
-archive state, defaults version, model selection, dangerous-tool posture,
-last-writer actor and timestamp, sorted comma-joined tags, and title. An
-unwritten metadata snapshot prints `last_writer=none`,
-`updated_at_unix_micros=none`, and empty tag and title values, which a present
-tag or title never is. A tag may itself contain the space that ends its field,
-the comma that separates it from a sibling, or the backslash that introduces an
-escape, so all three are escaped inside a tag exactly as a control code point
-is; every backslash in the tag field therefore opens an escape the client wrote,
-and the field decodes back to the exact tag set. The title is the line's last
-field, keeps its spaces, and is rendered to be read rather than decoded. When
-the page end names a continuation cursor, the client prints
-`next_after_session_id=<uuid>` to standard error after the results; a page is
-therefore never silently truncated, and that value is the next invocation's
-`--after`. The client also validates that a page never exceeds its requested
-limit.
+session-identity cursor. Empty filter text, filter text carrying U+0000, a
+repeated `--tag` value, a limit outside one through 100, more than 256 required
+tags, a tag beyond 1,024 UTF-8 bytes, and a title query plus tags beyond 262,144
+aggregate UTF-8 bytes are all rejected as usage errors before socket I/O, so
+every metadata-filter bound this page states reaches the user as a named
+diagnostic rather than a generic local encode failure. Each result is one line
+carrying the summary's session identity, archive state, defaults version, model
+selection, dangerous-tool posture, last-writer actor and timestamp, sorted
+comma-joined tags, and title. An unwritten metadata snapshot prints
+`last_writer=none`, `updated_at_unix_micros=none`, and empty tag and title
+values, which a present tag or title never is. A tag may itself contain the
+space that ends its field, the comma that separates it from a sibling, or the
+backslash that introduces an escape, so all three are escaped inside a tag
+exactly as a control code point is; every backslash in the tag field therefore
+opens an escape the client wrote, and the field decodes back to the exact tag
+set. The title is the line's last field, keeps its spaces, and is rendered to be
+read rather than decoded. When the page end names a continuation cursor, the
+client prints `next_after_session_id=<uuid>` to standard error after the
+results; a page is therefore never silently truncated, and that value is the
+next invocation's `--after`. The client also validates that a page never exceeds
+its requested limit.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input

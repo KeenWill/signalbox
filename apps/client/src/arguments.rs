@@ -426,6 +426,9 @@ fn metadata_filter_text(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err("metadata filter text must not be empty".to_owned());
     }
+    if value.contains('\0') {
+        return Err("metadata filter text must not contain U+0000".to_owned());
+    }
     Ok(value.to_owned())
 }
 
@@ -617,6 +620,12 @@ mod tests {
     fn search_rejects_empty_filter_text() {
         assert!(parse(["search", "--title", ""].map(Into::into)).is_err());
         assert!(parse(["search", "--tag", ""].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn nul_in_search_filter_text_is_rejected() {
+        assert!(parse(["search", "--title", "before\0after"].map(Into::into)).is_err());
+        assert!(parse(["search", "--tag", "before\0after"].map(Into::into)).is_err());
     }
 
     #[test]
