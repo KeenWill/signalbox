@@ -17,6 +17,9 @@ use signalbox_domain::{
 /// Production implementations return distinct UUIDv7-backed values. UUID
 /// timestamps are not queue order, eligibility, or lifecycle authority.
 pub trait StartEligibleTurnIdGenerator {
+    /// Generates the optional model-identity boundary semantic-entry identity.
+    fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId;
+
     /// Generates the origin semantic-entry identity.
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId;
 
@@ -32,6 +35,10 @@ pub trait StartEligibleTurnIdGenerator {
 pub struct UuidV7StartEligibleTurnIdGenerator;
 
 impl StartEligibleTurnIdGenerator for UuidV7StartEligibleTurnIdGenerator {
+    fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
+    }
+
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
         SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
     }
@@ -109,6 +116,7 @@ where
         session: SessionId,
     ) -> Result<StartEligibleTurnOutcome, Transaction::Error> {
         let identities = AcceptedInputTurnActivationIdentities::new(
+            self.ids.next_model_identity_entry_id(),
             self.ids.next_origin_entry_id(),
             self.ids.next_starting_frontier_id(),
             self.ids.next_initial_attempt_id(),
@@ -131,6 +139,7 @@ where
         Transaction::Error: Send + 'static,
     {
         let identities = AcceptedInputTurnActivationIdentities::new(
+            self.ids.next_model_identity_entry_id(),
             self.ids.next_origin_entry_id(),
             self.ids.next_starting_frontier_id(),
             self.ids.next_initial_attempt_id(),
@@ -261,6 +270,7 @@ mod tests {
         .reconstitute()
         .expect("the test queued projection is complete")
         .prepare_earliest_queued_activation(AcceptedInputTurnActivationIdentities::new(
+            origin_entry_id(8),
             origin_entry_id(5),
             frontier_id(6),
             attempt_id(7),
@@ -285,6 +295,7 @@ mod tests {
         origin_entries: VecDeque<SemanticTranscriptEntryId>,
         frontiers: VecDeque<ContextFrontierId>,
         attempts: VecDeque<TurnAttemptId>,
+        model_identity_entry_calls: usize,
         origin_entry_calls: usize,
         frontier_calls: usize,
         attempt_calls: usize,
@@ -300,6 +311,7 @@ mod tests {
                 origin_entries: origin_entries.into_iter().collect(),
                 frontiers: frontiers.into_iter().collect(),
                 attempts: attempts.into_iter().collect(),
+                model_identity_entry_calls: 0,
                 origin_entry_calls: 0,
                 frontier_calls: 0,
                 attempt_calls: 0,
@@ -314,6 +326,11 @@ mod tests {
     }
 
     impl StartEligibleTurnIdGenerator for FakeIds {
+        fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
+            self.model_identity_entry_calls += 1;
+            origin_entry_id(u128::MAX)
+        }
+
         fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
             self.origin_entry_calls += 1;
             self.origin_entries
@@ -389,23 +406,40 @@ mod tests {
     #[test]
     fn inv001_inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7StartEligibleTurnIdGenerator;
+        let first_model_identity = generator.next_model_identity_entry_id();
         let first_origin = generator.next_origin_entry_id();
         let first_frontier = generator.next_starting_frontier_id();
         let first_attempt = generator.next_initial_attempt_id();
+        let second_model_identity = generator.next_model_identity_entry_id();
         let second_origin = generator.next_origin_entry_id();
         let second_frontier = generator.next_starting_frontier_id();
         let second_attempt = generator.next_initial_attempt_id();
 
+        let first_model_identity_uuid = first_model_identity.into_uuid();
         let first_origin_uuid = first_origin.into_uuid();
         let first_frontier_uuid = first_frontier.into_uuid();
         let first_attempt_uuid = first_attempt.into_uuid();
+        let second_model_identity_uuid = second_model_identity.into_uuid();
         let second_origin_uuid = second_origin.into_uuid();
         let second_frontier_uuid = second_frontier.into_uuid();
         let second_attempt_uuid = second_attempt.into_uuid();
 
+        assert_ne!(first_model_identity, second_model_identity);
         assert_ne!(first_origin, second_origin);
         assert_ne!(first_frontier, second_frontier);
         assert_ne!(first_attempt, second_attempt);
+        assert_ne!(first_model_identity_uuid, first_origin_uuid);
+        assert_ne!(first_model_identity_uuid, first_frontier_uuid);
+        assert_ne!(first_model_identity_uuid, first_attempt_uuid);
+        assert_ne!(first_model_identity_uuid, second_origin_uuid);
+        assert_ne!(first_model_identity_uuid, second_frontier_uuid);
+        assert_ne!(first_model_identity_uuid, second_attempt_uuid);
+        assert_ne!(second_model_identity_uuid, first_origin_uuid);
+        assert_ne!(second_model_identity_uuid, first_frontier_uuid);
+        assert_ne!(second_model_identity_uuid, first_attempt_uuid);
+        assert_ne!(second_model_identity_uuid, second_origin_uuid);
+        assert_ne!(second_model_identity_uuid, second_frontier_uuid);
+        assert_ne!(second_model_identity_uuid, second_attempt_uuid);
         assert_ne!(first_origin_uuid, first_frontier_uuid);
         assert_ne!(first_origin_uuid, first_attempt_uuid);
         assert_ne!(first_origin_uuid, second_frontier_uuid);
@@ -418,9 +452,11 @@ mod tests {
         assert_ne!(second_origin_uuid, second_frontier_uuid);
         assert_ne!(second_origin_uuid, second_attempt_uuid);
         assert_ne!(second_frontier_uuid, second_attempt_uuid);
+        assert_uuid_v7_candidate(first_model_identity_uuid);
         assert_uuid_v7_candidate(first_origin_uuid);
         assert_uuid_v7_candidate(first_frontier_uuid);
         assert_uuid_v7_candidate(first_attempt_uuid);
+        assert_uuid_v7_candidate(second_model_identity_uuid);
         assert_uuid_v7_candidate(second_origin_uuid);
         assert_uuid_v7_candidate(second_frontier_uuid);
         assert_uuid_v7_candidate(second_attempt_uuid);
@@ -432,6 +468,7 @@ mod tests {
     fn s01_inv002_inv009_forwards_one_exact_session_and_identity_set() {
         let session = session_id(1);
         let identities = AcceptedInputTurnActivationIdentities::new(
+            origin_entry_id(u128::MAX),
             origin_entry_id(2),
             frontier_id(3),
             attempt_id(4),
@@ -451,6 +488,7 @@ mod tests {
             expected
         );
         let (ids, transaction) = service.into_parts();
+        assert_eq!(ids.model_identity_entry_calls, 1);
         assert_eq!(ids.origin_entry_calls, 1);
         assert_eq!(ids.frontier_calls, 1);
         assert_eq!(ids.attempt_calls, 1);
