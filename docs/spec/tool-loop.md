@@ -71,7 +71,16 @@ implemented decision sources are:
 have no storage encoding or producer. In particular, an automated source never
 constructs `OwnerCommand` or claims owner agency (INV-020).
 
-Policy resolution uses this accepted precedence:
+The implemented precedence below governs daemon-local execution and sessions
+without a credential profile. Runner dispatch under a selected credential
+profile first resolves the pair posture specified by
+[runner protocol and placement](runner-protocol.md#credential-profiles-and-approval):
+after the frozen dangerous blanket, pair-level `Automatic` authorizes the exact
+pair and `SessionPolicy` or an absent pair requires confirmation. The later
+application stack must add a distinct durable credential-policy decision source;
+this foundation does not encode one into the current persistence vocabulary.
+
+Daemon-local policy resolution uses this accepted precedence:
 
 1. the frozen session posture `DangerousToolAutoApproval::ApproveAll`;
 2. a future exact per-tool session override;
@@ -130,22 +139,31 @@ remaining tool work and the interrupt applies.
 
 ## Registry, placement, and effect metadata
 
-The application `ToolCatalog` port supplies immutable `ToolDefinition` values:
-name, model-facing description, argument JSON Schema, permission default (`Auto`
-or `Confirm`), one required effect class, and one nonempty set of admissible
-loci. The effect classes are `Pure`, `Idempotent`, and `SideEffecting`, with no
-default. Pure implies idempotent; idempotent work may change state but is safe
-to repeat. Admissible loci are `DaemonOnly`, `RunnerOnly { selector }`, or
-`DaemonOrRunner { selector }`. The latter prefers the session's attached runner
-when it satisfies the selector and currently advertises the tool, falling back
-to daemon-local execution. Declarations are static per tool; a model or runner
-cannot select another locus per call. The typed placement and runner-dispatch
-law is owned by [runner protocol and placement](runner-protocol.md).
+The application `ToolCatalog` port supplies immutable daemon-local
+`ToolDefinition` values: name, model-facing description, argument JSON Schema,
+permission default (`Auto` or `Confirm`), and the stored two-class crash
+classification used by the implemented local attempt machinery.
+
+The runner foundation adds one immutable daemon-owned `RunnerToolDeclaration`
+per runner-advertisable name. It carries the required three-way
+`RunnerToolEffectClass` (`Pure`, `Idempotent`, or `SideEffecting`) and one
+nonempty `ToolAdmissibleLoci` value (`DaemonOnly`, `RunnerOnly { selector }`, or
+`DaemonOrRunner { selector }`). Pure implies idempotent; idempotent work may
+change state but is safe to repeat. The combined locus prefers the session's
+attached eligible runner, falling back to daemon-local execution. Declarations
+are static per tool; a model or runner cannot select another locus per call. The
+typed placement and runner-dispatch law is owned by
+[runner protocol and placement](runner-protocol.md).
 
 The current daemon-local application catalog remains one process-lifetime
-immutable compiled value. Its existing `EffectFree` declaration is the `Pure`
-class, and its existing `ExternalEffect` declaration is the `SideEffecting`
-class; no current tool declares `Idempotent` or runner admissibility. Catalog
+immutable compiled value. Its existing `EffectFree` declaration maps to
+`RunnerToolEffectClass::Pure`, and `ExternalEffect` maps to
+`RunnerToolEffectClass::SideEffecting`; no current local declaration can project
+`Idempotent`. Before a shared name can use a daemon locus, the later application
+adapter must validate exact permission equality and this effect mapping against
+the authoritative runner declaration. A mismatch is unavailable, never a choice
+between two policies. Consolidating the typed representations requires the later
+application and persistence stack and no migration is introduced here. Catalog
 lookup and iteration are ports rather than a static global, but runtime
 rebinding and deployment compatibility for outstanding requests are not
 implemented; they require the durable definition-revision decision recorded
@@ -170,12 +188,12 @@ rewrite its name or arguments.
 
 Effect class controls crash classification, not permission identity. In the
 current daemon-local executor, a crash-lost prepared attempt, or an in-flight
-attempt declared `Pure` or `Idempotent`, closes `KnownFailed` and fails the
-current turn honestly; version one performs no automatic local retry. A
-crash-lost in-flight `SideEffecting` attempt closes `Ambiguous`, ends the
-abandoned turn attempt `Lost`, and parks the turn in `AwaitingRecoveryDecision`
-naming that exact tool attempt (INV-025, INV-026, INV-034). Runner lease loss
-uses the separate re-lease law in
+attempt declared `EffectFree`, closes `KnownFailed` and fails the current turn
+honestly; version one performs no automatic local retry. A crash-lost in-flight
+attempt declared `ExternalEffect` closes `Ambiguous`, ends the abandoned turn
+attempt `Lost`, and parks the turn in `AwaitingRecoveryDecision` naming that
+exact tool attempt (INV-025, INV-026, INV-034). Runner lease loss uses the
+separate re-lease law in
 [runner protocol and placement](runner-protocol.md#effect-classes-and-runner-leases);
 re-leasing one fenced runner attempt is not the current local executor
 fabricating a new physical attempt.

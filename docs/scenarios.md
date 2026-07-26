@@ -530,7 +530,7 @@ those tests.
 - **Failure behavior:** Runner unavailability is visible and does not silently
   move locality-sensitive work. Stale results fail fencing.
 - **Required invariants:** INV-011, INV-019, INV-021–INV-026.
-- **Remaining questions:** Pinning/affinity, multi-runner turns, result-size
+- **Remaining questions:** Durable lease/affinity orchestration, result-size
   handling, and local MCP capability discovery.
 
 ## S17 — Fork from previous transcript state
@@ -961,7 +961,8 @@ those tests.
   daemon catalog. Session creation records its class-or-identity selector,
   optional working directory, optional credential-profile selection, and
   workspace requirement. The first runner execution records one exact validated
-  registration and pins that runner.
+  registration, pins that runner, and creates any requested initial
+  credential-profile grant from that exact registration.
 - **State transitions:** Enrollment active → validated registration; placement
   unpinned → pinned on the first eligible runner. The domain foundation in
   [runner protocol and placement](spec/runner-protocol.md) implements these
@@ -989,12 +990,14 @@ those tests.
 - **Durable commands:** A later store stack persists an offered lease before
   streaming it, then persists its exact runner/generation claim before accepting
   a result. Domain transition inputs retain the runner, lease, physical tool
-  attempt, session, effect class, and dispatch generation.
+  attempt, session, tool, declaration-derived effect class, and dispatch
+  generation.
 - **State transitions:** An unclaimed lost lease advances to a checked successor
-  generation for every class. A claimed lost pure or idempotent lease produces
-  re-lease authority for the same physical attempt. A claimed lost
-  side-effecting lease produces crash-classification authority and cannot
-  produce re-lease authority.
+  generation for every class while retaining the never-executed attempt. A
+  claimed lost pure or idempotent lease produces re-lease authority that
+  requires a fresh physical attempt identity. A claimed lost side-effecting
+  lease produces crash-classification authority and cannot produce re-lease
+  authority.
 - **Transient updates:** Connection loss, reconnect, and repeated frames do not
   themselves advance the lease.
 - **Owning component:** The daemon owns lease and physical-attempt outcomes; the
@@ -1032,8 +1035,8 @@ those tests.
 - **Failure behavior:** Automatic migration is absent. An ineligible runner,
   stale placement or grant revision, unavailable profile, wider tool set,
   missing workspace capability, or attempt to reactivate a revoked grant fails
-  unchanged. Revocation gates future dispatch but does not yank or rewrite a
-  claimed lease.
+  unchanged. Revocation gates later lease creation but does not yank or rewrite
+  an already offered lease.
 - **Required invariants:** INV-005, INV-008, INV-024–INV-026, INV-035, INV-036,
   INV-042, INV-044, INV-045.
 - **Remaining questions:** Owner command shape, atomic store boundaries, exact

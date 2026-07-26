@@ -19,15 +19,18 @@ the same operation. Profile rotation and revocation also need inspectable
 forward behavior without altering work already executing.
 
 **Decision.** A runner holds named credential profiles provisioned out of band;
-credential values have no runner-protocol domain representation and never cross
-that protocol. The daemon owns profile-name validation, session selection,
-durable grant and audit facts, and approval posture for exact
-`(tool, credential profile)` pairs. `Automatic` is available only through an
-exact catalog pair; absence selects the existing session policy. Session
-creation snapshots the selected profile and advertised tool inventory.
+credential values have no runner-protocol control representation. The daemon
+owns profile-name validation, session selection, durable grant and audit facts,
+and approval posture for exact `(tool, credential profile)` pairs. After the
+dangerous session blanket, `Automatic` authorizes only its exact catalog pair;
+`SessionPolicy` or absence requires confirmation and cannot be overridden by a
+tool-only automatic default. Session creation records the profile request, and
+pinning snapshots it with the now-exact runner and advertised tool inventory.
 Replacement is a checked forward-only complete snapshot that emits typed change
-facts for later frontier injection. Revocation gates future dispatch
-authorization but does not cancel or rewrite an already claimed lease.
+facts for later frontier injection. Revocation gates later lease creation but
+does not cancel or rewrite an already offered lease. Arbitrary tool output is a
+separate result-egress boundary and carries no no-disclosure claim in this
+slice.
 
 **Rejected alternatives.** Sending values from the daemon creates a second
 credential-distribution system. Letting a runner advertise approval posture
@@ -82,9 +85,11 @@ duplicates unsafe work.
 `Pure`, `Idempotent`, or `SideEffecting`; pure implies idempotent. Tool
 placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
 or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
-the combined case. Runner leases bind an exact runner, physical tool attempt,
-and positive dispatch generation. Loss before claim may advance every class.
-Loss after claim produces re-lease authority only for pure or idempotent work;
+the combined case. Runner leases bind an exact pinned runner, tool, physical
+attempt, and positive dispatch generation; effect is derived from the validated
+declaration. Loss before claim may advance every class while retaining the
+never-executed attempt. Loss after claim produces re-lease authority only for
+pure or idempotent work and requires a fresh physical attempt identity;
 side-effecting loss produces exact crash-classification authority and cannot
 produce re-lease authority. Undeclared advertised tools are rejected; an
 untrusted pre-validation boundary classifies an absent effect declaration as
@@ -104,7 +109,7 @@ a call to widen the registry. Treating the stream as truth loses claims on
 reconnect.
 
 **Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
-INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
+INV-004, INV-021, INV-025, INV-026, INV-043, S12, S16 and S31, the
 [tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
 specifications, and later store and wire stacks.
 
@@ -122,10 +127,13 @@ runner, and opaque authentication-reference identities plus owner-allowed
 capability classes, and has terminal revocation. Registration carries
 availability names only. The complete advertisement is validated against the
 active enrollment and one daemon-side owner-editable catalog parsed into typed
-domain. Unknown or disallowed claims reject registration. The validated result
-attaches daemon declarations for permission, placement, effect, credential-pair
-approval, and workspace capability; re-registration can change availability but
-carries no field capable of changing that policy.
+domain, including its allowed capability classes. Unknown or disallowed claims
+reject registration. The validated result attaches daemon declarations for
+permission, placement, effect, credential-pair approval, and workspace
+capability; re-registration can change availability but carries no field capable
+of changing that policy. The runner declaration is authoritative for runner
+dispatch; a later adapter must reject any shared daemon-local definition whose
+permission or mapped effect disagrees.
 
 Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
 letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
