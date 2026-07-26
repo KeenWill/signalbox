@@ -153,3 +153,14 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             COALESCE(workflow_pass.turn_id, $2)
       WHERE workflow_pass.pass_id = $1
       FOR UPDATE OF workflow_pass";
+
+pub(crate) const REVIEW_FINDINGS_TRANSITION: &str = "SELECT finding_id
+       FROM review_finding
+      WHERE finding_id = ANY($1)
+      ORDER BY finding_id
+      FOR NO KEY UPDATE";
+
+pub(crate) const REVIEW_EXTERNAL_LINK_TRANSITION: &str = "SELECT external_link_id
+       FROM review_external_link
+      WHERE external_link_id = $1
+      FOR NO KEY UPDATE";
