@@ -42,14 +42,15 @@ def run_git(root: Path, *arguments: str) -> None:
     )
 
 
-def initialize_git_history(root: Path) -> None:
+def initialize_git_history(root: Path) -> str:
     """Create one reachable GitHub-style PR merge for the baseline fixture."""
+    merged_branch = "agent/example"
     run_git(root, "init", "-q", "-b", "main")
     run_git(root, "config", "user.name", "Docs checker tests")
     run_git(root, "config", "user.email", "docs-checker@example.invalid")
     run_git(root, "add", ".")
     run_git(root, "commit", "-q", "-m", "initial fixture")
-    run_git(root, "checkout", "-q", "-b", "agent/example")
+    run_git(root, "checkout", "-q", "-b", merged_branch)
     (root / "history-marker").write_text("PR 12 fixture\n", encoding="utf-8")
     run_git(root, "add", "history-marker")
     run_git(root, "commit", "-q", "-m", "fixture change")
@@ -60,9 +61,10 @@ def initialize_git_history(root: Path) -> None:
         "-q",
         "--no-ff",
         "-m",
-        "Merge pull request #12 from owner/agent/example",
-        "agent/example",
+        f"Merge pull request #12 from owner/{merged_branch}",
+        merged_branch,
     )
+    return merged_branch
 
 
 class DocsConsistencyTests(unittest.TestCase):
@@ -123,7 +125,7 @@ class DocsConsistencyTests(unittest.TestCase):
         (self.root / "docs/spec/README.md").write_text(
             "# Specification\n", encoding="utf-8"
         )
-        initialize_git_history(self.root)
+        self.merged_pr_branch = initialize_git_history(self.root)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -195,6 +197,54 @@ class DocsConsistencyTests(unittest.TestCase):
             ["invariant-registration"],
         )
         self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_in_block_doc_comment(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/** INV-001: tagged by an attached block doc comment. */\n"
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_unrelated_test_attribute_does_not_register_invariant(self) -> None:
+        (self.root / "src/ignored.rs").write_text(
+            '#[ignore = "INV-001 is temporarily flaky"]\n'
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_tagged_enforcement_requires_tagged_test_declaration(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            'const NOTE: &str = "INV-001";\n'
+            "// INV-001 is not attached to the test.\n"
+            "#[test]\n"
+            "fn untagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
+            "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("test name or attached doc comment", failures[0].message)
 
     def test_non_test_invariant_mentions_do_not_require_registration(self) -> None:
         (self.root / "src/context.rs").write_text(
@@ -1269,7 +1319,56 @@ class DocsConsistencyTests(unittest.TestCase):
             failure_categories(failures),
             ["spec-verification-history"],
         )
-        self.assertIn("names `agent/example`", failures[0].message)
+        self.assertIn(
+            f"names `{self.merged_pr_branch}`", failures[0].message
+        )
+
+    def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
+        run_git(
+            self.root,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Merge pull request #99 from owner/agent/spoof",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/spoof`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn("no merge commit reachable from HEAD", failures[0].message)
+
+    def test_local_branch_does_not_override_known_pr_history(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/wrong")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/wrong`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            f"names `{self.merged_pr_branch}`", failures[0].message
+        )
 
     def test_verification_ref_rejects_merge_unreachable_from_head(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "isolated-base")

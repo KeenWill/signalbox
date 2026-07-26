@@ -238,10 +238,16 @@ INVARIANT_TAG = re.compile(
 RUST_TEST_DECLARATION = re.compile(
     r"(?P<prefix>(?:"
     r"^[ \t]*///[^\n]*(?:\n|$)"
+    r"|^[ \t]*/\*\*(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)"
     r"|^[ \t]*#\[[^\]]*\][ \t]*(?:\n|$)"
     r")+)"
     r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
     r"(?:async[ \t]+)?fn[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+RUST_DOC_COMMENT = re.compile(
+    r"^[ \t]*(?:///[^\n]*(?:\n|$)"
+    r"|/\*\*(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$))",
     re.MULTILINE,
 )
 RUST_TEST_ATTRIBUTE = re.compile(
@@ -1344,7 +1350,10 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
         prefix = declaration.group("prefix")
         if RUST_TEST_ATTRIBUTE.search(prefix) is None:
             continue
-        material = f"{prefix}\n{declaration.group('name')}"
+        doc_comments = "\n".join(
+            comment.group(0) for comment in RUST_DOC_COMMENT.finditer(prefix)
+        )
+        material = f"{doc_comments}\n{declaration.group('name')}"
         declaration_line = line_number(text, declaration.start("name"))
         for tag in INVARIANT_TAG.finditer(material):
             invariant = f"INV-{tag.group('number')}"
@@ -1431,19 +1440,18 @@ def check_invariant_citations(
                 target_text = target.read_text(
                     encoding="utf-8", errors="replace"
                 )
-                invariant_number = invariant.removeprefix("INV-")
-                tag = re.compile(
-                    rf"(?i)(?<![A-Za-z0-9])INV[-_]?"
-                    rf"{invariant_number}(?![0-9])"
-                )
-                if tagged_claim and tag.search(target_text) is None:
+                declared_tags = {
+                    tag for tag, _ in rust_test_invariant_tags(target_text)
+                }
+                if tagged_claim and invariant not in declared_tags:
                     violations.append(
                         Violation(
                             INVARIANTS.as_posix(),
                             number,
                             "invariant-tag",
                             f"{invariant} cites `{target_label}` as tagged "
-                            f"enforcement, but the file contains no {invariant} tag",
+                            f"enforcement, but the file contains no {invariant} tag "
+                            "in a test name or attached doc comment",
                         )
                     )
 
@@ -1699,7 +1707,7 @@ def reachable_pull_request_branches(
 ) -> tuple[dict[int, set[str]], str | None]:
     """Read GitHub merge subjects reachable from the checked-out HEAD."""
     result = subprocess.run(
-        ["git", "log", "HEAD", "--format=%H%x1f%B%x1e"],
+        ["git", "log", "HEAD", "--format=%H%x1f%P%x1f%s%x1e"],
         cwd=root,
         check=False,
         capture_output=True,
@@ -1710,10 +1718,13 @@ def reachable_pull_request_branches(
         return {}, detail
     branches: dict[int, set[str]] = {}
     for record in result.stdout.split("\x1e"):
-        _, separator, message = record.lstrip("\n").partition("\x1f")
-        if not separator:
+        fields = record.lstrip("\n").split("\x1f", maxsplit=2)
+        if len(fields) != 3:
             continue
-        merge = PULL_REQUEST_MERGE.search(message)
+        _, parents, subject = fields
+        if len(parents.split()) != 2:
+            continue
+        merge = PULL_REQUEST_MERGE.fullmatch(subject)
         if merge is None:
             continue
         number = int(merge.group("number"))
@@ -1790,7 +1801,10 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 local_match = (
                     not github_event_present and branch == checkout_branch
                 )
-                in_flight_match = event_match or local_match
+                in_flight_match = (
+                    number not in reachable_branches
+                    and (event_match or local_match)
+                )
                 if historical_match:
                     continue
                 if in_flight_match:
