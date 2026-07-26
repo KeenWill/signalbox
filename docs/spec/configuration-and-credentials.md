@@ -14,9 +14,9 @@ in [process configuration](#process-configuration) were verified through PR #237
 `apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
 checked-in example path were verified through PR #258
 (`agent/signalboxd-rename`). The daemon-held GitHub credential channel and its
-code-host result redaction are verified against `agent/tool-batch-tier1`.
-Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
-tag.
+code-host result redaction are verified through PR #270
+(`agent/tool-batch-tier1`). Invariant law lives in
+[docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
 

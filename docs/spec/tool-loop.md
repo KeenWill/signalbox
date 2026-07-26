@@ -5,17 +5,17 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
-catalog extension is verified against `agent/tool-batch-tier1`. It owns logical
-tool requests, approval policy and decisions, physical tool attempts, result
-admission, intra-turn continuation, crash classification, the compiled registry,
-and the daemon-local catalog. Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
-model-call staging and provider translation in
-[model-call-execution](model-call-execution.md); durable-command identity in
-[identity-and-commands](identity-and-commands.md); and relational mechanics in
-[persistence-protocol](persistence-protocol.md). Invariant tags cite
-[the invariant catalog](../invariants.md).
+catalog extension is verified through PR #270 (`agent/tool-batch-tier1`). It
+owns logical tool requests, approval policy and decisions, physical tool
+attempts, result admission, intra-turn continuation, crash classification, the
+compiled registry, and the daemon-local catalog. Turn and attempt lifecycle law
+lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entry vocabulary in
+[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
+provider translation in [model-call-execution](model-call-execution.md);
+durable-command identity in [identity-and-commands](identity-and-commands.md);
+and relational mechanics in [persistence-protocol](persistence-protocol.md).
+Invariant tags cite [the invariant catalog](../invariants.md).
 
 ## Intra-turn rounds and request batches
 
