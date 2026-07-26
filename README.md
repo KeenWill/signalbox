@@ -129,11 +129,9 @@ with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and
 `SIGNALBOX_DEV_GITHUB_TOKEN_FILE` respectively. No credential material is
 committed or generated. Both paths are passed to the daemon unconditionally
 because it requires both variables at startup; neither file has to exist, since
-neither is read at startup. When each file is read, and what its absence does,
-are stated in the
-[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle),
-which also states that a trailing newline in either file is ignored — so
-`gh auth token > ~/.config/signalbox/github-token` works as written.
+neither is read at startup. When each file is read, what its bytes mean, and
+what its absence does are stated in the
+[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
