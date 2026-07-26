@@ -557,7 +557,14 @@ impl RunnerProtocolStore {
         let row = sqlx::query(
             "SELECT lease_generation.*, event.state_kind,
                     request.tool_name AS canonical_attempt_tool,
-                    placement.pinned_runner_id AS canonical_placement_runner
+                    placement.state_kind AS canonical_placement_state,
+                    placement.pinned_runner_id AS canonical_placement_runner,
+                    placement.registration_enrollment_id
+                        AS canonical_registration_enrollment,
+                    placement.registration_revision
+                        AS canonical_registration_revision,
+                    grant_tool.tool_name AS canonical_grant_tool,
+                    grant_tool.approval_kind AS canonical_grant_approval
                FROM runner_lease_generation AS lease_generation
                JOIN runner_current_lease_event AS current_event
                  ON current_event.lease_id = lease_generation.lease_id
@@ -575,6 +582,14 @@ impl RunnerProtocolStore {
                  ON placement.session_id = lease_generation.session_id
                 AND placement.event_ordinal =
                     lease_generation.placement_event_ordinal
+               LEFT JOIN runner_credential_grant_tool AS grant_tool
+                 ON grant_tool.session_id = lease_generation.session_id
+                AND grant_tool.runner_id = lease_generation.runner_id
+                AND grant_tool.grant_revision =
+                    lease_generation.credential_grant_revision
+                AND grant_tool.credential_profile_name =
+                    lease_generation.credential_profile_name
+                AND grant_tool.tool_name = lease_generation.tool_name
               WHERE lease_generation.lease_id = $1
                 AND lease_generation.generation = $2",
         )
@@ -680,7 +695,7 @@ async fn insert_registration(
         .await?;
     }
     for tool in tools {
-        let (loci, selector_kind, selector_runner, selector_class) = encode_loci(tool.loci())?;
+        let loci = encode_loci(tool.loci())?;
         sqlx::query(
             "INSERT INTO runner_registration_tool
                 (enrollment_id, registration_revision, tool_name,
@@ -693,10 +708,10 @@ async fn insert_registration(
         .bind(tool.name().as_str())
         .bind(encode_permission(tool.permission()))
         .bind(encode_effect(tool.effect()))
-        .bind(loci)
-        .bind(selector_kind)
-        .bind(selector_runner)
-        .bind(selector_class)
+        .bind(loci.kind)
+        .bind(loci.selector_kind)
+        .bind(loci.selector_runner)
+        .bind(loci.selector_class)
         .execute(&mut **transaction)
         .await?;
     }
@@ -933,15 +948,7 @@ async fn insert_placement_record(
     let (selector_kind, selector_runner, selector_class) = encode_selector(&request.selector);
     let (directory_kind, requested_directory) = encode_directory(&request.working_directory);
     let (workspace_kind, requested_repository) = encode_workspace_requirement(&request.workspace);
-    let (
-        state_kind,
-        pinned_runner,
-        pinned_directory,
-        pinned_profile,
-        tools,
-        workspace_repository,
-        workspace_directory,
-    ) = encode_placement_state(placement.state());
+    let state = encode_placement_state(placement.state());
     let (registration_enrollment, registration_revision) = registration
         .map(|registration| {
             (
@@ -983,19 +990,19 @@ async fn insert_placement_record(
     )
     .bind(workspace_kind)
     .bind(requested_repository)
-    .bind(state_kind)
-    .bind(pinned_runner)
-    .bind(pinned_directory)
-    .bind(pinned_profile)
+    .bind(state.kind)
+    .bind(state.pinned_runner)
+    .bind(state.pinned_directory)
+    .bind(state.pinned_profile)
     .bind(registration_enrollment)
     .bind(registration_revision)
-    .bind(count_decimal(tools.len())?)
-    .bind(workspace_repository)
-    .bind(workspace_directory)
+    .bind(count_decimal(state.tools.len())?)
+    .bind(state.workspace_repository)
+    .bind(state.workspace_directory)
     .bind(grant.map(|grant| Decimal::from(grant.revision().get())))
     .execute(&mut **transaction)
     .await?;
-    for tool in tools {
+    for tool in state.tools {
         sqlx::query(
             "INSERT INTO runner_session_placement_tool
                 (session_id, event_ordinal, tool_name)
@@ -1365,13 +1372,49 @@ fn decode_lease(row: &PgRow) -> Result<RunnerLease, RunnerProtocolStoreError> {
     let canonical_runner = row
         .try_get::<Option<Uuid>, _>("canonical_placement_runner")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let canonical_placement_state = row
+        .try_get::<Option<String>, _>("canonical_placement_state")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let canonical_registration_enrollment = row
+        .try_get::<Option<Uuid>, _>("canonical_registration_enrollment")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let canonical_registration_revision = row
+        .try_get::<Option<Decimal>, _>("canonical_registration_revision")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    if canonical_placement_state != "pinned"
+        || canonical_runner != runner.into_uuid()
+        || canonical_registration_enrollment != row.get::<Uuid, _>("registration_enrollment_id")
+        || canonical_registration_revision != row.get::<Decimal, _>("registration_revision")
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
     let authorization = match (
         row.try_get::<Option<String>, _>("credential_profile_name")?,
         row.try_get::<Option<Decimal>, _>("credential_grant_revision")?,
         row.try_get::<Option<String>, _>("credential_approval_kind")?,
     ) {
-        (None, None, None) => None,
+        (None, None, None) => {
+            if row
+                .try_get::<Option<String>, _>("canonical_grant_tool")?
+                .is_some()
+                || row
+                    .try_get::<Option<String>, _>("canonical_grant_approval")?
+                    .is_some()
+            {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+            None
+        }
         (Some(profile), Some(grant_revision), Some(approval)) => {
+            let canonical_grant_tool = row
+                .try_get::<Option<String>, _>("canonical_grant_tool")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+            let canonical_grant_approval = row
+                .try_get::<Option<String>, _>("canonical_grant_approval")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+            if canonical_grant_tool != tool.as_str() || canonical_grant_approval != approval {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
             Some(CredentialDispatchAuthorization {
                 session,
                 runner,
@@ -1452,42 +1495,50 @@ fn require_stored_lease_identity(
     Ok(())
 }
 
-fn encode_placement_state(
-    state: &SessionRunnerPlacementState,
-) -> (
-    &'static str,
-    Option<Uuid>,
-    Option<&str>,
-    Option<&str>,
-    Vec<&ToolName>,
-    Option<&str>,
-    Option<&str>,
-) {
+struct EncodedPlacementState<'a> {
+    kind: &'static str,
+    pinned_runner: Option<Uuid>,
+    pinned_directory: Option<&'a str>,
+    pinned_profile: Option<&'a str>,
+    tools: Vec<&'a ToolName>,
+    workspace_repository: Option<&'a str>,
+    workspace_directory: Option<&'a str>,
+}
+
+fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlacementState<'_> {
     let (state_kind, pinned) = match state {
         SessionRunnerPlacementState::Unpinned => {
-            return ("unpinned", None, None, None, Vec::new(), None, None);
+            return EncodedPlacementState {
+                kind: "unpinned",
+                pinned_runner: None,
+                pinned_directory: None,
+                pinned_profile: None,
+                tools: Vec::new(),
+                workspace_repository: None,
+                workspace_directory: None,
+            };
         }
         SessionRunnerPlacementState::Pinned(pinned) => ("pinned", pinned),
         SessionRunnerPlacementState::RunnerLost(pinned) => ("runner_lost", pinned),
     };
-    (
-        state_kind,
-        Some(pinned.runner.into_uuid()),
-        Some(pinned.working_directory.as_str()),
-        pinned
+    EncodedPlacementState {
+        kind: state_kind,
+        pinned_runner: Some(pinned.runner.into_uuid()),
+        pinned_directory: Some(pinned.working_directory.as_str()),
+        pinned_profile: pinned
             .credential_profile
             .as_ref()
             .map(CredentialProfileName::as_str),
-        pinned.tools.iter().collect(),
-        pinned
+        tools: pinned.tools.iter().collect(),
+        workspace_repository: pinned
             .workspace
             .as_ref()
             .map(|workspace| workspace.repository.as_str()),
-        pinned
+        workspace_directory: pinned
             .workspace
             .as_ref()
             .map(|workspace| workspace.working_directory.as_str()),
-    )
+    }
 }
 
 fn encode_selector(selector: &RunnerSelector) -> (&'static str, Option<Uuid>, Option<&str>) {
@@ -1563,20 +1614,35 @@ fn decode_workspace_requirement(
     }
 }
 
-fn encode_loci(
-    loci: &ToolAdmissibleLoci,
-) -> Result<(&'static str, &'static str, Option<Uuid>, Option<&str>), RunnerProtocolStoreError> {
+struct EncodedLoci<'a> {
+    kind: &'static str,
+    selector_kind: &'static str,
+    selector_runner: Option<Uuid>,
+    selector_class: Option<&'a str>,
+}
+
+fn encode_loci(loci: &ToolAdmissibleLoci) -> Result<EncodedLoci<'_>, RunnerProtocolStoreError> {
     match loci {
         ToolAdmissibleLoci::DaemonOnly => Err(RunnerProtocolStoreError::Domain(
             RunnerDomainError::InvalidState,
         )),
         ToolAdmissibleLoci::RunnerOnly { selector } => {
             let (kind, runner, class) = encode_selector(selector);
-            Ok(("runner_only", kind, runner, class))
+            Ok(EncodedLoci {
+                kind: "runner_only",
+                selector_kind: kind,
+                selector_runner: runner,
+                selector_class: class,
+            })
         }
         ToolAdmissibleLoci::DaemonOrRunner { selector } => {
             let (kind, runner, class) = encode_selector(selector);
-            Ok(("daemon_or_runner", kind, runner, class))
+            Ok(EncodedLoci {
+                kind: "daemon_or_runner",
+                selector_kind: kind,
+                selector_runner: runner,
+                selector_class: class,
+            })
         }
     }
 }

@@ -837,6 +837,25 @@ BEGIN
         IF prior.state_kind <> 'unpinned'
            OR NEW.state_kind <> 'pinned'
            OR NEW.placement_revision <> prior.placement_revision
+           OR ROW(
+                NEW.selector_kind,
+                NEW.selector_runner_id,
+                NEW.selector_capability_class,
+                NEW.directory_selection_kind,
+                NEW.requested_working_directory,
+                NEW.requested_credential_profile_name,
+                NEW.workspace_requirement_kind,
+                NEW.requested_repository_key
+           ) IS DISTINCT FROM ROW(
+                prior.selector_kind,
+                prior.selector_runner_id,
+                prior.selector_capability_class,
+                prior.directory_selection_kind,
+                prior.requested_working_directory,
+                prior.requested_credential_profile_name,
+                prior.workspace_requirement_kind,
+                prior.requested_repository_key
+           )
         THEN
             RAISE EXCEPTION 'runner placement pin is not canonical'
                 USING ERRCODE = '23514';
@@ -854,7 +873,15 @@ BEGIN
                 NEW.pinned_tool_count,
                 NEW.workspace_repository_key,
                 NEW.workspace_working_directory,
-                NEW.credential_grant_revision
+                NEW.credential_grant_revision,
+                NEW.selector_kind,
+                NEW.selector_runner_id,
+                NEW.selector_capability_class,
+                NEW.directory_selection_kind,
+                NEW.requested_working_directory,
+                NEW.requested_credential_profile_name,
+                NEW.workspace_requirement_kind,
+                NEW.requested_repository_key
            ) IS DISTINCT FROM ROW(
                 prior.pinned_runner_id,
                 prior.pinned_working_directory,
@@ -864,7 +891,15 @@ BEGIN
                 prior.pinned_tool_count,
                 prior.workspace_repository_key,
                 prior.workspace_working_directory,
-                prior.credential_grant_revision
+                prior.credential_grant_revision,
+                prior.selector_kind,
+                prior.selector_runner_id,
+                prior.selector_capability_class,
+                prior.directory_selection_kind,
+                prior.requested_working_directory,
+                prior.requested_credential_profile_name,
+                prior.workspace_requirement_kind,
+                prior.requested_repository_key
            )
         THEN
             RAISE EXCEPTION 'runner loss changed affinity facts'
@@ -892,6 +927,23 @@ BEGIN
                 prior.workspace_repository_key
            OR NEW.workspace_working_directory IS DISTINCT FROM
                 prior.workspace_working_directory
+           OR ROW(
+                NEW.selector_kind,
+                NEW.selector_runner_id,
+                NEW.selector_capability_class,
+                NEW.directory_selection_kind,
+                NEW.requested_working_directory,
+                NEW.workspace_requirement_kind,
+                NEW.requested_repository_key
+           ) IS DISTINCT FROM ROW(
+                prior.selector_kind,
+                prior.selector_runner_id,
+                prior.selector_capability_class,
+                prior.directory_selection_kind,
+                prior.requested_working_directory,
+                prior.workspace_requirement_kind,
+                prior.requested_repository_key
+           )
         THEN
             RAISE EXCEPTION 'credential profile replacement changed another axis'
                 USING ERRCODE = '23514';
