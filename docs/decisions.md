@@ -68,9 +68,9 @@ Replacement is a checked forward-only complete snapshot that emits typed change
 facts for later frontier injection. Runner replacement consumes a prior
 pinned-profile grant and creates a checked successor revision rather than
 recreating revision one. Revocation gates later lease creation but does not
-cancel or rewrite an already offered lease; its prior revision remains
-terminal. Arbitrary tool output is a separate result-egress boundary and carries
-no no-disclosure claim in this slice.
+cancel or rewrite an already offered lease; its prior revision remains terminal.
+Arbitrary tool output is a separate result-egress boundary and carries no
+no-disclosure claim in this slice.
 
 **Rejected alternatives.** Sending values from the daemon creates a second
 credential-distribution system. Letting a runner advertise approval posture
