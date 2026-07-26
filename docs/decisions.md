@@ -47,6 +47,13 @@ after the configured spelling would read `claude-opus-4-5` as a snapshot of
 their single-dependency manifest rule and this substrate's no-logging law, so
 the bridge — which already holds every typed fact — emits them instead.
 
+The fallback marker crosses the runtime boundary only as the reported identity
+it names; the substitution classification is carried by that identity, and a
+marker naming the configured target itself remains ambiguity rather than
+substitution. Carrying the marker as typed evidence in its own right would add a
+provider-neutral vocabulary variant both adapters must construct and redact, and
+is routed through the still-open provider provenance schema.
+
 **Affects.** `crates/model-provider-runtime`, the Anthropic adapter's response
 and stream decoders, the provider-target identity and operator-diagnostics laws
 in [model-call-execution](spec/model-call-execution.md), the adapter contract in

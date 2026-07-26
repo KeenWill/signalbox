@@ -92,7 +92,11 @@ and then closes the response as `ResponseUnintelligible` boundary loss, and the
 stream decoder treats an opened `fallback` block as a protocol violation. Why:
 the caller's identity rule must be able to tell an alias made concrete from a
 different model substituted, and a signal the provider states explicitly should
-not reach that rule as a generic unknown-block failure.
+not reach that rule as a generic unknown-block failure. The marker itself
+crosses the boundary only through that reported identity — this layer has no
+substitution variant of its own — so what the caller can conclude from it is
+bounded by
+[model-call-execution](model-call-execution.md#provider-target-identity).
 
 ## Two-stage execution
 

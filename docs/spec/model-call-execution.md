@@ -353,13 +353,20 @@ family by one digit and stays a different lineage, while
 `claude-haiku-4-5-20251001` against a configured `claude-haiku-4-5` is the same
 lineage made concrete.
 
-A provider that documents its own substitution signal is honored as evidence
-independently of the spelling comparison: the Anthropic adapter recognizes the
-server-side `fallback` content block, reports the model it names as continuing
-the turn, and refuses to treat the response as completion material
-([runtime-substrate](runtime-substrate.md)). Signalbox never requests
-server-side fallback, so observing the marker is itself proof that the resolved
-target did not serve the exchange (INV-018).
+A provider that documents its own substitution signal feeds that rule rather
+than bypassing it: the Anthropic adapter recognizes the server-side `fallback`
+content block, reports the model it names as continuing the turn through the
+ordinary reported-identity fact, and refuses to treat the response as completion
+material at all ([runtime-substrate](runtime-substrate.md)). Two guarantees
+follow, and only two. The response can never complete as the resolved target's
+output, whatever the block names. And when the block names another lineage — the
+case a real server-side fallback produces, including the sticky follow-up turns
+that carry no block but do report the substituting identity — the relation above
+classifies it as a substitution. A block that names the configured target itself
+is a provider self-contradiction: it still cannot complete, but it classifies as
+ambiguity rather than substitution, because the substitution classification is
+carried by the identity and no durable marker-only evidence exists to carry it
+(see Open edges).
 
 ### Operator diagnostics
 
@@ -503,11 +510,17 @@ prints the semantic transcript; it is deliberately not the client protocol.
 
 - Durable provider-target evidence (the designed `ProviderTargetEvidence`,
   mismatch-selects-`KnownFailed`, and post-completion invalidation) is
-  unimplemented. Two consequences: an accepted alias concretion records the
+  unimplemented. Three consequences: an accepted alias concretion records the
   concrete served identity only as operator diagnostics, not as a durable
-  per-call provenance row; and a substitution fails closed with an operator
-  error, so a substituted call is classified `Ambiguous` by restart rather than
-  `KnownFailed` live.
+  per-call provenance row; a substitution fails closed with an operator error,
+  so a substituted call is classified `Ambiguous` by restart rather than
+  `KnownFailed` live; and substitution is carried entirely by the reported
+  identity, so a provider fallback marker naming the configured target itself
+  classifies as ambiguity. Carrying the marker as typed evidence in its own
+  right would add a provider-neutral runtime-vocabulary variant that both
+  adapters would have to construct and redact, and is routed through the
+  provider provenance schema in
+  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Unstopped ambiguity recovery is a parked state only: no owner decision,
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,

@@ -195,7 +195,17 @@ pub enum ProviderTargetRelation {
 /// `claude-haiku-4-5` is the same lineage made concrete. Any other extension —
 /// a delivery or speed variant, a differently named family — is likewise a
 /// different lineage, because it is not the configured target.
-pub fn relate_provider_target(configured: &str, reported: &str) -> ProviderTargetRelation {
+/// The two arguments are the distinct target facts of
+/// docs/spec/runtime-substrate.md rather than two adjacent strings, so a
+/// caller cannot silently transpose this authorization-sensitive comparison:
+/// the relation is asymmetric, and swapping the operands would turn an alias
+/// concretion into a substitution.
+pub fn relate_provider_target(
+    configured: &ResolvedTarget,
+    reported: &ProviderReportedModel,
+) -> ProviderTargetRelation {
+    let configured = configured.as_str();
+    let reported = reported.as_str();
     if reported == configured {
         return ProviderTargetRelation::Exact;
     }
@@ -436,7 +446,7 @@ impl PreparedBinding {
 pub struct RuntimeModelCallCapability<Prepared> {
     prepared: Prepared,
     binding: PreparedBinding,
-    provider_model: String,
+    resolved_target: ResolvedTarget,
 }
 
 /// Sanitized adapter defect; provider response text and credentials are never
@@ -615,6 +625,7 @@ where
             fail_closed(
                 correlation,
                 RuntimeModelCallProviderError::UnconfiguredTarget,
+                None,
             )
         })?;
         let binding = PreparedBinding {
@@ -636,6 +647,7 @@ where
                         fail_closed(
                             correlation,
                             RuntimeModelCallProviderError::InvalidToolSchema,
+                            None,
                         )
                     })?;
                 Ok(ToolDefinition::with_raw_schema(
@@ -645,16 +657,16 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let resolved_target = ResolvedTarget::new(definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
-            ResolvedTarget::new(definition.provider_model().to_owned()),
+            resolved_target.clone(),
             messages,
             ModelSettings::new(definition.max_output_tokens()),
         );
         runtime_operation.tools = tools;
-        let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
             .prepare(runtime_operation, CancellationSignal::when(cancellation))
@@ -664,7 +676,7 @@ where
                 RuntimeModelCallCapability {
                     prepared,
                     binding,
-                    provider_model,
+                    resolved_target,
                 },
             )),
             PreparationOutcome::Cancelled {
@@ -692,6 +704,7 @@ where
                 Err(fail_closed(
                     correlation,
                     RuntimeModelCallProviderError::PreparationDefect,
+                    None,
                 ))
             }
         }
@@ -713,6 +726,7 @@ where
             return Err(fail_closed(
                 correlation,
                 RuntimeModelCallProviderError::AuthorizationMismatch,
+                None,
             ));
         }
         let mut observations = AcceptanceObservations {
@@ -734,14 +748,17 @@ where
             return Err(fail_closed(
                 correlation,
                 RuntimeModelCallProviderError::ObservationCorrelationMismatch,
+                None,
             ));
         }
         let classified = classify_terminal(
             report.evidence,
             &observations.observations,
-            capability.provider_model.as_str(),
+            &capability.resolved_target,
         )
-        .map_err(|error| fail_closed(correlation, error))?;
+        .map_err(|failure| {
+            fail_closed(correlation, failure.error, failure.served_target.as_deref())
+        })?;
         report_classified_outcome(correlation, &classified);
         Ok(authorized
             .observation_correlation()
@@ -751,19 +768,30 @@ where
 
 /// Records one fail-closed bridge outcome for operators and returns it.
 ///
-/// Sanitized by construction: the correlation identity and the stable cause
-/// token are the only fields, so no provider text, response body, credential
-/// material, or user content can reach telemetry (INV-035).
+/// Sanitized by construction: the correlation identity, the stable cause
+/// token, and — for a substitution — the bounded provider identity that
+/// actually served are the only fields, so no provider text, response body,
+/// credential material, or user content can reach telemetry (INV-035).
 fn fail_closed(
     correlation: ModelCallId,
     error: RuntimeModelCallProviderError,
+    served_target: Option<&str>,
 ) -> RuntimeModelCallProviderError {
-    tracing::error!(
-        failure_class = ?error.operator_failure_class(),
-        cause_code = error.cause_code().as_str(),
-        model_call_id = %correlation.as_uuid(),
-        "model call failed closed at the runtime bridge"
-    );
+    match served_target {
+        Some(served_target) => tracing::error!(
+            failure_class = ?error.operator_failure_class(),
+            cause_code = error.cause_code().as_str(),
+            model_call_id = %correlation.as_uuid(),
+            served_provider_target = served_target,
+            "model call failed closed at the runtime bridge"
+        ),
+        None => tracing::error!(
+            failure_class = ?error.operator_failure_class(),
+            cause_code = error.cause_code().as_str(),
+            model_call_id = %correlation.as_uuid(),
+            "model call failed closed at the runtime bridge"
+        ),
+    }
     error
 }
 
@@ -929,6 +957,8 @@ fn decode_checked_raw_json(
     serde_json::value::RawValue::from_string(value.to_owned())
 }
 
+/// A correlation mismatch is a fail-closed bridge defect like any other, so
+/// it is recorded through [`fail_closed`] rather than returned silently.
 fn require_correlation(
     expected: ModelCallId,
     returned: ModelCallId,
@@ -936,7 +966,11 @@ fn require_correlation(
     if expected == returned {
         Ok(())
     } else {
-        Err(RuntimeModelCallProviderError::CorrelationMismatch)
+        Err(fail_closed(
+            expected,
+            RuntimeModelCallProviderError::CorrelationMismatch,
+            None,
+        ))
     }
 }
 
@@ -1010,11 +1044,34 @@ struct TerminalClassification {
     concrete_target: Option<String>,
 }
 
+/// One fail-closed classification outcome plus the sanitized diagnostics that
+/// explain it.
+///
+/// A substitution carries the bounded identity that actually served, because
+/// the recorded decision makes substitution a separate *recorded* outcome:
+/// the token alone would leave an operator unable to name the model the
+/// provider used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClassificationFailure {
+    error: RuntimeModelCallProviderError,
+    served_target: Option<String>,
+}
+
+impl ClassificationFailure {
+    /// A defect with no served identity to record.
+    const fn bare(error: RuntimeModelCallProviderError) -> Self {
+        Self {
+            error,
+            served_target: None,
+        }
+    }
+}
+
 fn classify_terminal(
     evidence: TerminalEvidence,
     observations: &[Observation<ModelCallId>],
-    expected_provider_model: &str,
-) -> Result<TerminalClassification, RuntimeModelCallProviderError> {
+    configured_target: &ResolvedTarget,
+) -> Result<TerminalClassification, ClassificationFailure> {
     // docs/spec/model-call-execution.md: an alias resolved to its own
     // canonical dated form is the same logical target and is accepted with
     // the concrete identity recorded as evidence; a served identity from
@@ -1022,13 +1079,16 @@ fn classify_terminal(
     // separate outcome, never collapsed into an ordinary provider failure.
     let mut concrete_target = None;
     for reported in reported_identities(&evidence, observations) {
-        match relate_provider_target(expected_provider_model, reported.as_str()) {
+        match relate_provider_target(configured_target, reported) {
             ProviderTargetRelation::Exact => {}
             ProviderTargetRelation::AliasConcretion => {
                 concrete_target = Some(diagnostic_model_identity(reported.as_str()));
             }
             ProviderTargetRelation::DifferentLineage => {
-                return Err(RuntimeModelCallProviderError::ProviderTargetSubstituted);
+                return Err(ClassificationFailure {
+                    error: RuntimeModelCallProviderError::ProviderTargetSubstituted,
+                    served_target: Some(diagnostic_model_identity(reported.as_str())),
+                });
             }
         }
     }
@@ -1051,8 +1111,11 @@ fn classify_terminal(
                 match part {
                     AssistantPart::Text(text) if text.is_empty() => {}
                     AssistantPart::Text(text) => {
-                        let text = AssistantText::try_new(text)
-                            .map_err(|_| RuntimeModelCallProviderError::InvalidAssistantText)?;
+                        let text = AssistantText::try_new(text).map_err(|_| {
+                            ClassificationFailure::bare(
+                                RuntimeModelCallProviderError::InvalidAssistantText,
+                            )
+                        })?;
                         text_parts.push(text.clone());
                         response_parts.push(AssistantResponsePart::Text(text));
                     }
@@ -1078,7 +1141,9 @@ fn classify_terminal(
                         ));
                     }
                     AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {
-                        return Err(RuntimeModelCallProviderError::UnsupportedCompletionMaterial);
+                        return Err(ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        ));
                     }
                 }
             }
@@ -1217,6 +1282,16 @@ mod tests {
         ModelCallId::from_uuid(Uuid::from_u128(1))
     }
 
+    /// The exact provider-model spelling one deployment configures.
+    fn configured(spelling: &str) -> signalbox_model_runtime::ResolvedTarget {
+        signalbox_model_runtime::ResolvedTarget::new(spelling.to_owned())
+    }
+
+    /// One provider-reported identity, exactly as observed.
+    fn reported(spelling: &str) -> ProviderReportedModel {
+        ProviderReportedModel::new(spelling.to_owned())
+    }
+
     fn target(value: u128) -> ResolvedProviderTarget {
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
     }
@@ -1323,7 +1398,7 @@ mod tests {
     #[track_caller]
     fn assert_invalid_tool_proposal_closes(evidence: TerminalEvidence) {
         assert_eq!(
-            classify_terminal(evidence, &[], "model-exact")
+            classify_terminal(evidence, &[], &configured("model-exact"))
                 .expect("invalid proposal has a durable terminal classification")
                 .observation,
             ModelCallTerminalObservation::KnownFailed
@@ -1528,7 +1603,7 @@ mod tests {
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("typed refusal evidence is supported")
             .observation,
@@ -1544,7 +1619,7 @@ mod tests {
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("typed provider-error evidence is supported")
             .observation,
@@ -1558,7 +1633,7 @@ mod tests {
                     native: NativeErrorFacts::default(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("typed cancellation evidence is supported")
             .observation,
@@ -1572,7 +1647,7 @@ mod tests {
                     }),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("typed non-acceptance evidence is supported")
             .observation,
@@ -1584,7 +1659,7 @@ mod tests {
                     cause: UnsentCause::CancelledBeforeSend,
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("pre-send cancellation evidence is supported")
             .observation,
@@ -1602,7 +1677,7 @@ mod tests {
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("typed boundary-loss evidence is supported")
             .observation,
@@ -1625,7 +1700,7 @@ mod tests {
                     ],
                 ),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("text-only completion is supported")
             .observation,
@@ -1644,8 +1719,12 @@ mod tests {
     /// normalized domain proposals without retaining provider identifiers.
     #[test]
     fn s10_inv002_inv005_tool_completion_crosses_as_provider_neutral_proposals() {
-        let classified = classify_terminal(tool_completion("model-exact"), &[], "model-exact")
-            .expect("tool-use completion is supported");
+        let classified = classify_terminal(
+            tool_completion("model-exact"),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("tool-use completion is supported");
         let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
         else {
             panic!("tool-use finish produces a same-turn tool round");
@@ -1679,7 +1758,7 @@ mod tests {
                     })],
                 ),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("mismatched finish still classifies")
             .observation,
@@ -1694,7 +1773,7 @@ mod tests {
                     vec![AssistantPart::Text(String::from("no call"))],
                 ),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
             .expect("mismatched finish still classifies")
             .observation,
@@ -1794,10 +1873,13 @@ mod tests {
                     vec![AssistantPart::Text(String::from("hidden"))],
                 ),
                 &early,
-                "claude-haiku-4-5",
+                &configured("claude-haiku-4-5"),
             )
             .expect_err("a substituted lineage must fail closed"),
-            super::RuntimeModelCallProviderError::ProviderTargetSubstituted
+            super::ClassificationFailure {
+                error: super::RuntimeModelCallProviderError::ProviderTargetSubstituted,
+                served_target: Some(String::from("claude-opus-4-8")),
+            }
         );
         assert_eq!(
             classify_terminal(
@@ -1806,10 +1888,13 @@ mod tests {
                     vec![AssistantPart::Text(String::from("hidden"))],
                 ),
                 &[],
-                "claude-haiku-4-5",
+                &configured("claude-haiku-4-5"),
             )
             .expect_err("a substituted lineage must fail closed"),
-            super::RuntimeModelCallProviderError::ProviderTargetSubstituted
+            super::ClassificationFailure {
+                error: super::RuntimeModelCallProviderError::ProviderTargetSubstituted,
+                served_target: Some(String::from("claude-opus-4-8")),
+            }
         );
     }
 
@@ -1836,7 +1921,7 @@ mod tests {
                 vec![AssistantPart::Text(String::from("hello"))],
             ),
             &early,
-            "claude-haiku-4-5",
+            &configured("claude-haiku-4-5"),
         )
         .expect("an alias made concrete is the configured target");
 
@@ -1867,7 +1952,7 @@ mod tests {
                 vec![AssistantPart::Text(String::from("hello"))],
             ),
             &[],
-            "claude-haiku-4-5",
+            &configured("claude-haiku-4-5"),
         )
         .expect("an exact identity is the configured target");
 
@@ -1885,11 +1970,30 @@ mod tests {
         relation: String,
     }
 
+    /// Renders one relation row per configured/reported pair, in the given
+    /// order.
+    fn relation_rows(pairs: &[(&'static str, &'static str)]) -> Vec<RelationRow> {
+        pairs
+            .iter()
+            .map(|(configured_spelling, reported_spelling)| RelationRow {
+                configured: configured_spelling,
+                reported: reported_spelling,
+                relation: format!(
+                    "{:?}",
+                    super::relate_provider_target(
+                        &configured(configured_spelling),
+                        &reported(reported_spelling),
+                    )
+                ),
+            })
+            .collect()
+    }
+
     /// S20 / INV-014: the discriminator between an alias made concrete and a
     /// substituted lineage, stated as a table.
     #[test]
     fn s20_inv014_provider_target_relation_rule_is_stated_by_example() {
-        let rows = [
+        let rows = relation_rows(&[
             ("claude-haiku-4-5", "claude-haiku-4-5"),
             ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
             ("claude-haiku-4-5", "claude-haiku-4-5-2025-10-01"),
@@ -1901,14 +2005,7 @@ mod tests {
             ("claude-opus-4-5", "claude-opus-4-5-20251101"),
             ("claude-opus-4-5-20251101", "claude-opus-4-5"),
             ("", "claude-haiku-4-5-20251001"),
-        ]
-        .into_iter()
-        .map(|(configured, reported)| RelationRow {
-            configured,
-            reported,
-            relation: format!("{:?}", super::relate_provider_target(configured, reported)),
-        })
-        .collect::<Vec<_>>();
+        ]);
 
         expect![[r#"
             ┌──────────────────────────┬─────────────────────────────┬──────────────────┐
@@ -1940,94 +2037,112 @@ mod tests {
         cause_code: &'static str,
     }
 
-    /// INV-035: every classified outcome and every fail-closed defect carries
-    /// a stable, sanitized operator cause token; no provider text, response
-    /// body, or credential material can reach one.
+    /// Renders one cause row per classifiable outcome, in the given order.
+    ///
+    /// Every evidence value here classifies, so the row builder reads the
+    /// cause directly; the fail-closed cause codes are asserted separately.
+    fn cause_rows(outcomes: Vec<(&'static str, TerminalEvidence)>) -> Vec<CauseRow> {
+        outcomes
+            .into_iter()
+            .map(|(outcome, evidence)| CauseRow {
+                outcome,
+                cause_code: classify_terminal(evidence, &[], &configured("model-exact"))
+                    .expect("every fixture in this table classifies")
+                    .cause
+                    .as_str(),
+            })
+            .collect()
+    }
+
+    /// INV-035: every classified outcome carries a stable, sanitized operator
+    /// cause token; no provider text, response body, or credential material
+    /// can reach one.
     #[test]
-    fn inv035_every_outcome_carries_a_stable_sanitized_cause_code() {
-        let exchange = ExchangeFacts::default();
-        let classified = [
+    fn inv035_every_classified_outcome_carries_a_stable_sanitized_cause_code() {
+        let rows = cause_rows(vec![
             (
                 "completed",
-                classify_terminal(
-                    completion("model-exact", vec![AssistantPart::Text(String::from("ok"))]),
-                    &[],
-                    "model-exact",
-                ),
+                completion("model-exact", vec![AssistantPart::Text(String::from("ok"))]),
+            ),
+            (
+                "refused",
+                TerminalEvidence::Refused(RefusalEvidence {
+                    exchange: ExchangeFacts::default(),
+                    message_id: None,
+                    reported_model: None,
+                    content: Vec::new(),
+                    usage: TokenUsage::unreported(),
+                }),
             ),
             (
                 "provider_error(credential_rejected)",
-                classify_terminal(
-                    TerminalEvidence::ProviderError(ProviderErrorEvidence {
-                        exchange: exchange.clone(),
-                        reported_model: None,
-                        kind: ProviderErrorKind::CredentialRejected,
-                        native: NativeErrorFacts::default(),
-                        usage: TokenUsage::unreported(),
-                    }),
-                    &[],
-                    "model-exact",
-                ),
+                TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: ExchangeFacts::default(),
+                    reported_model: None,
+                    kind: ProviderErrorKind::CredentialRejected,
+                    native: NativeErrorFacts::default(),
+                    usage: TokenUsage::unreported(),
+                }),
             ),
             (
                 "proven_unsent(connect_failed)",
-                classify_terminal(
-                    TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
-                        cause: UnsentCause::ConnectFailed(TransportFacts {
-                            detail: String::from("safe typed fixture"),
-                        }),
+                TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::ConnectFailed(TransportFacts {
+                        detail: String::from("safe typed fixture"),
                     }),
-                    &[],
-                    "model-exact",
-                ),
+                }),
+            ),
+            (
+                "proven_unsent(cancelled_before_send)",
+                TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::CancelledBeforeSend,
+                }),
             ),
             (
                 "boundary_loss(transport_failed)",
-                classify_terminal(
-                    TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-                        cause: LossCause::TransportFailed(TransportFacts {
-                            detail: String::from("safe typed fixture"),
-                        }),
-                        exchange,
-                        reported_model: None,
-                        finish_reported: None,
-                        usage: TokenUsage::unreported(),
+                TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    cause: LossCause::TransportFailed(TransportFacts {
+                        detail: String::from("safe typed fixture"),
                     }),
-                    &[],
-                    "model-exact",
-                ),
+                    exchange: ExchangeFacts::default(),
+                    reported_model: None,
+                    finish_reported: None,
+                    usage: TokenUsage::unreported(),
+                }),
             ),
-            (
-                "provider_target_substituted",
-                classify_terminal(
-                    completion("claude-opus-4-8", vec![]),
-                    &[],
-                    "claude-haiku-4-5",
-                ),
-            ),
-        ]
-        .into_iter()
-        .map(|(outcome, result)| CauseRow {
-            outcome,
-            cause_code: match result {
-                Ok(classified) => classified.cause.as_str(),
-                Err(error) => error.cause_code().as_str(),
-            },
-        })
-        .collect::<Vec<_>>();
+        ]);
 
         expect![[r#"
-            ┌─────────────────────────────────────┬────────────────────────────────┐
-            │ outcome                             │ cause_code                     │
-            ├─────────────────────────────────────┼────────────────────────────────┤
-            │ completed                           │ completed                      │
-            │ provider_error(credential_rejected) │ provider_credential_rejected   │
-            │ proven_unsent(connect_failed)       │ connect_failed                 │
-            │ boundary_loss(transport_failed)     │ boundary_loss_transport_failed │
-            │ provider_target_substituted         │ provider_target_substituted    │
-            └─────────────────────────────────────┴────────────────────────────────┘
+            ┌──────────────────────────────────────┬────────────────────────────────┐
+            │ outcome                              │ cause_code                     │
+            ├──────────────────────────────────────┼────────────────────────────────┤
+            │ completed                            │ completed                      │
+            │ refused                              │ provider_refused               │
+            │ provider_error(credential_rejected)  │ provider_credential_rejected   │
+            │ proven_unsent(connect_failed)        │ connect_failed                 │
+            │ proven_unsent(cancelled_before_send) │ cancelled_before_send          │
+            │ boundary_loss(transport_failed)      │ boundary_loss_transport_failed │
+            └──────────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table(classified));
+        .assert_eq(&table(rows));
+    }
+
+    /// INV-035: a fail-closed substitution carries the same sanitized cause
+    /// vocabulary as a classified outcome.
+    #[test]
+    fn inv035_substitution_failure_carries_its_sanitized_cause_code() {
+        let failure = classify_terminal(
+            completion("claude-opus-4-8", vec![]),
+            &[],
+            &configured("claude-haiku-4-5"),
+        )
+        .expect_err("a substituted lineage must fail closed");
+
+        assert_eq!(
+            failure.error.cause_code().as_str(),
+            "provider_target_substituted"
+        );
+        assert_eq!(failure.served_target.as_deref(), Some("claude-opus-4-8"));
     }
 
     /// INV-035: a hostile provider-reported identity is bounded before it can

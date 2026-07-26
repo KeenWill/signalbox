@@ -382,6 +382,17 @@ mod tests {
         }
     }
 
+    /// The provider identities the decode reported, in observation order.
+    fn reported_models(observations: &[Observation<String>]) -> Vec<&str> {
+        observations
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::ProviderModelReported(reported) => Some(reported.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Decodes the body against canonical exchange facts, collecting
     /// observations correlated to `"call-1"`.
     fn decode(body: &str) -> (TerminalEvidence, Vec<Observation<String>>) {
@@ -650,13 +661,7 @@ mod tests {
         };
         assert!(detail.contains("server-side fallback block"));
         assert_eq!(
-            observations
-                .iter()
-                .filter_map(|observation| match &observation.fact {
-                    ObservationFact::ProviderModelReported(reported) => Some(reported.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
+            reported_models(&observations),
             vec!["model-exact-1", "substitute-model-2"],
             "both the envelope identity and the substituting identity reach the caller"
         );
@@ -680,14 +685,8 @@ mod tests {
 
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
         assert_eq!(
-            observations
-                .iter()
-                .filter(|observation| matches!(
-                    observation.fact,
-                    ObservationFact::ProviderModelReported(_)
-                ))
-                .count(),
-            1,
+            reported_models(&observations),
+            vec!["model-exact-1"],
             "only the envelope identity is reported"
         );
     }
