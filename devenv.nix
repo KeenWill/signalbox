@@ -48,6 +48,34 @@ let
   daemonSocketDirectory = "${config.env.DEVENV_RUNTIME}/signalbox";
   daemonSocketPath = "${daemonSocketDirectory}/signalboxd.sock";
 
+  # The certificate path below is derived from the checkout, so it can carry
+  # characters a URL query reserves. SQLx parses the URL and percent-decodes
+  # query values, so encode them here rather than trusting the path's shape:
+  # a raw `&` would start another parameter, `#` would truncate the query, and
+  # an accidental `%xx` would decode to something else entirely. `%` is
+  # replaced first, and `builtins.replaceStrings` does not rescan what it
+  # emits, so the escapes introduced here are not re-encoded.
+  percentEncodeQueryValue = builtins.replaceStrings
+    [ "%" "#" "&" "?" "+" "=" " " "\"" "<" ">" "\\" "^" "`" "{" "|" "}" ]
+    [
+      "%25"
+      "%23"
+      "%26"
+      "%3F"
+      "%2B"
+      "%3D"
+      "%20"
+      "%22"
+      "%3C"
+      "%3E"
+      "%5C"
+      "%5E"
+      "%60"
+      "%7B"
+      "%7C"
+      "%7D"
+    ];
+
   # Every connection parameter is stated in the URL, including the user name
   # and host the daemon refuses to let SQLx take from the process account or
   # the host filesystem. `sslrootcert` names the dev certificate authority
@@ -55,9 +83,11 @@ let
   # and SQLx adds this root to the platform trust store rather than replacing
   # it, so a loopback dev cluster can satisfy full verification without
   # touching SSL_CERT_FILE or SSL_CERT_DIR (which the daemon also refuses).
+  # The role, password, and database name are literals defined above, so only
+  # the checkout-derived certificate path needs encoding.
   databaseUrl =
     "postgres://${devRole}:${devPassword}@localhost:${toString devPort}"
-    + "/${devDatabase}?sslrootcert=${authorityCertificate}";
+    + "/${devDatabase}?sslrootcert=${percentEncodeQueryValue authorityCertificate}";
 
   # The exact ambient channels `production_connection_options` refuses. The
   # PostgreSQL service exports PGHOST, PGPORT, and PGDATA into the shared

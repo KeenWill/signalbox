@@ -89,10 +89,14 @@ repository root.
 
 ### Dev instance
 
-`devenv up` starts a dev instance: a PostgreSQL cluster on loopback port 54341
-and one `signalboxd` built from the working tree. What it launches, in what
-order, and why test databases stay deliberately outside its scope are recorded
-in the [decision log](docs/decisions.md); everything below is operational usage.
+`devenv up` starts a dev instance: a PostgreSQL cluster on loopback and one
+`signalboxd` built from the working tree. The cluster asks for port 54341 and
+devenv allocates upward from there if it is taken, so the port is resolved
+rather than fixed — `echo $PGPORT` inside `devenv shell` names the one in use,
+and the daemon is given the same resolved value. What `devenv up` launches, in
+what order, and why test databases stay deliberately outside its scope are
+recorded in the [decision log](docs/decisions.md); everything below is
+operational usage.
 
 State lives under the gitignored `.devenv/state/`: the cluster in `postgres/`,
 and everything the daemon needs in `dev-instance/` — a locally generated
