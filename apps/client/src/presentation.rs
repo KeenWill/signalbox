@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io::{self, Write},
+    path::Path,
 };
 
 use signalbox_process_protocol::{
@@ -112,6 +113,52 @@ impl<'a> Output<'a> {
         writeln!(
             self.stdout,
             "already_imported imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_scan_inserted(
+        &mut self,
+        path: &Path,
+        imported_conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        let path = self.render(&format!("{path:?}"));
+        writeln!(
+            self.stdout,
+            "imported path={path} imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_scan_already_imported(
+        &mut self,
+        path: &Path,
+        imported_conversation_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        let path = self.render(&format!("{path:?}"));
+        writeln!(
+            self.stdout,
+            "already_imported path={path} imported_conversation_id={imported_conversation_id}"
+        )
+    }
+
+    pub(crate) fn conversation_import_scan_skipped(
+        &mut self,
+        path: &Path,
+        error: &ClientError,
+    ) -> io::Result<()> {
+        let path = self.render(&format!("{path:?}"));
+        let reason = self.render(&error.to_string());
+        writeln!(self.stdout, "skipped path={path} reason={reason}")
+    }
+
+    pub(crate) fn conversation_import_scan_summary(
+        &mut self,
+        imported: usize,
+        already_imported: usize,
+        skipped: usize,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "scan_summary imported={imported} already_imported={already_imported} skipped={skipped}"
         )
     }
 

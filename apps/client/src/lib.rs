@@ -7,7 +7,7 @@ use std::{
     process::ExitCode,
 };
 
-use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome};
+use arguments::{Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome};
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SnapshotSelection};
@@ -29,6 +29,24 @@ mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
 const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+
+enum PreparedImport {
+    File(Vec<u8>),
+    Scan(Vec<PathBuf>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationImportOutcome {
+    Inserted(CanonicalUuid),
+    AlreadyImported(CanonicalUuid),
+}
+
+#[derive(Default)]
+struct ImportScanSummary {
+    imported: usize,
+    already_imported: usize,
+    skipped: usize,
+}
 
 /// Parses and runs one terminal-client invocation.
 pub async fn run(
@@ -79,8 +97,15 @@ async fn execute(
     } else {
         None
     };
-    let import_source = match &arguments.command {
-        Command::Import { path, .. } => Some(read_import_source(path).await?),
+    let prepared_import = match &arguments.command {
+        Command::Import {
+            source: ImportSourceArgument::File(path),
+            ..
+        } => Some(PreparedImport::File(read_import_source(path).await?)),
+        Command::Import {
+            source: ImportSourceArgument::Scan(path),
+            ..
+        } => Some(PreparedImport::Scan(collect_import_paths(path).await?)),
         Command::Create { .. }
         | Command::List
         | Command::Send { .. }
@@ -140,8 +165,15 @@ async fn execute(
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
         Command::Import { format, .. } => {
-            let source = import_source.ok_or(ClientError::Input("import source was not read"))?;
-            import_conversation(&mut client, &mut output, format, source).await
+            match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
+                PreparedImport::File(source) => {
+                    let outcome = import_conversation(&mut client, format, source).await?;
+                    write_single_import_outcome(&mut output, outcome)
+                }
+                PreparedImport::Scan(paths) => {
+                    scan_conversations(&mut client, &mut output, format, paths).await
+                }
+            }
         }
         Command::Reconcile {
             session_id,
@@ -453,12 +485,50 @@ async fn observe_session_defaults(
     }
 }
 
+async fn collect_import_paths(root: &Path) -> Result<Vec<PathBuf>, ClientError> {
+    let root_metadata = tokio::fs::symlink_metadata(root)
+        .await
+        .map_err(ClientError::scan_directory)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ClientError::Input("--scan requires a directory"));
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut paths = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut entries = tokio::fs::read_dir(directory)
+            .await
+            .map_err(ClientError::scan_directory)?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(ClientError::scan_directory)?
+        {
+            let path = entry.path();
+            let metadata = tokio::fs::symlink_metadata(&path)
+                .await
+                .map_err(ClientError::scan_directory)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 async fn import_conversation(
     client: &mut ProcessClient,
-    output: &mut Output<'_>,
     format: ConversationImportFormat,
     source: Vec<u8>,
-) -> Result<(), ClientError> {
+) -> Result<ConversationImportOutcome, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::ImportConversation {
             format,
@@ -468,22 +538,77 @@ async fn import_conversation(
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
-        } => {
-            output.conversation_import_inserted(imported_conversation_id)?;
-            Ok(())
-        }
+        } => Ok(ConversationImportOutcome::Inserted(
+            imported_conversation_id,
+        )),
         ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id,
-        } => {
-            output.conversation_import_already_imported(imported_conversation_id)?;
-            Ok(())
-        }
+        } => Ok(ConversationImportOutcome::AlreadyImported(
+            imported_conversation_id,
+        )),
         ServerMessage::Error {
             code,
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("import returned an unexpected response").mutation()),
+    }
+}
+
+fn write_single_import_outcome(
+    output: &mut Output<'_>,
+    outcome: ConversationImportOutcome,
+) -> Result<(), ClientError> {
+    match outcome {
+        ConversationImportOutcome::Inserted(imported_conversation_id) => {
+            output.conversation_import_inserted(imported_conversation_id)?;
+        }
+        ConversationImportOutcome::AlreadyImported(imported_conversation_id) => {
+            output.conversation_import_already_imported(imported_conversation_id)?;
+        }
+    }
+    Ok(())
+}
+
+async fn scan_conversations(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    format: ConversationImportFormat,
+    paths: Vec<PathBuf>,
+) -> Result<(), ClientError> {
+    let mut summary = ImportScanSummary::default();
+    for path in paths {
+        let outcome = match read_import_source(&path).await {
+            Ok(source) => import_conversation(client, format, source).await,
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(ConversationImportOutcome::Inserted(imported_conversation_id)) => {
+                summary.imported += 1;
+                output.conversation_import_scan_inserted(&path, imported_conversation_id)?;
+            }
+            Ok(ConversationImportOutcome::AlreadyImported(imported_conversation_id)) => {
+                summary.already_imported += 1;
+                output
+                    .conversation_import_scan_already_imported(&path, imported_conversation_id)?;
+            }
+            Err(error) => {
+                summary.skipped += 1;
+                output.conversation_import_scan_skipped(&path, &error)?;
+            }
+        }
+    }
+    output.conversation_import_scan_summary(
+        summary.imported,
+        summary.already_imported,
+        summary.skipped,
+    )?;
+    if summary.skipped == 0 {
+        Ok(())
+    } else {
+        Err(ClientError::ScanIncomplete {
+            skipped_files: summary.skipped,
+        })
     }
 }
 

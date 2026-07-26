@@ -42,7 +42,7 @@ pub(crate) enum Command {
     },
     Import {
         format: ConversationImportFormat,
-        path: PathBuf,
+        source: ImportSourceArgument,
     },
     Reconcile {
         session_id: CanonicalUuid,
@@ -50,6 +50,12 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
         defaults_version: Option<CanonicalU64>,
     },
+}
+
+#[derive(Debug)]
+pub(crate) enum ImportSourceArgument {
+    File(PathBuf),
+    Scan(PathBuf),
 }
 
 #[derive(Debug)]
@@ -101,7 +107,7 @@ enum CliCommand {
     Transcript(SessionArguments),
     /// Print a snapshot and follow durable session updates.
     Follow(SessionArguments),
-    /// Import one Claude Code session or Codex rollout JSONL file.
+    /// Import Claude Code sessions or Codex rollout JSONL files.
     Import(ImportArguments),
     /// Reconcile a turn parked on an ambiguous model call and continue with
     /// standard-input content.
@@ -226,13 +232,22 @@ struct SessionArguments {
 }
 
 #[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("source")
+        .required(true)
+        .multiple(false)
+        .args(["path", "scan"])
+))]
 struct ImportArguments {
     /// Select the source family and its current fixed converter version.
     #[arg(long, value_enum)]
     format: ImportFormatArgument,
     /// Read exactly one source file.
     #[arg(value_name = "FILE")]
-    path: PathBuf,
+    path: Option<PathBuf>,
+    /// Recursively import every regular lowercase .jsonl file under a directory.
+    #[arg(long, value_name = "DIR")]
+    scan: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -307,7 +322,16 @@ pub(crate) fn parse(
                 }
                 ImportFormatArgument::Codex => ConversationImportFormat::CodexRolloutJsonlV1,
             },
-            path: arguments.path,
+            source: match (arguments.path, arguments.scan) {
+                (Some(path), None) => ImportSourceArgument::File(path),
+                (None, Some(path)) => ImportSourceArgument::Scan(path),
+                (None, None) | (Some(_), Some(_)) => {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "import requires exactly one FILE or --scan DIR",
+                    )));
+                }
+            },
         },
         CliCommand::Reconcile(arguments) => Command::Reconcile {
             session_id: arguments.session_id,
@@ -355,7 +379,10 @@ mod tests {
 
     use signalbox_process_protocol::ConversationImportFormat;
 
-    use super::{Arguments, Command, DangerousToolAutoApprovalArgument, ParseOutcome, parse};
+    use super::{
+        Arguments, Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome,
+        parse,
+    };
 
     #[test]
     fn send_recovery_flags_are_an_exact_pair() {
@@ -510,7 +537,24 @@ mod tests {
         let parsed = parse(["import", "--format", "codex", "rollout.jsonl"].map(Into::into))
             .expect("the explicit supported format and one path parse");
 
-        assert_codex_import(parsed, Path::new("rollout.jsonl"));
+        assert_codex_file_import(parsed, Path::new("rollout.jsonl"));
+    }
+
+    #[test]
+    fn import_maps_one_explicit_supported_format_and_scan_directory() {
+        let parsed = parse(
+            [
+                "import",
+                "--format",
+                "codex",
+                "--scan",
+                "conversation-directory",
+            ]
+            .map(Into::into),
+        )
+        .expect("the explicit supported format and scan directory parse");
+
+        assert_codex_scan_import(parsed, Path::new("conversation-directory"));
     }
 
     #[test]
@@ -526,15 +570,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn import_rejects_a_file_together_with_a_scan_directory() {
+        assert!(
+            parse(
+                [
+                    "import",
+                    "--format",
+                    "codex",
+                    "rollout.jsonl",
+                    "--scan",
+                    "conversation-directory",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
     #[track_caller]
-    fn assert_codex_import(parsed: ParseOutcome, expected_path: &Path) {
+    fn assert_codex_file_import(parsed: ParseOutcome, expected_path: &Path) {
         let ParseOutcome::Run(arguments) = parsed else {
             panic!("the successful import parse runs the client");
         };
-        let Command::Import { format, path } = arguments.command else {
+        let Command::Import { format, source } = arguments.command else {
             panic!("the successful import parse selects the import command");
         };
         assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV1);
+        let ImportSourceArgument::File(path) = source else {
+            panic!("the positional import source selects one file");
+        };
+        assert_eq!(path, expected_path);
+    }
+
+    #[track_caller]
+    fn assert_codex_scan_import(parsed: ParseOutcome, expected_path: &Path) {
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful import parse runs the client");
+        };
+        let Command::Import { format, source } = arguments.command else {
+            panic!("the successful import parse selects the import command");
+        };
+        assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV1);
+        let ImportSourceArgument::Scan(path) = source else {
+            panic!("the scan option selects one directory");
+        };
         assert_eq!(path, expected_path);
     }
 

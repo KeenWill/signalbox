@@ -4,10 +4,12 @@ This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, and the owner-operated
-one-file import surface, verified against the implementing stack through PR #252
-(`agent/import-surfaces`). Later session creation from one imported frontier is
-owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
-activation and model-call rendering are owned by
+one-file and directory-scan import surfaces. The one-file surface was verified
+against the implementing stack through PR #252 (`agent/import-surfaces`); the
+directory scan is verified against `agent/import-directory-scan`. Later session
+creation from one imported frontier is owned by
+[sessions-and-transcript](sessions-and-transcript.md); native turn activation
+and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -275,13 +277,33 @@ domain or application crates.
 
 ## Operational surface
 
-The owner terminal exposes
-`signalbox import --format <claude-code|codex> <file>`. One invocation reads
-exactly the named file as bytes; it performs no directory traversal, neighboring
-file inspection, format detection, watching, or repeated read. The client does
-not transmit or persist the source path. It selects `ClaudeCodeSessionJsonlV2`
-for `claude-code` or `CodexRolloutJsonlV1` for `codex`, then carries the
-complete bytes and explicit selection in one version-five local process request.
+The owner terminal preserves the single-file form,
+`signalbox import --format <claude-code|codex> <file>`, and adds the explicit
+directory form, `signalbox import --format <claude-code|codex> --scan <dir>`.
+Exactly one file or scan directory is required. Both forms keep format selection
+explicit: `claude-code` selects `ClaudeCodeSessionJsonlV2`, and `codex` selects
+`CodexRolloutJsonlV1`. No source path is inferred from an environment or fixed
+home-directory convention.
+
+The single-file form reads exactly the named file and performs no neighboring
+file inspection. Scan mode first traverses the complete tree rooted at the named
+directory without following symbolic links. It selects only regular files whose
+extension is exactly lowercase `.jsonl`, sorts their full paths, and imposes no
+candidate-count cap. A traversal failure aborts before any request rather than
+hiding an unread subtree. Each candidate is then read and sent through the
+existing version-five `import_conversation` request, one file per request and in
+that sorted order; scan mode adds no protocol request or server-side batching.
+
+For every candidate, the terminal prints an escaped, quoted local path and one
+`imported`, `already_imported`, or `skipped` outcome. Successful outcomes name
+the imported conversation identity. A skipped outcome carries the exact client
+error; it means the client did not receive a definitive successful receipt, not
+that an ambiguity reason proves the request uncommitted. Processing continues
+after a skip. A final summary prints the uncapped imported, already-imported,
+and skipped counts; any skip makes the invocation fail after the remaining
+candidates are processed, while an empty matching set succeeds with zero counts.
+The source path is local presentation only and is never transmitted or
+persisted.
 
 The wire encodes the exact bytes as canonical padded base64. The existing 8 MiB
 frame bound determines whether a complete encoded request fits; the importer
@@ -290,13 +312,15 @@ transport bound rather than allocating from the file's declared size: it stops
 after one byte beyond the greatest raw byte count that padded base64 could
 possibly fit, then rejects that impossible payload before socket I/O. Exact
 encoded-frame construction also happens before socket I/O and remains the final
-fit check. A file-read failure happens before the request and is reported
-without its path. The server decodes and validates canonical base64 once under
-the existing inbound-frame permit without constructing a second full-size
-canonical encoding. Invalid base64 is a malformed frame. A selected converter's
-content-silent conversion failure is an `invalid_request`; database failure is
-conservatively `commit_ambiguous`, so the operator may retry the exact format
-and source bytes; integrity failure is `internal`.
+fit check. A single-file read failure happens before the request and is reported
+without its path. Scan-mode read and exact-frame-fit failures are reported
+against that candidate and do not truncate its bytes. The server decodes and
+validates canonical base64 once under the existing inbound-frame permit without
+constructing a second full-size canonical encoding. Invalid base64 is a
+malformed frame. A selected converter's content-silent conversion failure is an
+`invalid_request`; database failure is conservatively `commit_ambiguous`, so the
+operator may retry the exact format and source bytes; integrity failure is
+`internal`.
 
 The daemon selects the fixed converter, supplies UUIDv7 conversation and entry
 candidates, and invokes `ImportConversationService` against the append-only

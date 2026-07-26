@@ -8,7 +8,11 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
+    ScanDirectory(io::Error),
     SourceExceedsFrame,
+    ScanIncomplete {
+        skipped_files: usize,
+    },
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
@@ -39,6 +43,10 @@ impl ClientError {
         Self::SourceFile(error)
     }
 
+    pub(crate) fn scan_directory(error: io::Error) -> Self {
+        Self::ScanDirectory(error)
+    }
+
     pub(crate) fn mutation(self) -> Self {
         match self {
             Self::Remote {
@@ -47,6 +55,8 @@ impl ClientError {
             } => Self::AmbiguousMutation,
             Self::Remote { .. } | Self::SourceFile(_) | Self::SourceExceedsFrame => self,
             Self::Io(_)
+            | Self::ScanDirectory(_)
+            | Self::ScanIncomplete { .. }
             | Self::Encode(_)
             | Self::Decode(_)
             | Self::Protocol(_)
@@ -68,8 +78,15 @@ impl fmt::Display for ClientError {
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
+            Self::ScanDirectory(_) => {
+                formatter.write_str("the conversation import scan directory could not be read")
+            }
             Self::SourceExceedsFrame => formatter.write_str(
                 "the conversation import source cannot fit within the process frame bound",
+            ),
+            Self::ScanIncomplete { skipped_files } => write!(
+                formatter,
+                "the conversation import scan completed with {skipped_files} skipped file(s)"
             ),
             Self::Encode(_) => formatter.write_str("the client could not encode its request"),
             Self::Decode(_) => formatter.write_str("the server violated the process protocol"),
@@ -109,7 +126,7 @@ impl fmt::Display for ClientError {
 impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(error) | Self::SourceFile(error) => Some(error),
+            Self::Io(error) | Self::SourceFile(error) | Self::ScanDirectory(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::Protocol(_)
@@ -117,6 +134,7 @@ impl Error for ClientError {
             | Self::AmbiguousMutation
             | Self::Input(_)
             | Self::SourceExceedsFrame
+            | Self::ScanIncomplete { .. }
             | Self::TurnRecoveryRequired
             | Self::TurnFailed
             | Self::TurnRefused

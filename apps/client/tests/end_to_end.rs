@@ -10,7 +10,7 @@ use std::{
     ffi::OsString,
     fs,
     io::{self, ErrorKind},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
@@ -54,6 +54,8 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_terminal_client";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+/// A synthetic source larger than any complete import request can admit.
+const OVERSIZED_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 const IMPORT_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -240,6 +242,143 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     socket_directory.cleanup()?;
     drop(container);
     Ok(())
+}
+
+/// S28 / INV-038: scan mode imports every matching regular file in sorted
+/// path order, reports an oversized source without truncation, and exposes
+/// digest-idempotent replay per file.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn terminal_client_scan_reports_each_exact_import_outcome() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let first_path = source_directory.path().join("01-session.jsonl");
+    let oversized_path = source_directory.path().join("02-oversized.jsonl");
+    let nested_directory = source_directory.path().join("nested");
+    let second_path = nested_directory.join("03-session.jsonl");
+    fs::create_dir(&nested_directory)?;
+    fs::write(
+        &first_path,
+        concat!(
+            "{\"sessionId\":\"terminal-scan-first\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":\"first question\"}}\n",
+            "{\"sessionId\":\"terminal-scan-first\",\"type\":\"assistant\",",
+            "\"message\":{\"role\":\"assistant\",\"content\":\"first answer\"}}"
+        ),
+    )?;
+    fs::write(
+        &second_path,
+        concat!(
+            "{\"sessionId\":\"terminal-scan-second\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":\"second question\"}}\n",
+            "{\"sessionId\":\"terminal-scan-second\",\"type\":\"assistant\",",
+            "\"message\":{\"role\":\"assistant\",\"content\":\"second answer\"}}"
+        ),
+    )?;
+    std::fs::File::create(&oversized_path)?.set_len(OVERSIZED_IMPORT_BYTES)?;
+    fs::write(
+        source_directory.path().join("ignored.JSONL"),
+        b"not selected",
+    )?;
+    fs::write(source_directory.path().join("ignored.txt"), b"not selected")?;
+    symlink(
+        &first_path,
+        source_directory.path().join("04-symlink.jsonl"),
+    )?;
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+    let arguments = vec![
+        String::from("import"),
+        String::from("--format"),
+        String::from("claude-code"),
+        String::from("--scan"),
+        source_directory.path().display().to_string(),
+    ];
+
+    let inserted = run_client(
+        socket_directory.socket().to_owned(),
+        arguments.clone(),
+        None,
+    )
+    .await?;
+    assert!(!inserted.status.success());
+    assert_eq!(
+        String::from_utf8(inserted.stderr)?,
+        "error: the conversation import scan completed with 1 skipped file(s)\n"
+    );
+    let inserted_output = String::from_utf8(inserted.stdout)?;
+    let first_identity = scan_imported_identity(
+        inserted_output
+            .lines()
+            .next()
+            .ok_or_else(|| io::Error::other("the first scan outcome is absent"))?,
+        &first_path,
+    )?;
+    let second_identity = scan_imported_identity(
+        inserted_output
+            .lines()
+            .nth(2)
+            .ok_or_else(|| io::Error::other("the nested scan outcome is absent"))?,
+        &second_path,
+    )?;
+    assert_eq!(
+        inserted_output,
+        format!(
+            "imported path={:?} imported_conversation_id={first_identity}\n\
+             skipped path={:?} reason=the conversation import source cannot fit within the process \
+             frame bound\n\
+             imported path={:?} imported_conversation_id={second_identity}\n\
+             scan_summary imported=2 already_imported=0 skipped=1\n",
+            first_path, oversized_path, second_path,
+        )
+    );
+
+    let already_imported =
+        run_client(socket_directory.socket().to_owned(), arguments, None).await?;
+    assert!(!already_imported.status.success());
+    assert_eq!(
+        String::from_utf8(already_imported.stderr)?,
+        "error: the conversation import scan completed with 1 skipped file(s)\n"
+    );
+    assert_eq!(
+        String::from_utf8(already_imported.stdout)?,
+        format!(
+            "already_imported path={:?} imported_conversation_id={first_identity}\n\
+             skipped path={:?} reason=the conversation import source cannot fit within the process \
+             frame bound\n\
+             already_imported path={:?} imported_conversation_id={second_identity}\n\
+             scan_summary imported=0 already_imported=2 skipped=1\n",
+            first_path, oversized_path, second_path,
+        )
+    );
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+fn scan_imported_identity(line: &str, path: &Path) -> Result<String, Box<dyn Error>> {
+    let prefix = format!("imported path={:?} imported_conversation_id=", path);
+    let identity = line
+        .strip_prefix(&prefix)
+        .ok_or_else(|| io::Error::other("the scan outcome did not name the selected path"))?;
+    Uuid::parse_str(identity)?;
+    Ok(identity.to_owned())
 }
 
 /// S33 / INV-008 / INV-046: the terminal model verb observes the complete current
