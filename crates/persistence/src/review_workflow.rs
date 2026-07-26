@@ -757,8 +757,10 @@ impl ReviewWorkflowStore {
                     canonical_link.association_kind AS link_association_kind,
                     canonical_link.run_id AS link_run_id,
                     canonical_link.finding_id AS link_finding_id,
-                    link_finding.producing_pass_id
+                    canonical_link.finding_producing_pass_id
                         AS link_finding_producing_pass_id,
+                    link_finding.producing_pass_id
+                        AS canonical_link_finding_producing_pass_id,
                     canonical_link.provider_key AS link_provider_key,
                     canonical_link.object_kind AS link_object_kind,
                     attachment.external_link_id
@@ -843,6 +845,8 @@ impl ReviewWorkflowStore {
                  ON link_finding.finding_id = canonical_link.finding_id
                 AND link_finding.run_id = canonical_link.run_id
                 AND link_finding.target_id = canonical_link.target_id
+                AND link_finding.producing_pass_id =
+                    canonical_link.finding_producing_pass_id
                LEFT JOIN review_external_link_attachment AS attachment
                  ON attachment.external_link_id =
                     canonical_link.external_link_id
@@ -1081,6 +1085,25 @@ impl ReviewWorkflowStore {
             })?;
         }
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(link.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if posted_event.is_none()
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM review_finding_event
+                      WHERE external_link_id = $1
+                        AND event_kind = 'blocked_with_reason'
+                 )",
+            )
+            .bind(link.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?
+        {
+            return Err(ReviewWorkflowStoreError::IncompletePublicationReconciliation);
+        }
         bind_pass_result(&mut transaction, attachment.pass_evidence()).await?;
         sqlx::query(
             "INSERT INTO review_external_link_attachment
@@ -1178,12 +1201,14 @@ impl ReviewWorkflowStore {
             {
                 current
             } else {
-                self.load_external_link(link).await?.ok_or_else(|| {
-                    corruption(
-                        "review_external_link",
-                        String::from("locked reservation disappeared"),
-                    )
-                })?
+                Self::load_external_link_on_connection(&mut transaction, link)
+                    .await?
+                    .ok_or_else(|| {
+                        corruption(
+                            "review_external_link",
+                            String::from("locked reservation disappeared"),
+                        )
+                    })?
             };
             let no_change_pass = canonical_pass
                 .project_result(ReviewPassResult::ExternalLinkNoChange(
@@ -1344,6 +1369,15 @@ impl ReviewWorkflowStore {
         link: ReviewExternalLinkId,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let link = Self::load_external_link_on_connection(&mut transaction, link).await?;
+        transaction.commit().await?;
+        Ok(link)
+    }
+
+    async fn load_external_link_on_connection(
+        connection: &mut PgConnection,
+        link: ReviewExternalLinkId,
+    ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
             "SELECT link.external_link_id, link.target_id,
                     link.association_kind, link.run_id, link.finding_id,
@@ -1398,10 +1432,9 @@ impl ReviewWorkflowStore {
               WHERE link.external_link_id = $1",
         )
         .bind(link.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(row) = row else {
-            transaction.commit().await?;
             return Ok(None);
         };
         require_joined_reference(
@@ -1426,15 +1459,14 @@ impl ReviewWorkflowStore {
                 "finding producing pass row is missing",
             )?;
         }
-        let target =
-            load_target_on_connection(&mut transaction, target_id(row.try_get("target_id")?))
-                .await?
-                .ok_or_else(|| {
-                    corruption(
-                        "review_external_link",
-                        String::from("referenced target row is missing"),
-                    )
-                })?;
+        let target = load_target_on_connection(connection, target_id(row.try_get("target_id")?))
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("referenced target row is missing"),
+                )
+            })?;
         let (id, association, provider, kind) = decode_external_link_root(&row)?;
         let attachment = sqlx::query(
             "SELECT attachment.external_link_id, attachment.pass_run_id,
@@ -1489,7 +1521,7 @@ impl ReviewWorkflowStore {
               WHERE attachment.external_link_id = $1",
         )
         .bind(link.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut *connection)
         .await?;
         let attachment = match attachment {
             Some(row) => {
@@ -1506,7 +1538,7 @@ impl ReviewWorkflowStore {
                     "attaching run row is missing",
                 )?;
                 let pass_id = pass_id(row.try_get("pass_id")?);
-                let pass = load_pass_on_connection(&mut transaction, pass_id)
+                let pass = load_pass_on_connection(connection, pass_id)
                     .await?
                     .ok_or_else(|| {
                         corruption(
@@ -1574,7 +1606,7 @@ impl ReviewWorkflowStore {
               ORDER BY observation.observation_ordinal",
         )
         .bind(link.into_uuid())
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut *connection)
         .await?;
         let mut observations = Vec::with_capacity(observation_rows.len());
         for row in observation_rows {
@@ -1591,7 +1623,7 @@ impl ReviewWorkflowStore {
                 "observing run row is missing",
             )?;
             let pass_id = pass_id(row.try_get("pass_id")?);
-            let pass = load_pass_on_connection(&mut transaction, pass_id)
+            let pass = load_pass_on_connection(connection, pass_id)
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1602,7 +1634,7 @@ impl ReviewWorkflowStore {
                 .evidence();
             observations.push(decode_external_link_observation(&row, pass)?);
         }
-        let claims = load_external_link_claims_on_connection(&mut transaction, link).await?;
+        let claims = load_external_link_claims_on_connection(connection, link).await?;
         let link = ReviewExternalLink::try_reconstitute(
             id,
             association,
@@ -1614,7 +1646,6 @@ impl ReviewWorkflowStore {
             &target,
         )
         .map_err(|error| corruption("review_external_link", format!("{error:?}")))?;
-        transaction.commit().await?;
         Ok(Some(link))
     }
 }
@@ -3169,8 +3200,15 @@ fn decode_finding_external_link_aggregate(
         })?;
     let run = row.try_get::<Option<Uuid>, _>("link_run_id")?;
     let canonical_finding = row.try_get::<Option<Uuid>, _>("link_finding_id")?;
+    let stored_finding_pass = row.try_get::<Option<Uuid>, _>("link_finding_producing_pass_id")?;
     let canonical_finding_pass =
-        row.try_get::<Option<Uuid>, _>("link_finding_producing_pass_id")?;
+        row.try_get::<Option<Uuid>, _>("canonical_link_finding_producing_pass_id")?;
+    if stored_finding_pass != canonical_finding_pass {
+        return Err(corruption(
+            "review_finding_event",
+            String::from("posted event link finding producer mismatch"),
+        ));
+    }
     let association = match (
         association_kind.as_str(),
         run,

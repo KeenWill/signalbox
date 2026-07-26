@@ -1066,13 +1066,36 @@ fn assert_sqlstate(error: &sqlx::Error, expected: &str) {
     );
 }
 
+fn assert_concurrent_attachment_outcomes(
+    first: Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError>,
+    second: Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError>,
+) {
+    let constraint_rejection =
+        |outcome: &Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError>| {
+            matches!(
+                outcome,
+                Err(ReviewWorkflowStoreError::Database(error))
+                    if error
+                        .as_database_error()
+                        .and_then(|database| database.code())
+                        .as_deref()
+                        == Some("23514")
+            )
+        };
+    assert!(
+        (first.is_ok() && constraint_rejection(&second))
+            || (second.is_ok() && constraint_rejection(&first)),
+        "exactly one logical target must be admitted and the other constraint-rejected"
+    );
+}
+
 /// INV-040 / INV-041: the store reconstructs complete workflow evidence,
 /// including the canonical reservation, attachment, and observation sequence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
 -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
     let store = ReviewWorkflowStore::new(pool.clone());
     let session = SessionId::from_uuid(uuid(0x201));
     let accepted_input = AcceptedInputId::from_uuid(uuid(0x202));
@@ -1312,6 +1335,49 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .expect("atomically posted finding loads"),
         Some(posted_finding)
     );
+    sqlx::query(
+        "ALTER TABLE review_external_link
+         DROP CONSTRAINT review_external_link_finding_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_external_link
+         DISABLE TRIGGER review_external_link_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_external_link
+            SET finding_producing_pass_id = $1
+          WHERE external_link_id = $2",
+    )
+    .bind(judge_pass.pass().into_uuid())
+    .bind(link_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = store
+        .load_finding(finding_ref.finding())
+        .await
+        .expect_err("finding loading must authenticate the stored link producer");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed finding-history corruption");
+    };
+    assert_eq!(error.aggregate(), "review_finding_event");
+    assert!(
+        error.detail().contains("link finding producer mismatch"),
+        "unexpected corruption detail: {}",
+        error.detail(),
+    );
+    sqlx::query(
+        "UPDATE review_external_link
+            SET finding_producing_pass_id = $1
+          WHERE external_link_id = $2",
+    )
+    .bind(pass_ref.pass().into_uuid())
+    .bind(link_id.into_uuid())
+    .execute(&pool)
+    .await?;
     let first_observation = observation(
         link_id,
         ReviewEventOrdinal::one(),
@@ -4456,25 +4522,7 @@ async fn inv041_concurrent_external_object_attachment_has_one_logical_target()
             attachment(second_link, second_evidence, key("shared-object")),
         ),
     );
-    let outcomes = [first, second];
-    let admitted = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
-    let rejected = outcomes
-        .iter()
-        .filter(|outcome| {
-            matches!(
-                outcome,
-                Err(ReviewWorkflowStoreError::Database(error))
-                    if error
-                        .as_database_error()
-                        .and_then(|database| database.code())
-                        .as_deref()
-                        == Some("23514")
-            )
-        })
-        .count();
-
-    assert_eq!(admitted, 1, "exactly one logical target is established");
-    assert_eq!(rejected, 1, "the unrelated concurrent claimant is rejected");
+    assert_concurrent_attachment_outcomes(first, second);
     Ok(())
 }
 
