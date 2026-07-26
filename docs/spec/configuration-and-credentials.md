@@ -13,8 +13,10 @@ in [process configuration](#process-configuration) were verified through PR #237
 `crates/persistence/src/lib.rs`; the `signalboxd` binary name, its
 `apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
 checked-in example path were verified through PR #258
-(`agent/signalboxd-rename`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag.
+(`agent/signalboxd-rename`). The per-turn pinning behavior at a mid-session
+defaults boundary was verified through PR #272 (`agent/mid-session-model`).
+Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
+tag.
 
 ## Process configuration
 
@@ -165,6 +167,15 @@ credential presence is never consulted (INV-008):
   distinct from provider failure, with no silent model substitution, is what
   INV-017 and INV-018 require. Lifecycle detail is
   [model-call-execution](model-call-execution.md) material.
+
+Each accepted origin retains the selection frozen from its defaults epoch.
+Replacing session defaults imposes no same-provider restriction: any selection
+admitted by the immutable catalog may become the next epoch, while the current
+daemon composition still configures only Anthropic targets. The first subsequent
+turn resolves and pins its own provider target and credential reference at its
+model-call boundary. A prepared or in-flight predecessor retains its pins. This
+re-establishes credential affinity where the new defaults take effect and keeps
+provider prompt-cache prefixes stable for work already in progress (INV-046).
 
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider

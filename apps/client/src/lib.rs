@@ -7,7 +7,7 @@ use std::{
     process::ExitCode,
 };
 
-use arguments::{Command, ParseOutcome};
+use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome};
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SnapshotSelection};
@@ -81,6 +81,7 @@ async fn execute(
         Command::Create { .. }
         | Command::List
         | Command::Send { .. }
+        | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. } => None,
     };
@@ -107,6 +108,24 @@ async fn execute(
                 command_id,
                 defaults_version,
                 input,
+            )
+            .await
+        }
+        Command::Model {
+            session_id,
+            selection,
+            command_id,
+            defaults_version,
+            dangerous_tool_auto_approval,
+        } => {
+            replace_session_model(
+                &mut client,
+                &mut output,
+                session_id,
+                selection,
+                command_id,
+                defaults_version,
+                dangerous_tool_auto_approval,
             )
             .await
         }
@@ -222,6 +241,189 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObservedSessionDefaults {
+    version: CanonicalU64,
+    dangerous_tool_auto_approval: bool,
+}
+
+async fn replace_session_model(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    selection: ModelSelection,
+    command_id: Option<CommandId>,
+    defaults_version: Option<CanonicalU64>,
+    dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let observed = match (defaults_version, dangerous_tool_auto_approval) {
+        (Some(version), Some(posture)) => ObservedSessionDefaults {
+            version,
+            dangerous_tool_auto_approval: matches!(
+                posture,
+                DangerousToolAutoApprovalArgument::ApproveAll
+            ),
+        },
+        (None, None) => observe_session_defaults(client, session_id).await?,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(ClientError::Input(
+                "model recovery requires the complete printed defaults facts",
+            ));
+        }
+    };
+    output.recovery_value("defaults_version", &observed.version.value().to_string())?;
+    output.recovery_value(
+        "dangerous_tool_auto_approval",
+        if observed.dangerous_tool_auto_approval {
+            "approve-all"
+        } else {
+            "disabled"
+        },
+    )?;
+
+    let mut connection = client
+        .mutation_request(ClientRequest::ReplaceSessionDefaults {
+            command_id,
+            session_id,
+            expected_defaults_version: observed.version,
+            model_selection: selection,
+            dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionDefaultsReplaced {
+            session_id: replaced_session,
+            defaults_version: installed_version,
+            model_selection,
+            dangerous_tool_auto_approval,
+        } if replaced_session == session_id
+            && model_selection == selection
+            && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
+            && observed
+                .version
+                .value()
+                .checked_add(1)
+                .is_some_and(|expected| installed_version.value() == expected) =>
+        {
+            output.session_defaults_replaced(
+                replaced_session,
+                installed_version.value(),
+                &selection_display(model_selection),
+            )?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(
+            ClientError::Protocol("model replacement returned an unexpected response").mutation(),
+        ),
+    }
+}
+
+async fn observe_session_defaults(
+    client: &mut ProcessClient,
+    selected_session: CanonicalUuid,
+) -> Result<ObservedSessionDefaults, ClientError> {
+    let mut after_session_id = None;
+    loop {
+        let mut connection = client
+            .request(ClientRequest::ListSessionMetadata {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: true,
+                page_size: CanonicalU64::new(100),
+                after_session_id,
+            })
+            .await?;
+        match connection.message().await? {
+            ServerMessage::SessionMetadataPageStart {} => {}
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(code, message, detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "session metadata page did not begin with its start frame",
+                ));
+            }
+        }
+        let mut selected = None;
+        let mut observed_count = 0_u64;
+        let mut last_session_id = after_session_id;
+        let mut last_in_page = None;
+        loop {
+            match connection.message().await? {
+                ServerMessage::SessionMetadataSummary {
+                    session_id,
+                    defaults_version,
+                    dangerous_tool_auto_approval,
+                    ..
+                } => {
+                    if last_session_id.is_some_and(|last: CanonicalUuid| {
+                        session_id.into_uuid() <= last.into_uuid()
+                    }) {
+                        return Err(ClientError::Protocol(
+                            "session metadata summaries were not strictly ordered",
+                        ));
+                    }
+                    observed_count = observed_count.checked_add(1).ok_or(ClientError::Protocol(
+                        "session metadata summary count overflowed",
+                    ))?;
+                    last_session_id = Some(session_id);
+                    last_in_page = Some(session_id);
+                    if session_id == selected_session {
+                        selected = Some(ObservedSessionDefaults {
+                            version: defaults_version,
+                            dangerous_tool_auto_approval,
+                        });
+                    }
+                }
+                ServerMessage::SessionMetadataPageEnd {
+                    session_count,
+                    next_after_session_id,
+                } => {
+                    if session_count.value() != observed_count
+                        || next_after_session_id.is_some() && next_after_session_id != last_in_page
+                    {
+                        return Err(ClientError::Protocol(
+                            "session metadata page count or cursor was invalid",
+                        ));
+                    }
+                    if let Some(selected) = selected {
+                        return Ok(selected);
+                    }
+                    let Some(next) = next_after_session_id else {
+                        return Err(ClientError::Input("the selected session was not listed"));
+                    };
+                    after_session_id = Some(next);
+                    break;
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => return Err(ClientError::remote(code, message, detail)),
+                _ => {
+                    return Err(ClientError::Protocol(
+                        "session metadata page sequence or count was invalid",
+                    ));
+                }
+            }
+        }
     }
 }
 

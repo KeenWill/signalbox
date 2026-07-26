@@ -166,6 +166,7 @@ pub struct ToolBatch {
     requests: Box<[ToolRequest]>,
     approvals: BTreeMap<ToolRequestId, ToolApprovalResolution>,
     attempts: BTreeMap<ToolRequestId, ReconstitutedToolAttempt>,
+    retired_attempts: BTreeSet<ToolAttemptId>,
     phase: ToolBatchPhase,
 }
 
@@ -439,13 +440,15 @@ impl ToolBatch {
                 failure: ToolBatchExecutionFailure::NotExecuting,
             });
         };
-        if self.attempts.values().any(|candidate| {
-            let candidate_id = match candidate {
-                ReconstitutedToolAttempt::Current(current) => current.attempt(),
-                ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
-            };
-            candidate_id == replacement_attempt
-        }) {
+        if self.retired_attempts.contains(&replacement_attempt)
+            || self.attempts.values().any(|candidate| {
+                let candidate_id = match candidate {
+                    ReconstitutedToolAttempt::Current(current) => current.attempt(),
+                    ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
+                };
+                candidate_id == replacement_attempt
+            })
+        {
             return Err(ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptIdentityReuse,
             });
@@ -501,6 +504,7 @@ impl ToolBatch {
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })?;
+        self.retired_attempts.insert(retired.attempt());
         self.attempts.insert(
             request,
             ReconstitutedToolAttempt::Current(authorized.attempt().clone()),
@@ -1429,6 +1433,7 @@ fn reconstitute_batch(
         requests: requests.into_boxed_slice(),
         approvals,
         attempts,
+        retired_attempts: BTreeSet::new(),
         phase,
     })
 }

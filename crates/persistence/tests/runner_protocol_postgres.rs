@@ -8,19 +8,20 @@ use std::{error::Error, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    ApprovedToolRequest, AuthorizedToolAttempt, CredentialProfileGrant,
+    ApprovedToolRequest, AuthorizedToolAttempt, ContextFrontierId, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
     CredentialToolApproval, ModelCallId, NormalizedToolArguments, ProvisionedWorkspace,
-    ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
-    RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration,
-    RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerSelector, RunnerToolAttemptAuthorization,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
+    ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
+    RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLease,
+    RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
+    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
+    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
     WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
@@ -198,6 +199,42 @@ fn authorized_with_effect(
         .expect("the canonical in-flight fixture authorizes");
     RunnerToolAttemptAuthorization::try_new(approved_request(facts), authorized)
         .expect("the approved request binds the authorized fixture attempt")
+}
+
+fn claimed_batch(facts: PhysicalAttemptFacts) -> ToolBatch {
+    let approved = approved_request(facts);
+    let attempt = ToolAttemptReconstitutionInput::new(
+        ToolAttemptId::from_uuid(uuid(facts.attempt)),
+        ToolRequestId::from_uuid(uuid(facts.request)),
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+        ToolEffectClass::EffectFree,
+        ToolDispatchGeneration::first(),
+        ToolAttemptReconstitutionState::InFlight,
+    )
+    .reconstitute()
+    .expect("the claimed fixture attempt reconstitutes");
+    ToolBatchReconstitutionInput::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
+        ResolvedContextFrontierReconstitutionInput::new(
+            SessionId::from_uuid(uuid(SESSION)),
+            ContextFrontierId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 3))),
+            Vec::new(),
+        )
+        .reconstitute()
+        .expect("the empty claimed fixture frontier is valid"),
+        vec![approved.request().clone()],
+        vec![approved.approval().clone()],
+        vec![attempt],
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
+        },
+    )
+    .reconstitute()
+    .expect("the claimed fixture batch is complete")
 }
 
 fn authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
@@ -743,7 +780,8 @@ async fn append_runner_lost_without_advancing_head(
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
-             workspace_working_directory, credential_grant_revision)
+             workspace_working_directory, credential_grant_runner_id,
+             credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision,
                 'runner_lost', selector_kind, selector_runner_id,
                 selector_capability_class, directory_selection_kind,
@@ -754,7 +792,8 @@ async fn append_runner_lost_without_advancing_head(
                 pinned_working_directory, pinned_credential_profile_name,
                 registration_enrollment_id, registration_revision,
                 pinned_tool_count, workspace_repository_key,
-                workspace_working_directory, credential_grant_revision
+                workspace_working_directory, credential_grant_runner_id,
+                credential_grant_revision
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 2",
     )
@@ -782,6 +821,18 @@ fn assert_check_violation(error: sqlx::Error) {
             .code()
             .as_deref(),
         Some("23514")
+    );
+}
+
+#[track_caller]
+fn assert_foreign_key_violation(error: sqlx::Error) {
+    assert_eq!(
+        error
+            .as_database_error()
+            .expect("PostgreSQL reports a database error")
+            .code()
+            .as_deref(),
+        Some("23503")
     );
 }
 
@@ -1817,7 +1868,7 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
-             credential_grant_revision)
+             credential_grant_runner_id, credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision, 'pinned',
                 selector_kind, selector_runner_id,
                 selector_capability_class, directory_selection_kind,
@@ -1833,7 +1884,7 @@ async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), 
                        AND registration_revision = $5
                        AND tool_name = $6
                 ),
-                NULL, NULL, NULL
+                NULL, NULL, NULL, NULL
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 1",
     )
@@ -2074,7 +2125,7 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .await
         .expect_err("a replacement cannot retain its predecessor grant revision");
 
-    assert_store_check_violation(stale_grant_revision);
+    assert_store_domain_error(stale_grant_revision, RunnerDomainError::CorruptStoredFacts);
     let lost = duplicate_placement(&pin.placement, Some(registration.registration()))
         .mark_runner_lost()
         .expect("the pinned runner may be marked lost");
@@ -2688,7 +2739,7 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
              pinned_credential_profile_name, registration_enrollment_id,
              registration_revision, pinned_tool_count,
              workspace_repository_key, workspace_working_directory,
-             credential_grant_revision)
+             credential_grant_runner_id, credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision + 1,
                 'profile_replaced',
                 selector_kind, selector_runner_id,
@@ -2700,7 +2751,7 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
                 $2, registration_enrollment_id,
                 registration_revision, pinned_tool_count,
                 workspace_repository_key, workspace_working_directory,
-                credential_grant_revision + 1
+                credential_grant_runner_id, credential_grant_revision + 1
            FROM runner_session_placement_record
           WHERE session_id = $1 AND event_ordinal = 2",
     )
@@ -2723,7 +2774,7 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
         .await
         .expect_err("a replacement profile cannot reference the predecessor profile grant");
 
-    assert_check_violation(mismatched_grant);
+    assert_foreign_key_violation(mismatched_grant);
     transaction.rollback().await?;
     drop(pool);
     Ok(())
@@ -2942,6 +2993,18 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
             .expect("the later profiled replacement starts its grant lineage"),
         later_registration.registration(),
     );
+    let later_prior_runner: Uuid = sqlx::query_scalar(
+        "SELECT prior_runner_id
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3",
+    )
+    .bind(later_grant.session().into_uuid())
+    .bind(later_grant.runner().into_uuid())
+    .bind(Decimal::from(later_grant.revision().get()))
+    .fetch_one(&pool)
+    .await?;
     let expected_prior_runner = later_grant.runner();
     let successor = later
         .placement
@@ -2959,7 +3022,7 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
             Some(&successor.grant.grant),
         )
         .await?;
-    let prior_runner: Uuid = sqlx::query_scalar(
+    let successor_prior_runner: Uuid = sqlx::query_scalar(
         "SELECT prior_runner_id
            FROM runner_credential_grant
           WHERE session_id = $1
@@ -2972,8 +3035,14 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(RunnerId::from_uuid(prior_runner), expected_prior_runner);
-    assert_eq!(expected_prior_runner, expected_tombstone_runner);
+    assert_eq!(
+        RunnerId::from_uuid(later_prior_runner),
+        expected_tombstone_runner,
+    );
+    assert_eq!(
+        RunnerId::from_uuid(successor_prior_runner),
+        expected_prior_runner,
+    );
     drop(pool);
     Ok(())
 }
@@ -3225,6 +3294,15 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         .await?
         .expect("the first generation is durable before the loss event");
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let prepared_replacement = loss
+        .retry()
+        .expect("the claimed loss retains checked retry authority")
+        .prepare_claimed_attempt(
+            claimed_batch(INITIAL_PHYSICAL_ATTEMPT),
+            ToolAttemptId::from_uuid(uuid(RETRY_PHYSICAL_ATTEMPT.attempt)),
+        )
+        .expect("the owning batch retires and replaces the claimed attempt");
+    let (_batch, _retired, retry_authorization) = prepared_replacement.into_parts();
     let retry = pin
         .placement
         .offer_retry(
@@ -3232,7 +3310,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
             registration.registration(),
             pin.grant.as_ref(),
             loss,
-            authorized(RETRY_PHYSICAL_ATTEMPT),
+            retry_authorization,
         )
         .expect("claimed pure work requires a fresh physical attempt");
     store.store_lease(&retry).await?;

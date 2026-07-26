@@ -91,6 +91,7 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str =
     "SELECT record.event_ordinal, record.placement_revision,
                     record.state_kind, record.pinned_runner_id,
                     record.pinned_credential_profile_name,
+                    record.credential_grant_runner_id,
                     record.credential_grant_revision
                FROM runner_current_session_placement AS current_placement
                JOIN runner_session_placement_record AS record

@@ -16,18 +16,18 @@ use signalbox_domain::{
     CredentialDispatchAuthorization, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
     CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerDomainError, RunnerEnrollment,
-    RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolDispatchGeneration, ToolName, ToolPermissionDefault, ToolRequestId,
-    TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCredentialGrantLineage, RunnerDomainError,
+    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
+    RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
+    RunnerLeaseId, RunnerLeaseReconstitutionInput, RunnerLeaseState, RunnerSelector,
+    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
+    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -383,7 +383,6 @@ impl RunnerProtocolStore {
             event_kind,
             placement,
             registration,
-            grant,
         )
         .await?;
         if let (Some(grant), Some(registration)) = (grant, registration) {
@@ -442,7 +441,6 @@ impl RunnerProtocolStore {
             event_kind,
             &pin.placement,
             Some(registration),
-            pin.grant.as_ref(),
         )
         .await?;
         if let Some(grant) = pin.grant.as_ref() {
@@ -1104,7 +1102,6 @@ async fn insert_placement_record(
     event_kind: &str,
     placement: &SessionRunnerPlacement,
     registration: Option<&StoredValidatedRunnerRegistration>,
-    grant: Option<&CredentialProfileGrant>,
 ) -> Result<(), RunnerProtocolStoreError> {
     let request = placement.request();
     let (selector_kind, selector_runner, selector_class) = encode_selector(&request.selector);
@@ -1162,8 +1159,16 @@ async fn insert_placement_record(
     .bind(count_decimal(state.tools.len())?)
     .bind(state.workspace_repository)
     .bind(state.workspace_directory)
-    .bind(grant.map(|grant| grant.runner().into_uuid()))
-    .bind(grant.map(|grant| Decimal::from(grant.revision().get())))
+    .bind(
+        state
+            .grant_lineage
+            .map(|lineage| lineage.runner.into_uuid()),
+    )
+    .bind(
+        state
+            .grant_lineage
+            .map(|lineage| Decimal::from(lineage.revision.get())),
+    )
     .execute(&mut **transaction)
     .await?;
     for tool in state.tools {
@@ -1495,6 +1500,7 @@ async fn decode_placement(
                 .try_get::<Option<String>, _>("pinned_credential_profile_name")?
                 .map(profile_name)
                 .transpose()?,
+            grant_lineage: decode_grant_lineage(row)?,
             tools,
             runner_required_tools,
             workspace,
@@ -1516,6 +1522,21 @@ async fn decode_placement(
         registration,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+fn decode_grant_lineage(
+    placement: &PgRow,
+) -> Result<Option<RunnerCredentialGrantLineage>, RunnerProtocolStoreError> {
+    let revision = placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
+    let runner = placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
+    match (runner, revision) {
+        (None, None) => Ok(None),
+        (Some(runner), Some(revision)) => Ok(Some(RunnerCredentialGrantLineage {
+            runner: runner_id(runner),
+            revision: decode_generation(revision)?,
+        })),
+        _ => Err(RunnerProtocolCorruption::CrossWiredReference.into()),
+    }
 }
 
 async fn load_grant_for_placement(
@@ -1859,18 +1880,20 @@ fn validate_placement_snapshot(
                 profile == grant.profile()
                     && placement.session() == grant.session()
                     && pinned.runner == grant.runner()
+                    && pinned.grant_lineage == Some(grant.lineage())
             }
             None => {
                 placement.session() == grant.session()
                     && grant.state() == CredentialProfileGrantState::Revoked
                     && grant.revision() != RunnerGeneration::one()
+                    && pinned.grant_lineage == Some(grant.lineage())
             }
         },
         (
             SessionRunnerPlacementState::Pinned(pinned)
             | SessionRunnerPlacementState::RunnerLost(pinned),
             None,
-        ) => pinned.credential_profile.is_none(),
+        ) => pinned.credential_profile.is_none() && pinned.grant_lineage.is_none(),
         (SessionRunnerPlacementState::Unpinned, Some(_)) => false,
     };
     if !binding_matches {
@@ -1943,6 +1966,7 @@ struct EncodedPlacementState<'a> {
     pinned_runner: Option<Uuid>,
     pinned_directory: Option<&'a str>,
     pinned_profile: Option<&'a str>,
+    grant_lineage: Option<RunnerCredentialGrantLineage>,
     tools: Vec<&'a ToolName>,
     runner_required_tools: BTreeSet<&'a ToolName>,
     workspace_repository: Option<&'a str>,
@@ -1957,6 +1981,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
                 pinned_runner: None,
                 pinned_directory: None,
                 pinned_profile: None,
+                grant_lineage: None,
                 tools: Vec::new(),
                 runner_required_tools: BTreeSet::new(),
                 workspace_repository: None,
@@ -1974,6 +1999,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
             .credential_profile
             .as_ref()
             .map(CredentialProfileName::as_str),
+        grant_lineage: pinned.grant_lineage,
         tools: pinned.tools.iter().collect(),
         runner_required_tools: pinned.runner_required_tools.iter().collect(),
         workspace_repository: pinned

@@ -6,17 +6,17 @@ The baseline persistence protocol was verified through PR #175
 through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
 in PR #227 (`agent/review-workflow-persistence`); the `apps/signalboxd`
 migration-invocation home was verified through PR #258
-(`agent/signalboxd-rename`); the runner lease-admission trigger lock was verified
-against PR #267 (`agent/runner-persistence`). This page covers the Postgres
-representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+(`agent/signalboxd-rename`); the model-identity frontier shape was verified
+through PR #272 (`agent/mid-session-model`), and the runner lease-admission
+trigger lock was verified against PR #267 (`agent/runner-persistence`). This
+page covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -55,8 +55,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-eight files, `202607180001` through
-`202607280002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-nine files, `202607180001` through
+`202607280201` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -127,6 +127,17 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
+- Migration `202607280201` adds the closed `model_identity_changed`
+  semantic-entry payload, whose turn, positive defaults epoch, and direct
+  selection are total only for that kind. Deferred checks bind it to the named
+  turn's frozen epoch and direct selection and, for a turn whose immutable
+  boundary-requirement fact is true, require exactly one such entry iff a
+  started turn's immediate predecessor froze a different selection. A false fact
+  is reserved for active or terminal turns started before the boundary law;
+  those turns require no boundary entry and cannot carry one. When present, the
+  turn-start frontier ends with the boundary entry immediately followed by the
+  turn origin. The lifecycle insertion trigger admits that two-entry suffix
+  atomically while preserving the predecessor prefix and exact count.
 - A `context_frontier` header records its immutable total member count and an
   optional same-session prefix frontier. `context_frontier_delta` stores only
   the absolute-position suffix beyond that prefix; roots store their complete

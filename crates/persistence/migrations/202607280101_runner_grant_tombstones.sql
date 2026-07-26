@@ -131,3 +131,148 @@ AFTER INSERT ON runner_session_placement_record
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_profileless_grant_tombstone();
+
+
+-- Recheck grant completeness against the lineage pointer added above.
+CREATE OR REPLACE FUNCTION assert_runner_grant_complete(
+    checked_session uuid,
+    checked_runner uuid,
+    checked_revision numeric
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    grant_row runner_credential_grant%ROWTYPE;
+    actual_tools bigint;
+    invalid_tools bigint;
+    initial_audit bigint;
+BEGIN
+    SELECT * INTO grant_row
+      FROM runner_credential_grant
+     WHERE session_id = checked_session
+       AND runner_id = checked_runner
+       AND grant_revision = checked_revision;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    SELECT count(*) INTO actual_tools
+      FROM runner_credential_grant_tool
+     WHERE session_id = checked_session
+       AND runner_id = checked_runner
+       AND grant_revision = checked_revision;
+    SELECT count(*) INTO invalid_tools
+      FROM runner_credential_grant_tool AS granted
+      LEFT JOIN runner_registration_profile_approval AS policy
+        ON policy.enrollment_id = grant_row.registration_enrollment_id
+       AND policy.registration_revision = grant_row.registration_revision
+       AND policy.credential_profile_name = grant_row.credential_profile_name
+       AND policy.tool_name = granted.tool_name
+      LEFT JOIN runner_registration_tool AS available
+        ON available.enrollment_id = grant_row.registration_enrollment_id
+       AND available.registration_revision = grant_row.registration_revision
+       AND available.tool_name = granted.tool_name
+     WHERE granted.session_id = checked_session
+       AND granted.runner_id = checked_runner
+       AND granted.grant_revision = checked_revision
+       AND (
+            available.tool_name IS NULL
+            OR (
+                policy.tool_name IS NULL
+                AND granted.approval_kind <> $kind$session_policy$kind$
+            )
+            OR (
+                policy.tool_name IS NOT NULL
+                AND policy.approval_kind <> granted.approval_kind
+            )
+       );
+    SELECT count(*) INTO initial_audit
+      FROM runner_credential_grant_audit
+     WHERE session_id = checked_session
+       AND runner_id = checked_runner
+       AND grant_revision = checked_revision
+       AND audit_ordinal = 1;
+    IF grant_row.tool_count <> actual_tools
+       OR invalid_tools <> 0
+       OR initial_audit <> 1
+       OR (
+            grant_row.grant_revision > 1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_session_placement_record AS prior_placement
+                 WHERE prior_placement.session_id = grant_row.session_id
+                   AND prior_placement.event_ordinal =
+                        grant_row.placement_event_ordinal - 1
+                   AND prior_placement.credential_grant_runner_id =
+                        grant_row.prior_runner_id
+                   AND prior_placement.credential_grant_revision =
+                        grant_row.prior_grant_revision
+            )
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM runner_session_placement_record AS placement
+             WHERE placement.session_id = grant_row.session_id
+               AND placement.event_ordinal = grant_row.placement_event_ordinal
+               AND placement.event_kind IN (
+                    $kind$pinned$kind$,
+                    $kind$runner_replaced$kind$
+               )
+               AND placement.pinned_credential_profile_name IS NOT NULL
+               AND EXISTS (
+                    SELECT 1
+                      FROM runner_registration_tool AS available
+                     WHERE available.enrollment_id =
+                            grant_row.registration_enrollment_id
+                       AND available.registration_revision =
+                            grant_row.registration_revision
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM runner_credential_grant_tool AS granted
+                             WHERE granted.session_id = grant_row.session_id
+                               AND granted.runner_id = grant_row.runner_id
+                               AND granted.grant_revision =
+                                    grant_row.grant_revision
+                               AND granted.tool_name = available.tool_name
+                       )
+               )
+       )
+       OR NOT EXISTS (
+            SELECT 1
+              FROM runner_session_placement_record AS placement
+             WHERE placement.session_id = grant_row.session_id
+               AND placement.event_ordinal = grant_row.placement_event_ordinal
+               AND placement.state_kind = $kind$pinned$kind$
+               AND placement.credential_grant_runner_id = grant_row.runner_id
+               AND placement.credential_grant_revision =
+                    grant_row.grant_revision
+               AND (
+                    (
+                        placement.pinned_runner_id = grant_row.runner_id
+                        AND placement.registration_enrollment_id =
+                            grant_row.registration_enrollment_id
+                        AND placement.registration_revision =
+                            grant_row.registration_revision
+                        AND placement.pinned_credential_profile_name =
+                            grant_row.credential_profile_name
+                    )
+                    OR (
+                        placement.pinned_credential_profile_name IS NULL
+                        AND EXISTS (
+                            SELECT 1
+                              FROM runner_credential_grant_audit AS revoked
+                             WHERE revoked.session_id = grant_row.session_id
+                               AND revoked.runner_id = grant_row.runner_id
+                               AND revoked.grant_revision =
+                                    grant_row.grant_revision
+                               AND revoked.event_kind = $kind$revoked$kind$
+                        )
+                    )
+               )
+       )
+    THEN
+        RAISE EXCEPTION $message$runner credential grant evidence is incomplete$message$
+            USING ERRCODE = $code$23514$code$;
+    END IF;
+END;
+$function$;

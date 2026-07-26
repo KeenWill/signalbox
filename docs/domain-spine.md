@@ -958,6 +958,9 @@ pub enum FrozenModelSelection {
         definition: FrozenAliasDefinition,
     },
 }
+impl FrozenModelSelection {
+    pub const fn selected_direct(self) -> DirectModelSelection;
+}
 
 pub enum ModelParameters {
     ProviderDefaults,
@@ -1932,6 +1935,7 @@ impl AcceptedInputTurnSchedulingRecord {
         source_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
+    pub fn without_legacy_model_identity_boundary(self) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
     // origin_delivery(), origin_configuration(), configuration_provenance(), state()
@@ -2145,11 +2149,13 @@ impl AcceptedInputSchedulingProjection {
 pub struct AcceptedInputTurnActivationIdentities { /* private */ }
 impl AcceptedInputTurnActivationIdentities {
     pub const fn new(
+        model_identity_entry: SemanticTranscriptEntryId,
         origin_entry: SemanticTranscriptEntryId,
         starting_frontier: ContextFrontierId,
         initial_attempt: TurnAttemptId,
     ) -> Self;
-    // accessors: origin_entry(), starting_frontier(), initial_attempt()
+    // accessors: model_identity_entry(), origin_entry(), starting_frontier(),
+    // initial_attempt()
 }
 
 pub struct ActivatedAcceptedInputTurn { /* private */ }
@@ -2166,16 +2172,18 @@ impl PreparedAcceptedInputTurnActivation {
         self,
     ) -> (
         ActivatedAcceptedInputTurn,
-        SemanticTranscriptEntry,
+        Box<[SemanticTranscriptEntry]>,
         ResolvedContextFrontierSnapshot,
     );
-    // accessors: turn(), origin_entry(), starting_snapshot(), start()
+    // accessors: turn(), origin_entry(), starting_entries(),
+    // starting_snapshot(), start()
 }
 
 pub enum AcceptedInputEligibilityFailure {
     ActiveTurnPresent { turn: TurnId },
     NoQueuedTurn,
     OriginEntryIdentityAlreadyExists,
+    ModelIdentityEntryIdentityAlreadyExists,
     StartingFrontierIdentityAlreadyExists,
     InitialAttemptIdentityAlreadyExists,
     InternalOriginFrontierConstructionFailed,
@@ -2829,6 +2837,11 @@ pub enum SemanticTranscriptEntryPayload {
     SteeringAcceptedInput {
         accepted_input: AcceptedInputId,
         source_turn: TurnId,
+    },
+    ModelIdentityChanged {
+        turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
     },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
@@ -3994,6 +4007,11 @@ impl ModelCallCredentialReference {
 }
 
 pub enum ModelConversationMessage {
+    ModelIdentityChanged {
+        source: SemanticTranscriptEntryRef,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
+    },
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
@@ -4754,6 +4772,7 @@ pub trait ClassifyOperatorFailure {
 
 ```rust
 pub trait StartEligibleTurnIdGenerator {
+    fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_starting_frontier_id(&mut self) -> ContextFrontierId;
     fn next_initial_attempt_id(&mut self) -> TurnAttemptId;
@@ -5431,15 +5450,7 @@ impl RunnerLease {
 pub struct RunnerLeaseReconstitutionInput {
     /* public raw lease projection and independent fence */
 }
-pub enum RunnerLeaseLoss {
-    RetryPermitted {
-        lost: RunnerLease,
-        retry: Box<RunnerLeaseRetryAuthority>,
-    },
-    CrashClassificationRequired {
-        lost: RunnerLease,
-    },
-}
+pub struct RunnerLeaseLoss { /* private, produced only by RunnerLease::lose */ }
 impl RunnerLeaseLoss {
     // accessors: lost(), retry(), crash_attempt()
 }
@@ -5480,8 +5491,11 @@ pub struct ProvisionedWorkspace {
 pub struct SessionRunnerPlacementRequest {
     /* public complete requested axes */
 }
+pub struct RunnerCredentialGrantLineage {
+    /* public exact last-grant runner and revision */
+}
 pub struct PinnedRunnerPlacement {
-    /* public complete pinned facts */
+    /* public complete pinned facts, including optional grant lineage */
 }
 pub enum SessionRunnerPlacementState {
     Unpinned,
@@ -5572,8 +5586,8 @@ pub struct CredentialProfileGrantReconstitutionInput {
     /* public complete typed grant and approval facts */
 }
 impl CredentialProfileGrant {
-    // accessors: state(), revision(), profile(), session(), runner(), tools(),
-    //   approvals()
+    // accessors: state(), revision(), lineage(), profile(), session(), runner(),
+    //   tools(), approvals()
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
         input: CredentialProfileGrantReconstitutionInput,
@@ -6384,8 +6398,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 48                   |
-| **signalbox-domain total**                         | **504 (+1 free fn)** |
+| domain: runner                                     | 49                   |
+| **signalbox-domain total**                         | **505 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

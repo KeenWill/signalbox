@@ -210,20 +210,25 @@ required retry law:
   successor generation; after claim that authority consumes the owning checked
   `ToolBatch`, retires the prior in-flight attempt to its effect-correct
   terminal history, installs and authorizes a fresh physical `ToolAttemptId`,
-  and returns both attempt records with the updated batch, while authority lost
-  before claim retains the never-executed attempt identity; and
+  retains every retired attempt identity in the updated batch, and returns both
+  attempt records; only the private replacement evidence produced by that batch
+  transition can authorize the claimed re-lease, while authority lost before
+  claim retains the never-executed attempt identity; and
 - `SideEffecting` produces typed crash-classification authority whose physical
   attempt is derived from the opaque lost lease and never produces re-lease
   authority.
 
-Generation exhaustion and claimed-attempt identity reuse fail closed. Re-leasing
-continues one logical tool request and lease lineage. Its successor
-`RunnerGeneration` is distinct from the fresh physical attempt's
-`ToolDispatchGeneration`, which starts at `first()` under the tool-loop law.
-Every repeated physical execution therefore has its own attempt identity and
-record as required by INV-004. Side-effecting loss composes with the existing
-physical-attempt ambiguity machinery; this domain slice does not duplicate or
-overwrite that attempt's outcome (INV-004, INV-025, INV-026, INV-043).
+Generation exhaustion, reuse of any current or retired attempt identity, and a
+standalone same-request authorization for claimed retry all fail closed.
+`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` can
+produce retry or crash-classification authority. Re-leasing continues one
+logical tool request and lease lineage. Its successor `RunnerGeneration` is
+distinct from the fresh physical attempt's `ToolDispatchGeneration`, which
+starts at `first()` under the tool-loop law. Every repeated physical execution
+therefore has its own attempt identity and record as required by INV-004.
+Side-effecting loss composes with the existing physical-attempt ambiguity
+machinery; this domain slice does not duplicate or overwrite that attempt's
+outcome (INV-004, INV-025, INV-026, INV-043).
 
 The lease aggregate contains no channel handle or process-local connection
 state. A reconnecting registration cannot recreate, complete, or discard a lease
@@ -326,12 +331,12 @@ narrowed re-registration is reconciled separately and is not substituted for
 that historical snapshot.
 
 The store retains append-only created, pinned, runner-lost, runner-replaced, and
-profile-replaced records behind one current pointer. Relational transition checks
-require contiguous event history, exact revision succession, unchanged affinity
-facts at runner loss, profile-only changes for profile replacement, and each
-stored tool's runner-required flag to match its declaration's runner-only or
-combined locus. Every appended record advances the current-placement head in the
-same transaction. Reconstitution reads the current record with its exact
+profile-replaced records behind one current pointer. Relational transition
+checks require contiguous event history, exact revision succession, unchanged
+affinity facts at runner loss, profile-only changes for profile replacement, and
+each stored tool's runner-required flag to match its declaration's runner-only
+or combined locus. Every appended record advances the current-placement head in
+the same transaction. Reconstitution reads the current record with its exact
 validated registration and tool inventory. The loaded persistence wrapper
 retains that historical registration and its durable revision so a caller can
 reconcile against newer availability and persist `RunnerLost` without
@@ -379,24 +384,26 @@ reusable standalone dispatch token.
 Grant replacement is forward-only. It checks the current revision and installs
 one complete later snapshot, returning a `CredentialProfileChange` with the
 before-and-after profile and tool inventories for later frontier injection.
-Runner replacement consumes any prior grant lineage and creates a checked
-successor revision. A profileless replacement carries the lineage forward as a
-new terminal tombstone, so restoring a previously selected profile cannot
-recreate revision one. Every prior revoked revision remains terminal. Every
-successor binds its predecessor through the immediately prior placement exact
-runner and grant revision, so equal revision numbers in independent session
-grant lines cannot cross-wire provenance. Revocation is also forward-only and
-gates later lease creation. A lease already offered is already dispatched and
-completes or crash-classifies normally; revocation neither rewrites nor cancels
-it. A revoked grant revision cannot become active again. Complete reconstitution
-accepts a complete public raw-facts input, checks an independently authoritative
-expected session, and rejects foreign runner facts, a profile absent from the
-validated registration, or a tool set wider than the advertisement. Grants
-created by initial pin or runner replacement contain the complete validated
-registration tool inventory; explicit profile replacement may select a checked
-subset. The store retains normalized grant snapshots and append-only issued,
-replaced, and revoked audit events. Grant relations contain only profile names,
-tool names, pair approval posture, and typed audit correlations: there is no
+Runner replacement consumes the exact last-grant runner and revision carried by
+the pinned placement and creates a checked successor revision. A profileless
+replacement carries both that placement evidence and the lineage forward as a
+new terminal tombstone; omitting the tombstone is therefore structurally
+rejected, and restoring a previously selected profile cannot recreate revision
+one. Every prior revoked revision remains terminal. Every successor binds its
+predecessor through the immediately prior placement exact runner and grant
+revision, so equal revision numbers in independent session grant lines cannot
+cross-wire provenance. Revocation is also forward-only and gates later lease
+creation. A lease already offered is already dispatched and completes or
+crash-classifies normally; revocation neither rewrites nor cancels it. A revoked
+grant revision cannot become active again. Complete reconstitution accepts a
+complete public raw-facts input, checks an independently authoritative expected
+session, and rejects foreign runner facts, a profile absent from the validated
+registration, or a tool set wider than the advertisement. Grants created by
+initial pin or runner replacement contain the complete validated registration
+tool inventory; explicit profile replacement may select a checked subset. The
+store retains normalized grant snapshots and append-only issued, replaced, and
+revoked audit events. Grant relations contain only profile names, tool names,
+pair approval posture, and typed audit correlations: there is no
 credential-value or generic payload column. A stored grant preserves an explicit
 profile approval exactly; only a genuinely absent policy pair may use the
 session-policy fallback. Truncation of immutable grant audit evidence is
