@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Preserve metadata command issuer as independent evidence
+
+**Context.** Metadata receipt reconstitution decoded the stored actor and then
+used that same value to construct the canonical command it was meant to check.
+Changing an owner actor to a supported tool actor therefore made the later
+comparison tautological, including when applied result attribution changed with
+it. The specification already requires the comparison to use independent facts.
+
+**Decision.** Add a forward-only migration that backfills and seals an
+owner-or-tool issuer discriminator and optional tool-request identity separately
+from the existing actor projection. New receipts write both facts. Loads
+construct the canonical command from the issuer proof, decode the actor
+projection separately, and let domain reconstitution reject disagreement for
+both applied and rejected receipts.
+
+**Rejected alternatives.** Treating the actor projection as its own canonical
+source preserves the tautology. Using the applied result actor cannot cover
+rejected receipts and still permits command and result actors to be changed
+together. Removing the comparison would weaken INV-012.
+
+**Affects.** [identity-and-commands](spec/identity-and-commands.md),
+[persistence-protocol](spec/persistence-protocol.md), migration
+`202607280003_metadata_command_issuer.sql`, and metadata receipt loading and
+PostgreSQL proofs.
+
 ## 2026-07-26 — Renumber the review-workflow migration after main advanced
 
 **Context.** The review-workflow foundation reserved the `2026072602xx` block

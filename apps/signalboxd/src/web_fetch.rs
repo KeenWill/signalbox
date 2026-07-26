@@ -297,15 +297,7 @@ async fn fetch_with_client(
         }
         body.extend_from_slice(&chunk);
         if body.len() == MAX_WEB_FETCH_BODY_BYTES {
-            if stream
-                .next()
-                .await
-                .transpose()
-                .map_err(|_| WebFetchTransportFailure::DispatchUnknown)?
-                .is_some()
-            {
-                truncated = true;
-            }
+            truncated = has_more_response_bytes(&mut stream).await?;
             break;
         }
     }
@@ -316,6 +308,20 @@ async fn fetch_with_client(
     };
     WebFetchResponse::new(status, content_type, body, completeness)
         .ok_or(WebFetchTransportFailure::DispatchUnknown)
+}
+
+async fn has_more_response_bytes<S, B, E>(stream: &mut S) -> Result<bool, WebFetchTransportFailure>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        if !chunk.as_ref().is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
@@ -815,6 +821,18 @@ mod tests {
             WebFetchResponse::new(200, None, oversized, WebFetchBodyCompleteness::Truncated);
 
         assert_eq!(response, None);
+    }
+
+    /// Empty frames after an exact-cap response do not imply retained bytes
+    /// were discarded.
+    #[tokio::test]
+    async fn exact_body_cap_ignores_empty_trailing_chunks() {
+        let mut stream = futures_util::stream::iter([
+            Ok::<Vec<u8>, std::convert::Infallible>(Vec::new()),
+            Ok(Vec::new()),
+        ]);
+
+        assert_eq!(has_more_response_bytes(&mut stream).await, Ok(false));
     }
 
     /// The production transport sends one credential-free request and exposes

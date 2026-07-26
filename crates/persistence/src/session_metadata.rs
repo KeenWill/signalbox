@@ -31,7 +31,7 @@ use crate::{
     mapping::{
         PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
         defaults_version_from_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-        session_id_to_uuid,
+        session_id_to_uuid, tool_request_id_from_uuid,
     },
 };
 
@@ -761,7 +761,8 @@ async fn insert_typed_record(
              replacement_title, replacement_archived,
              result_kind, rejection_kind, result_session_id,
              result_applied_session_id, result_updated_at, result_actor_kind,
-             result_actor_turn_id, result_actor_tool_request_id)
+             result_actor_turn_id, result_actor_tool_request_id,
+             issuer_kind, issuer_tool_request_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
              CASE WHEN $13::numeric IS NOT NULL THEN $4 ELSE NULL END,
@@ -772,7 +773,7 @@ async fn insert_typed_record(
              END,
              CASE WHEN $13::numeric IS NOT NULL THEN $5 ELSE NULL END,
              CASE WHEN $13::numeric IS NOT NULL THEN $6 ELSE NULL END,
-             CASE WHEN $13::numeric IS NOT NULL THEN $7 ELSE NULL END)",
+             CASE WHEN $13::numeric IS NOT NULL THEN $7 ELSE NULL END, $14, $15)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(REPLACE_SESSION_METADATA_KIND)
@@ -787,6 +788,8 @@ async fn insert_typed_record(
     .bind(rejection_kind)
     .bind(session_id_to_uuid(command.session()))
     .bind(updated_at.map(|value| Decimal::from(value.as_unix_micros())))
+    .bind(actor.kind)
+    .bind(actor.tool_request)
     .execute(&mut *connection)
     .await?;
 
@@ -808,6 +811,8 @@ async fn load_command_from_connection(
             typed.actor_kind,
             typed.actor_turn_id,
             typed.actor_tool_request_id,
+            typed.issuer_kind,
+            typed.issuer_tool_request_id,
             typed.replacement_title,
             typed.replacement_archived,
             typed.result_kind,
@@ -869,13 +874,8 @@ fn decode_command(
     require_supported_version(row, "typed_version")?;
 
     let session = session_id_from_uuid(required(row, "session_id")?);
-    let actor_kind: String = required(row, "actor_kind")?;
-    let command_actor = decode_actor(
-        actor_kind.clone(),
-        row.try_get("actor_turn_id")?,
-        row.try_get("actor_tool_request_id")?,
-        "command actor",
-    )?;
+    let issuer_kind: String = required(row, "issuer_kind")?;
+    let issuer_tool: Option<Uuid> = row.try_get("issuer_tool_request_id")?;
     let content = decode_content(
         row.try_get("replacement_title")?,
         required(row, "replacement_tags")?,
@@ -883,11 +883,34 @@ fn decode_command(
         required(row, "replacement_attribute_values")?,
         required(row, "replacement_archived")?,
     )?;
-    let command = match command_actor {
-        Actor::Owner => ReplaceSessionMetadata::new(command_id, session, content),
-        Actor::Tool { request } => {
-            ReplaceSessionMetadata::new_for_tool(command_id, session, request, content)
+    let command = match (issuer_kind.as_str(), issuer_tool) {
+        ("owner", None) => ReplaceSessionMetadata::new(command_id, session, content),
+        ("tool", Some(request)) => ReplaceSessionMetadata::new_for_tool(
+            command_id,
+            session,
+            tool_request_id_from_uuid(request),
+            content,
+        ),
+        ("owner", Some(_)) | ("tool", None) => {
+            return Err(SessionMetadataCorruption::Inconsistent("command issuer shape").into());
         }
+        (other, _) => {
+            return Err(SessionMetadataCorruption::Unsupported {
+                field: "command issuer",
+                value: other.to_owned(),
+            }
+            .into());
+        }
+    };
+    let actor_kind: String = required(row, "actor_kind")?;
+    let command_actor = decode_actor(
+        actor_kind.clone(),
+        row.try_get("actor_turn_id")?,
+        row.try_get("actor_tool_request_id")?,
+        "command actor",
+    )?;
+    match command_actor {
+        Actor::Owner | Actor::Tool { .. } => {}
         Actor::Model { .. } | Actor::Recovery => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
@@ -895,7 +918,7 @@ fn decode_command(
             }
             .into());
         }
-    };
+    }
     let result_kind: String = required(row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
     let result_session = session_id_from_uuid(required(row, "result_session_id")?);
