@@ -36,7 +36,7 @@ use signalbox_model_runtime::{
     PreparationOutcome, RequestedTarget, ResolvedTarget, TerminalEvidence,
 };
 use signalbox_model_runtime_codex_cli::{
-    CodexCliConfig, CodexCliRuntime, SUPPORTED_CODEX_CLI_VERSION,
+    CodexCliConfig, CodexCliPreparedRequest, CodexCliRuntime, SUPPORTED_CODEX_CLI_VERSION,
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
@@ -84,12 +84,26 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
     );
     operation.delivery = DeliveryMode::Buffered;
 
-    // `CodexCliPreparedRequest` implements no diagnostic formatting on
-    // purpose, so each non-prepared outcome reports itself.
-    let prepared = match runtime
-        .prepare(operation, CancellationSignal::never())
-        .await
-    {
+    let prepared = require_prepared(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+    let mut observations = Vec::new();
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    let completed = require_completion(report.evidence);
+    assert_protocol_surfaces(&completed, &model);
+}
+
+/// `CodexCliPreparedRequest` deliberately implements no diagnostic formatting,
+/// so each non-prepared outcome reports only its safe shared-runtime evidence.
+fn require_prepared(
+    outcome: PreparationOutcome<String, CodexCliPreparedRequest<String>>,
+) -> CodexCliPreparedRequest<String> {
+    match outcome {
         PreparationOutcome::Prepared(prepared) => prepared,
         PreparationOutcome::Cancelled { .. } => panic!("smoke preparation was not cancelled"),
         PreparationOutcome::Failed { failure, .. } => {
@@ -98,19 +112,16 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
         PreparationOutcome::Defect { defect, .. } => {
             panic!("smoke preparation found a defect: {defect:?}")
         }
-    };
-    let mut observations = Vec::new();
-    let report = runtime
-        .execute(prepared, &mut observations, CancellationSignal::never())
-        .await;
+    }
+}
 
-    let completed = match report.evidence {
+fn require_completion(evidence: TerminalEvidence) -> CompletionEvidence {
+    match evidence {
         TerminalEvidence::Completed(completed) => completed,
         // Adapter-produced evidence is already credential-shape redacted, so
         // printing it here cannot surface credential material.
         other => panic!("the pinned Codex CLI did not complete the exchange: {other:?}"),
-    };
-    assert_protocol_surfaces(&completed, &model);
+    }
 }
 
 /// Fails closed: an unreadable, unparsable, or mismatched version is a smoke

@@ -160,7 +160,10 @@ the pin, never by a pull-request event, with credentials held in a protected
 deployment environment. Authenticate that smoke through the CLI's
 non-interactive API-key login, piped from the secret into the CLI's own
 credential store, and state plainly that it therefore covers protocol
-compatibility and not subscription login.
+compatibility and not subscription login. Treat the addressable model set as an
+account-scoped input: keep the cheapest advertised model as a local fallback,
+and let the environment or local caller select another model without changing
+the test when its credential cannot address that fallback.
 
 **Rejected alternatives.** Pinning the Homebrew cask that serves local installs
 has no Renovate manager; a GitHub-release regex manager would hand-roll a
@@ -173,6 +176,9 @@ calendar time while proving nothing. Storing a subscription access token as a
 secret would go stale between the CLI's own token rotations, so automation built
 on it would fail for reasons unrelated to compatibility; weakening the
 fork-exposure rules to reach a subscription session was not considered.
+Hard-coding the model that one subscription account currently addresses would
+make another subscription or API-key credential's model set look like protocol
+drift.
 
 **Affects.** `tooling/codex-cli`, `renovate.json5`,
 `.github/workflows/codex-smoke.yml`, the tests of

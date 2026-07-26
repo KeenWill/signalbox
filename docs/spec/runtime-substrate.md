@@ -5,14 +5,15 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
 against the implementing stack through PR #183
 (`agent/provider-call-security-parser`) plus the Codex CLI adapter stack (PR
-#264, `agent/codex-cli-wrap`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`). It covers the
-provider-neutral operation, observation, and evidence vocabulary; SSE framing;
-structured-output and tool decode; `ScriptedModel`; the three provider adapters;
-and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+#264, `agent/codex-cli-wrap`, and PR #268, `agent/codex-cli-pin-smoke`). The
+`signalboxd` names this page states for the composition root, its telemetry, and
+the production `FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`). It covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the three provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
