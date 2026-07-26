@@ -127,49 +127,76 @@ pub(crate) async fn inspect(
             .try_get("has_decide_tool_request")
             .map_err(RegistryInspectionError::Database)?;
 
-        match (
-            kind,
-            has_create,
-            has_imported_create,
-            has_defaults,
-            has_metadata,
-            has_input,
-            has_tool,
-        ) {
-            (CommandKind::CreateSession, true, false, false, false, false, false)
-            | (
+        let present: Vec<CommandKind> = [
+            (CommandKind::CreateSession, has_create),
+            (
                 CommandKind::CreateSessionFromImportedFrontier,
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-            )
-            | (CommandKind::ReplaceSessionDefaults, false, false, true, false, false, false)
-            | (CommandKind::ReplaceSessionMetadata, false, false, false, true, false, false)
-            | (CommandKind::SubmitInput, false, false, false, false, true, false)
-            | (CommandKind::DecideToolRequest, false, false, false, false, false, true) => Ok(kind),
-            (CommandKind::CreateSession, false, false, false, false, false, false)
-            | (
-                CommandKind::CreateSessionFromImportedFrontier,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-            )
-            | (CommandKind::ReplaceSessionDefaults, false, false, false, false, false, false)
-            | (CommandKind::ReplaceSessionMetadata, false, false, false, false, false, false)
-            | (CommandKind::SubmitInput, false, false, false, false, false, false)
-            | (CommandKind::DecideToolRequest, false, false, false, false, false, false) => Err(
-                RegistryInspectionError::Corruption(RegistryCorruption::MissingTypedRecord(kind)),
+                has_imported_create,
             ),
-            _ => Err(RegistryInspectionError::Corruption(
-                RegistryCorruption::ConflictingTypedRecords,
-            )),
-        }
+            (CommandKind::ReplaceSessionDefaults, has_defaults),
+            (CommandKind::ReplaceSessionMetadata, has_metadata),
+            (CommandKind::SubmitInput, has_input),
+            (CommandKind::DecideToolRequest, has_tool),
+        ]
+        .into_iter()
+        .filter_map(|(candidate, is_present)| is_present.then_some(candidate))
+        .collect();
+        sole_typed_record(kind, &present).map_err(RegistryInspectionError::Corruption)
     })
     .transpose()
+}
+
+/// The registry's consistency rule: exactly one typed record exists, and it
+/// is the registered kind.
+fn sole_typed_record(
+    kind: CommandKind,
+    present: &[CommandKind],
+) -> Result<CommandKind, RegistryCorruption> {
+    match present {
+        [only] if *only == kind => Ok(kind),
+        [] => Err(RegistryCorruption::MissingTypedRecord(kind)),
+        _ => Err(RegistryCorruption::ConflictingTypedRecords),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandKind, RegistryCorruption, sole_typed_record};
+
+    #[test]
+    fn a_sole_typed_record_of_the_registered_kind_is_consistent() {
+        assert_eq!(
+            sole_typed_record(CommandKind::SubmitInput, &[CommandKind::SubmitInput]),
+            Ok(CommandKind::SubmitInput)
+        );
+    }
+
+    #[test]
+    fn no_typed_record_is_missing_record_corruption() {
+        assert_eq!(
+            sole_typed_record(CommandKind::SubmitInput, &[]),
+            Err(RegistryCorruption::MissingTypedRecord(
+                CommandKind::SubmitInput
+            ))
+        );
+    }
+
+    #[test]
+    fn a_sole_typed_record_of_another_kind_is_conflicting_records_corruption() {
+        assert_eq!(
+            sole_typed_record(CommandKind::SubmitInput, &[CommandKind::CreateSession]),
+            Err(RegistryCorruption::ConflictingTypedRecords)
+        );
+    }
+
+    #[test]
+    fn multiple_typed_records_are_conflicting_records_corruption() {
+        assert_eq!(
+            sole_typed_record(
+                CommandKind::SubmitInput,
+                &[CommandKind::CreateSession, CommandKind::SubmitInput]
+            ),
+            Err(RegistryCorruption::ConflictingTypedRecords)
+        );
+    }
 }

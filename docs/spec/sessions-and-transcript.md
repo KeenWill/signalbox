@@ -4,11 +4,12 @@ This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
-content, and actor attribution. The imported-conversation record and converter
-are owned by [conversation-import](conversation-import.md). Where a law is cited
-as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
-mechanics owned by another decision are summarized, the owning sibling page is
-linked inline.
+content, and actor attribution. It was verified against the implementing stack
+through PR #229 (`agent/session-metadata-protocol`). The imported-conversation
+record and converter are owned by [conversation-import](conversation-import.md).
+Where a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the
+catalog of record; where mechanics owned by another decision are summarized, the
+owning sibling page is linked inline.
 
 ## Session identity and creation provenance
 
