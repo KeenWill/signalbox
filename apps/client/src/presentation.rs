@@ -1066,7 +1066,11 @@ fn control_safe(value: &str, field: TextField) -> String {
         let code = character as u32;
         let preserved_line_feed = character == '\n' && field == TextField::Flowing;
         let control = code <= 0x1f || (0x7f..=0x9f).contains(&code);
-        let delimiter = matches!(character, ' ' | ',') && field == TextField::DelimitedOnLine;
+        // A delimited field escapes the introducer too, so every backslash in
+        // its output opens an escape this renderer wrote and the field decodes
+        // back to the exact values it was given.
+        let delimiter =
+            matches!(character, ' ' | ',' | '\\') && field == TextField::DelimitedOnLine;
         if delimiter || (control && !preserved_line_feed) {
             rendered.push_str(&format!("\\u{{{code:x}}}"));
         } else {
@@ -1130,6 +1134,16 @@ mod tests {
             control_safe("café, and a space\u{1f980}", TextField::DelimitedOnLine),
             "café\\u{2c}\\u{20}and\\u{20}a\\u{20}space\u{1f980}"
         );
+    }
+
+    #[test]
+    fn terminal_safe_delimited_field_distinguishes_written_escape_text_from_an_escape() {
+        let comma = control_safe(",", TextField::DelimitedOnLine);
+        let escape_text_for_a_comma = control_safe("\\u{2c}", TextField::DelimitedOnLine);
+
+        assert_eq!(comma, "\\u{2c}");
+        assert_eq!(escape_text_for_a_comma, "\\u{5c}u{2c}");
+        assert_ne!(comma, escape_text_for_a_comma);
     }
 
     #[test]

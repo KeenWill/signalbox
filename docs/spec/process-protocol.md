@@ -805,14 +805,17 @@ archive state, defaults version, model selection, dangerous-tool posture,
 last-writer actor and timestamp, sorted comma-joined tags, and title. An
 unwritten metadata snapshot prints `last_writer=none`,
 `updated_at_unix_micros=none`, and empty tag and title values, which a present
-tag or title never is. A tag may itself contain the space that ends its field
-and the comma that separates it from a sibling, so both are escaped inside a tag
-exactly as a control code point is; the tag field therefore states the exact tag
-set. The title is the line's last field and keeps its spaces. When the page end
-names a continuation cursor, the client prints `next_after_session_id=<uuid>` to
-standard error after the results; a page is therefore never silently truncated,
-and that value is the next invocation's `--after`. The client also validates
-that a page never exceeds its requested limit.
+tag or title never is. A tag may itself contain the space that ends its field,
+the comma that separates it from a sibling, or the backslash that introduces an
+escape, so all three are escaped inside a tag exactly as a control code point
+is; every backslash in the tag field therefore opens an escape the client wrote,
+and the field decodes back to the exact tag set. The title is the line's last
+field, keeps its spaces, and is rendered to be read rather than decoded. When
+the page end names a continuation cursor, the client prints
+`next_after_session_id=<uuid>` to standard error after the results; a page is
+therefore never silently truncated, and that value is the next invocation's
+`--after`. The client also validates that a page never exceeds its requested
+limit.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
@@ -885,12 +888,12 @@ to a terminal preserves line feed but renders every other C0 code point, DEL,
 and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC execution. A
 metadata title or tag shares its output line with named neighbors, so `search`
 escapes line feed in those two fields as well, and a tag additionally escapes
-its own delimiters, using the same `\u{...}` vocabulary; no metadata value can
-forge another result row, field, or tag. `--raw-output` is the explicit opt-in
-that writes those fields unchanged; the same safe-rendering choice covers
-assistant text, typed diagnostics, and durable updates. Each complete raw text
-value is flushed before the client awaits another frame, without adding a
-delimiter.
+its own delimiters and escape introducer, using the same `\u{...}` vocabulary;
+no metadata value can forge another result row, field, or tag. `--raw-output` is
+the explicit opt-in that writes those fields unchanged; the same safe-rendering
+choice covers assistant text, typed diagnostics, and durable updates. Each
+complete raw text value is flushed before the client awaits another frame,
+without adding a delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
