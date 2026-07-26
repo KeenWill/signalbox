@@ -322,6 +322,16 @@ impl StreamDecoder {
                 signature,
             },
             WireResponseBlock::RedactedThinking { data } => BlockBuilder::RedactedThinking { data },
+            WireResponseBlock::Fallback { .. } => {
+                // This adapter never enables server-side fallback, so a
+                // fallback marker mid-stream means the stream is no longer
+                // the resolved target's response.
+                return self.violation(format!(
+                    "server-side fallback block opened at index {}, but this operation never \
+                     enabled provider fallback",
+                    event.index
+                ));
+            }
             WireResponseBlock::Unrecognized => {
                 return self.violation(format!(
                     "unrecognized content-block type opened at index {}",

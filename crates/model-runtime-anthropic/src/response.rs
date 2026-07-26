@@ -70,7 +70,9 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
         WireResponseBlock::RedactedThinking { data } => {
             Some(AssistantPart::RedactedThinking { data })
         }
-        WireResponseBlock::Unrecognized => None,
+        // A fallback marker is a routing fact, never assistant material; the
+        // buffered decoder handles it before reaching this conversion.
+        WireResponseBlock::Fallback { .. } | WireResponseBlock::Unrecognized => None,
     }
 }
 
@@ -185,6 +187,31 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 });
             }
         };
+        if let WireResponseBlock::Fallback { to_model } = block {
+            // This adapter never enables server-side fallback, so the marker
+            // proves the response was served by a model other than the
+            // resolved target. The substituting identity is surfaced as a
+            // reported-model fact — the caller's provider-target rule
+            // (docs/spec/model-call-execution.md) classifies it — and the
+            // response itself is not completion material.
+            if let Some(model) = to_model {
+                sink.observe(Observation {
+                    correlation: correlation.clone(),
+                    fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(model)),
+                });
+            }
+            return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::ResponseUnintelligible {
+                    detail: "success response carries a server-side fallback block, but this \
+                             operation never enabled provider fallback"
+                        .to_string(),
+                },
+                exchange,
+                reported_model,
+                finish_reported: None,
+                usage,
+            });
+        }
         match convert_block(block) {
             Some(part)
                 if matches!(
@@ -589,6 +616,80 @@ mod tests {
         );
 
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    /// S20: the provider's server-side fallback marker is the distinct
+    /// substitution signal. This adapter never enables fallback, so the
+    /// response is not completion material, and the substituting identity is
+    /// surfaced as a reported-model fact for the caller's provider-target
+    /// rule rather than being lost in a generic unknown-block failure.
+    #[test]
+    fn s20_server_side_fallback_block_reports_the_substituting_model() {
+        let (evidence, observations) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "fallback",
+                     "from": {"model": "model-exact-1"},
+                     "to": {"model": "substitute-model-2"}},
+                    {"type": "text", "text": "served by the other model"}
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a fallback-served response is not the resolved target's completion material");
+        };
+        let LossCause::ResponseUnintelligible { detail } = loss.cause else {
+            panic!("a fallback marker is response-unintelligible evidence");
+        };
+        assert!(detail.contains("server-side fallback block"));
+        assert_eq!(
+            observations
+                .iter()
+                .filter_map(|observation| match &observation.fact {
+                    ObservationFact::ProviderModelReported(reported) => Some(reported.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["model-exact-1", "substitute-model-2"],
+            "both the envelope identity and the substituting identity reach the caller"
+        );
+    }
+
+    /// A fallback marker without a named continuing model still refuses to
+    /// complete; nothing is fabricated about which model served.
+    #[test]
+    fn s20_fallback_block_without_a_named_model_still_refuses_to_complete() {
+        let (evidence, observations) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{"type": "fallback"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| matches!(
+                    observation.fact,
+                    ObservationFact::ProviderModelReported(_)
+                ))
+                .count(),
+            1,
+            "only the envelope identity is reported"
+        );
     }
 
     #[test]
