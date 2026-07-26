@@ -5410,13 +5410,14 @@ impl ReviewExternalLinkObservationResult {
     ) -> Self;
     // accessors: link(), ordinal(), state()
 }
-pub struct ReviewExternalLinkNoChangeResult { /* reservation + unchanged state */ }
+pub struct ReviewExternalLinkNoChangeResult { /* reservation + observation frontier + state */ }
 impl ReviewExternalLinkNoChangeResult {
     pub const fn new(
         link: ReviewExternalLinkId,
+        observed_through: ReviewEventOrdinal,
         state: ReviewExternalObjectState,
     ) -> Self;
-    // accessors: link(), state()
+    // accessors: link(), observed_through(), state()
 }
 pub struct ReviewExternalLinkPublicationBlockedResult {
     /* pending reservation + reason */
@@ -5836,11 +5837,12 @@ pub enum ReviewExternalObjectKind {
     ReviewComment,
     ChangeRequestComment,
 }
-pub struct ReviewExternalLinkAttachment { /* link + pass + run + external object key */ }
+pub struct ReviewExternalLinkAttachment { /* link + stored pass + pass/run evidence + object key */ }
 impl ReviewExternalLinkAttachment {
     pub const fn new(
         link: ReviewExternalLinkId,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         external_object: ReviewKey,
     ) -> Self;
@@ -5852,12 +5854,13 @@ pub enum ReviewExternalObjectState {
     Outdated,
     Resolved,
 }
-pub struct ReviewExternalLinkObservation { /* link + ordinal + pass + run + state */ }
+pub struct ReviewExternalLinkObservation { /* link + ordinal + stored pass + pass/run evidence + state */ }
 impl ReviewExternalLinkObservation {
     pub const fn new(
         link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         state: ReviewExternalObjectState,
     ) -> Self;
@@ -5939,8 +5942,10 @@ pub enum ReviewExternalLinkTransitionFailure {
     ForeignObservationLink,
     ForeignPass,
     IncompatibleAttachmentPass,
+    AttachmentPassEvidenceMismatch,
     IncompatibleAttachmentRunEvidence,
     IncompatibleObservationPass,
+    ObservationPassEvidenceMismatch,
     IncompatibleObservationRunEvidence,
     IncompatiblePublicationBlockPass,
     IncompatiblePublicationBlockRunEvidence,
