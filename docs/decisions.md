@@ -38,6 +38,7 @@ composition.
 **Affects.** Startup-scan application outcomes and reporting, PostgreSQL startup
 recovery mapping, signalboxd startup composition and logging, and the
 application domain-spine declaration.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a
