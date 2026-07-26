@@ -534,7 +534,7 @@ impl ToolBatch {
         };
         let authorized = approved
             .prepare_attempt(replacement_attempt, turn_attempt, effect_class)
-            .authorize()
+            .authorize_with_runner_issuance(Arc::clone(&self.runner_issuance))
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })?;

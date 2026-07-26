@@ -2898,7 +2898,15 @@ mod tests {
                 authorization,
             )
             .expect("pure claimed work permits a fresh physical attempt");
+        let duplicate_local_authority = retry_batch
+            .resume_in_flight_attempt(retry_attempt)
+            .expect("the replacement remains locally resumable");
+        let duplicate_approved = approved_request("inspect");
 
+        assert_eq!(
+            RunnerToolAttemptAuthorization::try_new(duplicate_approved, duplicate_local_authority),
+            Err(RunnerDomainError::InvalidState)
+        );
         assert_eq!(retired_attempt.attempt(), offered_attempt);
         assert_eq!(
             retired_attempt.end(),
