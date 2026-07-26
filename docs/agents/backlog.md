@@ -120,6 +120,37 @@ fixture conversations only, never the owner's real archives, covering each
 source-format era, with golden/expect assertions on the imported result — is
 part of the entry's scope.
 
+Owner direction, 2026-07-26 (orientation only; the provenance marker's
+representation and the lineage mechanism are settled in the owning spec diff at
+pickup, not here): agent-to-agent subagent session transcripts import as
+first-class conversations — the same imported-conversation store, the same
+importer identity model, nothing second-class about how they are held. Two
+additions come with them. First, linkage to the parent session's imported
+conversation, recorded as durable evidence in the same spirit as the
+source-session lineage evidence the header already carries. Second, a typed
+provenance marker distinguishing an agent-driven session from a human-driven
+one; it composes with the session satellites the session-metadata entry below
+owns rather than standing up a parallel mechanism, and whether it lands as a
+metadata tag or a dedicated typed field is the design pass's call.
+
+One tension is flagged for pickup rather than settled here. The import spec's
+recorded law forbids deriving identity from a filename or source path and keeps
+converters bytes-only, yet for some source formats the parent linkage lives only
+in the archive's directory layout — a per-session subagent directory whose
+placement, not whose bytes, names the parent. The likely resolution is declared
+lineage: the parent arrives as explicit caller-supplied evidence on the import
+request, the operator asserting the relationship, which keeps the converter
+pure. The same request also carries the source filename, captured as recorded
+provenance evidence and never as identity input, which leaves the byte-digest
+identity law untouched. It is cheap, auditable corroboration: some source
+formats name their files by session identifier, and that is worth the most
+exactly where in-band metadata is thin, as in the subagent case. The owning spec
+diff decides.
+
+Counting follows from the first-class stance: subagent conversations are
+conversations and count in any conversation inventory, with the provenance
+marker enabling filtered views rather than exclusion from the count.
+
 ## Migration baseline reset [blocked-on: schema-audit verdict; owner checkpoint call] [size: S-M]
 
 Owns: `crates/persistence/migrations` (rewrite to a clean baseline), the
