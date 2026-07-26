@@ -288,13 +288,17 @@ token.
 Grant replacement is forward-only. It checks the current revision and installs
 one complete later snapshot, returning a `CredentialProfileChange` with the
 before-and-after profile and tool inventories for later frontier injection.
+Runner replacement consumes any prior pinned-profile grant and creates a checked
+successor revision; it cannot recreate revision one, including after the prior
+grant was revoked. The prior revoked revision remains terminal.
 Revocation is also forward-only and gates later lease creation. A lease already
 offered is already dispatched and completes or crash-classifies normally;
-revocation neither rewrites nor cancels it. A revoked grant cannot become active
-again. Complete reconstitution checks an independently authoritative expected
-session and rejects foreign runner facts, a profile absent from the validated
-registration, or a tool set wider than the advertisement. Durable revision
-history and atomic store dispatch gating remain persistence work (INV-045).
+revocation neither rewrites nor cancels it. A revoked grant revision cannot
+become active again. Complete reconstitution checks an independently
+authoritative expected session and rejects foreign runner facts, a profile
+absent from the validated registration, or a tool set wider than the
+advertisement. Durable revision history and atomic store dispatch gating remain
+persistence work (INV-045).
 
 ## Workspace provisioning
 

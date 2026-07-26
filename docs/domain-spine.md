@@ -5285,6 +5285,13 @@ pub enum CredentialToolApproval {
 }
 
 pub struct CredentialProfilePolicy { /* private */ }
+impl CredentialProfilePolicy {
+    pub fn try_new(
+        name: CredentialProfileName,
+        approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
+    ) -> Result<Self, RunnerDomainError>;
+    // accessors: name(), approval_for()
+}
 pub enum WorkspaceCapability {
     WorktreePerSession,
 }
@@ -5347,6 +5354,12 @@ impl ValidatedRunnerRegistration {
 }
 
 pub struct RunnerGeneration(/* private NonZeroU64 */);
+impl RunnerGeneration {
+    pub const fn one() -> Self;
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn get(self) -> u64;
+    pub const fn checked_next(self) -> Option<Self>;
+}
 pub struct RunnerLeaseCorrelation {
     /* public exact fence fields */
 }
@@ -5373,6 +5386,9 @@ impl RunnerLease {
         correlation: RunnerLeaseCorrelation,
     ) -> Result<Self, RunnerDomainError>;
     pub fn lose(self) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+    pub fn reconstitute(
+        input: RunnerLeaseReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
 }
 pub struct RunnerLeaseReconstitutionInput {
     /* public lease and independent fence */
@@ -5420,17 +5436,21 @@ impl SessionRunnerPlacement {
         session: SessionId,
         request: SessionRunnerPlacementRequest,
     ) -> Self;
-    pub fn pin(
+    pub fn pin_and_offer_lease(
         self,
+        enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
+        authorized: AuthorizedToolAttempt,
+        offer: RunnerLeaseOfferRequest,
     ) -> Result<SessionRunnerPin, RunnerDomainError>;
     pub fn offer_lease(
         &self,
         enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
+        authorized: AuthorizedToolAttempt,
         offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn offer_retry(
@@ -5439,7 +5459,7 @@ impl SessionRunnerPlacement {
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
         loss: RunnerLeaseLoss,
-        attempt: ToolAttemptId,
+        authorized: AuthorizedToolAttempt,
     ) -> Result<RunnerLease, RunnerDomainError>;
     pub fn mark_runner_lost(self) -> Result<Self, RunnerDomainError>;
     pub fn reconcile_registration(
@@ -5452,6 +5472,7 @@ impl SessionRunnerPlacement {
         registration: &ValidatedRunnerRegistration,
         directory: RunnerWorkingDirectory,
         workspace: Option<ProvisionedWorkspace>,
+        prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError>;
     pub fn replace_credential_profile(
         self,
@@ -5468,7 +5489,7 @@ impl SessionRunnerPlacement {
     // accessors: state(), revision()
 }
 pub struct SessionRunnerPin {
-    /* public placement and optional initial grant */
+    /* public placement, optional initial grant, and initial lease */
 }
 pub struct RunnerPlacementReplacement {
     /* public placement, change, and optional replacement grant */
