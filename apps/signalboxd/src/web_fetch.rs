@@ -1,6 +1,12 @@
 //! Bounded daemon-local single-URL web fetch.
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
@@ -31,11 +37,10 @@ const WEB_FETCH_SCHEMA: &str = r#"{
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one absolute HTTP(S) URL without user information or a fragment";
 const REQUEST_FAILED_DETAIL: &str = "web fetch request failed";
-const REQUEST_TIMED_OUT_DETAIL: &str = "web fetch request timed out";
-const RESPONSE_BODY_FAILED_DETAIL: &str = "web fetch response body failed";
 const DEFAULT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
+const MAX_RESOLVED_ADDRESSES: usize = 32;
 pub(crate) const MAX_WEB_FETCH_BODY_BYTES: usize = 64 * 1024;
 
 /// A static `web_fetch` declaration or production transport could not be
@@ -100,12 +105,6 @@ impl<Transport> WebFetchTool<Transport> {
         let request_failed_detail =
             ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
-        let request_timed_out_detail =
-            ToolExecutionErrorDetail::try_new(String::from(REQUEST_TIMED_OUT_DETAIL))
-                .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
-        let response_body_failed_detail =
-            ToolExecutionErrorDetail::try_new(String::from(RESPONSE_BODY_FAILED_DETAIL))
-                .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
         let definition = ToolDefinition::new(
             name,
             String::from(WEB_FETCH_DESCRIPTION),
@@ -126,8 +125,6 @@ impl<Transport> WebFetchTool<Transport> {
             executor: WebFetchExecutor {
                 transport,
                 request_failed_detail,
-                request_timed_out_detail,
-                response_body_failed_detail,
             },
         })
     }
@@ -209,12 +206,10 @@ impl WebFetchResponse {
 /// Sanitized result of one physical fetch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebFetchTransportFailure {
-    /// Request or connection setup failed without useful response metadata.
+    /// Destination resolution or client setup failed before dispatch.
     RequestFailed,
-    /// The fixed whole-exchange timeout elapsed.
-    TimedOut,
-    /// Response body delivery failed after headers arrived.
-    ResponseBodyFailed,
+    /// Dispatch began but no complete bounded response was established.
+    DispatchUnknown,
 }
 
 /// Injectable one-request web transport.
@@ -229,7 +224,7 @@ pub trait WebFetchTransport: Send {
 /// Production reqwest transport with no ambient proxy, redirect, or retry.
 #[derive(Clone, Debug)]
 pub struct ReqwestWebFetchTransport {
-    client: Client,
+    exchange_timeout: Duration,
 }
 
 impl ReqwestWebFetchTransport {
@@ -238,20 +233,8 @@ impl ReqwestWebFetchTransport {
         if exchange_timeout.is_zero() {
             return Err(ReqwestWebFetchConstructionError);
         }
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = Client::builder()
-            .tls_backend_rustls()
-            .tls_version_min(reqwest::tls::Version::TLS_1_2)
-            .tls_danger_accept_invalid_certs(false)
-            .tls_danger_accept_invalid_hostnames(false)
-            .no_proxy()
-            .redirect(Policy::none())
-            .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .timeout(exchange_timeout)
-            .build()
-            .map_err(|_| ReqwestWebFetchConstructionError)?;
-        Ok(Self { client })
+        build_web_fetch_client(exchange_timeout, None)?;
+        Ok(Self { exchange_timeout })
     }
 }
 
@@ -272,65 +255,173 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
         &mut self,
         request: WebFetchRequest,
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
-        let response = self.client.get(request.url).send().await.map_err(|error| {
-            if error.is_timeout() {
-                WebFetchTransportFailure::TimedOut
-            } else {
-                WebFetchTransportFailure::RequestFailed
-            }
-        })?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| value.len() <= MAX_CONTENT_TYPE_BYTES)
-            .map(str::to_owned);
-        let mut body = Vec::new();
-        let mut truncated = false;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                if error.is_timeout() {
-                    WebFetchTransportFailure::TimedOut
-                } else {
-                    WebFetchTransportFailure::ResponseBodyFailed
-                }
-            })?;
-            let remaining = MAX_WEB_FETCH_BODY_BYTES.saturating_sub(body.len());
-            if chunk.len() > remaining {
-                body.extend_from_slice(&chunk[..remaining]);
-                truncated = true;
-                break;
-            }
-            body.extend_from_slice(&chunk);
-            if body.len() == MAX_WEB_FETCH_BODY_BYTES {
-                if stream
-                    .next()
-                    .await
-                    .transpose()
-                    .map_err(|error| {
-                        if error.is_timeout() {
-                            WebFetchTransportFailure::TimedOut
-                        } else {
-                            WebFetchTransportFailure::ResponseBodyFailed
-                        }
-                    })?
-                    .is_some()
-                {
-                    truncated = true;
-                }
-                break;
-            }
-        }
-        let completeness = if truncated {
-            WebFetchBodyCompleteness::Truncated
-        } else {
-            WebFetchBodyCompleteness::Complete
-        };
-        WebFetchResponse::new(status, content_type, body, completeness)
-            .ok_or(WebFetchTransportFailure::ResponseBodyFailed)
+        let started = tokio::time::Instant::now();
+        let destination = resolve_public_destination(&request, self.exchange_timeout).await?;
+        let remaining = self
+            .exchange_timeout
+            .checked_sub(started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(WebFetchTransportFailure::RequestFailed)?;
+        let client = build_web_fetch_client(remaining, Some(&destination))
+            .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
+        fetch_with_client(client, request).await
     }
+}
+
+async fn fetch_with_client(
+    client: Client,
+    request: WebFetchRequest,
+) -> Result<WebFetchResponse, WebFetchTransportFailure> {
+    let response = client
+        .get(request.url)
+        .send()
+        .await
+        .map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() <= MAX_CONTENT_TYPE_BYTES)
+        .map(str::to_owned);
+    let mut body = Vec::new();
+    let mut truncated = false;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        let remaining = MAX_WEB_FETCH_BODY_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == MAX_WEB_FETCH_BODY_BYTES {
+            if stream
+                .next()
+                .await
+                .transpose()
+                .map_err(|_| WebFetchTransportFailure::DispatchUnknown)?
+                .is_some()
+            {
+                truncated = true;
+            }
+            break;
+        }
+    }
+    let completeness = if truncated {
+        WebFetchBodyCompleteness::Truncated
+    } else {
+        WebFetchBodyCompleteness::Complete
+    };
+    WebFetchResponse::new(status, content_type, body, completeness)
+        .ok_or(WebFetchTransportFailure::DispatchUnknown)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedPublicDestination {
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+async fn resolve_public_destination(
+    request: &WebFetchRequest,
+    exchange_timeout: Duration,
+) -> Result<ResolvedPublicDestination, WebFetchTransportFailure> {
+    let host = request
+        .url
+        .host_str()
+        .ok_or(WebFetchTransportFailure::RequestFailed)?;
+    let port = request
+        .url
+        .port_or_known_default()
+        .ok_or(WebFetchTransportFailure::RequestFailed)?;
+    let addresses = if let Some(address) = parse_url_host_ip(host) {
+        vec![SocketAddr::new(address, port)]
+    } else {
+        let resolved =
+            tokio::time::timeout(exchange_timeout, tokio::net::lookup_host((host, port)))
+                .await
+                .map_err(|_| WebFetchTransportFailure::RequestFailed)?
+                .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
+        resolved
+            .take(MAX_RESOLVED_ADDRESSES + 1)
+            .collect::<Vec<_>>()
+    };
+    if addresses.is_empty()
+        || addresses.len() > MAX_RESOLVED_ADDRESSES
+        || addresses
+            .iter()
+            .any(|address| !is_public_destination_address(address.ip()))
+    {
+        return Err(WebFetchTransportFailure::RequestFailed);
+    }
+    Ok(ResolvedPublicDestination {
+        host: host.to_owned(),
+        addresses,
+    })
+}
+
+fn build_web_fetch_client(
+    exchange_timeout: Duration,
+    destination: Option<&ResolvedPublicDestination>,
+) -> Result<Client, ReqwestWebFetchConstructionError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut builder = Client::builder()
+        .tls_backend_rustls()
+        .tls_version_min(reqwest::tls::Version::TLS_1_2)
+        .tls_danger_accept_invalid_certs(false)
+        .tls_danger_accept_invalid_hostnames(false)
+        .no_proxy()
+        .redirect(Policy::none())
+        .retry(reqwest::retry::never())
+        .pool_max_idle_per_host(0)
+        .timeout(exchange_timeout);
+    if let Some(destination) = destination {
+        builder = builder.resolve_to_addrs(&destination.host, &destination.addresses);
+    }
+    builder
+        .build()
+        .map_err(|_| ReqwestWebFetchConstructionError)
+}
+
+fn is_public_destination_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let [first, second, third, _fourth] = address.octets();
+            !(first == 0
+                || first == 10
+                || first == 127
+                || first >= 224
+                || (first == 100 && (64..=127).contains(&second))
+                || (first == 169 && second == 254)
+                || (first == 172 && (16..=31).contains(&second))
+                || (first == 192 && second == 0 && third == 0)
+                || (first == 192 && second == 0 && third == 2)
+                || (first == 192 && second == 88 && third == 99)
+                || (first == 192 && second == 168)
+                || (first == 198 && matches!(second, 18 | 19))
+                || (first == 198 && second == 51 && third == 100)
+                || (first == 203 && second == 0 && third == 113))
+        }
+        IpAddr::V6(address) => {
+            let segments = address.segments();
+            let in_global_unicast = (0x2000..=0x3fff).contains(&segments[0]);
+            let special_2001 =
+                segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8);
+            let transition_6to4 = segments[0] == 0x2002;
+            let documentation_3fff = segments[0] == 0x3fff && segments[1] <= 0x0fff;
+            in_global_unicast && !special_2001 && !transition_6to4 && !documentation_3fff
+        }
+    }
+}
+
+fn parse_url_host_ip(host: &str) -> Option<IpAddr> {
+    host.strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse()
+        .ok()
 }
 
 /// Daemon-local bounded web executor.
@@ -342,8 +433,6 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
 pub struct WebFetchExecutor<Transport> {
     transport: Transport,
     request_failed_detail: ToolExecutionErrorDetail,
-    request_timed_out_detail: ToolExecutionErrorDetail,
-    response_body_failed_detail: ToolExecutionErrorDetail,
 }
 
 /// A checked catalog/executor assumption failed inside `web_fetch`.
@@ -353,6 +442,8 @@ pub enum WebFetchExecutorError {
     ArgumentValidationDrift,
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
+    /// Physical dispatch began without a complete bounded acknowledgement.
+    DispatchUnknown,
 }
 
 impl fmt::Display for WebFetchExecutorError {
@@ -360,6 +451,7 @@ impl fmt::Display for WebFetchExecutorError {
         formatter.write_str(match self {
             Self::ArgumentValidationDrift => "web_fetch argument validation drifted",
             Self::ResultEncoding => "web_fetch result encoding failed",
+            Self::DispatchUnknown => "web_fetch dispatch outcome is unknown",
         })
     }
 }
@@ -368,7 +460,14 @@ impl Error for WebFetchExecutorError {}
 
 impl ClassifyOperatorFailure for WebFetchExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
-        OperatorFailureClass::CallerOrHubBug
+        match self {
+            Self::ArgumentValidationDrift | Self::ResultEncoding => {
+                OperatorFailureClass::CallerOrHubBug
+            }
+            Self::DispatchUnknown => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+        }
     }
 }
 
@@ -389,13 +488,8 @@ where
             Err(WebFetchTransportFailure::RequestFailed) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.request_failed_detail.clone()),
             },
-            Err(WebFetchTransportFailure::TimedOut) => ToolExecutorEvidence::KnownFailed {
-                detail: Some(self.request_timed_out_detail.clone()),
-            },
-            Err(WebFetchTransportFailure::ResponseBodyFailed) => {
-                ToolExecutorEvidence::KnownFailed {
-                    detail: Some(self.response_body_failed_detail.clone()),
-                }
+            Err(WebFetchTransportFailure::DispatchUnknown) => {
+                return Err(WebFetchExecutorError::DispatchUnknown);
             }
         };
         Ok(invocation.bind(evidence))
@@ -427,6 +521,13 @@ fn decode_arguments(
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
+    {
+        return Err(InvalidWebFetchArguments);
+    }
+    if url
+        .host_str()
+        .and_then(parse_url_host_ip)
+        .is_some_and(|address| !is_public_destination_address(address))
     {
         return Err(InvalidWebFetchArguments);
     }
@@ -516,6 +617,109 @@ mod tests {
         ));
     }
 
+    /// Typed decoding rejects a direct loopback destination before execution.
+    #[test]
+    fn web_fetch_typed_decode_rejects_loopback_ip() {
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+            .expect("static web_fetch tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+
+        assert!(matches!(
+            catalog.validate_arguments(
+                definition.name(),
+                &arguments(r#"{"url":"http://127.0.0.1/private"}"#),
+            ),
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+        ));
+    }
+
+    /// Typed decoding rejects a direct private destination before execution.
+    #[test]
+    fn web_fetch_typed_decode_rejects_private_ip() {
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+            .expect("static web_fetch tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+
+        assert!(matches!(
+            catalog.validate_arguments(
+                definition.name(),
+                &arguments(r#"{"url":"https://10.0.0.1/private"}"#),
+            ),
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+        ));
+    }
+
+    /// Typed decoding rejects an IPv6 unique-local destination before
+    /// execution.
+    #[test]
+    fn web_fetch_typed_decode_rejects_unique_local_ipv6() {
+        let (catalog, _executor) = WebFetchTool::try_new(FailingTransport)
+            .expect("static web_fetch tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+
+        assert!(matches!(
+            catalog.validate_arguments(
+                definition.name(),
+                &arguments(r#"{"url":"https://[fd00::1]/private"}"#),
+            ),
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+        ));
+    }
+
+    /// Public address classification admits ordinary global-unicast
+    /// destinations.
+    #[test]
+    fn web_fetch_public_destination_classification_accepts_global_addresses() {
+        let public_v4 = "93.184.216.34".parse().expect("fixture IPv4 parses");
+        let public_v6 = "2606:2800:220:1:248:1893:25c8:1946"
+            .parse()
+            .expect("fixture IPv6 parses");
+
+        assert!(is_public_destination_address(public_v4));
+        assert!(is_public_destination_address(public_v6));
+    }
+
+    /// Public address classification rejects link-local and documentation
+    /// ranges that must never become fetch destinations.
+    #[test]
+    fn web_fetch_public_destination_classification_rejects_non_public_addresses() {
+        let link_local_v4 = "169.254.169.254".parse().expect("fixture IPv4 parses");
+        let documentation_v4 = "192.0.2.1".parse().expect("fixture IPv4 parses");
+        let documentation_v6 = "2001:db8::1".parse().expect("fixture IPv6 parses");
+
+        assert!(!is_public_destination_address(link_local_v4));
+        assert!(!is_public_destination_address(documentation_v4));
+        assert!(!is_public_destination_address(documentation_v6));
+    }
+
+    /// Loss after physical dispatch is classified as commit-ambiguous
+    /// infrastructure failure.
+    #[test]
+    fn web_fetch_dispatch_unknown_is_commit_ambiguous() {
+        assert_eq!(
+            WebFetchExecutorError::DispatchUnknown.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+    }
+
+    /// Hostname resolution rejects a destination set containing only loopback
+    /// addresses before request dispatch.
+    #[tokio::test]
+    async fn web_fetch_resolution_rejects_loopback_hostname() {
+        let request = WebFetchRequest {
+            url: Url::parse("http://localhost/private").expect("fixture URL is valid"),
+        };
+
+        let resolution = resolve_public_destination(&request, Duration::from_secs(2)).await;
+
+        assert_eq!(resolution, Err(WebFetchTransportFailure::RequestFailed));
+    }
+
     /// Bounded binary input becomes deterministic lossy text plus metadata.
     #[test]
     fn web_fetch_result_is_bounded_text_with_metadata() {
@@ -570,14 +774,19 @@ mod tests {
             .local_addr()
             .expect("listener address is available");
         let server = tokio::spawn(serve_one_redirect(listener, address));
+        let host = "example.test";
         let request = WebFetchRequest {
-            url: Url::parse(&format!("http://{address}/start")).expect("loopback URL is valid"),
+            url: Url::parse(&format!("http://{host}:{}/start", address.port()))
+                .expect("fixture URL is valid"),
         };
-        let mut transport = ReqwestWebFetchTransport::try_new(Duration::from_secs(2))
-            .expect("fixed transport builds");
+        let destination = ResolvedPublicDestination {
+            host: String::from(host),
+            addresses: vec![address],
+        };
+        let client = build_web_fetch_client(Duration::from_secs(2), Some(&destination))
+            .expect("fixed test client builds");
 
-        let response = transport
-            .fetch(request)
+        let response = fetch_with_client(client, request)
             .await
             .expect("redirect headers form a bounded response");
         let observed = server.await.expect("loopback server task completes");

@@ -12,6 +12,7 @@ use signalbox_domain::{
     DurableCommandId, NormalizedToolArguments, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, SessionId, SessionMetadataContent, SessionMetadataSnapshot,
     ToolEffectClass, ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResultText,
 };
 use signalbox_persistence::session_metadata::{
     SessionMetadataRepository, SessionMetadataRepositoryError,
@@ -162,6 +163,28 @@ pub struct SessionStatusWrite {
     replacement: SessionMetadataContent,
 }
 
+impl SessionStatusWrite {
+    /// Returns the durable command identity derived from the tool attempt.
+    pub const fn command(&self) -> DurableCommandId {
+        self.command
+    }
+
+    /// Returns the invocation's current session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact tool request attributed as last writer.
+    pub const fn request(&self) -> ToolRequestId {
+        self.request
+    }
+
+    /// Borrows the complete replacement admitted before dispatch.
+    pub const fn replacement(&self) -> &SessionMetadataContent {
+        &self.replacement
+    }
+}
+
 /// Authoritative result of one status write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionStatusWriteOutcome {
@@ -301,6 +324,8 @@ pub enum SessionStatusExecutorError<WriterError> {
     ArgumentValidationDrift,
     /// The injected writer failed without trustworthy tool evidence.
     Writer(WriterError),
+    /// The writer returned an applied snapshot for different admitted facts.
+    WriterContract,
     /// Compact result encoding unexpectedly failed.
     ResultEncoding,
 }
@@ -315,6 +340,9 @@ where
                 formatter.write_str("session_status_update argument validation drifted")
             }
             Self::Writer(error) => error.fmt(formatter),
+            Self::WriterContract => {
+                formatter.write_str("session_status_update writer contract was violated")
+            }
             Self::ResultEncoding => {
                 formatter.write_str("session_status_update result encoding failed")
             }
@@ -329,7 +357,7 @@ where
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Writer(error) => Some(error),
-            Self::ArgumentValidationDrift | Self::ResultEncoding => None,
+            Self::ArgumentValidationDrift | Self::WriterContract | Self::ResultEncoding => None,
         }
     }
 }
@@ -340,7 +368,7 @@ where
 {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::ArgumentValidationDrift | Self::ResultEncoding => {
+            Self::ArgumentValidationDrift | Self::WriterContract | Self::ResultEncoding => {
                 OperatorFailureClass::CallerOrHubBug
             }
             Self::Writer(error) => error.operator_failure_class(),
@@ -360,11 +388,14 @@ where
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let replacement = decode_arguments(invocation.request().arguments())
             .map_err(|_| SessionStatusExecutorError::ArgumentValidationDrift)?;
+        let session = invocation.correlation().session();
+        let result = session_status_result_text(session, &replacement)
+            .map_err(|_| SessionStatusExecutorError::ResultEncoding)?;
         let update = SessionStatusWrite {
             command: DurableCommandId::from_uuid(invocation.correlation().attempt().into_uuid()),
-            session: invocation.correlation().session(),
+            session,
             request: invocation.correlation().request(),
-            replacement,
+            replacement: replacement.clone(),
         };
         let evidence = match self
             .writer
@@ -372,8 +403,13 @@ where
             .await
             .map_err(SessionStatusExecutorError::Writer)?
         {
-            SessionStatusWriteOutcome::Applied(snapshot) => {
-                session_status_success_evidence(&snapshot)?
+            SessionStatusWriteOutcome::Applied(snapshot)
+                if snapshot.session() == session && snapshot.content() == &replacement =>
+            {
+                ToolExecutorEvidence::CompletedText(result)
+            }
+            SessionStatusWriteOutcome::Applied(_) => {
+                return Err(SessionStatusExecutorError::WriterContract);
             }
             SessionStatusWriteOutcome::SessionNotFound => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.session_not_found_detail.clone()),
@@ -388,6 +424,14 @@ where
 struct InvalidSessionStatusArguments;
 
 fn decode_arguments(
+    arguments: &NormalizedToolArguments,
+) -> Result<SessionMetadataContent, InvalidSessionStatusArguments> {
+    let content = decode_metadata_content(arguments)?;
+    session_status_result_text(SessionId::from_uuid(uuid::Uuid::nil()), &content)?;
+    Ok(content)
+}
+
+fn decode_metadata_content(
     arguments: &NormalizedToolArguments,
 ) -> Result<SessionMetadataContent, InvalidSessionStatusArguments> {
     let serde_json::Value::Object(mut object) =
@@ -435,28 +479,39 @@ fn decode_arguments(
         .map_err(|_| InvalidSessionStatusArguments)
 }
 
-fn session_status_success_evidence<WriterError>(
-    snapshot: &SessionMetadataSnapshot,
-) -> Result<ToolExecutorEvidence, SessionStatusExecutorError<WriterError>> {
-    let content = snapshot.content();
+fn session_status_result_text(
+    session: SessionId,
+    content: &SessionMetadataContent,
+) -> Result<String, InvalidSessionStatusArguments> {
     let attributes: std::collections::BTreeMap<&str, &str> = content.attributes().collect();
     let tags: Vec<&str> = content.tags().collect();
     let result = serde_json::to_string(&serde_json::json!({
         "archived": content.archived(),
         "attributes": attributes,
-        "session_id": snapshot.session().into_uuid().to_string(),
+        "session_id": session.into_uuid().to_string(),
         "tags": tags,
         "title": content.title(),
     }))
-    .map_err(|_| SessionStatusExecutorError::ResultEncoding)?;
-    Ok(ToolExecutorEvidence::CompletedText(result))
+    .map_err(|_| InvalidSessionStatusArguments)?;
+    ToolResultText::try_new(result)
+        .map(ToolResultText::into_string)
+        .map_err(|_| InvalidSessionStatusArguments)
 }
 
 #[cfg(test)]
 mod tests {
     use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
+    use uuid::Uuid;
 
     use super::*;
+
+    // Canonical arguments with this many escaped control characters remain
+    // under the 1 MiB argument bound; adding the fixed session-id receipt field
+    // places the canonical result three bytes over its independent 1 MiB bound.
+    const RECEIPT_OVERFLOW_CONTROL_CHARACTERS: usize = 174_744;
+    const FIXTURE_COMMAND_ID: u128 = 1;
+    const FIXTURE_SESSION_ID: u128 = 2;
+    const FIXTURE_REQUEST_ID: u128 = 3;
 
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
@@ -517,6 +572,49 @@ mod tests {
             ),
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
+    }
+
+    /// Argument admission rejects metadata whose canonical success receipt
+    /// would exceed the independent result-text bound.
+    #[test]
+    fn session_status_typed_decode_rejects_oversized_receipt() {
+        let supplied = serde_json::json!({
+            "archived": false,
+            "attributes": {
+                "k": "\u{0001}".repeat(RECEIPT_OVERFLOW_CONTROL_CHARACTERS)
+            },
+            "tags": [],
+            "title": null,
+        })
+        .to_string();
+        let normalized = arguments(&supplied);
+
+        assert!(decode_metadata_content(&normalized).is_ok());
+        assert_eq!(
+            decode_arguments(&normalized),
+            Err(InvalidSessionStatusArguments)
+        );
+    }
+
+    /// Injected writers can inspect every admitted write fact without
+    /// depending on the PostgreSQL adapter.
+    #[test]
+    fn session_status_write_exposes_application_seam_facts() {
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(FIXTURE_COMMAND_ID));
+        let session = SessionId::from_uuid(Uuid::from_u128(FIXTURE_SESSION_ID));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(FIXTURE_REQUEST_ID));
+        let replacement = SessionMetadataContent::empty();
+        let write = SessionStatusWrite {
+            command,
+            session,
+            request,
+            replacement: replacement.clone(),
+        };
+
+        assert_eq!(write.command(), command);
+        assert_eq!(write.session(), session);
+        assert_eq!(write.request(), request);
+        assert_eq!(write.replacement(), &replacement);
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

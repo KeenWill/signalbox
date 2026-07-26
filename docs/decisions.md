@@ -44,19 +44,25 @@ live-network tests. The existing provider transport already fixes the
 repository's redirect, proxy, retry, TLS, and idle-connection posture.
 
 **Decision.** Accept one absolute HTTP(S) URL of at most 8 KiB, rejecting user
-information and fragments. Issue one GET with no credentials, ambient proxy,
-redirect following, protocol retry, or idle reuse, under a 15-second
+information, fragments, and direct non-public IP destinations. Before dispatch,
+resolve a domain to at most 32 addresses, reject the complete set if any address
+is non-public, and pin the admitted set into the request client so a second DNS
+answer cannot change the destination. Issue one GET with no credentials, ambient
+proxy, redirect following, protocol retry, or idle reuse, under a 15-second
 whole-exchange timeout and the existing rustls/TLS 1.2 floor. Retain at most 64
 KiB of response bytes, decode that prefix as lossy UTF-8, and return compact
 JSON with URL, status, bounded content type, body, and truncation metadata.
-Treat a transport or body failure as sanitized known-failure evidence.
+Resolution and client-setup failures are sanitized known failures; after
+dispatch begins, transport, timeout, or body loss is commit-ambiguous.
 
 **Rejected alternatives.** Following redirects or enabling reqwest defaults can
 issue another physical request. Ambient proxies add an undeclared routing and
-credential channel. Unbounded buffering violates result admission. Returning raw
-bytes would require a result-content variant the tool loop does not implement. A
-new HTTP stack would duplicate the focused reqwest/rustls dependencies already
-in the workspace.
+credential channel. Trusting the URL text alone permits private-address access
+and DNS rebinding. Re-resolving during connection setup reopens the same race.
+Unbounded buffering violates result admission. Returning raw bytes would require
+a result-content variant the tool loop does not implement. A new HTTP stack
+would duplicate the focused reqwest/rustls dependencies already in the
+workspace.
 
 **Affects.** [tool-loop](spec/tool-loop.md), `apps/signalboxd` dependencies, the
 `web_fetch` declaration and executor, and its mocked offline proofs.
