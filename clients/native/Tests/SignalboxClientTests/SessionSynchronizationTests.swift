@@ -147,7 +147,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.last?.kind, .decoding)
   }
 
-  func testMalformedKnownEventRecoversBeforeAdvancingCursor() throws {
+  func testINV033MalformedKnownEventRecoversBeforeAdvancingCursor() throws {
     let eventCursor = SynchronizationFixture.unknownCursor
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -170,7 +170,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedKnownEventInReplayRecoversWithoutBuffering() throws {
+  func testINV033MalformedKnownEventInReplayRecoversWithoutBuffering() throws {
     var transport = try SynchronizationFixture.transportAtReplay(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -191,7 +191,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedSnapshotStartEntersHelloRecovery() throws {
+  func testINV033MalformedSnapshotStartEntersHelloRecovery() throws {
     var transport = try SynchronizationFixture.transport()
 
     _ = transport.send(.start)
@@ -213,7 +213,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedSideSnapshotStartEntersSideHistoryRecovery() throws {
+  func testINV033MalformedSideSnapshotStartEntersSideHistoryRecovery() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -239,7 +239,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedNestedTurnFailsSnapshotClosed() throws {
+  func testINV033MalformedNestedTurnFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -258,7 +258,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedNestedEntryFailsSnapshotClosed() throws {
+  func testINV033MalformedNestedEntryFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -277,7 +277,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedNestedTextEntryFailsSnapshotClosed() throws {
+  func testINV033MalformedNestedTextEntryFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -324,6 +324,25 @@ final class SessionSynchronizationTests: XCTestCase {
       .frame(
         generation: 1,
         message: try SynchronizationFixture.futureCurrentModelCallState()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testINV033FailedTurnWithCallWithoutAttemptFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.failedTurnWithCallWithoutAttempt()
       )
     )
 
@@ -396,7 +415,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testMalformedLiveEventEnvelopeReconnectsForFreshSnapshot() throws {
+  func testINV033MalformedLiveEventEnvelopeReconnectsForFreshSnapshot() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -649,6 +668,38 @@ final class SessionSynchronizationTests: XCTestCase {
       .frame(
         generation: 1,
         message: try SynchronizationFixture.inputAcceptedEvent(
+          cursor: SynchronizationFixture.sideBufferedCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+  }
+
+  func testFutureEventJSONNodesCountTowardBufferUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(
+        maximumUTF8Bytes: SynchronizationFixture.capacityBelowEncodedFutureEvent
+      )
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedEvent(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownEventWithNullNodes(
           cursor: SynchronizationFixture.sideBufferedCursor
         )
       )
@@ -1068,7 +1119,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.last?.kind, .staleCompletion)
   }
 
-  func testMalformedKnownSnapshotFrameFailsClosedIntoRecovery() throws {
+  func testINV033MalformedKnownSnapshotFrameFailsClosedIntoRecovery() throws {
     var transport = try SynchronizationFixture.transportInHistory(cursor: 10)
 
     let effects = transport.send(
@@ -1185,6 +1236,7 @@ private enum SynchronizationFixture {
   static let secondSideBufferedCursor: UInt64 = 22
   static let liveDuringReplaySideRefreshCursor: UInt64 = 23
   static let recoveredCursor: UInt64 = 30
+  static let capacityBelowEncodedFutureEvent: UInt = 32
   static let session = "11111111-1111-4111-8111-111111111111"
   static let turn = "22222222-2222-4222-8222-222222222222"
   static let acceptedInput = "33333333-3333-4333-8333-333333333333"
@@ -1461,6 +1513,27 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func failedTurnWithCallWithoutAttempt() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"failed",
+          "terminal_frontier_id":"\(frontier)",
+          "terminal_attempt_id":null,
+          "terminal_model_call":{
+            "model_call_id":"\(modelCall)",
+            "disposition":"known_failed"
+          }
+        }
+      }
+      """
+    )
+  }
+
   static func futureTranscriptEntry() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -1622,6 +1695,24 @@ private enum SynchronizationFixture {
         "cursor":"\(cursor)",
         "session_id":"\(session)",
         "event":{"type":"fixture_future_event","retained":true}
+      }
+      """
+    )
+  }
+
+  static func unknownEventWithNullNodes(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"fixture_future_event",
+          "nodes":[null,null,null,null,null,null,null,null]
+        }
       }
       """
     )

@@ -1210,7 +1210,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     switch message {
     case .transcriptTurn(let turn):
       guard
-        !turn.state.hasUnknownStoredVariant,
+        !turn.state.isInvalidStoredProjection,
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
@@ -1354,14 +1354,16 @@ extension SignalboxSynchronizationSnapshot.Record {
 }
 
 extension SignalboxTranscriptTurnState {
-  fileprivate var hasUnknownStoredVariant: Bool {
+  fileprivate var isInvalidStoredProjection: Bool {
     switch self {
     case .activeRunning(_, let currentModelCall):
       return currentModelCall?.state.hasUnknownStoredVariant ?? false
+    case .failed(_, let terminalAttemptID, let terminalModelCall):
+      return terminalModelCall != nil && terminalAttemptID == nil
     case .unknown:
       return true
     case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return false
     }
@@ -1374,7 +1376,7 @@ extension SignalboxTranscriptTurnState {
     case .activeRunning(_, let currentModelCall):
       return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .unknown(_, let payload, let diagnostic):
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
@@ -1395,7 +1397,7 @@ extension SignalboxCurrentModelCallState {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .unknown(_, let payload):
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
     case .prepared, .inFlight, .cancellationRequested:
       return 0
     }
@@ -1426,7 +1428,7 @@ extension SignalboxTranscriptEntry {
     case .imported(_, _, let sourceSpeaker, _):
       return sourceSpeaker.retainedUTF8Bytes
     case .unknown(_, let payload, let diagnostic):
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .turnCompleted, .turnFailed, .turnCancelled:
       return 0
@@ -1451,7 +1453,7 @@ extension SignalboxTranscriptTextEntry {
     case .imported(_, _, let sourceSpeaker):
       return sourceSpeaker.retainedUTF8Bytes
     case .unknown(_, let payload, let diagnostic):
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .user, .assistant:
       return 0
@@ -1470,7 +1472,7 @@ extension SignalboxImportedSourceSpeaker {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .unknown(_, let payload):
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
     case .notAttested, .attestedAbsent, .attested:
       return 0
     }
@@ -1494,7 +1496,7 @@ extension SignalboxProcessSessionEvent {
     case .toolBatchTransition(_, _, let state):
       return state.retainedUTF8Bytes
     case .unknown(_, let payload, let diagnostic):
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .sessionCreated, .turnActivated, .turnCompleted, .turnFailed, .turnRefused,
       .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired:
@@ -1506,7 +1508,7 @@ extension SignalboxProcessSessionEvent {
 extension SignalboxModelCallState {
   fileprivate var retainedUTF8Bytes: UInt {
     if case .unknown(_, let payload) = self {
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
     }
     return 0
   }
@@ -1515,35 +1517,18 @@ extension SignalboxModelCallState {
 extension SignalboxToolBatchState {
   fileprivate var retainedUTF8Bytes: UInt {
     if case .unknown(_, let payload) = self {
-      return payload.retainedUTF8Bytes
+      return payload.encodedUTF8Bytes
     }
     return 0
   }
 }
 
 extension Dictionary where Key == String, Value == SignalboxJSONValue {
-  fileprivate var retainedUTF8Bytes: UInt {
-    reduce(into: UInt(0)) { total, field in
-      total = total.saturatedAdding(UInt(field.key.utf8.count))
-      total = total.saturatedAdding(field.value.retainedUTF8Bytes)
+  fileprivate var encodedUTF8Bytes: UInt {
+    guard let encoded = try? SignalboxJSONCoding.encoder().encode(self) else {
+      return .max
     }
-  }
-}
-
-extension SignalboxJSONValue {
-  fileprivate var retainedUTF8Bytes: UInt {
-    switch self {
-    case .object(let object):
-      return object.retainedUTF8Bytes
-    case .array(let array):
-      return array.reduce(into: UInt(0)) { total, value in
-        total = total.saturatedAdding(value.retainedUTF8Bytes)
-      }
-    case .string(let string):
-      return UInt(string.utf8.count)
-    case .number, .bool, .null:
-      return 0
-    }
+    return UInt(encoded.count)
   }
 }
 

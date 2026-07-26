@@ -19,9 +19,10 @@ much variable-size content they retain before snapshot work completes.
 
 **Decision.** Every native synchronization policy supplies an event-buffer
 capacity: a maximum event count for fixed overhead and a maximum retained UTF-8
-byte count for content and future-event JSON. Crossing either bound rejects the
-connection through bounded recovery without advancing the cursor past the
-unadmitted event. The application wiring owns the concrete operational values.
+byte count for content and the re-encoded future-event JSON object, including
+container and scalar nodes. Crossing either bound rejects the connection through
+bounded recovery without advancing the cursor past the unadmitted event. The
+application wiring owns the concrete operational values.
 
 **Rejected alternatives.** An unbounded array permits heap growth under a slow
 or stalled snapshot. Bounding count alone leaves large event content unbounded.
