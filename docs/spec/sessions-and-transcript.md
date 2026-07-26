@@ -5,7 +5,7 @@ creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
 content, and actor attribution. It was verified against the implementing stack
-through PR #229 (`agent/session-metadata-protocol`); the defaults-epoch and
+through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`). The imported-conversation record and converter are
 owned by [conversation-import](conversation-import.md). Where a law is cited as
