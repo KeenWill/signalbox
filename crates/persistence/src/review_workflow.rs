@@ -766,74 +766,7 @@ impl ReviewWorkflowStore {
                     referenced_finding.producing_pass_id
                         AS referenced_finding_pass_id,
                     referenced_finding_pass.pass_id
-                        AS canonical_referenced_finding_pass_id,
-                    canonical_link.external_link_id AS canonical_link_id,
-                    canonical_link.target_id AS link_target_id,
-                    canonical_link.association_kind AS link_association_kind,
-                    canonical_link.run_id AS link_run_id,
-                    canonical_link.finding_id AS link_finding_id,
-                    canonical_link.finding_producing_pass_id
-                        AS link_finding_producing_pass_id,
-                    link_finding.producing_pass_id
-                        AS canonical_link_finding_producing_pass_id,
-                    canonical_link.provider_key AS link_provider_key,
-                    canonical_link.object_kind AS link_object_kind,
-                    attachment.external_link_id
-                        AS attachment_external_link_id,
-                    attachment.target_id AS attachment_target_id,
-                    attachment.pass_run_id AS attachment_pass_run_id,
-                    attachment.pass_id AS attachment_pass_id,
-                    attachment_pass.pass_id
-                        AS canonical_attachment_pass_id,
-                    attachment_pass.pass_kind AS attachment_pass_kind,
-                    attachment_pass.state_kind AS attachment_pass_state_kind,
-                    attachment_pass.turn_id AS attachment_pass_turn_id,
-                    attachment_pass.output_frontier_id
-                        AS attachment_pass_output_frontier_id,
-                    attachment_pass.result_kind
-                        AS attachment_pass_result_kind,
-                    attachment_pass.result_finding_id
-                        AS attachment_pass_result_finding_id,
-                    attachment_pass.result_finding_run_id
-                        AS attachment_pass_result_finding_run_id,
-                    attachment_pass.result_finding_pass_id
-                        AS attachment_pass_result_finding_pass_id,
-                    attachment_pass.result_event_ordinal
-                        AS attachment_pass_result_event_ordinal,
-                    attachment_pass.result_event_kind
-                        AS attachment_pass_result_event_kind,
-                    attachment_pass.result_reason
-                        AS attachment_pass_result_reason,
-                    attachment_pass.result_referenced_finding_id
-                        AS attachment_pass_result_referenced_finding_id,
-                    attachment_pass.result_referenced_finding_run_id
-                        AS attachment_pass_result_referenced_finding_run_id,
-                    attachment_pass.result_referenced_finding_pass_id
-                        AS attachment_pass_result_referenced_finding_pass_id,
-                    attachment_pass.result_referenced_finding_status
-                        AS attachment_pass_result_referenced_finding_status,
-                    attachment_pass.result_external_link_id
-                        AS attachment_pass_result_external_link_id,
-                    attachment_pass.result_external_object_key
-                        AS attachment_pass_result_external_object_key,
-                    attachment_pass.result_observation_state
-                        AS attachment_pass_result_observation_state,
-                    attachment_run.run_id
-                        AS canonical_attachment_run_id,
-                    attachment_run.workflow_kind
-                        AS attachment_workflow_kind,
-                    attachment_run.policy_version
-                        AS attachment_policy_version,
-                    attachment_run.minimum_judge_confidence
-                        AS attachment_minimum_judge_confidence,
-                    attachment_run.minimum_publication_confidence
-                        AS attachment_minimum_publication_confidence,
-                    attachment_run.state_kind
-                        AS attachment_run_state_kind,
-                    attachment_run.state_pass_id
-                        AS attachment_run_state_pass_id,
-                    attachment.external_object_key
-                        AS attachment_external_object_key
+                        AS canonical_referenced_finding_pass_id
                FROM review_finding_event AS event
                LEFT JOIN review_pass AS event_pass
                  ON event_pass.pass_id = event.event_pass_id
@@ -854,24 +787,6 @@ impl ReviewWorkflowStore {
                     referenced_finding.run_id
                 AND referenced_finding_pass.target_id =
                     referenced_finding.target_id
-               LEFT JOIN review_external_link AS canonical_link
-                 ON canonical_link.external_link_id = event.external_link_id
-               LEFT JOIN review_finding AS link_finding
-                 ON link_finding.finding_id = canonical_link.finding_id
-                AND link_finding.run_id = canonical_link.run_id
-                AND link_finding.target_id = canonical_link.target_id
-                AND link_finding.producing_pass_id =
-                    canonical_link.finding_producing_pass_id
-               LEFT JOIN review_external_link_attachment AS attachment
-                 ON attachment.external_link_id =
-                    canonical_link.external_link_id
-               LEFT JOIN review_pass AS attachment_pass
-                 ON attachment_pass.pass_id = attachment.pass_id
-                AND attachment_pass.run_id = attachment.pass_run_id
-                AND attachment_pass.target_id = attachment.target_id
-               LEFT JOIN review_run AS attachment_run
-                 ON attachment_run.run_id = attachment_pass.run_id
-                AND attachment_run.target_id = attachment_pass.target_id
               WHERE event.finding_id = $1
               ORDER BY event.event_ordinal",
         )
@@ -913,51 +828,28 @@ impl ReviewWorkflowStore {
                     )
                 })?
                 .evidence();
-            let attachment_pass = match row
-                .try_get::<Option<Uuid>, _>("attachment_pass_id")?
-                .map(pass_id)
-            {
-                Some(pass) => {
-                    require_joined_reference(
-                        &row,
-                        "canonical_attachment_pass_id",
-                        "review_finding_event",
-                        "attachment pass row is missing",
-                    )?;
-                    require_joined_reference(
-                        &row,
-                        "canonical_attachment_run_id",
-                        "review_finding_event",
-                        "attachment run row is missing",
-                    )?;
-                    Some(
-                        load_pass_on_connection(connection, pass)
-                            .await?
-                            .ok_or_else(|| {
-                                corruption(
-                                    "review_finding_event",
-                                    String::from("attachment pass row is missing"),
-                                )
-                            })?
-                            .evidence(),
-                    )
-                }
-                None => None,
-            };
-            let link_claims = match row
+            let canonical_link = match row
                 .try_get::<Option<Uuid>, _>("external_link_id")?
                 .map(external_link_id)
             {
-                Some(link) => load_external_link_claims_on_connection(connection, link).await?,
-                None => Vec::new(),
+                Some(link) => Some(
+                    Self::load_external_link_on_connection(connection, link)
+                        .await?
+                        .ok_or_else(|| {
+                            corruption(
+                                "review_finding_event",
+                                String::from("event external link is missing"),
+                            )
+                        })?,
+                ),
+                None => None,
             };
             events.push(decode_finding_event(
                 &row,
                 proposal.reference(),
                 &target,
                 event_pass,
-                attachment_pass.as_ref(),
-                link_claims,
+                canonical_link.as_ref(),
             )?);
         }
         let finding = ReviewFinding::try_reconstitute(proposal, events).map_err(|error| {
@@ -1037,6 +929,27 @@ impl ReviewWorkflowStore {
         let Some(current) = self.load_external_link(link).await? else {
             return Ok(None);
         };
+        current
+            .clone()
+            .attach(attachment.clone())
+            .map_err(|error| {
+                ReviewWorkflowStoreError::InvalidTransition(
+                    ReviewWorkflowTransitionError::ExternalLink(error),
+                )
+            })?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(link.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let current = Self::load_external_link_on_connection(&mut transaction, link)
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("locked reservation disappeared"),
+                )
+            })?;
         let next = current.attach(attachment.clone()).map_err(|error| {
             ReviewWorkflowStoreError::InvalidTransition(
                 ReviewWorkflowTransitionError::ExternalLink(error),
@@ -1070,15 +983,15 @@ impl ReviewWorkflowStore {
         if posted_event.is_none()
             && let ReviewExternalLinkAssociation::Finding(reference) = next.association()
         {
-            let current_finding =
-                self.load_finding(reference.finding())
-                    .await?
-                    .ok_or_else(|| {
-                        corruption(
-                            "review_external_link_attachment",
-                            String::from("associated finding is missing"),
-                        )
-                    })?;
+            let current_finding = self
+                .load_finding_on_connection(&mut transaction, reference.finding())
+                .await?
+                .ok_or_else(|| {
+                    corruption(
+                        "review_external_link_attachment",
+                        String::from("associated finding is missing"),
+                    )
+                })?;
             if matches!(
                 current_finding.events().last().map(ReviewFindingEvent::kind),
                 Some(ReviewFindingEventKind::BlockedWithReason {
@@ -1091,7 +1004,7 @@ impl ReviewWorkflowStore {
         }
         if let Some(event) = posted_event.as_ref() {
             let current_finding = self
-                .load_finding(event.finding().finding())
+                .load_finding_on_connection(&mut transaction, event.finding().finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1105,11 +1018,6 @@ impl ReviewWorkflowStore {
                 ))
             })?;
         }
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
-            .bind(link.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
         if posted_event.is_none()
             && sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (
@@ -1176,29 +1084,19 @@ impl ReviewWorkflowStore {
             .bind(link.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
-        let latest_observation = sqlx::query_as::<_, (i64, String)>(
-            "SELECT observation_ordinal, object_state
-               FROM review_external_link_observation
-              WHERE external_link_id = $1
-              ORDER BY observation_ordinal DESC
-              LIMIT 1",
-        )
-        .bind(link.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if latest_observation
-            .as_ref()
-            .is_some_and(|(_, state)| state == encode_external_object_state(observation.state()))
+        let current = Self::load_external_link_on_connection(&mut transaction, link)
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("locked reservation disappeared"),
+                )
+            })?;
+        if let Some(latest) = current
+            .observations()
+            .last()
+            .filter(|latest| latest.state() == observation.state())
         {
-            let latest_ordinal = latest_observation
-                .as_ref()
-                .map(|(ordinal, _)| *ordinal)
-                .ok_or_else(|| {
-                    corruption(
-                        "review_external_link_observation",
-                        String::from("matching latest observation disappeared"),
-                    )
-                })?;
             let canonical_pass =
                 load_pass_on_connection(&mut transaction, observation.pass().pass())
                     .await?
@@ -1215,36 +1113,11 @@ impl ReviewWorkflowStore {
                     String::from("observing pass differs from canonical execution facts"),
                 ));
             }
-            let current = if current
-                .observations()
-                .last()
-                .is_some_and(|latest| latest.state() == observation.state())
-            {
-                current
-            } else {
-                Self::load_external_link_on_connection(&mut transaction, link)
-                    .await?
-                    .ok_or_else(|| {
-                        corruption(
-                            "review_external_link",
-                            String::from("locked reservation disappeared"),
-                        )
-                    })?
-            };
             let no_change_pass = canonical_pass
                 .project_result(ReviewPassResult::ExternalLinkNoChange(
                     ReviewExternalLinkNoChangeResult::new(
                         link,
-                        ReviewEventOrdinal::try_new(positive_u32(
-                            latest_ordinal,
-                            "review_external_link_observation",
-                        )?)
-                        .map_err(|_| {
-                            corruption(
-                                "review_external_link_observation",
-                                String::from("zero ordinal"),
-                            )
-                        })?,
+                        latest.ordinal(),
                         observation.state(),
                     ),
                 ))
@@ -1254,7 +1127,7 @@ impl ReviewWorkflowStore {
                         String::from("unchanged report pass cannot bind the no-change result"),
                     )
                 })?;
-            current
+            let next = current
                 .confirm_unchanged(no_change_pass.clone(), observation.run_evidence())
                 .map_err(|error| {
                     ReviewWorkflowStoreError::InvalidTransition(
@@ -1263,8 +1136,13 @@ impl ReviewWorkflowStore {
                 })?;
             bind_pass_result(&mut transaction, &no_change_pass).await?;
             commit_mutation(transaction).await?;
-            return self.load_external_link(link).await;
+            return Ok(Some(next));
         }
+        let next = current.observe(observation.clone()).map_err(|error| {
+            ReviewWorkflowStoreError::InvalidTransition(
+                ReviewWorkflowTransitionError::ExternalLink(error),
+            )
+        })?;
         bind_pass_result(&mut transaction, observation.pass_evidence()).await?;
         sqlx::query(
             "INSERT INTO review_external_link_observation
@@ -1274,14 +1152,14 @@ impl ReviewWorkflowStore {
         )
         .bind(observation.link().into_uuid())
         .bind(i64::from(observation.ordinal().get()))
-        .bind(current.association().target().into_uuid())
+        .bind(next.association().target().into_uuid())
         .bind(observation.pass().run().run().into_uuid())
         .bind(observation.pass().pass().into_uuid())
         .bind(encode_external_object_state(observation.state()))
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
-        self.load_external_link(link).await
+        Ok(Some(next))
     }
 
     /// Binds one blocked publication pass to its exact pending reservation.
@@ -1841,6 +1719,7 @@ async fn load_pass_on_connection(
                 workflow_pass.result_observation_state,
                 canonical_input.session_id AS accepted_input_session_id,
                 canonical_input.origin_turn_id AS accepted_input_origin_turn_id,
+                canonical_origin_turn.turn_id AS canonical_origin_turn_id,
                 canonical_turn.turn_id AS evidence_turn_id,
                 canonical_turn.session_id AS turn_session_id,
                 canonical_turn.origin_accepted_input_id
@@ -1861,6 +1740,13 @@ async fn load_pass_on_connection(
              ON canonical_target.target_id = workflow_pass.target_id
            LEFT JOIN accepted_input AS canonical_input
              ON canonical_input.accepted_input_id =
+                workflow_pass.accepted_input_id
+           LEFT JOIN turn_lifecycle AS canonical_origin_turn
+             ON canonical_origin_turn.turn_id =
+                workflow_pass.origin_turn_id
+            AND canonical_origin_turn.session_id =
+                workflow_pass.session_id
+            AND canonical_origin_turn.origin_accepted_input_id =
                 workflow_pass.accepted_input_id
            LEFT JOIN turn_lifecycle AS canonical_turn
              ON canonical_turn.turn_id = workflow_pass.turn_id
@@ -1887,6 +1773,12 @@ async fn load_pass_on_connection(
     let produced_findings = load_produced_findings_on_connection(connection, pass).await?;
     let turn_evidence = decode_pass_turn_evidence(&row)?;
     let pass = reconstitute_pass(&row, turn_evidence, produced_findings)?;
+    require_joined_reference(
+        &row,
+        "canonical_origin_turn_id",
+        "review_pass",
+        "origin turn row is missing",
+    )?;
     let policy = decode_review_policy(
         &row,
         "run_policy_version",
@@ -3040,8 +2932,7 @@ fn decode_finding_event(
     finding: ReviewFindingRef,
     target_snapshot: &ReviewTarget,
     pass: ReviewPassEvidence,
-    attachment_pass: Option<&ReviewPassEvidence>,
-    link_claims: Vec<ReviewExternalLinkClaim>,
+    canonical_link: Option<&ReviewExternalLink>,
 ) -> Result<ReviewFindingEvent, ReviewWorkflowStoreError> {
     let row_finding = finding_id(row.try_get("finding_id")?);
     let row_run = run_id(row.try_get("finding_run_id")?);
@@ -3139,23 +3030,16 @@ fn decode_finding_event(
         },
         ("stale", None, None, None, None, None) => ReviewFindingEventKind::Stale,
         ("posted", None, None, None, None, Some(link)) => {
-            let canonical = decode_finding_external_link_aggregate(
-                row,
-                external_link_id(link),
-                target_snapshot,
-                attachment_pass,
-                link_claims,
-            )?;
+            let canonical =
+                require_finding_event_external_link(canonical_link, external_link_id(link))?;
             ReviewFindingEventKind::Posted {
                 link: Box::new(
-                    ReviewFindingExternalLinkRef::try_new(finding, &canonical).map_err(
-                        |error| {
-                            corruption(
-                                "review_finding_event",
-                                format!("invalid canonical posted link: {:?}", error.failure()),
-                            )
-                        },
-                    )?,
+                    ReviewFindingExternalLinkRef::try_new(finding, canonical).map_err(|error| {
+                        corruption(
+                            "review_finding_event",
+                            format!("invalid canonical posted link: {:?}", error.failure()),
+                        )
+                    })?,
                 ),
             }
         }
@@ -3163,12 +3047,9 @@ fn decode_finding_event(
         ("blocked_with_reason", Some(reason), None, None, None, link) => {
             let link = link
                 .map(|link| {
-                    let canonical = decode_finding_external_link_aggregate(
-                        row,
+                    let canonical = require_finding_event_external_link(
+                        canonical_link,
                         external_link_id(link),
-                        target_snapshot,
-                        attachment_pass,
-                        link_claims,
                     )?;
                     let reservation = ReviewExternalLink::try_reserve(
                         canonical.id(),
@@ -3219,169 +3100,23 @@ fn decode_finding_event(
     ))
 }
 
-fn decode_finding_external_link_aggregate(
-    row: &PgRow,
+fn require_finding_event_external_link(
+    canonical_link: Option<&ReviewExternalLink>,
     event_link: ReviewExternalLinkId,
-    target_snapshot: &ReviewTarget,
-    canonical_attachment_pass: Option<&ReviewPassEvidence>,
-    claims: Vec<ReviewExternalLinkClaim>,
-) -> Result<ReviewExternalLink, ReviewWorkflowStoreError> {
-    let id = row
-        .try_get::<Option<Uuid>, _>("canonical_link_id")?
-        .map(external_link_id)
-        .ok_or_else(|| {
-            corruption(
-                "review_finding_event",
-                String::from("posted event canonical link is missing"),
-            )
-        })?;
-    if id != event_link {
+) -> Result<&ReviewExternalLink, ReviewWorkflowStoreError> {
+    let canonical = canonical_link.ok_or_else(|| {
+        corruption(
+            "review_finding_event",
+            String::from("event canonical link is missing"),
+        )
+    })?;
+    if canonical.id() != event_link {
         return Err(corruption(
             "review_finding_event",
-            String::from("posted event link identity mismatch"),
+            String::from("event link identity mismatch"),
         ));
     }
-    let target = row
-        .try_get::<Option<Uuid>, _>("link_target_id")?
-        .map(target_id)
-        .ok_or_else(|| {
-            corruption(
-                "review_finding_event",
-                String::from("posted event link target is missing"),
-            )
-        })?;
-    if target != target_snapshot.id() {
-        return Err(corruption(
-            "review_finding_event",
-            String::from("posted event link target evidence mismatch"),
-        ));
-    }
-    let association_kind = row
-        .try_get::<Option<String>, _>("link_association_kind")?
-        .ok_or_else(|| {
-            corruption(
-                "review_finding_event",
-                String::from("posted event link association is missing"),
-            )
-        })?;
-    let run = row.try_get::<Option<Uuid>, _>("link_run_id")?;
-    let canonical_finding = row.try_get::<Option<Uuid>, _>("link_finding_id")?;
-    let stored_finding_pass = row.try_get::<Option<Uuid>, _>("link_finding_producing_pass_id")?;
-    let canonical_finding_pass =
-        row.try_get::<Option<Uuid>, _>("canonical_link_finding_producing_pass_id")?;
-    if stored_finding_pass != canonical_finding_pass {
-        return Err(corruption(
-            "review_finding_event",
-            String::from("posted event link finding producer mismatch"),
-        ));
-    }
-    let association = match (
-        association_kind.as_str(),
-        run,
-        canonical_finding,
-        canonical_finding_pass,
-    ) {
-        ("target", None, None, None) => ReviewExternalLinkAssociation::Target(target),
-        ("run", Some(run), None, None) => {
-            ReviewExternalLinkAssociation::Run(ReviewRunRef::new(target, run_id(run)))
-        }
-        ("finding", Some(run), Some(canonical_finding), Some(canonical_finding_pass)) => {
-            ReviewExternalLinkAssociation::Finding(ReviewFindingRef::new(
-                ReviewPassRef::new(
-                    ReviewRunRef::new(target, run_id(run)),
-                    pass_id(canonical_finding_pass),
-                ),
-                finding_id(canonical_finding),
-            ))
-        }
-        _ => {
-            return Err(corruption(
-                "review_finding_event",
-                format!("invalid posted link association shape {association_kind}"),
-            ));
-        }
-    };
-    let provider = row
-        .try_get::<Option<String>, _>("link_provider_key")?
-        .ok_or_else(|| {
-            corruption(
-                "review_finding_event",
-                String::from("posted event link provider is missing"),
-            )
-        })?;
-    let object_kind = row
-        .try_get::<Option<String>, _>("link_object_kind")?
-        .ok_or_else(|| {
-            corruption(
-                "review_finding_event",
-                String::from("posted event link object kind is missing"),
-            )
-        })?;
-    let attachment_link = row.try_get::<Option<Uuid>, _>("attachment_external_link_id")?;
-    let attachment_target = row.try_get::<Option<Uuid>, _>("attachment_target_id")?;
-    let attachment_run = row.try_get::<Option<Uuid>, _>("attachment_pass_run_id")?;
-    let attachment_pass = row.try_get::<Option<Uuid>, _>("attachment_pass_id")?;
-    let attachment_object = row.try_get::<Option<String>, _>("attachment_external_object_key")?;
-    let attachment = match (
-        attachment_link,
-        attachment_target,
-        attachment_run,
-        attachment_pass,
-        attachment_object,
-    ) {
-        (None, None, None, None, None) if canonical_attachment_pass.is_none() => None,
-        (Some(link), Some(target), Some(run), Some(pass), Some(object)) => {
-            let reference = ReviewPassRef::new(
-                ReviewRunRef::new(target_id(target), run_id(run)),
-                pass_id(pass),
-            );
-            let pass = canonical_attachment_pass.ok_or_else(|| {
-                corruption(
-                    "review_finding_event",
-                    String::from("attachment pass evidence is missing"),
-                )
-            })?;
-            if pass.reference() != reference {
-                return Err(corruption(
-                    "review_finding_event",
-                    String::from("attachment pass ancestry mismatch"),
-                ));
-            }
-            Some(ReviewExternalLinkAttachment::new(
-                external_link_id(link),
-                reference,
-                pass.clone(),
-                ReviewRunEvidence::new(
-                    reference.run(),
-                    decode_workflow_kind(&row.try_get::<String, _>("attachment_workflow_kind")?)?,
-                    pass.policy(),
-                    decode_run_state(
-                        reference.run(),
-                        &row.try_get::<String, _>("attachment_run_state_kind")?,
-                        row.try_get("attachment_run_state_pass_id")?,
-                    )?,
-                ),
-                review_key(object, "review_external_link_attachment")?,
-            ))
-        }
-        _ => {
-            return Err(corruption(
-                "review_finding_event",
-                String::from("torn posted link attachment"),
-            ));
-        }
-    };
-    ReviewExternalLink::try_reconstitute(
-        id,
-        association,
-        review_key(provider, "review_external_link")?,
-        decode_external_object_kind(&object_kind)?,
-        attachment,
-        Vec::new(),
-        claims,
-        target_snapshot,
-    )
-    .map_err(|error| corruption("review_finding_event", format!("{error:?}")))
+    Ok(canonical)
 }
 
 fn decode_external_link_root(

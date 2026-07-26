@@ -1383,7 +1383,7 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .load_finding(finding_ref.finding())
             .await
             .expect("atomically posted finding loads"),
-        Some(posted_finding)
+        Some(posted_finding.clone())
     );
     sqlx::query(
         "ALTER TABLE review_external_link
@@ -1413,9 +1413,11 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
     let ReviewWorkflowStoreError::Corruption(error) = error else {
         panic!("expected typed finding-history corruption");
     };
-    assert_eq!(error.aggregate(), "review_finding_event");
+    assert_eq!(error.aggregate(), "review_external_link");
     assert!(
-        error.detail().contains("link finding producer mismatch"),
+        error
+            .detail()
+            .contains("finding producing pass row is missing"),
         "unexpected corruption detail: {}",
         error.detail(),
     );
@@ -1450,6 +1452,13 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .await
             .expect("complete link loads"),
         Some(observed.clone())
+    );
+    assert_eq!(
+        store
+            .load_finding(finding_ref.finding())
+            .await
+            .expect("posted finding loads through observed link history"),
+        Some(posted_finding.clone())
     );
     let unchanged = observation(
         link_id,
@@ -1489,6 +1498,13 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .await
             .expect("no-change claim reloads"),
         Some(expected_unchanged.clone())
+    );
+    assert_eq!(
+        store
+            .load_finding(finding_ref.finding())
+            .await
+            .expect("posted finding loads through a durable no-change claim"),
+        Some(posted_finding.clone())
     );
     let (later_import_pass, later_import_turn) = insert_isolated_pass_for_target(
         &pool,
@@ -1534,6 +1550,62 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .expect("historical no-change claim reloads after later state"),
         Some(expected_advanced)
     );
+    assert_eq!(
+        store
+            .load_finding(finding_ref.finding())
+            .await
+            .expect("posted finding loads after later external observations"),
+        Some(posted_finding)
+    );
+    let unrelated_target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(0x30b)),
+        key("example-code-host"),
+        key("example/repository"),
+        ReviewTargetSubject::Commit,
+        key("unrelated-head"),
+        None,
+        None,
+    )
+    .expect("unrelated target is structurally valid");
+    store.insert_target(&unrelated_target).await?;
+    sqlx::query(
+        "ALTER TABLE review_external_object_identity
+         DISABLE TRIGGER review_external_object_identity_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_external_object_identity
+            SET logical_target_id = $1
+          WHERE provider_key = 'example-code-host'
+            AND object_kind = 'review_comment'
+            AND external_object_key = 'comment-84'",
+    )
+    .bind(unrelated_target.id().into_uuid())
+    .execute(&pool)
+    .await?;
+    let identity_error = store
+        .load_finding(finding_ref.finding())
+        .await
+        .expect_err("finding history must authenticate the external-object registry");
+    let ReviewWorkflowStoreError::Corruption(identity_error) = identity_error else {
+        panic!("expected typed finding-history corruption");
+    };
+    assert_eq!(
+        identity_error.aggregate(),
+        "review_external_link_attachment"
+    );
+    assert!(identity_error.detail().contains("unrelated logical target"));
+    sqlx::query(
+        "UPDATE review_external_object_identity
+            SET logical_target_id = $1
+          WHERE provider_key = 'example-code-host'
+            AND object_kind = 'review_comment'
+            AND external_object_key = 'comment-84'",
+    )
+    .bind(target_id.into_uuid())
+    .execute(&pool)
+    .await?;
 
     sqlx::query(
         "ALTER TABLE review_pass
@@ -1664,6 +1736,62 @@ async fn inv040_pass_loader_rejects_cross_wired_accepted_input() -> Result<(), B
             .contains("accepted input origin turn differs")
     );
 
+    Ok(())
+}
+
+/// INV-040: pass loading authenticates the queued pass's exact origin turn,
+/// independently of its accepted-input snapshot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv040_pass_loader_rejects_missing_origin_turn() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let missing_turn = uuid(0x21f);
+
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DISABLE TRIGGER review_pass_change_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_pass
+         DROP CONSTRAINT review_pass_origin_turn_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET origin_turn_id = $2
+          WHERE accepted_input_id = $1",
+    )
+    .bind(uuid(0x202))
+    .bind(missing_turn)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET origin_turn_id = $2
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .bind(missing_turn)
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .store
+        .load_pass(fixture.pass.pass())
+        .await
+        .expect_err("missing canonical origin turn must fail pass loading closed");
+    let ReviewWorkflowStoreError::Corruption(error) = error else {
+        panic!("expected typed review-pass corruption");
+    };
+    assert_eq!(error.aggregate(), "review_pass");
+    assert!(error.detail().contains("origin turn row is missing"));
     Ok(())
 }
 
@@ -3388,6 +3516,16 @@ async fn inv040_inv041_review_lookup_indexes_are_pinned() -> Result<(), Box<dyn 
     .fetch_one(&pool)
     .await?;
     assert!(producing_pass_index.contains("(producing_pass_id, target_id, run_id, finding_id)"));
+
+    let attachment_identity_index: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = 'public'
+            AND indexname = 'review_external_link_attachment_identity_index'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(attachment_identity_index.contains("(identity_digest, target_id)"));
     Ok(())
 }
 
@@ -5618,6 +5756,117 @@ async fn inv040_inv041_linked_block_serializes_with_non_posting_attachment()
             .expect("non-posting attachment persists")
             .external_object(),
         &key("comment-7b4")
+    );
+    Ok(())
+}
+
+/// INV-041: attachment returns the canonical aggregate reloaded under the
+/// reservation lock, including a publication claim that won the lock first.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_attachment_returns_claim_committed_while_waiting() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let attaching_pass =
+        insert_fixture_pass(&fixture, 0x7c0, ReviewPassKind::ImportExternalContext).await;
+    let blocked_pass = insert_fixture_pass(&fixture, 0x7c1, ReviewPassKind::Publish).await;
+    let attaching_evidence =
+        succeed_fixture_passes(&pool, &fixture.store, &[attaching_pass]).await[0].clone();
+    let (_, blocked_turn) = start_review_pass(&fixture.store, blocked_pass).await;
+    synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
+
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x7c2));
+    let reservation = ReviewExternalLink::try_reserve(
+        link,
+        ReviewExternalLinkAssociation::Target(fixture.target),
+        key("example-code-host"),
+        ReviewExternalObjectKind::ReviewComment,
+        &fixture.target_snapshot,
+    )
+    .expect("reservation matches the target");
+    fixture
+        .store
+        .reserve_external_link(reservation.clone())
+        .await?;
+    let reason = text("provider acknowledgement requires reconciliation");
+    let blocked_evidence = pass_evidence(
+        blocked_pass,
+        ReviewPassKind::Publish,
+        ReviewPolicy::version_one(),
+        ReviewPassState::Blocked {
+            turn: blocked_turn,
+            result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(
+                ReviewExternalLinkPublicationBlockedResult::new(link, reason.clone()),
+            )),
+        },
+    );
+    let blocked_run = run_evidence_for_pass(blocked_evidence.clone());
+    let attachment = attachment(link, attaching_evidence, key("comment-7c2"));
+    let expected = reservation
+        .block_publication(blocked_evidence, blocked_run)
+        .expect("blocked pass claims the reservation")
+        .attach(attachment.clone())
+        .expect("same-target pass may attach after the claim");
+
+    let mut blocking = pool.begin().await?;
+    sqlx::query(
+        "SELECT external_link_id
+           FROM review_external_link
+          WHERE external_link_id = $1
+          FOR NO KEY UPDATE",
+    )
+    .bind(link.into_uuid())
+    .fetch_one(&mut *blocking)
+    .await?;
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let attaching_store = fixture.store.clone();
+    let attaching_barrier = barrier.clone();
+    let mut attaching = tokio::spawn(async move {
+        attaching_barrier.wait().await;
+        attaching_store.attach_external_link(link, attachment).await
+    });
+    barrier.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), &mut attaching)
+        .await
+        .expect_err("attachment must wait for the reservation transition lock");
+
+    sqlx::query(
+        "UPDATE review_pass
+            SET state_kind = 'blocked'
+          WHERE pass_id = $1",
+    )
+    .bind(blocked_pass.pass().into_uuid())
+    .execute(&mut *blocking)
+    .await?;
+    sqlx::query(
+        "UPDATE review_run
+            SET state_kind = 'blocked',
+                state_pass_id = $2
+          WHERE run_id = $1",
+    )
+    .bind(blocked_pass.run().run().into_uuid())
+    .bind(blocked_pass.pass().into_uuid())
+    .execute(&mut *blocking)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_publication_blocked',
+                result_reason = $2,
+                result_external_link_id = $3
+          WHERE pass_id = $1",
+    )
+    .bind(blocked_pass.pass().into_uuid())
+    .bind(reason.as_str())
+    .bind(link.into_uuid())
+    .execute(&mut *blocking)
+    .await?;
+    blocking.commit().await?;
+
+    assert_eq!(
+        attaching.await.expect("attachment task remains live")?,
+        Some(expected),
+        "the returned aggregate must retain the claim committed while waiting"
     );
     Ok(())
 }

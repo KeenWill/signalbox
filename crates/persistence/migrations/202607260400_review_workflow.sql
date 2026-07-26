@@ -1714,6 +1714,15 @@ CREATE TABLE review_external_link_attachment (
     provider_key text NOT NULL,
     object_kind text NOT NULL,
     external_object_key text NOT NULL,
+    identity_digest text GENERATED ALWAYS AS (
+        md5(
+            provider_key
+                || chr(31)
+                || object_kind
+                || chr(31)
+                || external_object_key
+        )
+    ) STORED,
 
     CONSTRAINT review_external_link_attachment_target_key
         UNIQUE (external_link_id, target_id),
@@ -1740,6 +1749,9 @@ CREATE TABLE review_external_link_attachment (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
+
+CREATE INDEX review_external_link_attachment_identity_index
+    ON review_external_link_attachment (identity_digest, target_id);
 
 CREATE FUNCTION guard_review_external_link_attachment_insert()
 RETURNS trigger
@@ -1812,7 +1824,14 @@ BEGIN
     IF EXISTS (
         SELECT 1
           FROM review_external_link_attachment
-         WHERE target_id = NEW.target_id
+         WHERE identity_digest = md5(
+                   NEW.provider_key
+                       || chr(31)
+                       || NEW.object_kind
+                       || chr(31)
+                       || NEW.external_object_key
+               )
+           AND target_id = NEW.target_id
            AND provider_key = NEW.provider_key
            AND object_kind = NEW.object_kind
            AND external_object_key = NEW.external_object_key
@@ -1885,9 +1904,10 @@ BEGIN
           FROM review_external_link_attachment AS attachment
           JOIN review_target AS attached_target
             ON attached_target.target_id = attachment.target_id
-          JOIN review_target AS logical_target
+         JOIN review_target AS logical_target
             ON logical_target.target_id = NEW.logical_target_id
-         WHERE attachment.provider_key = NEW.provider_key
+         WHERE attachment.identity_digest = NEW.identity_digest
+           AND attachment.provider_key = NEW.provider_key
            AND attachment.object_kind = NEW.object_kind
            AND attachment.external_object_key = NEW.external_object_key
            AND (
