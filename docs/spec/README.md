@@ -10,11 +10,13 @@ verification reference names that pull request as `` PR #N (`branch-ref`) `` and
 may narrow the claim to the surface the pull request settled, either as a
 semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) `` — or
 as prose following the parenthetical; a scope tail is free-form prose that must
-carry at least one non-whitespace character and must stay inside the reference's
-own block, and a page may carry one reference per verified surface.
-`scripts/check_docs_consistency.py` enforces this form. The historical ADR
-corpus these pages distilled is retired: the [ADR mapping](#adr-mapping) below
-resolves every record number to its destination, and git history is the archive.
+render as more than whitespace and block-quote markers, may name code in
+backticks without the span's own parentheses closing the reference, and must
+stay inside the reference's own block, and a page may carry one reference per
+verified surface. `scripts/check_docs_consistency.py` enforces this form. The
+historical ADR corpus these pages distilled is retired: the
+[ADR mapping](#adr-mapping) below resolves every record number to its
+destination, and git history is the archive.
 
 Conventions: pages state implemented behavior only; load-bearing design choices
 carry one-sentence "Why:" rationales; invariant references use INV tags resolved

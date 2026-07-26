@@ -26,12 +26,13 @@ docstring was the only place it appeared.
 **Decision.** [The specification index](spec/README.md) owns the format. A
 verification reference is `` PR #N (`branch-ref`) ``, optionally narrowed by a
 semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) ``. The
-scope is free-form prose that must carry at least one non-whitespace character
-(an empty or whitespace-only tail is rejected) and must stay inside the
-reference's own block, ending at a blank line or a sibling list item in either
-raw or block-quoted form. `scripts/check_docs_consistency.py` enforces the
-format and captures nothing from the tail, so no consumer can come to depend on
-its wording.
+scope is free-form prose that must render as more than whitespace and
+block-quote markers (an empty, whitespace-only, or marker-only tail is rejected)
+and must stay inside the reference's own block, ending at a blank line or a
+sibling list item in either raw or block-quoted form. A scope may name code in
+backticks, and the parentheses inside such a span do not close the reference.
+`scripts/check_docs_consistency.py` enforces the format and captures nothing
+from the tail, so no consumer can come to depend on its wording.
 
 **Rejected alternatives.** Admitting only the scope-outside-the-parentheses form
 the pages use today: it separates the narrowing from the reference it narrows

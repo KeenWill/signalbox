@@ -14,9 +14,10 @@ The check is deterministic and offline. It verifies:
    reference whose PR token uses ``PR #N (`branch-ref`)``, optionally narrowed
    to the surface that PR settled by a semicolon tail: ``PR #N (`branch-ref`;
    <scope>)``. The scope tail is free-form prose: its content is not validated,
-   but it must carry at least one non-whitespace character and may not leave
-   the reference's own block. ``docs/spec/README.md`` states this format; this
-   check enforces it.
+   but it must render as more than whitespace and quote markers, may name code
+   in backticks without the span's parentheses closing the reference, and may
+   not leave the reference's own block. ``docs/spec/README.md`` states this
+   format; this check enforces it.
 
 External links, semantic freshness of verification references, and reverse
 discovery of every INV-tagged test are deliberately outside this check. Run
@@ -130,15 +131,44 @@ LIST_ITEM_BOUNDARY = rf"\n{QUOTED_LINE_PREFIX}[ \t]*(?:[-+*]|\d+[.)])[ \t]"
 # A verification parenthetical may narrow its claim to the surface the PR
 # actually settled, after a semicolon: ``PR #N (`branch-ref`; <scope>)``. The
 # branch ref stays mandatory and is validated exactly as before; the scope tail
-# is free-form prose and is deliberately unvalidated beyond being non-empty —
-# the lookahead requires one non-whitespace character, so ``(`branch`;)`` and a
-# whitespace-only tail are rejected. It may wrap across lines but may not leave
-# its own block, so it stops at a blank line or a sibling list item, quoted or
-# not — and, being ``[^)]``, at the parenthetical's own closer.
+# is free-form prose and is deliberately unvalidated beyond being non-empty as
+# rendered. It may wrap across lines but may not leave its own block, so it
+# stops at a blank line or a sibling list item, quoted or not — and at the
+# parenthetical's own closer.
 SCOPED_DETAIL_BOUNDARY = rf"{PARAGRAPH_BOUNDARY}|{LIST_ITEM_BOUNDARY}"
-SCOPED_DETAIL_CHARACTER = rf"(?:(?!{SCOPED_DETAIL_BOUNDARY})[^)])"
+# Scopes name code, and a code span may hold parentheses, so the tail reads a
+# complete code span as one unit before falling back to a single non-closer
+# character: the ``)`` in `` `handle()` `` neither closes the reference early
+# nor rescues an unterminated one by standing in for the missing closer.
+# Completeness is the rule ``inline_code_ranges`` applies — a backtick run
+# closed by a run of the same length, which the surrounding ``(?<!`)`` and
+# ``(?!`)`` guards pin — and the two branches are disjoint, since only the
+# code-span branch may begin with a backtick. An unpaired backtick therefore
+# ends the tail and the reference fails to parse: accepted, because a scope
+# whose span never closes bounds the reference no more clearly for a reader
+# than for the checker.
+SCOPED_DETAIL_CODE_SPAN = (
+    r"(?<!`)(?P<scope_code_delimiter>`+)(?!`)"
+    rf"(?:(?!{SCOPED_DETAIL_BOUNDARY})"
+    r"(?!(?<!`)(?P=scope_code_delimiter)(?!`))[\s\S])*?"
+    r"(?<!`)(?P=scope_code_delimiter)(?!`)"
+)
+SCOPED_DETAIL_UNIT = (
+    rf"(?:(?!{SCOPED_DETAIL_BOUNDARY})(?:{SCOPED_DETAIL_CODE_SPAN}|[^`)]))"
+)
+# Non-emptiness is measured on what the tail renders, not on what it spells: a
+# tail wrapped inside a block quote repeats a ``>`` marker on every
+# continuation line, so counting any non-whitespace character would let a scope
+# that renders as nothing but its own container scaffolding pass. The lookahead
+# therefore skips whitespace and quote markers while hunting for the first
+# content character, and — the closer being neither skipped nor content — never
+# hunts past the closer, so ``(`branch`;)``, a whitespace-only tail, and a
+# quoted tail whose continuation line carries only ``> )`` are all rejected.
+SCOPED_DETAIL_SCAFFOLD = r"[\s>]*"
+SCOPED_DETAIL_CONTENT = r"[^\s>)]"
 SCOPED_DETAIL_TAIL = (
-    rf";(?={SCOPED_DETAIL_CHARACTER}*[^\s)]){SCOPED_DETAIL_CHARACTER}*"
+    rf";(?={SCOPED_DETAIL_SCAFFOLD}{SCOPED_DETAIL_CONTENT})"
+    rf"{SCOPED_DETAIL_UNIT}*"
 )
 PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
@@ -1596,9 +1626,9 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     "spec-verification",
                     "verification reference must use "
                     "`PR #N (`branch-ref`)`, optionally with a `;` scope "
-                    "tail carrying at least one non-whitespace character, "
-                    "and a positive decimal PR number with a "
-                    "non-whitespace branch ref",
+                    "tail that renders as more than whitespace and quote "
+                    "markers and closes its own code spans, and a positive "
+                    "decimal PR number with a non-whitespace branch ref",
                 )
             )
 
