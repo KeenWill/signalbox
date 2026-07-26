@@ -503,7 +503,7 @@ impl CreateSession {
         provenance: SessionCreationProvenance,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
-    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
     pub fn prepare(self, session: SessionId)
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
     // accessors: command_id(), provenance(), initial_configuration_defaults()
@@ -519,7 +519,7 @@ impl CreateSessionFromImportedFrontier {
         relationship: ImportedSessionRelationship,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
-    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
     pub fn prepare<NextSemanticEntryId>(
         self,
         imported_conversation: &ImportedConversation,
@@ -989,6 +989,24 @@ impl SessionConfigurationDefaultsVersion {
     pub const fn checked_next(self) -> Option<Self>;  // None at u64::MAX
 }
 
+pub struct SessionSystemPrompt(/* private String */);
+impl SessionSystemPrompt {
+    pub const MAX_UTF8_BYTES: usize;  // 1_048_576
+    pub fn try_new(value: String) -> Result<Self, SessionSystemPromptError>;
+    // accessors: as_str(), into_string()
+}
+
+pub enum SessionSystemPromptFailure {
+    Empty,
+    TooLarge { bytes: usize },
+    ContainsNull,
+}
+
+pub struct SessionSystemPromptError { /* private */ }
+impl SessionSystemPromptError {
+    // accessors: value(), failure(), into_parts()
+}
+
 pub struct SessionConfigurationDefaults { /* private */ }
 impl SessionConfigurationDefaults {
     pub const fn new(model: ModelSelectionRequest) -> Self;
@@ -996,13 +1014,18 @@ impl SessionConfigurationDefaults {
         model: ModelSelectionRequest,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
-    // accessors: model(), dangerous_tool_auto_approval()
+    pub const fn complete(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+    ) -> Self;
+    // accessors: model(), dangerous_tool_auto_approval(), system_prompt()
 }
 
 pub struct VersionedSessionConfigurationDefaults { /* private */ }
 impl VersionedSessionConfigurationDefaults {
     pub const fn establish(defaults: SessionConfigurationDefaults) -> Self;  // version one
-    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Option<Self>;
+    pub fn replace(&self, defaults: SessionConfigurationDefaults) -> Option<Self>;
     pub fn derive_request(
         &self,
         expected: SessionConfigurationDefaultsVersion,
@@ -3499,7 +3522,7 @@ impl ReplaceSessionDefaultsVersionExhausted {
 pub struct PreparedReplaceSessionDefaults { /* private */ }
 // sealed: ReplaceSessionDefaults::prepare_session_not_found / prepare_against
 impl PreparedReplaceSessionDefaults {
-    pub const fn into_parts(self) -> (ReplaceSessionDefaults, ReplaceSessionDefaultsResult);
+    pub fn into_parts(self) -> (ReplaceSessionDefaults, ReplaceSessionDefaultsResult);
     // accessors: command(), result()
 }
 
@@ -3507,7 +3530,7 @@ pub struct ReplaceSessionDefaultsPreparationError { /* private */ }
 // sealed: Err of prepare_against; adapter correlation failure, not a
 // terminal command rejection
 impl ReplaceSessionDefaultsPreparationError {
-    pub const fn into_parts(self) -> (ReplaceSessionDefaults, SessionId);
+    pub fn into_parts(self) -> (ReplaceSessionDefaults, SessionId);
     // accessors: command(), provided_session()
 }
 
@@ -4042,7 +4065,7 @@ pub enum ModelToolResultContent {
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
-    // accessors: request(), credential_reference(), messages(), tools()
+    // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
 }
 
 pub enum ModelFrontierRenderingError {
@@ -4064,6 +4087,7 @@ pub enum PrepareModelCallOutcome {
         request: Box<PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
         tool_entries: Box<[ResolvedToolConversationEntry]>,
     },
     TargetUnavailable(Box<FailedModelCallTurn>),
@@ -4337,7 +4361,7 @@ pub struct ScriptedModelCallProvider { /* private */ }
 impl ScriptedModelCallProvider {
     pub fn new(steps: impl IntoIterator<Item = ScriptedModelCallStep>) -> Self;
     // accessors: capability_preparation_count(), interaction_count(), remaining_step_count(),
-    // last_prepared_messages(), last_prepared_tools()
+    // last_prepared_messages(), last_prepared_tools(), last_prepared_system_prompt()
 }
 // impl ModelCallProvider
 ```
@@ -6002,7 +6026,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 29                   |
 | domain: session                                    | 21                   |
 | domain: imported_session                           | 18                   |
-| domain: configuration                              | 19                   |
+| domain: configuration                              | 22                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
@@ -6024,7 +6048,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **451 (+1 free fn)** |
+| **signalbox-domain total**                         | **454 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

@@ -102,6 +102,7 @@ async fn execute(
         Command::Create { .. }
         | Command::List
         | Command::Send { .. }
+        | Command::Reconcile { .. }
         | Command::Model { .. }
         | Command::Transcript { .. }
         | Command::Follow { .. }
