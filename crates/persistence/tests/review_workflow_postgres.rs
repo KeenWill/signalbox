@@ -22,17 +22,16 @@ use signalbox_domain::{
     ReviewExternalLinkPublicationBlockedResult, ReviewExternalLinkTransitionFailure,
     ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
     ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
-    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
-    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
-    ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionFailure, ReviewKey,
-    ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
-    ReviewPassKind, ReviewPassRef, ReviewPassResult, ReviewPassState, ReviewPassTurnEvidence,
-    ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings, ReviewReferencedFindingEvidence,
-    ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTarget,
-    ReviewTargetId, ReviewTargetSubject, ReviewText, ReviewWorkflowKind, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId,
-    UserContent,
+    ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation, ReviewFindingProposal,
+    ReviewFindingRef, ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionFailure,
+    ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence,
+    ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassResult, ReviewPassState,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewProducedFindings,
+    ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunRef,
+    ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SubmitInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -237,6 +236,41 @@ fn pass_evidence(
         ),
         ReviewPassState::Cancelled { turn: None } => (TurnId::from_uuid(uuid(0x203)), None),
     };
+    if kind == ReviewPassKind::ReadOnlyReview
+        && matches!(&state, ReviewPassState::Succeeded { result: None, .. })
+    {
+        let mut run =
+            ReviewRun::try_reconstitute(signalbox_domain::ReviewRunReconstitutionInput::new(
+                reference.run(),
+                workflow_for_pass(kind),
+                policy,
+                ReviewRunState::Queued,
+                None,
+            ))
+            .expect("fixture run is queued");
+        let pass = ReviewPass::try_new(
+            reference,
+            kind,
+            &mut run,
+            session,
+            ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(origin_turn)),
+        )
+        .expect("fixture pass is queued")
+        .transition(
+            ReviewPassState::Running { turn: origin_turn },
+            Some(ReviewPassTurnEvidence::new(
+                origin_turn,
+                session,
+                accepted_input,
+                ReviewPassTurnOutcome::Active,
+                None,
+            )),
+        )
+        .expect("fixture pass starts")
+        .transition(state, turn_evidence)
+        .expect("fixture pass reaches its transient terminal state");
+        return ReviewPassEvidence::from_pass(&pass, policy);
+    }
     let pass = ReviewPass::try_reconstitute(signalbox_domain::ReviewPassReconstitutionInput::new(
         reference,
         kind,
@@ -1304,13 +1338,11 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
         unchanged_import_evidence,
         ReviewExternalObjectState::Current,
     );
-    assert_eq!(
-        store
-            .append_external_observation(link_id, unchanged)
-            .await
-            .expect("unchanged polling is a semantic no-op"),
-        Some(observed)
-    );
+    let unchanged_link = store
+        .append_external_observation(link_id, unchanged)
+        .await
+        .expect("unchanged polling is a semantic no-op")
+        .expect("the canonical link remains present");
     let unchanged_pass = store
         .load_pass(unchanged_import_pass.pass())
         .await?
@@ -1325,6 +1357,22 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
                 && result.state() == ReviewExternalObjectState::Current
         ),
         "unchanged observation consumes the pass with exact durable evidence",
+    );
+    let unchanged_evidence =
+        ReviewPassEvidence::from_pass(&unchanged_pass, ReviewPolicy::version_one());
+    let expected_unchanged = observed
+        .confirm_unchanged(
+            unchanged_evidence.clone(),
+            run_evidence_for_pass(unchanged_evidence),
+        )
+        .expect("the durable no-change result authenticates its claim");
+    assert_eq!(unchanged_link, expected_unchanged);
+    assert_eq!(
+        store
+            .load_external_link(link_id)
+            .await
+            .expect("no-change claim reloads"),
+        Some(expected_unchanged)
     );
 
     Ok(())
@@ -2843,7 +2891,7 @@ async fn inv041_blocked_publication_binds_pending_reservation() -> Result<(), Bo
             .store
             .block_external_link_publication(link, pass.clone(), run)
             .await?,
-        Some(expected)
+        Some(expected.clone())
     );
     let loaded = fixture
         .store
@@ -2851,6 +2899,11 @@ async fn inv041_blocked_publication_binds_pending_reservation() -> Result<(), Bo
         .await?
         .expect("blocked publication pass remains loadable");
     assert_eq!(loaded.state(), pass.state());
+    assert_eq!(
+        fixture.store.load_external_link(link).await?,
+        Some(expected),
+        "publication-block claims survive aggregate reload"
+    );
     Ok(())
 }
 
@@ -5003,24 +5056,23 @@ async fn inv040_inv041_blocked_publication_reconciles_with_attachment_pass()
         .store
         .reserve_external_link(reservation.clone())
         .await?;
-    fixture
-        .store
-        .append_finding_event(
-            finding_ref.finding(),
-            finding_event(
-                finding_ref,
-                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
-                blocked_evidence,
-                ReviewFindingEventKind::BlockedWithReason {
-                    reason: blocking_reason,
-                    link: Some(Box::new(
-                        ReviewFindingPendingExternalLinkRef::try_new(finding_ref, &reservation)
-                            .expect("publication block names its pending reservation"),
-                    )),
-                },
-            ),
-        )
-        .await?;
+    let blocked_run = run_evidence_for_pass(blocked_evidence.clone());
+    let expected_blocked_link = reservation
+        .clone()
+        .block_publication(blocked_evidence.clone(), blocked_run)
+        .expect("finding publication block claims its pending reservation");
+    assert_eq!(
+        fixture
+            .store
+            .block_external_link_publication(link, blocked_evidence, blocked_run)
+            .await?,
+        Some(expected_blocked_link.clone())
+    );
+    assert_eq!(
+        fixture.store.load_external_link(link).await?,
+        Some(expected_blocked_link),
+        "finding publication-block claims survive aggregate reload"
+    );
 
     let incomplete = fixture
         .store

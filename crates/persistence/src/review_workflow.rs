@@ -9,8 +9,8 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, ReviewChangeRequestNumber, ReviewConfidence,
     ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalLinkNoChangeResult, ReviewExternalLinkObservation,
+    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkClaim,
+    ReviewExternalLinkId, ReviewExternalLinkNoChangeResult, ReviewExternalLinkObservation,
     ReviewExternalLinkObservationResult, ReviewExternalLinkPublicationBlockedResult,
     ReviewExternalLinkTransitionFailure, ReviewExternalObjectKind, ReviewExternalObjectState,
     ReviewFinding, ReviewFindingContent, ReviewFindingDiffSide, ReviewFindingEvent,
@@ -378,11 +378,12 @@ impl ReviewWorkflowStore {
             return Ok(None);
         };
         let (current_pass, turn_evidence) = decode_pass_for_transition(pass_row)?;
-        let (_, _, policy, _) = decode_run_facts(&run_row)?;
+        let (run_reference, workflow, policy, run_state) = decode_run_facts(&run_row)?;
         let loaded_pass = LoadedReviewPass {
             pass: current_pass.clone(),
             policy,
             turn_evidence,
+            run: ReviewRunEvidence::new(run_reference, workflow, policy, run_state),
         };
         let (current_run, _) = decode_run_for_transition(&run_row, Some(&loaded_pass))?;
         let transitioned_pass =
@@ -924,12 +925,20 @@ impl ReviewWorkflowStore {
                 }
                 None => None,
             };
+            let link_claims = match row
+                .try_get::<Option<Uuid>, _>("external_link_id")?
+                .map(external_link_id)
+            {
+                Some(link) => load_external_link_claims_on_connection(connection, link).await?,
+                None => Vec::new(),
+            };
             events.push(decode_finding_event(
                 &row,
                 proposal.reference(),
                 &target,
                 event_pass,
                 attachment_pass.as_ref(),
+                link_claims,
             )?);
         }
         let finding = ReviewFinding::try_reconstitute(proposal, events).map_err(|error| {
@@ -1222,6 +1231,62 @@ impl ReviewWorkflowStore {
                     ReviewWorkflowTransitionError::ExternalLink(error),
                 )
             })?;
+        let blocked_event = match pass_state_result(pass.state()) {
+            Some(ReviewPassResult::FindingEvent(result)) => {
+                let ReviewFindingEventResultKind::BlockedWithReason {
+                    reason,
+                    link: Some(result_link),
+                } = result.kind()
+                else {
+                    return Err(corruption(
+                        "review_external_link",
+                        String::from("publication finding result is not a linked block"),
+                    ));
+                };
+                let pending =
+                    ReviewFindingPendingExternalLinkRef::try_new(result.finding(), &current)
+                        .map_err(|error| {
+                            corruption(
+                                "review_external_link",
+                                format!("blocked result link is invalid: {:?}", error.failure()),
+                            )
+                        })?;
+                if pending.link() != *result_link {
+                    return Err(corruption(
+                        "review_external_link",
+                        String::from("blocked result names another reservation"),
+                    ));
+                }
+                Some(ReviewFindingEvent::new(
+                    result.finding(),
+                    result.ordinal(),
+                    pass.reference(),
+                    pass.clone(),
+                    run,
+                    ReviewFindingEventKind::BlockedWithReason {
+                        reason: reason.clone(),
+                        link: Some(Box::new(pending)),
+                    },
+                ))
+            }
+            _ => None,
+        };
+        if let Some(event) = blocked_event.as_ref() {
+            let current_finding = self
+                .load_finding(event.finding().finding())
+                .await?
+                .ok_or_else(|| {
+                    corruption(
+                        "review_external_link",
+                        String::from("blocked result finding is missing"),
+                    )
+                })?;
+            current_finding.apply(event.clone()).map_err(|error| {
+                ReviewWorkflowStoreError::InvalidTransition(ReviewWorkflowTransitionError::Finding(
+                    error,
+                ))
+            })?;
+        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
             .bind(link.into_uuid())
@@ -1240,9 +1305,12 @@ impl ReviewWorkflowStore {
         {
             return Err(ReviewWorkflowStoreError::IncompletePublicationReconciliation);
         }
-        bind_pass_result(&mut transaction, &pass).await?;
+        match blocked_event.as_ref() {
+            Some(event) => insert_finding_event(&mut transaction, event).await?,
+            None => bind_pass_result(&mut transaction, &pass).await?,
+        }
         commit_mutation(transaction).await?;
-        Ok(Some(blocked))
+        self.load_external_link(blocked.id()).await
     }
 
     /// Loads and validates a reservation, optional attachment, and observations.
@@ -1509,6 +1577,7 @@ impl ReviewWorkflowStore {
                 .evidence();
             observations.push(decode_external_link_observation(&row, pass)?);
         }
+        let claims = load_external_link_claims_on_connection(&mut transaction, link).await?;
         let link = ReviewExternalLink::try_reconstitute(
             id,
             association,
@@ -1516,6 +1585,7 @@ impl ReviewWorkflowStore {
             kind,
             attachment,
             observations,
+            claims,
             &target,
         )
         .map_err(|error| corruption("review_external_link", format!("{error:?}")))?;
@@ -1621,11 +1691,16 @@ struct LoadedReviewPass {
     pass: ReviewPass,
     policy: ReviewPolicy,
     turn_evidence: Option<ReviewPassTurnEvidence>,
+    run: ReviewRunEvidence,
 }
 
 impl LoadedReviewPass {
     fn evidence(&self) -> ReviewPassEvidence {
         ReviewPassEvidence::from_pass(&self.pass, self.policy)
+    }
+
+    const fn run_evidence(&self) -> ReviewRunEvidence {
+        self.run
     }
 }
 
@@ -1642,6 +1717,8 @@ async fn load_pass_on_connection(
                     AS run_minimum_judge_confidence,
                 canonical_run.minimum_publication_confidence
                     AS run_minimum_publication_confidence,
+                canonical_run.state_kind AS run_state_kind,
+                canonical_run.state_pass_id AS run_state_pass_id,
                 workflow_pass.session_id AS pass_session_id,
                 workflow_pass.accepted_input_id, workflow_pass.state_kind,
                 workflow_pass.origin_turn_id,
@@ -1714,11 +1791,64 @@ async fn load_pass_on_connection(
         "run_minimum_publication_confidence",
         "review_pass",
     )?;
+    let run_reference = pass.reference().run();
+    let run = ReviewRunEvidence::new(
+        run_reference,
+        decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
+        policy,
+        decode_run_state(
+            run_reference,
+            &row.try_get::<String, _>("run_state_kind")?,
+            row.try_get("run_state_pass_id")?,
+        )?,
+    );
     Ok(Some(LoadedReviewPass {
         pass,
         policy,
         turn_evidence,
+        run,
     }))
+}
+
+async fn load_external_link_claims_on_connection(
+    connection: &mut PgConnection,
+    link: ReviewExternalLinkId,
+) -> Result<Vec<ReviewExternalLinkClaim>, ReviewWorkflowStoreError> {
+    let rows = sqlx::query(
+        "SELECT pass_id
+           FROM review_pass
+          WHERE result_external_link_id = $1
+            AND (
+                result_kind IN (
+                    'external_link_no_change',
+                    'external_link_publication_blocked'
+                )
+                OR (
+                    result_kind = 'finding_event'
+                    AND result_event_kind = 'blocked_with_reason'
+                )
+            )
+          ORDER BY pass_id",
+    )
+    .bind(link.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut claims = Vec::with_capacity(rows.len());
+    for row in rows {
+        let pass = load_pass_on_connection(connection, pass_id(row.try_get("pass_id")?))
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("claiming pass row is missing"),
+                )
+            })?;
+        claims.push(ReviewExternalLinkClaim::new(
+            pass.evidence(),
+            pass.run_evidence(),
+        ));
+    }
+    Ok(claims)
 }
 
 async fn load_produced_findings_on_connection(
@@ -2013,12 +2143,18 @@ async fn authenticate_pass_result_binding(
                 String::from("effect pass run row is missing"),
             )
         })?;
-    sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
+    let pass_row = sqlx::query(crate::lock_inventory::REVIEW_PASS_TRANSITION)
         .bind(proposed.reference().pass().into_uuid())
         .bind(pass_state_turn(proposed.state()).map(TurnId::into_uuid))
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or_else(|| corruption("review_pass", String::from("effect pass row is missing")))?;
+    if pass_row
+        .try_get::<Option<String>, _>("result_kind")?
+        .is_none()
+    {
+        return authenticate_unbound_pass_result(transaction, &pass_row, &run_row, proposed).await;
+    }
     let loaded = load_pass_on_connection(transaction, proposed.reference().pass())
         .await?
         .ok_or_else(|| corruption("review_pass", String::from("effect pass row is missing")))?;
@@ -2145,6 +2281,230 @@ async fn authenticate_pass_result_binding(
     .bind(run_pass.map(ReviewPassId::into_uuid))
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+async fn authenticate_unbound_pass_result(
+    transaction: &mut Transaction<'_, Postgres>,
+    pass_row: &PgRow,
+    run_row: &PgRow,
+    proposed: &ReviewPassEvidence,
+) -> Result<(), ReviewWorkflowStoreError> {
+    let (run_reference, workflow, policy, run_state) = decode_run_facts(run_row)?;
+    let reference = ReviewPassRef::new(
+        ReviewRunRef::new(
+            target_id(pass_row.try_get("target_id")?),
+            run_id(pass_row.try_get("run_id")?),
+        ),
+        pass_id(pass_row.try_get("pass_id")?),
+    );
+    let kind = decode_pass_kind(&pass_row.try_get::<String, _>("pass_kind")?)?;
+    if reference != proposed.reference() || kind != proposed.kind() || policy != proposed.policy() {
+        return Err(corruption(
+            "review_pass",
+            String::from("effect pass differs from canonical execution facts"),
+        ));
+    }
+    let accepted_input = ReviewPassAcceptedInputEvidence::new(
+        accepted_input_id(pass_row.try_get("accepted_input_id")?),
+        session_id(
+            pass_row
+                .try_get::<Option<Uuid>, _>("accepted_input_session_id")?
+                .ok_or_else(|| {
+                    corruption("review_pass", String::from("accepted input row is missing"))
+                })?,
+        ),
+        Some(turn_id(pass_row.try_get("origin_turn_id")?)),
+    );
+    let mut queued_run = ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
+        run_reference,
+        workflow,
+        policy,
+        ReviewRunState::Queued,
+        None,
+    ))
+    .map_err(|error| {
+        corruption(
+            "review_pass",
+            format!(
+                "effect pass run cannot support atomic binding: {:?}",
+                error.failure()
+            ),
+        )
+    })?;
+    let mut current = ReviewPass::try_new(
+        reference,
+        kind,
+        &mut queued_run,
+        session_id(pass_row.try_get("pass_session_id")?),
+        accepted_input,
+    )
+    .map_err(|error| {
+        corruption(
+            "review_pass",
+            format!(
+                "effect pass cannot support atomic binding: {:?}",
+                error.failure()
+            ),
+        )
+    })?;
+    let canonical_turn = decode_pass_turn_evidence(pass_row)?.ok_or_else(|| {
+        corruption(
+            "review_pass",
+            String::from("effect pass canonical turn row is missing"),
+        )
+    })?;
+    let proposed_turn = pass_state_turn(proposed.state()).ok_or_else(|| {
+        corruption(
+            "review_pass",
+            String::from("effect pass result is not terminal"),
+        )
+    })?;
+    if canonical_turn.turn() != proposed_turn {
+        return Err(corruption(
+            "review_pass",
+            String::from("effect pass turn differs from canonical execution"),
+        ));
+    }
+    let active_turn = ReviewPassTurnEvidence::new(
+        canonical_turn.turn(),
+        canonical_turn.session(),
+        canonical_turn.accepted_input(),
+        ReviewPassTurnOutcome::Active,
+        None,
+    );
+    current = current
+        .transition(
+            ReviewPassState::Running {
+                turn: proposed_turn,
+            },
+            Some(active_turn),
+        )
+        .map_err(|error| {
+            corruption(
+                "review_pass",
+                format!(
+                    "effect pass cannot replay its running state: {:?}",
+                    error.failure()
+                ),
+            )
+        })?;
+    let stored_kind: String = pass_row.try_get("state_kind")?;
+    if stored_kind != "running" {
+        let proposed_state = encode_pass_state(proposed.state());
+        let stored_turn: Option<Uuid> = pass_row.try_get("turn_id")?;
+        let stored_frontier: Option<Uuid> = pass_row.try_get("output_frontier_id")?;
+        if stored_kind != proposed_state.kind
+            || stored_turn != proposed_state.turn.map(TurnId::into_uuid)
+            || stored_frontier != proposed_state.frontier.map(ContextFrontierId::into_uuid)
+        {
+            return Err(corruption(
+                "review_pass",
+                String::from("effect pass differs from canonical terminal facts"),
+            ));
+        }
+    }
+    let running = current.clone();
+    let transitioned = current
+        .transition(proposed.state().clone(), Some(canonical_turn))
+        .map_err(|error| {
+            corruption(
+                "review_pass",
+                format!(
+                    "canonical pass rejected its atomic effect outcome: {:?}",
+                    error.failure()
+                ),
+            )
+        })?;
+    if ReviewPassEvidence::from_pass(&transitioned, policy) != *proposed {
+        return Err(corruption(
+            "review_pass",
+            String::from("effect pass differs from canonical terminal facts"),
+        ));
+    }
+    if stored_kind == "running" {
+        let loaded = LoadedReviewPass {
+            pass: running,
+            policy,
+            turn_evidence: Some(canonical_turn),
+            run: ReviewRunEvidence::new(run_reference, workflow, policy, run_state),
+        };
+        let (current_run, _) = decode_run_for_transition(run_row, Some(&loaded))?;
+        let next_run = match proposed.state() {
+            ReviewPassState::Succeeded { .. } => ReviewRunState::Succeeded {
+                concluding_pass: proposed.reference(),
+            },
+            ReviewPassState::Failed { .. } => ReviewRunState::Failed {
+                failed_pass: proposed.reference(),
+            },
+            ReviewPassState::Blocked { .. } => ReviewRunState::Blocked {
+                blocking_pass: proposed.reference(),
+            },
+            ReviewPassState::Cancelled { .. } => ReviewRunState::Cancelled {
+                last_pass: Some(proposed.reference()),
+            },
+            ReviewPassState::Queued | ReviewPassState::Running { .. } => {
+                return Err(corruption(
+                    "review_pass",
+                    String::from("effect result belongs to a nonterminal pass"),
+                ));
+            }
+        };
+        let transitioned_run = current_run
+            .transition(next_run, Some(proposed.clone()))
+            .map_err(|error| {
+                corruption(
+                    "review_run",
+                    format!(
+                        "canonical run rejected its effect pass outcome: {:?}",
+                        error.failure()
+                    ),
+                )
+            })?;
+        let lifecycle = encode_pass_state(transitioned.state());
+        sqlx::query(
+            "UPDATE review_pass
+                SET state_kind = $2,
+                    turn_id = $3,
+                    output_frontier_id = $4
+              WHERE pass_id = $1",
+        )
+        .bind(proposed.reference().pass().into_uuid())
+        .bind(lifecycle.kind)
+        .bind(lifecycle.turn.map(TurnId::into_uuid))
+        .bind(lifecycle.frontier.map(ContextFrontierId::into_uuid))
+        .execute(&mut **transaction)
+        .await?;
+        let (run_kind, run_pass) = encode_run_state(transitioned_run.state());
+        sqlx::query(
+            "UPDATE review_run
+                SET state_kind = $2,
+                    state_pass_id = $3
+              WHERE run_id = $1",
+        )
+        .bind(run_reference.run().into_uuid())
+        .bind(run_kind)
+        .bind(run_pass.map(ReviewPassId::into_uuid))
+        .execute(&mut **transaction)
+        .await?;
+    } else {
+        ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
+            run_reference,
+            workflow,
+            policy,
+            run_state,
+            Some(proposed.clone()),
+        ))
+        .map_err(|error| {
+            corruption(
+                "review_run",
+                format!(
+                    "canonical run contradicts its effect pass outcome: {:?}",
+                    error.failure()
+                ),
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -2559,6 +2919,7 @@ fn decode_finding_event(
     target_snapshot: &ReviewTarget,
     pass: ReviewPassEvidence,
     attachment_pass: Option<&ReviewPassEvidence>,
+    link_claims: Vec<ReviewExternalLinkClaim>,
 ) -> Result<ReviewFindingEvent, ReviewWorkflowStoreError> {
     let row_finding = finding_id(row.try_get("finding_id")?);
     let row_run = run_id(row.try_get("finding_run_id")?);
@@ -2661,6 +3022,7 @@ fn decode_finding_event(
                 external_link_id(link),
                 target_snapshot,
                 attachment_pass,
+                link_claims,
             )?;
             ReviewFindingEventKind::Posted {
                 link: Box::new(
@@ -2684,6 +3046,7 @@ fn decode_finding_event(
                         external_link_id(link),
                         target_snapshot,
                         attachment_pass,
+                        link_claims,
                     )?;
                     let reservation = ReviewExternalLink::try_reserve(
                         canonical.id(),
@@ -2739,6 +3102,7 @@ fn decode_finding_external_link_aggregate(
     event_link: ReviewExternalLinkId,
     target_snapshot: &ReviewTarget,
     canonical_attachment_pass: Option<&ReviewPassEvidence>,
+    claims: Vec<ReviewExternalLinkClaim>,
 ) -> Result<ReviewExternalLink, ReviewWorkflowStoreError> {
     let id = row
         .try_get::<Option<Uuid>, _>("canonical_link_id")?
@@ -2884,6 +3248,7 @@ fn decode_finding_external_link_aggregate(
         decode_external_object_kind(&object_kind)?,
         attachment,
         Vec::new(),
+        claims,
         target_snapshot,
     )
     .map_err(|error| corruption("review_finding_event", format!("{error:?}")))
