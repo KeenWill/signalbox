@@ -3,6 +3,7 @@ import Foundation
 public enum SignalboxProcessProtocol {
   public static let currentVersion = SignalboxProcessProtocolVersion.five
   public static let maximumFrameBytes = 8 * 1024 * 1024
+  public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
 }
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {

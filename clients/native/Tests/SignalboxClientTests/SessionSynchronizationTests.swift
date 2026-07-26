@@ -147,7 +147,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.last?.kind, .decoding)
   }
 
-  func testMalformedKnownEventPublishesDiagnosticWithoutKillingSteadyStream() throws {
+  func testMalformedKnownEventRecoversBeforeAdvancingCursor() throws {
     let eventCursor = SynchronizationFixture.unknownCursor
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -162,16 +162,32 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.effectNames(effects),
-      ["report_diagnostic", "publish_event"]
+      ["close_follow", "report_diagnostic", "schedule_reconnect"]
     )
-    XCTAssertEqual(transport.machine.diagnostics.last?.kind, .decoding)
     XCTAssertEqual(
       transport.machine.phase,
-      .steady(
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+  }
+
+  func testMalformedKnownEventInReplayRecoversWithoutBuffering() throws {
+    var transport = try SynchronizationFixture.transportAtReplay(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
         generation: 1,
-        cursor: SignalboxCanonicalUInt64(rawValue: eventCursor),
-        refreshID: nil
+        message: try SynchronizationFixture.malformedKnownEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
       )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .replay)
     )
   }
 
@@ -277,6 +293,85 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       transport.machine.phase,
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testFutureTurnStateFailsAuthoritativeSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.futureTurnState()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testFutureNestedModelCallStateFailsAuthoritativeSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.futureCurrentModelCallState()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testFutureEntryVariantFailsAuthoritativeSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.futureTranscriptEntry()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testOversizedContentFragmentFailsAuthoritativeSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.textEntry())
+    )
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.oversizedContent()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
     )
   }
 
@@ -424,6 +519,75 @@ final class SessionSynchronizationTests: XCTestCase {
         cursor: SignalboxCanonicalUInt64(rawValue: bufferedCursor),
         refreshID: nil
       )
+    )
+  }
+
+  func testBufferedEventCountCapacityEntersBoundedRecovery() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventCountCapacity(maximumEvents: 1)
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.completedEvent(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    let admitted = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.inputAcceptedEvent(
+          cursor: SynchronizationFixture.sideBufferedCursor
+        )
+      )
+    )
+    let overflow = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.inputAcceptedEvent(
+          cursor: SynchronizationFixture.secondSideBufferedCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(admitted.isEmpty)
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(overflow))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+  }
+
+  func testBufferedEventUTF8CapacityEntersBoundedRecovery() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 0)
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.completedEvent(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.inputAcceptedEvent(
+          cursor: SynchronizationFixture.sideBufferedCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
     )
   }
 
@@ -944,7 +1108,9 @@ private enum SynchronizationFixture {
   static let initialCursor: UInt64 = 10
   static let unknownCursor: UInt64 = 11
   static let laterCursor: UInt64 = 13
+  static let sideRefreshTriggerCursor: UInt64 = 20
   static let sideBufferedCursor: UInt64 = 21
+  static let secondSideBufferedCursor: UInt64 = 22
   static let recoveredCursor: UInt64 = 30
   static let session = "11111111-1111-4111-8111-111111111111"
   static let turn = "22222222-2222-4222-8222-222222222222"
@@ -964,15 +1130,59 @@ private enum SynchronizationFixture {
     retry: SignalboxSynchronizationRetryPolicy(
       delays: [.milliseconds(100), .milliseconds(200)]
     ),
-    snapshotCapacity: .init(maximumRecords: 128, maximumUTF8Bytes: 1_048_576)
+    snapshotCapacity: .init(maximumRecords: 128, maximumUTF8Bytes: 1_048_576),
+    eventBufferCapacity: .init(maximumEvents: 128, maximumUTF8Bytes: 1_048_576)
   )
 
   static func sessionID() throws -> SignalboxCanonicalUUID {
     try SignalboxCanonicalUUID(validating: session)
   }
 
+  static func firstRecovery(
+    failedStage: SignalboxSynchronizationStage
+  ) -> SignalboxSessionSynchronizationPhase {
+    .recovery(failedStage: failedStage, failureCount: 1, nextGeneration: 2)
+  }
+
+  static func eventCountCapacity(
+    maximumEvents: UInt
+  ) -> SignalboxSynchronizationEventBufferCapacity {
+    .init(
+      maximumEvents: maximumEvents,
+      maximumUTF8Bytes: policy.eventBufferCapacity.maximumUTF8Bytes
+    )
+  }
+
+  static func eventByteCapacity(
+    maximumUTF8Bytes: UInt
+  ) -> SignalboxSynchronizationEventBufferCapacity {
+    .init(
+      maximumEvents: policy.eventBufferCapacity.maximumEvents,
+      maximumUTF8Bytes: maximumUTF8Bytes
+    )
+  }
+
   static func transport(
     snapshotCapacity: SignalboxSynchronizationSnapshotCapacity = policy.snapshotCapacity
+  ) throws -> ScriptedSynchronizationTransport {
+    try transport(
+      snapshotCapacity: snapshotCapacity,
+      eventBufferCapacity: policy.eventBufferCapacity
+    )
+  }
+
+  static func transport(
+    eventBufferCapacity: SignalboxSynchronizationEventBufferCapacity
+  ) throws -> ScriptedSynchronizationTransport {
+    try transport(
+      snapshotCapacity: policy.snapshotCapacity,
+      eventBufferCapacity: eventBufferCapacity
+    )
+  }
+
+  private static func transport(
+    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity,
+    eventBufferCapacity: SignalboxSynchronizationEventBufferCapacity
   ) throws -> ScriptedSynchronizationTransport {
     ScriptedSynchronizationTransport(
       machine: SignalboxSessionSynchronizationMachine(
@@ -980,7 +1190,8 @@ private enum SynchronizationFixture {
         policy: SignalboxSessionSynchronizationPolicy(
           deadlines: policy.deadlines,
           retry: policy.retry,
-          snapshotCapacity: snapshotCapacity
+          snapshotCapacity: snapshotCapacity,
+          eventBufferCapacity: eventBufferCapacity
         )
       )
     )
@@ -1023,6 +1234,33 @@ private enum SynchronizationFixture {
     cursor: UInt64
   ) throws -> ScriptedSynchronizationTransport {
     var result = try transportAtReplay(cursor: cursor)
+    _ = result.send(.replayCompleted(generation: 1))
+    return result
+  }
+
+  static func synchronizedTransport(
+    cursor: UInt64,
+    eventBufferCapacity: SignalboxSynchronizationEventBufferCapacity
+  ) throws -> ScriptedSynchronizationTransport {
+    var result = try transport(eventBufferCapacity: eventBufferCapacity)
+    _ = result.send(.start)
+    _ = result.send(.connected(generation: 1))
+    _ = result.send(
+      .frame(
+        generation: 1,
+        message: try snapshotStart(cursor: cursor)
+      )
+    )
+    _ = result.send(
+      .frame(
+        generation: 1,
+        message: try snapshotEnd(
+          cursor: cursor,
+          turnCount: 0,
+          entryCount: 0
+        )
+      )
+    )
     _ = result.send(.replayCompleted(generation: 1))
     return result
   }
@@ -1107,6 +1345,53 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func futureTurnState() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{"type":"fixture_future_turn_state"}
+      }
+      """
+    )
+  }
+
+  static func futureCurrentModelCallState() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_running",
+          "current_attempt_id":"44444444-4444-4444-8444-444444444444",
+          "current_model_call":{
+            "model_call_id":"\(modelCall)",
+            "state":{"type":"fixture_future_model_call_state"}
+          }
+        }
+      }
+      """
+    )
+  }
+
+  static func futureTranscriptEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_entry",
+        "entry_index":"0",
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{"type":"fixture_future_entry"}
+      }
+      """
+    )
+  }
+
   static func queuedTurn() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -1167,6 +1452,24 @@ private enum SynchronizationFixture {
         "fragment_index":"\(fragmentIndex)",
         "final_fragment":true,
         "content_fragment":"fixture owner input"
+      }
+      """
+    )
+  }
+
+  static func oversizedContent() throws -> SignalboxProcessServerMessage {
+    let content = String(
+      repeating: "x",
+      count: SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes + 1
+    )
+    return try message(
+      """
+      {
+        "type":"transcript_content",
+        "entry_index":"0",
+        "fragment_index":"0",
+        "final_fragment":true,
+        "content_fragment":"\(content)"
       }
       """
     )

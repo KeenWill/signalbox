@@ -48,15 +48,18 @@ public struct SignalboxSessionSynchronizationPolicy: Equatable, Sendable {
   public let deadlines: SignalboxSynchronizationDeadlines
   public let retry: SignalboxSynchronizationRetryPolicy
   public let snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
+  public let eventBufferCapacity: SignalboxSynchronizationEventBufferCapacity
 
   public init(
     deadlines: SignalboxSynchronizationDeadlines,
     retry: SignalboxSynchronizationRetryPolicy,
-    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
+    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity,
+    eventBufferCapacity: SignalboxSynchronizationEventBufferCapacity
   ) {
     self.deadlines = deadlines
     self.retry = retry
     self.snapshotCapacity = snapshotCapacity
+    self.eventBufferCapacity = eventBufferCapacity
   }
 }
 
@@ -70,6 +73,20 @@ public struct SignalboxSynchronizationSnapshotCapacity: Equatable, Sendable {
 
   public init(maximumRecords: UInt, maximumUTF8Bytes: UInt) {
     self.maximumRecords = maximumRecords
+    self.maximumUTF8Bytes = maximumUTF8Bytes
+  }
+}
+
+/// The caller-selected heap bound for events waiting behind snapshot work.
+///
+/// Event count bounds fixed per-event overhead. UTF-8 bytes bound retained
+/// variable-size content and future-event JSON. Zero permits no buffered event.
+public struct SignalboxSynchronizationEventBufferCapacity: Equatable, Sendable {
+  public let maximumEvents: UInt
+  public let maximumUTF8Bytes: UInt
+
+  public init(maximumEvents: UInt, maximumUTF8Bytes: UInt) {
+    self.maximumEvents = maximumEvents
     self.maximumUTF8Bytes = maximumUTF8Bytes
   }
 }
@@ -226,6 +243,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   private var accumulator: SignalboxSnapshotAccumulator?
   private var replayBuffer: [SignalboxBufferedFollowedEvent] = []
   private var replayBufferHead = 0
+  private var replayBufferUTF8Bytes: UInt = 0
   private var activeRefresh: SignalboxSideSnapshotRefresh?
   private var nextRefreshID: UInt64 = 1
 
@@ -379,6 +397,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     guard var currentAccumulator = accumulator else {
       return protocolFailure(stage: .history, message: "Snapshot history state was missing.")
     }
+    accumulator = nil
     switch currentAccumulator.ingest(message, expectedSessionID: sessionID) {
     case .accepted:
       accumulator = currentAccumulator
@@ -417,13 +436,19 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   ) -> [SignalboxSessionSynchronizationEffect] {
     switch message {
     case .sessionEvent(let followed):
-      replayBuffer.append(
-        SignalboxBufferedFollowedEvent(
-          followed: followed,
-          alreadyObserved: false
+      guard followed.event.decodingDiagnostic == nil else {
+        return protocolFailure(
+          stage: .replay,
+          message: followed.event.decodingDiagnostic?.message
+            ?? "A malformed followed event could not be decoded."
         )
+      }
+      return buffer(
+        followed,
+        observation: .pendingPublication,
+        stage: .replay,
+        reportDiagnostics: true
       )
-      return diagnosticEffects(for: followed, stage: .replay)
     case .protocolError(let remote):
       return remoteFailure(remote, stage: .replay)
     case .unknown(let kind, _, let decodingDiagnostic):
@@ -495,23 +520,38 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         message: "A followed event named a different session."
       )
     }
+    guard followed.event.decodingDiagnostic == nil else {
+      return protocolFailure(
+        stage: .steady,
+        message: followed.event.decodingDiagnostic?.message
+          ?? "A malformed followed event could not be decoded."
+      )
+    }
     guard followed.cursor > cursor else {
       return reportDiagnostics ? diagnosticEffects(for: followed, stage: .steady) : []
+    }
+    if activeRefresh != nil {
+      let effects = buffer(
+        followed,
+        observation: .alreadyPublished,
+        stage: .steady,
+        reportDiagnostics: reportDiagnostics
+      )
+      if case .recovery = phase {
+        return effects
+      }
+      phase = .steady(
+        generation: currentGeneration,
+        cursor: followed.cursor,
+        refreshID: refreshID
+      )
+      return effects
     }
     phase = .steady(
       generation: currentGeneration,
       cursor: followed.cursor,
       refreshID: refreshID
     )
-    if activeRefresh != nil {
-      replayBuffer.append(
-        SignalboxBufferedFollowedEvent(
-          followed: followed,
-          alreadyObserved: true
-        )
-      )
-      return reportDiagnostics ? diagnosticEffects(for: followed, stage: .steady) : []
-    }
     var effects =
       reportDiagnostics
       ? diagnosticEffects(for: followed, stage: .steady)
@@ -593,6 +633,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     guard var currentAccumulator = refresh.accumulator else {
       return protocolFailure(stage: .sideHistory, message: "Side snapshot history was missing.")
     }
+    activeRefresh = nil
+    refresh.accumulator = nil
     switch currentAccumulator.ingest(message, expectedSessionID: sessionID) {
     case .accepted:
       refresh.accumulator = currentAccumulator
@@ -636,6 +678,36 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     }
   }
 
+  private mutating func buffer(
+    _ followed: SignalboxFollowedSessionEvent,
+    observation: SignalboxBufferedEventObservation,
+    stage currentStage: SignalboxSynchronizationStage,
+    reportDiagnostics: Bool
+  ) -> [SignalboxSessionSynchronizationEffect] {
+    let retainedBytes = followed.event.retainedUTF8Bytes
+    let (nextBytes, overflowed) = replayBufferUTF8Bytes.addingReportingOverflow(
+      retainedBytes
+    )
+    guard
+      UInt(replayBuffer.count - replayBufferHead) < policy.eventBufferCapacity.maximumEvents,
+      !overflowed,
+      nextBytes <= policy.eventBufferCapacity.maximumUTF8Bytes
+    else {
+      return protocolFailure(
+        stage: currentStage,
+        message: "Buffered followed events exceeded the configured native-client capacity."
+      )
+    }
+    replayBuffer.append(
+      SignalboxBufferedFollowedEvent(
+        followed: followed,
+        observation: observation
+      )
+    )
+    replayBufferUTF8Bytes = nextBytes
+    return reportDiagnostics ? diagnosticEffects(for: followed, stage: currentStage) : []
+  }
+
   private mutating func drainReplayBuffer(
     generation currentGeneration: UInt64
   ) -> [SignalboxSessionSynchronizationEffect] {
@@ -643,8 +715,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     while activeRefresh == nil, replayBufferHead < replayBuffer.count {
       let buffered = replayBuffer[replayBufferHead]
       replayBufferHead += 1
+      replayBufferUTF8Bytes -= buffered.followed.event.retainedUTF8Bytes
       let nextEffects =
-        buffered.alreadyObserved
+        buffered.observation == .alreadyPublished
         ? publishPreviouslyObservedEvent(
           buffered.followed,
           generation: currentGeneration
@@ -938,8 +1011,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   }
 
   private mutating func clearReplayBuffer() {
-    replayBuffer.removeAll(keepingCapacity: true)
+    replayBuffer.removeAll(keepingCapacity: false)
     replayBufferHead = 0
+    replayBufferUTF8Bytes = 0
   }
 
   private func deadlineIsCurrent(
@@ -1055,7 +1129,12 @@ private struct SignalboxSideSnapshotRefresh: Sendable {
 
 private struct SignalboxBufferedFollowedEvent: Sendable {
   let followed: SignalboxFollowedSessionEvent
-  let alreadyObserved: Bool
+  let observation: SignalboxBufferedEventObservation
+}
+
+private enum SignalboxBufferedEventObservation: Sendable {
+  case pendingPublication
+  case alreadyPublished
 }
 
 private enum SignalboxSnapshotAccumulatorOutcome {
@@ -1106,7 +1185,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     switch message {
     case .transcriptTurn(let turn):
       guard
-        !turn.state.hasDecodingDiagnostic,
+        !turn.state.hasUnknownStoredVariant,
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
@@ -1123,7 +1202,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptEntry(let entry):
       entriesStarted = true
       guard
-        !entry.entry.hasDecodingDiagnostic,
+        !entry.entry.hasUnknownStoredVariant,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1142,7 +1221,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptTextEntry(let entry):
       entriesStarted = true
       guard
-        !entry.entry.hasDecodingDiagnostic,
+        !entry.entry.hasUnknownStoredVariant,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1194,7 +1273,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     switch message {
     case .transcriptContent(let content)
     where content.entryIndex.rawValue == contentEntryIndex
-      && content.fragmentIndex.rawValue == expectedFragmentIndex:
+      && content.fragmentIndex.rawValue == expectedFragmentIndex
+      && content.contentFragment.utf8.count
+        <= SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes:
       guard append(.content(content)) else {
         return .invalid("Snapshot exceeded the configured native-client capacity.")
       }
@@ -1248,11 +1329,17 @@ extension SignalboxSynchronizationSnapshot.Record {
 }
 
 extension SignalboxTranscriptTurnState {
-  fileprivate var hasDecodingDiagnostic: Bool {
-    if case .unknown(_, _, let diagnostic) = self {
-      return diagnostic != nil
+  fileprivate var hasUnknownStoredVariant: Bool {
+    switch self {
+    case .activeRunning(_, let currentModelCall):
+      return currentModelCall?.state.hasUnknownStoredVariant ?? false
+    case .unknown:
+      return true
+    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
+      return false
     }
-    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
@@ -1273,6 +1360,13 @@ extension SignalboxTranscriptTurnState {
 }
 
 extension SignalboxCurrentModelCallState {
+  fileprivate var hasUnknownStoredVariant: Bool {
+    if case .unknown = self {
+      return true
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .unknown(_, let payload):
@@ -1284,11 +1378,16 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
-  fileprivate var hasDecodingDiagnostic: Bool {
-    if case .unknown(_, _, let diagnostic) = self {
-      return diagnostic != nil
+  fileprivate var hasUnknownStoredVariant: Bool {
+    switch self {
+    case .imported(_, _, let sourceSpeaker, _):
+      return sourceSpeaker.hasUnknownStoredVariant
+    case .unknown:
+      return true
+    case .assistantToolUse, .toolExecutionResult, .toolDenied, .toolClosed,
+      .turnCompleted, .turnFailed, .turnCancelled:
+      return false
     }
-    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
@@ -1311,11 +1410,15 @@ extension SignalboxTranscriptEntry {
 }
 
 extension SignalboxTranscriptTextEntry {
-  fileprivate var hasDecodingDiagnostic: Bool {
-    if case .unknown(_, _, let diagnostic) = self {
-      return diagnostic != nil
+  fileprivate var hasUnknownStoredVariant: Bool {
+    switch self {
+    case .imported(_, _, let sourceSpeaker):
+      return sourceSpeaker.hasUnknownStoredVariant
+    case .unknown:
+      return true
+    case .user, .assistant:
+      return false
     }
-    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
@@ -1332,6 +1435,13 @@ extension SignalboxTranscriptTextEntry {
 }
 
 extension SignalboxImportedSourceSpeaker {
+  fileprivate var hasUnknownStoredVariant: Bool {
+    if case .unknown = self {
+      return true
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .unknown(_, let payload):
@@ -1339,6 +1449,50 @@ extension SignalboxImportedSourceSpeaker {
     case .notAttested, .attestedAbsent, .attested:
       return 0
     }
+  }
+}
+
+extension SignalboxProcessSessionEvent {
+  fileprivate var decodingDiagnostic: SignalboxDecodingDiagnostic? {
+    if case .unknown(_, _, let diagnostic) = self {
+      return diagnostic
+    }
+    return nil
+  }
+
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .inputAccepted(_, _, _, let content):
+      return UInt(content.utf8.count)
+    case .modelCallTransition(_, _, let state):
+      return state.retainedUTF8Bytes
+    case .toolBatchTransition(_, _, let state):
+      return state.retainedUTF8Bytes
+    case .unknown(_, let payload, let diagnostic):
+      return payload.retainedUTF8Bytes
+        .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
+    case .sessionCreated, .turnActivated, .turnCompleted, .turnFailed, .turnRefused,
+      .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired:
+      return 0
+    }
+  }
+}
+
+extension SignalboxModelCallState {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(_, let payload) = self {
+      return payload.retainedUTF8Bytes
+    }
+    return 0
+  }
+}
+
+extension SignalboxToolBatchState {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(_, let payload) = self {
+      return payload.retainedUTF8Bytes
+    }
+    return 0
   }
 }
 

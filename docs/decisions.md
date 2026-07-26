@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Bound native followed-event buffering in memory
+
+**Context.** The native synchronization machine buffers followed events while it
+validates initial history and while a side snapshot is in flight. Neither the
+process protocol nor session lifetime bounds how many events can arrive or how
+much variable-size content they retain before snapshot work completes.
+
+**Decision.** Every native synchronization policy supplies an event-buffer
+capacity: a maximum event count for fixed overhead and a maximum retained UTF-8
+byte count for content and future-event JSON. Crossing either bound rejects the
+connection through bounded recovery without advancing the cursor past the
+unadmitted event. The application wiring owns the concrete operational values.
+
+**Rejected alternatives.** An unbounded array permits heap growth under a slow
+or stalled snapshot. Bounding count alone leaves large event content unbounded.
+Dropping oldest events creates an unrecoverable cursor gap, and spilling to disk
+adds lifecycle and failure modes disproportionate to this phase.
+
+**Affects.** The native synchronization policy, replay and side-snapshot event
+buffers, scripted transport tests, and application composition that selects the
+capacity.
+
 ## 2026-07-26 — Retain a bounded native synchronization diagnostic history
 
 **Context.** The native synchronization machine reports every diagnostic as an
