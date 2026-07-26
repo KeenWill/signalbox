@@ -77,6 +77,9 @@ impl fmt::Display for SessionStatusToolConstructionError {
 impl Error for SessionStatusToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for session status replacement.
+///
+/// Effect posture: `ExternalEffect`. Execution durably replaces metadata and
+/// carries the exact tool request as last-writer agency.
 #[derive(Clone, Debug)]
 pub struct SessionStatusTool<Writer> {
     catalog: CompiledToolCatalog,

@@ -12,10 +12,10 @@ use std::{error::Error, sync::Arc};
 
 use signalbox_domain::{
     Actor, CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataReconstitutionFailure,
-    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    SessionMetadataContent, TranscriptAncestry,
+    PreparedCreateSession, ReplaceSessionMetadata, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, SessionConfigurationDefaults, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionMetadataContent, ToolRequestId,
+    TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -181,11 +181,11 @@ async fn s01_inv012_missing_session_rejection_replays_exactly() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-012: an applied receipt with a non-owner stored command actor fails
+/// INV-012: an applied receipt with an unsupported stored command actor fails
 /// closed during repository reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_applied_metadata_receipt_rejects_non_owner_command_actor()
+async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone())
@@ -216,25 +216,26 @@ async fn inv012_applied_metadata_receipt_rejects_non_owner_command_actor()
     .execute(&pool)
     .await?;
 
-    assert!(matches!(
-        repository.load_command(command(0x902)).await,
-        Err(SessionMetadataRepositoryError::Corruption(
-            SessionMetadataCorruption::Domain(
-                ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
-            )
-        ))
-    ));
+    let Err(SessionMetadataRepositoryError::Corruption(SessionMetadataCorruption::Unsupported {
+        field,
+        value,
+    })) = repository.load_command(command(0x902)).await
+    else {
+        panic!("recovery agency must remain unsupported for metadata commands")
+    };
+    assert_eq!(field, "command actor");
+    assert_eq!(value, "unsupported metadata writer");
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// INV-012: a rejected receipt with a non-owner stored command actor fails
+/// INV-012: a rejected receipt with an unsupported stored command actor fails
 /// closed during repository reconstitution.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_rejected_metadata_receipt_rejects_non_owner_command_actor()
+async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = SessionMetadataRepository::new(pool.clone());
@@ -261,14 +262,15 @@ async fn inv012_rejected_metadata_receipt_rejects_non_owner_command_actor()
     .execute(&pool)
     .await?;
 
-    assert!(matches!(
-        repository.load_command(command(0x901)).await,
-        Err(SessionMetadataRepositoryError::Corruption(
-            SessionMetadataCorruption::Domain(
-                ReplaceSessionMetadataReconstitutionFailure::CommandActorMismatch
-            )
-        ))
-    ));
+    let Err(SessionMetadataRepositoryError::Corruption(SessionMetadataCorruption::Unsupported {
+        field,
+        value,
+    })) = repository.load_command(command(0x901)).await
+    else {
+        panic!("recovery agency must remain unsupported for metadata commands")
+    };
+    assert_eq!(field, "command actor");
+    assert_eq!(value, "unsupported metadata writer");
 
     pool.close().await;
     drop(container);
@@ -339,6 +341,67 @@ async fn inv005_inv012_applied_metadata_replay_and_conflict_are_exact() -> Resul
             .content(),
         &first_content
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: an admitted tool-attributed replacement round-trips the exact
+/// request agency through the immutable receipt and current writer stamp.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn Error>> {
+    const CREATION_COMMAND: u128 = 0x801;
+    const TARGET_SESSION: u128 = 0x701;
+    const REPLACEMENT_COMMAND: u128 = 0x902;
+    const TOOL_REQUEST: u128 = 0xA01;
+
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(creation(CREATION_COMMAND, TARGET_SESSION))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let tool_request = ToolRequestId::from_uuid(Uuid::from_u128(TOOL_REQUEST));
+    let replacement = ReplaceSessionMetadata::new_for_tool(
+        command(REPLACEMENT_COMMAND),
+        session(TARGET_SESSION),
+        tool_request,
+        SessionMetadataContent::empty(),
+    );
+
+    let outcome = repository.handle(replacement.clone()).await?;
+    let ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
+        applied,
+    )) = &outcome
+    else {
+        panic!("the first replacement for an existing session must apply")
+    };
+    let recorded = repository
+        .load_command(replacement.command_id())
+        .await?
+        .expect("the tool-attributed replacement receipt exists");
+
+    assert_eq!(
+        replacement.actor(),
+        Actor::Tool {
+            request: tool_request
+        }
+    );
+    assert_eq!(recorded.command(), &replacement);
+    assert_eq!(
+        recorded.result(),
+        &ReplaceSessionMetadataResult::Applied(applied.clone())
+    );
+    assert_eq!(
+        applied
+            .snapshot()
+            .last_writer()
+            .expect("an applied replacement has a writer")
+            .actor(),
+        replacement.actor()
+    );
+    assert_eq!(repository.handle(replacement).await?, outcome);
 
     pool.close().await;
     drop(container);

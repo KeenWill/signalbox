@@ -617,7 +617,7 @@ impl ReplaceSessionMetadataReconstitutionInput {
 /// Why typed durable facts cannot reconstruct a recorded replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplaceSessionMetadataReconstitutionFailure {
-    /// The recorded command names an actor other than the canonical owner.
+    /// The independently recorded actor differs from the canonical command.
     CommandActorMismatch,
     /// The terminal result names a different target session.
     ResultSessionMismatch,

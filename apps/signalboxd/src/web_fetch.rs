@@ -69,6 +69,9 @@ impl fmt::Display for WebFetchToolConstructionError {
 impl Error for WebFetchToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `web_fetch`.
+///
+/// Effect posture: `ExternalEffect`. Although the method is GET, the remote
+/// server can observe the request, so a crash-lost dispatch is not effect-free.
 #[derive(Clone, Debug)]
 pub struct WebFetchTool<Transport> {
     catalog: CompiledToolCatalog,

@@ -88,6 +88,9 @@ impl fmt::Display for CurrentTimeToolConstructionError {
 impl Error for CurrentTimeToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `current_time`.
+///
+/// Effect posture: `EffectFree`. Execution observes the injected clock and
+/// time-zone database only and performs no externally visible write.
 #[derive(Clone, Debug)]
 pub struct CurrentTimeTool<Clock> {
     catalog: CompiledToolCatalog,

@@ -498,16 +498,30 @@ fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) 
     })
 }
 
-fn expected_tool_result(request: ToolRequestId, content: String, is_error: bool) -> MessagePart {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedToolResultDisposition {
+    Successful,
+    Failed,
+}
+
+fn expected_tool_result(
+    request: ToolRequestId,
+    content: String,
+    disposition: ExpectedToolResultDisposition,
+) -> MessagePart {
     MessagePart::ToolResult(ToolResultRecord {
         tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
         content,
-        is_error,
+        is_error: matches!(disposition, ExpectedToolResultDisposition::Failed),
     })
 }
 
 fn expected_successful_tool_result(request: ToolRequestId, content: String) -> MessagePart {
-    expected_tool_result(request, content, false)
+    expected_tool_result(request, content, ExpectedToolResultDisposition::Successful)
+}
+
+fn expected_failed_tool_result(request: ToolRequestId, content: String) -> MessagePart {
+    expected_tool_result(request, content, ExpectedToolResultDisposition::Failed)
 }
 
 #[track_caller]
@@ -862,7 +876,7 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(requests[0], "confirmed", r#"{"value":"one"}"#),
-            expected_tool_result(requests[0], String::from("completed:confirmed"), false),
+            expected_successful_tool_result(requests[0], String::from("completed:confirmed")),
         ]
     );
     let operations = runtime.received_operations();
@@ -1207,7 +1221,7 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(request, "confirmed", "{}"),
-            expected_tool_result(
+            expected_failed_tool_result(
                 request,
                 serde_json::json!({
                     "error": {
@@ -1216,7 +1230,6 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
                     }
                 })
                 .to_string(),
-                true,
             ),
         ]
     );
@@ -1433,7 +1446,7 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         continuation_tool_exchange(&restarted_runtime)?,
         vec![
             expected_tool_call(request, "confirmed", "{}"),
-            expected_tool_result(request, String::from("completed:confirmed"), false),
+            expected_successful_tool_result(request, String::from("completed:confirmed")),
         ],
         "the fresh composition must reach the correlated continuation call"
     );
@@ -1538,8 +1551,8 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         vec![
             expected_tool_call(requests[0], "automatic", "{}"),
             expected_tool_call(requests[1], "confirmed", "{}"),
-            expected_tool_result(requests[0], String::from("completed:automatic"), false),
-            expected_tool_result(requests[1], String::from("completed:confirmed"), false),
+            expected_successful_tool_result(requests[0], String::from("completed:automatic")),
+            expected_successful_tool_result(requests[1], String::from("completed:confirmed")),
         ],
         "continuation history retains paired calls and proposal-ordered results"
     );

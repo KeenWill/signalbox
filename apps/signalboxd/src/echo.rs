@@ -54,6 +54,9 @@ impl fmt::Display for EchoToolConstructionError {
 impl Error for EchoToolConstructionError {}
 
 /// Compiled catalog entry and matching executor for `echo`.
+///
+/// Effect posture: `EffectFree`. Execution observes no external state and
+/// returns only a checked projection of the invocation arguments.
 #[derive(Clone, Debug)]
 pub struct EchoTool {
     catalog: CompiledToolCatalog,
