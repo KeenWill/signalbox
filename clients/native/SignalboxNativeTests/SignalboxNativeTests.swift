@@ -653,6 +653,84 @@ final class SignalboxNativeTests: XCTestCase {
         viewModel.disconnectStream()
     }
 
+    func testHelloDeadlineBoundsStalledHistorySynchronization() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let deadlineWaiter = SignaledFirstStreamHelloTimeoutWaiter()
+        let viewModel = SessionDetailViewModel(
+            session: fixture.session,
+            streamHelloTimeout: StreamHelloHistoryReuseFixture.retryTimeout,
+            waitForStreamHello: { timeout in
+                try await deadlineWaiter.wait(for: timeout)
+            }
+        ) { service }
+        let synchronizedStatus = observeStatus(
+            .waitingForConfirmation,
+            on: viewModel
+        )
+
+        let initialLoad = Task {
+            await viewModel.load()
+        }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await initialLoad.value
+        viewModel.connectStream()
+        await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        // The authoritative post-hello history request is now pending and is
+        // deliberately never resumed: the synchronization deadline must still
+        // be armed while it loads.
+        await service.waitForListEventsInvocation()
+        deadlineWaiter.expireFirstWait()
+        let synchronizationRetried = expectation(
+            description: "stalled synchronization abandoned for a replacement stream"
+        )
+        Task {
+            await service.waitForStreamInvocationCount(
+                StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+            )
+            // The stalled request completes only after its stream is gone, so
+            // its late result must be ignored.
+            service.resumeHistoryEvents()
+            synchronizationRetried.fulfill()
+        }
+        await fulfillment(
+            of: [synchronizationRetried],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+        service.sendStreamHello()
+        let retryHistoryRequested = expectation(
+            description: "replacement stream performs the authoritative history read"
+        )
+        Task {
+            await service.waitForListEventsInvocation()
+            service.resumeHistoryEvents()
+            retryHistoryRequested.fulfill()
+        }
+        await fulfillment(
+            of: [retryHistoryRequested],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+        await fulfillment(
+            of: [synchronizedStatus.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertTrue(viewModel.isStreaming)
+        XCTAssertEqual(
+            service.streamInvocationCount,
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedStalledSynchronizationListEventsCallCount
+        )
+        XCTAssertEqual(viewModel.events, fixture.expectedSynchronizedEvents)
+        withExtendedLifetime(synchronizedStatus.cancellable) {}
+        viewModel.disconnectStream()
+    }
+
     func testArtifactRefreshFailureAfterStreamHelloKeepsStreamSynchronized() async throws {
         let fixture = try await streamHelloHistoryReuseFixture()
         let service = HistoryReuseStreamSignalboxService(
@@ -1430,6 +1508,10 @@ private struct StreamHelloHistoryReuseFixture {
     /// Initial load, failed reconnect synchronization, then successful retry.
     static let expectedRequestFailureListEventsCallCount = 3
 
+    /// Initial load, the stalled synchronization request, then the
+    /// replacement stream's authoritative request.
+    static let expectedStalledSynchronizationListEventsCallCount = 3
+
     /// An explicit disconnect retains the initial request without starting a fallback.
     static let expectedCancelledInitialListEventsCallCount = 1
 
@@ -1450,7 +1532,8 @@ private struct StreamHelloHistoryReuseFixture {
     static let diagnosticRetryTimeout: Duration = .seconds(1)
     static let retryObservationTimeout: TimeInterval = 3
 
-    /// A retry remains pending long enough for its hello to cancel the deadline.
+    /// A deadline generous enough that it never expires on its own during a
+    /// test; only completed synchronization or the test cancels it.
     static let retryTimeout: Duration = .seconds(60)
 
     static let firstStreamInvocationCount = 1
@@ -1645,6 +1728,48 @@ private final class ImmediateFirstStreamHelloTimeoutWaiter: @unchecked Sendable 
             return
         }
         try await Task.sleep(for: timeout)
+    }
+}
+
+/// Holds the first stream's deadline until the test explicitly expires it;
+/// every later deadline sleeps for its full timeout.
+private final class SignaledFirstStreamHelloTimeoutWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invocationCount = 0
+    private var firstWaitExpired = false
+    private var firstWaitContinuation: CheckedContinuation<Void, Never>?
+
+    func wait(for timeout: Duration) async throws {
+        let isFirstInvocation = lock.withLock {
+            invocationCount += 1
+            return invocationCount == StreamHelloHistoryReuseFixture.firstStreamInvocationCount
+        }
+        guard isFirstInvocation else {
+            try await Task.sleep(for: timeout)
+            return
+        }
+        await withCheckedContinuation { continuation in
+            let alreadyExpired = lock.withLock {
+                if firstWaitExpired {
+                    return true
+                }
+                firstWaitContinuation = continuation
+                return false
+            }
+            if alreadyExpired {
+                continuation.resume()
+            }
+        }
+    }
+
+    func expireFirstWait() {
+        let continuation = lock.withLock {
+            firstWaitExpired = true
+            let continuation = firstWaitContinuation
+            firstWaitContinuation = nil
+            return continuation
+        }
+        continuation?.resume()
     }
 }
 

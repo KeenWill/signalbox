@@ -688,8 +688,12 @@ final class SessionDetailViewModel: ObservableObject {
         sessionID: SignalboxSessionID,
         streamID: UUID
     ) async {
-        streamHelloTimeoutTask?.cancel()
-        streamHelloTimeoutTask = nil
+        // The deadline armed at connect covers the complete hello-plus-history
+        // synchronization: hello alone is not completion, so a stalled
+        // authoritative history read expires into the bounded recovery path
+        // instead of suspending the stream consumer while frames buffer
+        // without bound. takeHistorySynchronization cancels the deadline once
+        // synchronization completes or fails.
         do {
             // The hello marks the subscription boundary: only a history read
             // started after it can observe mutations, such as deletions, that
