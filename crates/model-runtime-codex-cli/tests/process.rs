@@ -1310,6 +1310,42 @@ async fn inv_035_bare_credential_member_is_redacted() {
     assert!(diagnostic.contains("[redacted]"));
 }
 
+/// INV-035: a credential member whose value is a JSON object is consumed
+/// through its balanced structural close before terminal evidence leaves the
+/// adapter, never released piecewise past its first structural character.
+#[tokio::test]
+async fn inv_035_structured_credential_value_is_redacted_whole() {
+    let result = execute_scenario(
+        "structured_credential_value",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}", result.evidence);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_STRUCTURED_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+}
+
+/// INV-035: a structured credential value split across streamed reasoning
+/// items cannot be reconstructed by concatenating the emitted deltas.
+#[tokio::test]
+async fn inv_035_split_structured_credential_value_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_structured_credential",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_STRUCTURED_SECRET));
+    assert!(streamed.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn synchronous_preparation_wins_over_ready_cancellation() {
     let temporary = tempfile::tempdir().expect("test working directory is created");

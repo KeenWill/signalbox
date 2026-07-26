@@ -544,10 +544,13 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   credential token shapes before observations or evidence leave the crate;
   credential-bearing authorization and cookie header shapes consume their whole
   line value; quoted credential values consume through their matching unescaped
-  quote, and JSON identity/session-token members are included. Envelope-decode
-  errors are content-silent rather than embedding a rejected provider value.
-  Why: subscription authentication remains wholly inside the intended CLI
-  control surface while credential-shaped reflection still fails closed.
+  quote; object- or array-shaped credential values consume through their
+  balanced structural close, and a container still open at the end of the
+  controlled text is suppressed through that end rather than released piecewise;
+  and JSON identity/session-token members are included. Envelope-decode errors
+  are content-silent rather than embedding a rejected provider value. Why:
+  subscription authentication remains wholly inside the intended CLI control
+  surface while credential-shaped reflection still fails closed.
 
 ## Operator failure taxonomy
 
