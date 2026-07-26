@@ -22,7 +22,6 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
@@ -35,6 +34,7 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
+use signalboxd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -43,7 +43,11 @@ use testcontainers_modules::{
 use tokio::time::timeout;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalbox_hubd_e2e";
+/// The undated provider-model spelling the fixture deployment configures.
+const CONFIGURED_PROVIDER_MODEL: &str = "claude-haiku-4-5";
+/// The canonical dated form of that same family, as a provider echoes it.
+const SERVED_PROVIDER_MODEL: &str = "claude-haiku-4-5-20251001";
+const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
@@ -129,6 +133,11 @@ async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
 /// checkpoint sequence, assistant reply, and terminal lifecycle facts.
 /// INV-026: the bridge receives a one-action runtime script, so any repeated
 /// physical interaction exhausts the script and fails the test.
+/// S20: the fixture configures an undated provider-model spelling while the
+/// scripted response echoes that family's canonical dated form, so the chain
+/// also proves the provider-target normalization law of
+/// docs/spec/model-call-execution.md end to end: the call completes and the
+/// supervisor never raises a fatal signal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply()
@@ -188,7 +197,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
     let runtime_models =
         RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
             target,
-            String::from("scripted-exact"),
+            String::from(CONFIGURED_PROVIDER_MODEL),
             64,
         )
         .expect("fixture runtime definition is valid")])
@@ -197,7 +206,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
-            reported_model: Some(ProviderReportedModel::new("scripted-exact")),
+            reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
             finish: CompletionFinish::EndTurn,
             content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
             usage: TokenUsage::unreported(),

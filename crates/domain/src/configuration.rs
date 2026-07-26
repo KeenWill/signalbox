@@ -83,6 +83,16 @@ pub enum FrozenModelSelection {
     },
 }
 
+impl FrozenModelSelection {
+    /// Returns the exact direct selection whose model identity is frozen.
+    pub const fn selected_direct(self) -> DirectModelSelection {
+        match self {
+            Self::Direct(selection) => selection,
+            Self::FrozenAlias { definition, .. } => definition.selected(),
+        }
+    }
+}
+
 /// The single constructible baseline model-parameter choice: Signalbox
 /// supplies no model-parameter overrides.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

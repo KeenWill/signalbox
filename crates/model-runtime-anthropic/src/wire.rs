@@ -125,6 +125,19 @@ pub(crate) enum WireResponseBlock {
     RedactedThinking {
         data: String,
     },
+    /// The provider's server-side fallback marker: the point in this
+    /// response where one model declined and another continued.
+    ///
+    /// Recognized explicitly rather than left unknown so a genuine
+    /// cross-model substitution is distinguishable from additive provider
+    /// evolution. This adapter never enables server-side fallback, so
+    /// observing the block is evidence that the served model is not the
+    /// resolved target.
+    Fallback {
+        /// The model the block names as continuing the turn, when it named
+        /// one.
+        to_model: Option<String>,
+    },
     /// A content-block type this adapter does not recognize. Surfaced as
     /// evidence rather than silently dropped: response material containing
     /// unknown parts is not valid completion material.
@@ -159,6 +172,14 @@ pub(crate) fn parse_response_block(
     struct RedactedThinkingBlock {
         data: String,
     }
+    #[derive(Deserialize)]
+    struct FallbackBlock {
+        to: Option<FallbackModel>,
+    }
+    #[derive(Deserialize)]
+    struct FallbackModel {
+        model: Option<String>,
+    }
     let tag: Tag = serde_json::from_str(raw.get())?;
     Ok(match tag.kind.as_str() {
         "text" => {
@@ -183,6 +204,12 @@ pub(crate) fn parse_response_block(
         "redacted_thinking" => {
             let block: RedactedThinkingBlock = serde_json::from_str(raw.get())?;
             WireResponseBlock::RedactedThinking { data: block.data }
+        }
+        "fallback" => {
+            let block: FallbackBlock = serde_json::from_str(raw.get())?;
+            WireResponseBlock::Fallback {
+                to_model: block.to.and_then(|to| to.model),
+            }
         }
         _ => WireResponseBlock::Unrecognized,
     })

@@ -5,9 +5,10 @@
 //! boundaries that validate the referenced facts.
 
 use crate::{
-    AcceptedInputId, ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryId, ModelCallId, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolRequestId, TurnId,
+    AcceptedInputId, DirectModelSelection, ImportedSourceAttestation, ImportedSpeaker,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ModelCallId, NonEmptyUnicodeText,
+    NonEmptyUnicodeTextError, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+    SessionConfigurationDefaultsVersion, SessionId, ToolRequestId, TurnId,
 };
 
 /// Exact assistant-owned text from one definitive provider response.
@@ -58,6 +59,15 @@ pub enum SemanticTranscriptEntryPayload {
         accepted_input: AcceptedInputId,
         /// The exact active turn the input was accepted to steer.
         source_turn: TurnId,
+    },
+    /// An injected boundary informing a turn of its newly selected model.
+    ModelIdentityChanged {
+        /// The turn whose starting frontier first observes the new identity.
+        turn: TurnId,
+        /// The immutable defaults epoch bound by that turn's origin.
+        defaults_version: SessionConfigurationDefaultsVersion,
+        /// The exact direct selection frozen for the turn.
+        selected: DirectModelSelection,
     },
     /// An explicit marker for an exact failed turn.
     TurnFailed {

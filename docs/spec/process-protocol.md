@@ -1,19 +1,24 @@
 # Process protocol
 
 The baseline Signalbox process protocol version one and the terminal client that
-consumes it were verified through PR #177 (`agent/terminal-client`). The
-conversation-import stack adds protocol version two for the conservative
-imported transcript-snapshot projection described here. The tool-loop stack adds
-protocol version three for tool-bearing projection; versions one and two retain
-their closed message vocabularies unchanged. The session-metadata stack adds
-protocol version four for paginated metadata listing, single-session metadata
-reads, and durable complete-snapshot replacement; versions one through three
-retain their closed request and message vocabularies unchanged. The one-file
-conversation-import surface adds protocol version five; versions one through
-four remain unchanged, verified through PR #252 (`agent/import-surfaces`). The
-implementation in this stack speaks versions one through five, and its terminal
-client selects version five. This page is the normative boundary between a local
-client process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
+consumes it were verified through PR #177 (`agent/terminal-client`); the
+`signalboxd` binary name this page states for the serving process was verified
+through PR #258 (`agent/signalboxd-rename`). The conversation-import stack adds
+protocol version two for the conservative imported transcript-snapshot
+projection described here. The tool-loop stack adds protocol version three for
+tool-bearing projection; versions one and two retain their closed message
+vocabularies unchanged. The session-metadata stack adds protocol version four
+for paginated metadata listing, single-session metadata reads, and durable
+complete-snapshot replacement; versions one through three retain their closed
+request and message vocabularies unchanged. The one-file conversation-import
+surface adds protocol version five; versions one through four remain unchanged,
+verified through PR #252 (`agent/import-surfaces`). The mid-session
+model-selection stack adds protocol version six for complete, forward-only
+defaults replacement and its model-identity frontier entry; versions one through
+five remain unchanged, verified through PR #272 (`agent/mid-session-model`). The
+implementation in this stack speaks versions one through six, and its terminal
+client selects version six. This page is the normative boundary between a local
+client process and `signalboxd`; domain values, PostgreSQL records, and wire
 messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
@@ -22,37 +27,37 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-All five versions use one Unix domain stream socket. The hub requires its path
+All six versions use one Unix domain stream socket. The daemon requires its path
 in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
-`signalbox-hubd` binds the socket with owner-only `0600` permissions. The
-configured path must be absolute and must end in an explicit filename component;
-a trailing separator, `/.`, or `/..` is rejected rather than normalized. The hub
+`signalboxd` binds the socket with owner-only `0600` permissions. The configured
+path must be absolute and must end in an explicit filename component; a trailing
+separator, `/.`, or `/..` is rejected rather than normalized. The daemon
 canonicalizes its existing parent once and uses that resolved parent for the
-socket lifetime; the parent must be a directory owned by the hub's effective
+socket lifetime; the parent must be a directory owned by the daemon's effective
 user with traditional permission mode exactly `0700`. This owner-private
 immediate parent is required even when the socket node itself has mode `0600`;
 version one does not rely on every supported Unix implementation enforcing
 socket-node permissions. Every resolved ancestor up to the filesystem root must
 also resist same-machine replacement: a group- or other-writable ancestor is
 accepted only when it has the sticky bit and the next path component toward the
-socket is owned by the hub's effective user. Every ancestor must itself be owned
-by either root or the hub's effective user, so an unprivileged different owner
-cannot make a currently protected directory writable after validation. An
-untrusted owner, a non-sticky writable ancestor, or a sticky writable ancestor
-containing a component owned by another user fails startup.
+socket is owned by the daemon's effective user. Every ancestor must itself be
+owned by either root or the daemon's effective user, so an unprivileged
+different owner cannot make a currently protected directory writable after
+validation. An untrusted owner, a non-sticky writable ancestor, or a sticky
+writable ancestor containing a component owned by another user fails startup.
 
-Before inspecting the final path, the hub opens or creates the adjacent
+Before inspecting the final path, the daemon opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
 with exact `0600` permissions, takes its nonblocking exclusive advisory file
 lock, and holds that lock through final socket cleanup. Failure to open, verify,
 or lock the sidecar fails without touching the socket path. The sidecar remains
-after shutdown so a later hub can lock the same inode. While holding that
-lifetime path lock, the hub also reclaims a retained socket left at the reserved
-`<socket-path>.identity` name by an abrupt prior exit only when the public and
-reserved names still identify the same owned socket. An orphaned or differently
-paired entry at the reserved name fails startup without modification. It then
-handles the final path as follows:
+after shutdown so a later daemon can lock the same inode. While holding that
+lifetime path lock, the daemon also reclaims a retained socket left at the
+reserved `<socket-path>.identity` name by an abrupt prior exit only when the
+public and reserved names still identify the same owned socket. An orphaned or
+differently paired entry at the reserved name fails startup without
+modification. It then handles the final path as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
@@ -60,14 +65,14 @@ handles the final path as follows:
 4. a socket owned by the effective user is first retained by a hard link at the
    reserved identity name so its device and inode cannot be recycled, and a
    connection failure with `ConnectionRefused` proves it stale only if a second
-   `lstat` still observes that retained identity. The hub removes only that
+   `lstat` still observes that retained identity. The daemon removes only that
    revalidated entry and then binds; every other ownership, connection, or
    metadata result fails startup without modification.
 
 The path lock makes the final revalidation and removal indivisible with respect
-to another conforming hub. The bind itself must still create a new socket and
-never replace another entry. The hub binds a new unlistening Unix stream socket
-inside the verified owner-private parent, captures its socket type,
+to another conforming daemon. The bind itself must still create a new socket and
+never replace another entry. The daemon binds a new unlistening Unix stream
+socket inside the verified owner-private parent, captures its socket type,
 effective-user ownership, device, and inode with `lstat`, and retains that inode
 with a hard link at the reserved identity name. Without changing the
 process-wide creation mask, it sets exact owner-only `0600` permissions through
@@ -78,16 +83,16 @@ completes. The identity link remains for the listener lifetime so the device and
 inode cannot be recycled. Any address, identity, ownership, or permission
 mismatch fails startup and removes no raced entry. Graceful shutdown keeps the
 listener and identity link live while a final `lstat` proves the public path
-still names this hub's socket and removes that path, then releases the identity
-link and path lock.
+still names this daemon's socket and removes that path, then releases the
+identity link and path lock.
 
 The transport is local-machine and single-user only. The process protocol's lack
 of authentication is provisional; none of the versions has an authorization
 exchange or remote transport. Socket filesystem access is the deployment
 boundary; it is not represented as application-level owner proof.
 
-The hub owns at most 128 accepted connection tasks. At that limit it leaves new
-connections in the bounded listener backlog until an active task exits, then
+The daemon owns at most 128 accepted connection tasks. At that limit it leaves
+new connections in the bounded listener backlog until an active task exits, then
 resumes accepting. The limit counts long-lived follow connections and ordinary
 request connections alike. At most eight connection tasks may accumulate an
 inbound frame simultaneously. An idle connection holds no frame slot: each
@@ -125,7 +130,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`, `2`, `3`, `4`, or `5`;
+- `version`: JSON integer `1`, `2`, `3`, `4`, `5`, or `6`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -137,13 +142,13 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one through five
-produces an `unsupported_version` error naming the supported versions, then the
-server closes the connection. Every response uses the request's admitted
-version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A client speaking version two through five admits
-that version-one fallback only for `malformed_frame` or `unsupported_version`,
-then applies the ordinary request-identity check; every other response-version
+spellings decode to the same name. A version other than one through six produces
+an `unsupported_version` error naming the supported versions, then the server
+closes the connection. Every response uses the request's admitted version; when
+no version can be admitted, the server error uses version one as the
+pre-admission fallback. A client speaking version two through six admits that
+version-one fallback only for `malformed_frame` or `unsupported_version`, then
+applies the ordinary request-identity check; every other response-version
 mismatch fails locally. A server error uses `request_id = "0"` only when the
 incoming frame prevents recovery of a valid nonzero identity; zero is never a
 valid client identity or success-response identity. Leading zeroes, a plus sign,
@@ -161,17 +166,18 @@ errors self-describing without connection-global negotiation state.
 Request objects carry a required string `type` and reject fields not admitted by
 that variant.
 
-| Type                       | Version | Additional required members                                                                                                                                                                 | Meaning                                                                                                                                                            |
-| -------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `create_session`           | 1+      | `command_id` (canonical UUID string), `initial_model_selection` (selection object)                                                                                                          | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                             |
-| `list_sessions`            | 1+      | none                                                                                                                                                                                        | Read all current sessions as legacy summaries, ordered by session identity.                                                                                        |
-| `submit_input`             | 1+      | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                          | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                    |
-| `read_transcript`          | 1+      | `session_id` (canonical UUID string)                                                                                                                                                        | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                     |
-| `follow_session`           | 1+      | `session_id` (canonical UUID string)                                                                                                                                                        | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session. |
-| `list_session_metadata`    | 4       | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null) | Read one filtered metadata-summary page in session-identity order.                                                                                                 |
-| `read_session_metadata`    | 4       | `session_id` (canonical UUID string)                                                                                                                                                        | Read one complete current metadata snapshot.                                                                                                                       |
-| `replace_session_metadata` | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                     | Durably replace one complete metadata snapshot as the owner actor.                                                                                                 |
-| `import_conversation`      | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                            | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                            |
+| Type                       | Version | Additional required members                                                                                                                                                                    | Meaning                                                                                                                                                            |
+| -------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create_session`           | 1+      | `command_id` (canonical UUID string), `initial_model_selection` (selection object)                                                                                                             | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                             |
+| `list_sessions`            | 1+      | none                                                                                                                                                                                           | Read all current sessions as legacy summaries, ordered by session identity.                                                                                        |
+| `submit_input`             | 1+      | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                                             | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                    |
+| `read_transcript`          | 1+      | `session_id` (canonical UUID string)                                                                                                                                                           | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                     |
+| `follow_session`           | 1+      | `session_id` (canonical UUID string)                                                                                                                                                           | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session. |
+| `list_session_metadata`    | 4       | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null)    | Read one filtered metadata-summary page in session-identity order.                                                                                                 |
+| `read_session_metadata`    | 4       | `session_id` (canonical UUID string)                                                                                                                                                           | Read one complete current metadata snapshot.                                                                                                                       |
+| `replace_session_metadata` | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                        | Durably replace one complete metadata snapshot as the owner actor.                                                                                                 |
+| `import_conversation`      | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                               | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                            |
+| `replace_session_defaults` | 6       | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean) | Install one complete immutable defaults epoch as the owner actor, conditional on the exact current epoch.                                                          |
 
 A selection object is exactly one of:
 
@@ -186,7 +192,15 @@ new request identity does not change command meaning (INV-012). The expected
 defaults version is part of the canonical submit payload. A caller retries an
 ambiguous submission with the same command identity, session, content, expected
 version, and treatment; changing any of them is a conflicting reuse, not
-recovery.
+recovery. The expected defaults version is likewise part of a replacement's
+canonical payload; exact recovery preserves it together with the complete model
+selection and dangerous-tool auto-approval posture.
+
+Before application construction, `replace_session_defaults` validates the
+requested direct selection or alias against the process's immutable model
+catalog. An unknown catalog identity is `invalid_request` and claims no command
+identity. This check is read-only: the protocol does not register models or
+change the catalog.
 
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).
@@ -221,25 +235,27 @@ value cannot construct the corresponding application input; no currently valid
 metadata frame is intended to reach that mapping error.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in all five versions. If a turn is already active, the normal typed
+treatment in all six versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
 Versions two and three admit the same request vocabulary as version one and add
 no new mutation authority. Version four retains that vocabulary and adds only
 the three metadata requests. Version five retains all earlier requests and adds
-only `import_conversation`. A metadata request carried under version one, two,
-or three, or an import request carried under version one through four, is
+only `import_conversation`. Version six retains all earlier requests and adds
+only `replace_session_defaults`. A metadata request carried under version one,
+two, or three, an import request carried under version one through four, or a
+defaults-replacement request carried under version one through five is
 classified as `malformed_frame` because its supported version does not admit
 that request variant; it never reaches application construction. A version-one
 `submit_input`, `read_transcript`, or `follow_session` request that selects
 imported ancestry returns a version-one `unsupported_version` error naming
 version two before mutation or snapshot construction.
 
-Versions four and five also inherit every transcript, turn-state, entry, and
+Versions four through six also inherit every transcript, turn-state, entry, and
 event shape admitted by version three, including the imported representations
 introduced by version two and the tool-bearing representations introduced by
-version three. A version-four or version-five `read_transcript`,
+version three. A version-four, version-five, or version-six `read_transcript`,
 `follow_session`, or `submit_input` therefore never requires a downgrade or a
 newer version for a representation already admitted by version three.
 
@@ -252,16 +268,24 @@ tool-only event, a version-one or version-two follower receives that same error
 and the connection closes before the event is emitted. A version-one or
 version-two `submit_input` request targeting a session whose existing history
 contains a tool-only state or entry returns that same error naming version three
-before mutation. This gate lets an upgraded hub continue serving old clients
+before mutation. This gate lets an upgraded daemon continue serving old clients
 without sending a tagged variant their accepted version requires them to reject.
 Version three adds tool observation but no approval, cancellation, or other
 mutation request.
 
-Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
-before application construction or mutation and returns `invalid_request` when
-it is exceeded. This leaves enough space for worst-case JSON escaping when the
-same accepted content is projected in a queued turn or durable update event. The
-exact capacity choice is recorded in the
+A version-one through version-five `read_transcript`, `follow_session`, or
+`submit_input` request targeting a session whose history contains a
+model-identity boundary returns `unsupported_version` naming version six before
+snapshot construction or mutation. A follower admitted before that boundary may
+receive only older-version-compatible transition events; its next authoritative
+snapshot request encounters this same gate. Version six preserves every earlier
+shape and admits the new entry.
+
+Submitted `content` is limited to 1 MiB of UTF-8. The daemon applies that
+boundary before application construction or mutation and returns
+`invalid_request` when it is exceeded. This leaves enough space for worst-case
+JSON escaping when the same accepted content is projected in a queued turn or
+durable update event. The exact capacity choice is recorded in the
 [input-bound decision](../decisions.md#2026-07-23--bound-process-protocol-input-at-1-mib).
 
 An import `source` is the complete exact byte sequence encoded with RFC 4648
@@ -282,14 +306,17 @@ request.
 
 Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted mutation request — `create_session`,
-`submit_input`, `replace_session_metadata`, or `import_conversation` — produces
-exactly one of:
+`submit_input`, `replace_session_metadata`, `replace_session_defaults`, or
+`import_conversation` — produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`;
 - `session_metadata_replaced` with `session_id`, the complete `metadata`
   snapshot installed by that recorded handling, and its non-null `last_writer`;
+- `session_defaults_replaced` with `session_id`, the newly installed
+  `defaults_version`, complete `model_selection`, and
+  `dangerous_tool_auto_approval`;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`; or
 - `error` with a stable `code` and a non-sensitive `message`.
@@ -345,6 +372,11 @@ non-owner metadata writer is constructible through this boundary; additional
 actor variants require the later slice that introduces their constructing
 authority. Actor is provenance, not wire authentication or authorization.
 
+`session_defaults_replaced` is the successful version-six defaults write
+receipt. It echoes the complete installed defaults and names the exact successor
+epoch. An equal command replay returns that original receipt even after later
+epochs exist; current state is observed through metadata reads.
+
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. The version-one input treatment
 admits `session_not_found { session_id }`,
@@ -353,10 +385,14 @@ admits `session_not_found { session_id }`,
 `unknown_model_alias { session_id, alias_id }`, and
 `acceptance_position_exhausted { session_id, last }`. A version-four
 `replace_session_metadata` rejection admits exactly
-`session_not_found { session_id }`. Other error codes have no `detail`. An equal
-replay returns the same success or rejection projection as the first handling.
+`session_not_found { session_id }`. A version-six `replace_session_defaults`
+rejection admits `session_not_found { session_id }`,
+`defaults_version_mismatch { session_id, expected, current }`, and
+`defaults_version_exhausted { session_id, current }`. Other error codes have no
+`detail`. An equal replay returns the same success or rejection projection as
+the first handling.
 
-The error-code set in all five versions is:
+The error-code set in all six versions is:
 
 | Code                  | Meaning                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -369,12 +405,13 @@ The error-code set in all five versions is:
 | `resync_required`     | A follower fell behind the bounded process-local event fan-out.                                      |
 | `unavailable`         | Infrastructure failed; no requested mutation may have committed.                                     |
 | `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                    |
-| `internal`            | Fail-closed corruption or a hub defect stopped the request.                                          |
+| `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                       |
 
-For `create_session`, `submit_input`, and `replace_session_metadata`, a lost
-commit response maps to `commit_ambiguous`; the client retries the exact command
-identity and payload to discover the recorded outcome. A definitely pre-commit
-infrastructure failure maps to `unavailable`.
+For `create_session`, `submit_input`, `replace_session_metadata`, and
+`replace_session_defaults`, a lost commit response maps to `commit_ambiguous`;
+the client retries the exact command identity and payload to discover the
+recorded outcome. A definitely pre-commit infrastructure failure maps to
+`unavailable`.
 
 Conversation import carries no durable command identity because exact
 format-and-source replay already resolves through the import digest. A selected
@@ -417,12 +454,12 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 3. the entry messages below in frontier-member order; and
 4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
 
-The hub builds that complete sequence in a secure unnamed temporary file before
-writing its first snapshot frame to the connection. Persistence validates the
-execution lineage in PostgreSQL and yields one turn or frontier member at a time
-from the same read-only repeatable-read transaction; hubd encodes each item
-directly to the spool, commits the transaction after the final item, rewinds,
-and streams the completed file. A slow client therefore holds neither a
+The daemon builds that complete sequence in a secure unnamed temporary file
+before writing its first snapshot frame to the connection. Persistence validates
+the execution lineage in PostgreSQL and yields one turn or frontier member at a
+time from the same read-only repeatable-read transaction; signalboxd encodes
+each item directly to the spool, commits the transaction after the final item,
+rewinds, and streams the completed file. A slow client therefore holds neither a
 PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
 is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
 temporary disk usage follows the complete encoded transcript size. Projection or
@@ -467,14 +504,18 @@ and
 The distinct tool variant avoids changing the older `reconciliation_required`
 object.
 
-In every version, each non-text native frontier member is one `transcript_entry`
-with `entry_index`, `source_session_id`, `entry_id`, and one closed `entry`
-object: `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
-`turn_cancelled { turn_id }`. Version three also admits
+Across their admitted representations, each non-text native frontier member is
+one `transcript_entry` with `entry_index`, `source_session_id`, `entry_id`, and
+one closed `entry` object: `turn_completed { turn_id }`,
+`turn_failed { turn_id }`, or `turn_cancelled { turn_id }`. Version three also
+admits
 `assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
 `tool_execution_result { tool_request_id, tool_attempt_id, content }`,
 `tool_denied { tool_request_id, content }`, and
-`tool_closed { tool_request_id, content }`. A native text member begins with
+`tool_closed { tool_request_id, content }`. Version six additionally admits
+`model_identity_changed { turn_id, defaults_version, selected_model_id }`,
+naming the first started turn bound to a changed frozen direct selection. A
+native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -550,7 +591,7 @@ endpoint. Transaction- and statement-pooled proxy modes are unsupported because
 the guard and generation fences below use locks owned by one PostgreSQL server
 session.
 
-Before migration or recovery, `signalbox-hubd` acquires
+Before migration or recovery, `signalboxd` acquires
 `pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
 connection and retains that connection—and therefore the session-level
 lock—until shutdown. Failure to acquire the fixed database-scoped guard fails
@@ -558,30 +599,30 @@ startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`.
 
 The singleton `hub_fence_state` stores a positive generation. Every application
 pool connection acquires and retains a shared session advisory lock keyed by the
-ASCII namespace `SBF1` (`1396852273`) and this hub's generation, then requires
-the durable singleton still to equal that generation before the connection
-becomes usable. A mismatch rejects the connection. A successor holding the
-singleton guard takes and retains the exclusive prior-generation fence, then
-transactionally advances the row before constructing its fenced pool. That
-exclusive request waits for all prior pooled sessions and prevents the old
-process from opening another usable connection: an older generation that tries
-again after a failed intermediate successor can acquire only its old shared
-lock, then fails the current-generation check. Pool construction requires a
-non-cloneable capability borrowing the still-live fence session; the copyable
+ASCII namespace `SBF1` (`1396852273`) and this daemon's generation, then
+requires the durable singleton still to equal that generation before the
+connection becomes usable. A mismatch rejects the connection. A successor
+holding the singleton guard takes and retains the exclusive prior-generation
+fence, then transactionally advances the row before constructing its fenced
+pool. That exclusive request waits for all prior pooled sessions and prevents
+the old process from opening another usable connection: an older generation that
+tries again after a failed intermediate successor can acquire only its old
+shared lock, then fails the current-generation check. Pool construction requires
+a non-cloneable capability borrowing the still-live fence session; the copyable
 generation value is observational and cannot construct work after guard release.
 The first migration creates and initializes the row for a database that cannot
-have a prior fenced hub; later startups fence before running any newer
+have a prior fenced daemon; later startups fence before running any newer
 migration. This fence migration belongs to Signalbox's initial deployment: the
-owner confirms that no deployed database or hub predates it, so there is no
+owner confirms that no deployed database or daemon predates it, so there is no
 legacy unfenced writer to drain during the first installation. Importing or
 upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
 startup rather than wrapping.
 
-Together these guards enforce one active hub process—and therefore one
+Together these guards enforce one active daemon process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a
-successor's migration or recovery from overlapping an old hub's authoritative
+successor's migration or recovery from overlapping an old daemon's authoritative
 work. Guard-session monitoring and fatal-loss behavior are owned by
-[Hub runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#hub-runtime-startup-order-and-shutdown).
+[Daemon runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#daemon-runtime-startup-order-and-shutdown).
 For each attempt, the dispatcher:
 
 1. starts a PostgreSQL transaction and locks the singleton
@@ -646,7 +687,7 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-All five versions forward durable transition events only. Provider token deltas
+All six versions forward durable transition events only. Provider token deltas
 remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
@@ -688,15 +729,16 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version five; version four's metadata
-operations remain core protocol and hub capabilities without new terminal-client
-UX. Older clients remain supported for representations admitted by their
-declared version as described above. The client accepts a global
+The `signalbox` binary in this stack uses version six; version four's metadata
+operations remain core protocol and daemon capabilities without new
+terminal-client UX. Older clients remain supported for representations admitted
+by their declared version as described above. The client accepts a global
 `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
+- `model <session-uuid> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid> --defaults-version <decimal> --dangerous-tool-auto-approval <disabled|approve-all>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
 - `import --format <claude-code|codex> <file>`.
@@ -714,20 +756,26 @@ by the
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` first reads the
 session summary and uses its defaults version, then prints that expected version
-to standard error before sending the mutation. Thus every client-generated or
-server-discovered recovery value is visible before its commit can become
-ambiguous. Exact replay also requires the original selection or session argument
-and, for `send`, the exact standard-input content; the client does not echo that
-potentially sensitive input or synthesize a shell command. Its ambiguity
-diagnostic directs the user to retry the original command with those arguments
-and input plus any printed recovery values. For recovery, the user supplies the
-printed command identity; `send` then also requires the exact
-`--defaults-version`, and the two flags are rejected unless supplied together.
-The client never silently substitutes a new command identity for an ambiguous
-attempt. It uses a fresh nonzero request identity per connection, renders only
-known version-five messages, and exits nonzero on protocol or application errors
-other than the follow-specific `resync_required` control case, which reconnects
-for a fresh snapshot.
+to standard error before sending the mutation. `model` reads complete,
+include-archived metadata pages until a count- and cursor-acknowledged page
+names the session; it copies both the defaults version and dangerous-tool
+posture, prints those facts, and changes only the requested model selection.
+Thus every client-generated or server-discovered recovery value is visible
+before its commit can become ambiguous. Exact replay also requires the original
+selection or session argument and, for `send`, the exact standard-input content;
+the client does not echo that potentially sensitive input or synthesize a shell
+command. Its ambiguity diagnostic directs the user to retry the original command
+with those arguments and input plus any printed recovery values. For recovery,
+the user supplies the printed command identity; `send` then also requires the
+exact `--defaults-version`. `model` instead requires all three printed facts —
+command identity, defaults version, and dangerous-tool posture. Each recovery
+set is all-or-none. The client never silently substitutes a new command identity
+for an ambiguous attempt. It uses a fresh nonzero request identity per
+connection, validates that a defaults receipt is the exact successor carrying
+the requested selection and copied posture, renders only known version-six
+messages, and exits nonzero on protocol or application errors other than the
+follow-specific `resync_required` control case, which reconnects for a fresh
+snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn
@@ -750,9 +798,11 @@ assistant text produced for its exact turn. A failed or refused turn produces a
 typed diagnostic and a nonzero exit without reply text; cancelled and
 reconciliation-required turns do the same with their distinct typed diagnostics.
 `follow` prints the initial transcript and subsequent typed durable updates
-until interrupted. By default every process-derived text field written to a
-terminal preserves line feed but renders every other C0 code point, DEL, and C1
-code points as visible `\u{...}` escapes, preventing ESC/OSC execution.
+until interrupted. Version-six snapshots render a model boundary as
+`model_identity_changed` with its turn, defaults version, selected model, source
+session, and entry identity. By default every process-derived text field written
+to a terminal preserves line feed but renders every other C0 code point, DEL,
+and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC execution.
 `--raw-output` is the explicit opt-in that writes those fields unchanged; the
 same safe-rendering choice covers assistant text, typed diagnostics, and durable
 updates. Each complete raw text value is flushed before the client awaits

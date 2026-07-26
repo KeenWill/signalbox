@@ -11,19 +11,24 @@ law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
 semantic entries and frontiers in
 [sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
 outbox in [persistence-protocol](persistence-protocol.md); the typed
-model-runtime layer and hub runtime in
+model-runtime layer and daemon runtime in
 [runtime-substrate](runtime-substrate.md); model configuration and credentials
-in [configuration-and-credentials](configuration-and-credentials.md). Invariant
-tags cite [docs/invariants.md](../invariants.md).
+in [configuration-and-credentials](configuration-and-credentials.md). The
+`apps/signalboxd` supervision and `signalbox-debug` code homes this page names
+were verified through PR #258 (`agent/signalboxd-rename`); the
+[provider-target identity](#provider-target-identity) rule and the sanitized
+model-call cause codes were verified through PR #280
+(`agent/provider-identity-normalization`). Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
-A model call is one durable hub authorization to attempt a provider interaction
-(INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at creation:
-`ModelCallId`, owning turn and attempt, the exact frozen model selection, the
-turn-pinned resolved target, and the exact ordered context frontier it consumes
-(INV-015). Nonterminal states are `Prepared`, `InFlight`, and
-`CancellationRequested`; terminal history is a separate `EndedModelCall`
+A model call is one durable daemon authorization to attempt a provider
+interaction (INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at
+creation: `ModelCallId`, owning turn and attempt, the exact frozen model
+selection, the turn-pinned resolved target, and the exact ordered context
+frontier it consumes (INV-015). Nonterminal states are `Prepared`, `InFlight`,
+and `CancellationRequested`; terminal history is a separate `EndedModelCall`
 carrying one of five physical dispositions — `Completed`, `KnownFailed`,
 `Refused`, `Cancelled`, `Ambiguous` — and exposes no transition back (INV-006).
 
@@ -238,8 +243,8 @@ one fallback reclassified-successor candidate per pending input, while terminal
 closure and startup recovery draw one reclassified-successor candidate per
 pending input. Persistence invokes those closures inside the transaction but
 never owns minting. Why: the locked pending count moves into the transaction
-without moving identity authority into persistence. A proven hub-minted identity
-collision (unique-violation rollback on the call, entry, frontier, or
+without moving identity authority into persistence. A proven daemon-minted
+identity collision (unique-violation rollback on the call, entry, frontier, or
 reclassified-turn key) is the only same-invocation transaction retry, with fresh
 candidates and no repeated credential or provider work. Why: a proven
 unique-violation rollback is the one failure that guarantees the transaction had
@@ -288,7 +293,7 @@ exactly-once claim.
 ## Provider observation classification
 
 Classification is an adapter contract consuming the full-request-send boundary
-([runtime-substrate](runtime-substrate.md)); the hub never reinterprets SDK
+([runtime-substrate](runtime-substrate.md)); the daemon never reinterprets SDK
 errors by retryability or exception type. The runtime bridge
 (`crates/model-provider-runtime/src/lib.rs`) maps the runtime's typed terminal
 evidence ([runtime-substrate](runtime-substrate.md) owns how evidence is
@@ -310,12 +315,80 @@ only from an authenticated complete exchange is the runtime layer's contract
 blocks are dropped without creating invalid entries. Tool-call parts with a
 `ToolUse` finish become the normalized proposals owned by
 [tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
-stage closed because no durable semantic representation exists. A
-provider-reported model differing from the expected exact spelling — in early
-observations or terminal evidence — also fails the adapter stage closed rather
-than classifying, because provider-target mismatch evidence is not yet
-representable durably (see Open edges). Scripted providers declare their exact
-terminal observation; nothing is inferred from timing or injected I/O errors.
+stage closed because no durable semantic representation exists. Scripted
+providers declare their exact terminal observation; nothing is inferred from
+timing or injected I/O errors.
+
+### Provider-target identity
+
+The requested selection, the pinned resolved target, and the provider-reported
+identity stay three separate facts ([runtime-substrate](runtime-substrate.md));
+the bridge is the one place that relates the third to the second, for every
+identity the exchange reported — early observations and terminal evidence alike,
+since the rule is timing-sensitive. Exactly one of three relations holds
+(INV-014):
+
+- **Exact.** The reported identity equals the configured exact spelling.
+- **Alias concretion.** The reported identity is the configured spelling
+  followed by `-` and a *dated snapshot qualifier* (`YYYYMMDD` or `YYYY-MM-DD`).
+  This is the same logical target named in its canonical concrete form, not a
+  mismatch: the daemon configures one family and the provider echoes which
+  pinned snapshot of that family served the request. Classification proceeds
+  normally and the concrete identity is recorded as sanitized evidence of what
+  actually served.
+- **Different lineage.** Anything else — another family, a delivery or speed
+  variant, or a family-name extension that is not a full date — is a
+  *substitution*: the provider served a model the daemon never authorized. This
+  is a distinct outcome, never collapsed into the alias case and never into an
+  ordinary provider failure. It fails the adapter stage closed today, because
+  the durable substitution provenance it would have to record does not exist yet
+  (see Open edges).
+
+The relation is derived from the configured target's own family, never from a
+table of known provider identifiers, so a newly published model needs no code
+change. Requiring a full date shape — rather than any trailing segment — is what
+keeps a *version* extension of the same family name from being read as a
+snapshot: against a configured `claude-opus-4`, `claude-opus-4-5` extends the
+family by one digit and stays a different lineage, while
+`claude-haiku-4-5-20251001` against a configured `claude-haiku-4-5` is the same
+lineage made concrete.
+
+A provider that documents its own substitution signal feeds that rule rather
+than bypassing it: the Anthropic adapter recognizes the server-side `fallback`
+content block, reports the model it names as continuing the turn through the
+ordinary reported-identity fact, and refuses to treat the response as completion
+material at all ([runtime-substrate](runtime-substrate.md)). Two guarantees
+follow, and only two. The response can never complete as the resolved target's
+output, whatever the block names. And when the block names another lineage — the
+case a real server-side fallback produces, including the sticky follow-up turns
+that carry no block but do report the substituting identity — the relation above
+classifies it as a substitution. A block that names the configured target itself
+is a provider self-contradiction: it still cannot complete, but it classifies as
+ambiguity rather than substitution, because the substitution classification is
+carried by the identity and no durable marker-only evidence exists to carry it
+(see Open edges).
+
+### Operator diagnostics
+
+Every classified outcome and every fail-closed bridge defect carries a stable,
+sanitized cause code alongside the shared
+[operator failure class](runtime-substrate.md#operator-failure-taxonomy): the
+class says how bad the failure is, the cause code says what happened. The codes
+are fixed tokens — provider response text, request or response bodies,
+credential material, and user content can never reach one (INV-035) — and the
+runtime's own exhaustive `ProviderErrorKind` classification is carried verbatim
+rather than restated, so the adapter taxonomy and the operator vocabulary cannot
+drift apart. A provider-reported identity retained for diagnostics is
+credential-redacted by the adapter and length-bounded by the bridge before it
+can reach a log line. The bridge emits the cause code for each fail-closed
+defect, each non-completing classification, each accepted alias concretion, and
+each trustworthy capability-preparation failure — the pre-send outcome the
+application commits as `KnownFailed`, whose closed
+`UnsupportedOperation`/`CredentialUnavailable`/`CredentialUnusable` vocabulary
+maps to tokens without its adapter-rendered detail text. A substitution
+additionally carries the bounded identity that actually served, so an operator
+can name the model the provider used. The runtime crates themselves remain
+logging-free ([runtime-substrate](runtime-substrate.md)).
 
 ## Terminal outcomes
 
@@ -393,7 +466,7 @@ was prevented.
 
 ## Crash, restart, and supervision
 
-hubd (`apps/hubd/src/lib.rs`, `main.rs`) wraps execution in
+signalboxd (`apps/signalboxd/src/lib.rs`, `main.rs`) wraps execution in
 `FatalExecutionSupervisor`: a post-activation stage failure — after at most one
 same-incarnation reconciliation pass when retained evidence exists — raises a
 fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
@@ -433,18 +506,26 @@ roles), the in-process gate, and `RuntimeModelCallProvider` over the Anthropic
 runtime, with the domain target catalog and runtime model catalog built from one
 versioned static configuration file and a reread credential file
 ([configuration-and-credentials](configuration-and-credentials.md)). The
-`signalbox-debug` binary (`apps/hubd/src/bin/signalbox-debug.rs`) drives one
-session through the real scheduler and PostgreSQL path with either a
+`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
+one session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
 prints the semantic transcript; it is deliberately not the client protocol.
 
 ## Open edges
 
-- Provider-target mismatch evidence (the designed `ProviderTargetEvidence`,
+- Durable provider-target evidence (the designed `ProviderTargetEvidence`,
   mismatch-selects-`KnownFailed`, and post-completion invalidation) is
-  unimplemented; the adapter fails closed with an operator error, so a
-  mismatched call is classified `Ambiguous` by restart rather than `KnownFailed`
-  live.
+  unimplemented. Three consequences: an accepted alias concretion records the
+  concrete served identity only as operator diagnostics, not as a durable
+  per-call provenance row; a substitution fails closed with an operator error,
+  so a substituted call is classified `Ambiguous` by restart rather than
+  `KnownFailed` live; and substitution is carried entirely by the reported
+  identity, so a provider fallback marker naming the configured target itself
+  classifies as ambiguity. Carrying the marker as typed evidence in its own
+  right would add a provider-neutral runtime-vocabulary variant that both
+  adapters would have to construct and redact, and is routed through the
+  provider provenance schema in
+  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Unstopped ambiguity recovery is a parked state only: no owner decision,
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,

@@ -18,13 +18,14 @@ const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
     AuthorizedModelCall, CompletedModelCallIdentities, ContextFrontierId,
-    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker, ImportedText,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
-    RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn,
+    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DirectModelSelection,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
+    ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
+    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
+    PreparedModelCallRequest, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
+    SessionConfigurationDefaultsVersion, SessionId, StopRequestedModelCallTurn,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolApprovalDecision,
     ToolAttemptEnd, ToolDenialReason, ToolExecutionError, ToolRequest, ToolRequestId,
     ToolResponsePartIdentity, ToolResultContent, ToolRoundModelCallIdentities, TurnAttemptId,
@@ -59,6 +60,15 @@ impl ModelCallCredentialReference {
 /// preserves the provenance of entries inherited across sessions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelConversationMessage {
+    /// Injected session event declaring the model identity newly in force.
+    ModelIdentityChanged {
+        /// The source-qualified semantic entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The immutable defaults epoch bound by the starting turn.
+        defaults_version: SessionConfigurationDefaultsVersion,
+        /// The exact direct model identity newly selected.
+        selected: DirectModelSelection,
+    },
     /// Exact accepted-input origin content rendered with the user role.
     User {
         /// The source-qualified semantic entry being rendered.
@@ -173,6 +183,15 @@ fn render_frontier_messages<'a>(
                 content: content.clone(),
             }),
             SemanticTranscriptEntryPayload::Imported { .. } => {}
+            SemanticTranscriptEntryPayload::ModelIdentityChanged {
+                defaults_version,
+                selected,
+                ..
+            } => messages.push(ModelConversationMessage::ModelIdentityChanged {
+                source,
+                defaults_version: *defaults_version,
+                selected: *selected,
+            }),
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 let content = origin_content(*accepted_input).ok_or(
@@ -2126,12 +2145,17 @@ mod tests {
         .reconstitute()
         .expect("fixture scheduling projection is complete")
         .prepare_earliest_queued_activation(AcceptedInputTurnActivationIdentities::new(
+            identity(99, SemanticTranscriptEntryId::from_uuid),
             identity(6, SemanticTranscriptEntryId::from_uuid),
             identity(7, ContextFrontierId::from_uuid),
             identity(8, TurnAttemptId::from_uuid),
         ))
         .expect("the sole queued fixture turn is eligible");
-        let (active_turn, origin_entry, starting_snapshot) = activation.into_parts();
+        let (active_turn, starting_entries, starting_snapshot) = activation.into_parts();
+        let origin_entry = starting_entries
+            .last()
+            .expect("fixture activation carries its origin")
+            .clone();
         let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
             direct,
             ResolvedProviderTarget::naming(identity(9, ProviderModelIdentity::from_uuid)),
