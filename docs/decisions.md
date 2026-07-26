@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Allowlist the Codex subprocess environment
+
+**Context.** A subprocess inherits its parent's complete environment by default.
+The Codex wrapper needs the operator-selected subscription-login location,
+ordinary process paths, locale, certificate, and proxy configuration, but
+passing unrelated service variables would expose ambient capabilities to the
+provider process. Clearing every variable would also make the CLI's own login
+and network configuration unreliable.
+
+**Decision.** Clear the environment for each Codex spawn, then copy only the
+named home and Codex-home paths, executable and temporary paths, XDG paths,
+locale and terminal settings, certificate paths, and proxy settings listed by
+the adapter. Never enumerate, retain, diagnose, or pass any other parent
+variable. Keep filesystem authority separate: this subprocess boundary supplies
+the CLI's documented read-only sandbox and working root, while stronger host
+isolation belongs to later composition.
+
+**Rejected alternatives.** Inheriting the complete service environment exposes
+unrelated secrets and capabilities. An empty environment can disconnect the CLI
+from the subscription login it exclusively owns and from required network
+configuration. Claiming a filesystem allowlist that the wrapped CLI does not
+enforce would overstate the adapter's authority.
+
+**Affects.** The Codex CLI provider section of
+[runtime-substrate](spec/runtime-substrate.md) and
+`crates/model-runtime-codex-cli`.
+
 ## 2026-07-25 — Anchor subprocess dispatch at one process spawn
 
 **Context.** INV-025/026 prohibited hidden repeat sends around one authorized

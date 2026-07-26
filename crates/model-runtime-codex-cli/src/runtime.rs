@@ -21,6 +21,33 @@ use crate::event::EventDecoder;
 use crate::translate::{TranslationError, translate};
 use crate::wire::OUTPUT_SCHEMA;
 
+const CODEX_ENVIRONMENT_ALLOWLIST: &[&str] = &[
+    "ALL_PROXY",
+    "CODEX_HOME",
+    "COLORTERM",
+    "HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NO_PROXY",
+    "PATH",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
+
 /// Codex CLI protocol snapshot covered by this adapter's offline fixtures.
 ///
 /// Composition must select this executable version before wiring the adapter;
@@ -282,6 +309,7 @@ async fn execute_process<C: Clone + Send + Sync>(
 ) -> TerminalEvidence {
     let mut command = Command::new(&prepared.executable);
     command
+        .env_clear()
         .arg("exec")
         .arg("--json")
         .arg("--ephemeral")
@@ -303,6 +331,11 @@ async fn execute_process<C: Clone + Send + Sync>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for name in CODEX_ENVIRONMENT_ALLOWLIST {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     #[cfg(unix)]
     command.process_group(0);
 
@@ -318,7 +351,6 @@ async fn execute_process<C: Clone + Send + Sync>(
             });
         }
     };
-    let process_group_id = child.id();
     let deadline = tokio::time::Instant::now() + prepared.exchange_timeout;
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.start_kill();
@@ -437,39 +469,42 @@ async fn execute_process<C: Clone + Send + Sync>(
         }
     }
 
+    let mut stderr_task = stderr_task;
     let terminal_observed = decoder.terminal_observed();
+    let stderr = tokio::select! {
+        biased;
+        result = &mut stderr_task => stderr_result(result),
+        () = &mut *cancellation => {
+            if !terminal_observed {
+                interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+                abort_stderr_task(stderr_task).await;
+                return decoder.boundary_loss(LossCause::CancellationRequested);
+            }
+            let cleanup_grace = prepared
+                .interrupt_grace
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            interrupt_then_kill(&mut child, cleanup_grace).await;
+            abort_stderr_task(stderr_task).await;
+            "Codex stderr was unavailable after cancellation during process cleanup".to_string()
+        },
+        () = tokio::time::sleep_until(deadline) => {
+            force_kill(&mut child).await;
+            abort_stderr_task(stderr_task).await;
+            "Codex stderr was unavailable at the process-cleanup deadline".to_string()
+        },
+    };
     let status = tokio::select! {
         biased;
         status = child.wait() => status,
         () = &mut *cancellation, if !terminal_observed => {
             interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
-            abort_stderr_task(stderr_task).await;
             return decoder.boundary_loss(LossCause::CancellationRequested);
         },
         () = tokio::time::sleep_until(deadline) => {
             force_kill(&mut child).await;
-            abort_stderr_task(stderr_task).await;
             return decoder.boundary_loss(LossCause::TimedOut(TransportFacts::new(
                 "Codex CLI process exceeded its exchange timeout",
             )));
-        },
-    };
-    let mut stderr_task = stderr_task;
-    let stderr = tokio::select! {
-        biased;
-        result = &mut stderr_task => stderr_result(result),
-        () = &mut *cancellation => {
-            let cleanup_grace = prepared
-                .interrupt_grace
-                .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
-            interrupt_group_then_kill(process_group_id, cleanup_grace).await;
-            abort_stderr_task(stderr_task).await;
-            "Codex stderr was unavailable after cancellation during process cleanup".to_string()
-        },
-        () = tokio::time::sleep_until(deadline) => {
-            kill_process_group(process_group_id);
-            abort_stderr_task(stderr_task).await;
-            "Codex stderr was unavailable at the process-cleanup deadline".to_string()
         },
     };
 
@@ -572,10 +607,7 @@ async fn interrupt_then_kill(child: &mut Child, grace: Duration) {
             && let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32)
         {
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::INT);
-            if matches!(tokio::time::timeout(grace, child.wait()).await, Ok(Ok(_))) {
-                kill_process_group(Some(raw_pid));
-                return;
-            }
+            tokio::time::sleep(grace).await;
         }
     }
     force_kill(child).await;
@@ -585,19 +617,6 @@ async fn force_kill(child: &mut Child) {
     kill_process_group(child.id());
     let _ = child.start_kill();
     let _ = child.wait().await;
-}
-
-async fn interrupt_group_then_kill(process_group_id: Option<u32>, grace: Duration) {
-    #[cfg(unix)]
-    if let Some(raw_pid) = process_group_id
-        && let Some(pid) = rustix::process::Pid::from_raw(raw_pid as i32)
-    {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::INT);
-        tokio::time::sleep(grace).await;
-    }
-    #[cfg(not(unix))]
-    let _ = grace;
-    kill_process_group(process_group_id);
 }
 
 fn kill_process_group(process_group_id: Option<u32>) {

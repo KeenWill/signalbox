@@ -200,14 +200,13 @@ impl<C: Clone> EventDecoder<C> {
         }
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
-            Err(error) => {
+            Err(_) => {
                 return boundary_loss(
                     self.exchange,
                     self.usage,
                     LossCause::ResponseUnintelligible {
-                        detail: format!(
-                            "last agent message does not match the response envelope: {error}"
-                        ),
+                        detail: "last agent message does not match the response envelope"
+                            .to_string(),
                     },
                 );
             }

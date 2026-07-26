@@ -10,11 +10,12 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionFinish, CredentialReference, DeliveryMode,
-    LossCause, ModelOperation, ModelRuntime, Observation, ObservationFact, PreparationFailure,
-    PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget, StreamInterruption,
-    StructuredOutputContract, TerminalEvidence, TokenUsage, ToolChoice, ToolDefinition, ToolName,
-    decode_structured,
+    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
+    CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
+    Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
+    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredOutputContract,
+    TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition,
+    ToolName, decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -151,6 +152,24 @@ async fn an_undecodable_last_agent_message_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause)
             .contains("last agent message")
+    );
+}
+
+#[tokio::test]
+async fn credential_shaped_envelope_errors_are_content_silent() {
+    let result = execute_scenario(
+        "credential_envelope_error",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let detail = response_unintelligible(&boundary_loss(&result.evidence).cause);
+
+    assert!(!detail.contains(fixtures::SENSITIVE_ENVELOPE_TOKEN));
+    assert_eq!(
+        detail,
+        "last agent message does not match the response envelope"
     );
 }
 
@@ -619,12 +638,34 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
 
 #[tokio::test]
 async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
-    let result = execute_scenario_with_timeout(
-        "inherited_stderr",
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let result = execute_operation_in_directory(
+        temporary.path(),
+        operation(
+            "inherited_stderr",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+        CancellationSignal::never(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+    assert_recorded_process_exited(temporary.path().join("fake-codex-inherited-stderr-pid"));
+}
+
+#[tokio::test]
+async fn subprocess_environment_is_allowlisted() {
+    let result = execute_scenario(
+        "filtered_environment",
         DeliveryMode::Buffered,
         OperationShape::Text,
         CancellationSignal::never(),
-        Duration::from_secs(1),
     )
     .await;
 
@@ -722,6 +763,34 @@ async fn undeclared_named_choice_fails_before_spawn() {
     );
 
     assert!(unsupported_detail(failure).contains("no declared tool"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn malformed_replayed_tool_json_is_unsupported_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.messages = vec![ConversationMessage {
+        role: ConversationRole::Assistant,
+        parts: vec![MessagePart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("call-invalid-json"),
+            name: ToolName::new(fixtures::TOOL_NAME),
+            arguments_json: "{not json".to_string(),
+        })],
+    }];
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("not valid JSON"));
     assert_eq!(spawn_count(temporary.path()), 0);
 }
 
@@ -853,19 +922,29 @@ async fn execute_operation_with_timeout(
     exchange_timeout: Duration,
 ) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
-    let runtime = runtime_with_timeout(temporary.path(), fake_cli(), exchange_timeout);
+    execute_operation_in_directory(temporary.path(), operation, cancellation, exchange_timeout)
+        .await
+}
+
+async fn execute_operation_in_directory(
+    directory: &Path,
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+    exchange_timeout: Duration,
+) -> ExecutionResult {
+    let runtime = runtime_with_timeout(directory, fake_cli(), exchange_timeout);
     let prepared = prepare(&runtime, operation).await;
     let mut observations = Vec::new();
     let report = runtime
         .execute(prepared, &mut observations, cancellation)
         .await;
-    let argv = read_optional(temporary.path().join("fake-codex-argv"));
-    let prompt = read_optional(temporary.path().join("fake-codex-prompt"));
+    let argv = read_optional(directory.join("fake-codex-argv"));
+    let prompt = read_optional(directory.join("fake-codex-prompt"));
 
     ExecutionResult {
         evidence: report.evidence,
         observations,
-        spawns: spawn_count(temporary.path()),
+        spawns: spawn_count(directory),
         argv,
         prompt,
     }
@@ -977,6 +1056,27 @@ fn spawn_count(directory: &Path) -> usize {
 fn read_optional(path: std::path::PathBuf) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
+
+#[cfg(unix)]
+fn assert_recorded_process_exited(path: std::path::PathBuf) {
+    let raw_pid = std::fs::read_to_string(path)
+        .expect("the fake CLI records its inherited-stderr descendant")
+        .parse::<i32>()
+        .expect("the recorded descendant identity is a process id");
+    let pid =
+        rustix::process::Pid::from_raw(raw_pid).expect("the descendant process id is nonzero");
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while rustix::process::test_kill_process(pid).is_ok() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        rustix::process::test_kill_process(pid).is_err(),
+        "the inherited-stderr descendant remains alive after process-group cleanup"
+    );
+}
+
+#[cfg(not(unix))]
+fn assert_recorded_process_exited(_path: std::path::PathBuf) {}
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
     let watcher = tokio::spawn(async move {

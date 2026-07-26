@@ -17,6 +17,7 @@ pub const SENSITIVE_REFRESH_TOKEN: &str = "sensitive-refresh";
 pub const SENSITIVE_STDERR_TOKEN: &str = "sensitive-stderr";
 pub const SENSITIVE_TOOL_ID_ONE: &str = "sk-sensitive-call-one";
 pub const SENSITIVE_TOOL_ID_TWO: &str = "API_KEY=sensitive-call-two";
+pub const SENSITIVE_ENVELOPE_TOKEN: &str = "authorization=Bearer sensitive-envelope-token";
 #[allow(
     dead_code,
     reason = "process-only expected values share this module with the fake executable"

@@ -371,9 +371,15 @@ one-shot capability without starting a process. Execution consumes it as exactly
 one `codex exec --json --ephemeral` spawn, passes the full rendered frontier on
 stdin, requires an absolute configured executable path, selects the exact
 resolved model, ignores user configuration and rule files, and uses the
-read-only CLI sandbox. It neither resumes nor persists a Codex thread. Why: a
-fresh ephemeral invocation keeps provider session state out of memory and makes
-the caller's complete handed context the sole semantic input.
+read-only CLI sandbox. Before spawn it clears the parent environment, then
+copies only its explicit home/Codex-home, executable and temporary path, XDG,
+locale/terminal, certificate, and proxy allowlist; unrelated service variables
+do not reach the CLI. It neither resumes nor persists a Codex thread. Why: a
+fresh ephemeral invocation keeps provider session state out of memory, and the
+caller supplies the complete conversation frontier instead of an in-memory
+resume pointer. The read-only sandbox and working root are the adapter's
+filesystem boundary; stronger host isolation is later composition work, not an
+adapter claim.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
@@ -390,15 +396,16 @@ never completion.
 `turn.completed` is success evidence only when the last completed agent-message
 item decodes as the adapter's response envelope and satisfies the declared tool
 and structured-output constraints. The decoded envelope is checked against the
-shared JSON nesting bound independently of the escaped outer event. The envelope
-distinguishes completion from refusal. Buffered delivery retains its content
-without deltas; streamed delivery emits bounded CLI reasoning items and the
-final envelope content as ordered deltas before the same terminal evidence. Tool
-argument JSON remains byte-verbatim when it is credential-shape clean. Usage
-comes only from `turn.completed`; an omitted cache counter remains unreported
-rather than becoming a reported zero. Preparation rejects a zero output-token
-limit, non-finite sampling values, temperature outside zero through two, and
-top-p outside zero through one.
+shared JSON nesting bound independently of the escaped outer event; envelope
+decode errors are content-silent. The envelope distinguishes completion from
+refusal. Buffered delivery retains its content without deltas; streamed delivery
+emits bounded CLI reasoning items and the final envelope content as ordered
+deltas before the same terminal evidence. Tool argument JSON remains
+byte-verbatim when it is credential-shape clean. Usage comes only from
+`turn.completed`; an omitted cache counter remains unreported rather than
+becoming a reported zero. Preparation rejects malformed replayed tool-call JSON,
+a zero output-token limit, non-finite sampling values, temperature outside zero
+through two, and top-p outside zero through one as unsupported caller input.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Cancellation before spawn is proven unsent.
@@ -412,9 +419,10 @@ the decoder drains only the current bounded reader batch before synchronously
 rechecking control, so continuously ready stdout cannot starve it. Once a
 provider terminal marker is observed, a later cancellation cannot replace that
 definitive evidence, but the process deadline continues to govern exit and
-cleanup. The adapter also bounds stderr cleanup after the direct child exits and
-terminates the original process group when an inherited stderr handle outlives
-the deadline. The offline test binary exercises all process and evidence paths
+cleanup. The adapter also bounds stderr cleanup before reaping the direct child
+and terminates the original process group when an inherited stderr handle
+outlives the deadline, so cleanup never signals through a reusable process
+identity. The offline test binary exercises all process and evidence paths
 without a live CLI or network.
 
 ## Credential-access boundary
@@ -456,9 +464,11 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   text and JSON are recursively scrubbed by credential-bearing member names and
   credential token shapes before observations or evidence leave the crate;
   credential-bearing authorization and cookie header shapes consume their whole
-  line value. Why: subscription authentication remains wholly inside the
-  intended CLI control surface while credential-shaped reflection still fails
-  closed.
+  line value; quoted credential values consume through their matching unescaped
+  quote, and JSON identity/session-token members are included. Envelope-decode
+  errors are content-silent rather than embedding a rejected provider value.
+  Why: subscription authentication remains wholly inside the intended CLI
+  control surface while credential-shaped reflection still fails closed.
 
 ## Operator failure taxonomy
 

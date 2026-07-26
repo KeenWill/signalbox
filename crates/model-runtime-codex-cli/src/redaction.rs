@@ -103,6 +103,8 @@ fn credential_key(key: &str) -> bool {
         "apikey",
         "accesstoken",
         "refreshtoken",
+        "idtoken",
+        "sessiontoken",
         "credential",
         "password",
         "secret",
@@ -124,21 +126,44 @@ fn redact_after_marker(text: &str, marker: &str) -> String {
             .map(char::len_utf8)
             .sum::<usize>();
         output.push_str(&remaining[value_start..value_start + whitespace]);
-        let quoted = remaining[value_start + whitespace..].starts_with(['"', '\'']);
-        if quoted {
+        let opening_quote = remaining[value_start + whitespace..]
+            .chars()
+            .next()
+            .filter(|character| matches!(character, '"' | '\''));
+        if opening_quote.is_some() {
             output.push_str(&remaining[value_start + whitespace..value_start + whitespace + 1]);
         }
         output.push_str(REDACTED);
-        let token_start = value_start + whitespace + usize::from(quoted);
-        let value_end = remaining[token_start..]
-            .find(|character: char| {
-                character.is_whitespace() || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
-            })
-            .map_or(remaining.len(), |length| token_start + length);
+        let token_start = value_start + whitespace + usize::from(opening_quote.is_some());
+        let value_end = opening_quote.map_or_else(
+            || {
+                remaining[token_start..]
+                    .find(|character: char| {
+                        character.is_whitespace()
+                            || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
+                    })
+                    .map_or(remaining.len(), |length| token_start + length)
+            },
+            |quote| quoted_value_end(remaining, token_start, quote),
+        );
         remaining = &remaining[value_end..];
     }
     output.push_str(remaining);
     output
+}
+
+fn quoted_value_end(text: &str, value_start: usize, quote: char) -> usize {
+    let mut escaped = false;
+    for (offset, character) in text[value_start..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return value_start + offset;
+        }
+    }
+    text.len()
 }
 
 fn redact_line_value(text: &str, marker: &str) -> String {
@@ -201,6 +226,11 @@ mod tests {
     const COOKIE_VALUE_ONE: &str = "sensitive-cookie-one";
     const COOKIE_VALUE_TWO: &str = "sensitive-cookie-two";
     const JWT_SHAPED_VALUE: &str = "eyJsensitive.jwt.value";
+    const ID_TOKEN_VALUE: &str = "sensitive-id-token";
+    const SESSION_TOKEN_VALUE: &str = "sensitive-session-token";
+    const QUOTED_SECRET_VALUE: &str = "sensitive value with spaces";
+    const ESCAPED_QUOTED_SECRET_VALUE: &str = r#"sensitive \"quoted\" value"#;
+    const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
 
     /// INV-035: credential-shaped text never leaves the CLI adapter.
     #[test]
@@ -232,12 +262,31 @@ mod tests {
     #[test]
     fn inv_035_redacts_nested_credential_members() {
         let fixture = format!(
-            r#"{{"safe":"kept","nested":{{"API_KEY":"{NESTED_CREDENTIAL_VALUE}","apiKey":"{NESTED_CREDENTIAL_VALUE}","accessToken":"{NESTED_CREDENTIAL_VALUE}","refreshToken":"{NESTED_CREDENTIAL_VALUE}"}}}}"#
+            r#"{{"safe":"kept","nested":{{"API_KEY":"{NESTED_CREDENTIAL_VALUE}","apiKey":"{NESTED_CREDENTIAL_VALUE}","accessToken":"{NESTED_CREDENTIAL_VALUE}","refreshToken":"{NESTED_CREDENTIAL_VALUE}","id_token":"{ID_TOKEN_VALUE}","sessionToken":"{SESSION_TOKEN_VALUE}"}}}}"#
         );
         let output = redact_json(&fixture);
 
         assert!(!output.contains(NESTED_CREDENTIAL_VALUE));
+        assert!(!output.contains(ID_TOKEN_VALUE));
+        assert!(!output.contains(SESSION_TOKEN_VALUE));
         assert!(output.contains(r#""safe":"kept""#));
+    }
+
+    /// INV-035: quoted credential-shaped values are removed as one value.
+    #[test]
+    fn inv_035_redacts_complete_quoted_values() {
+        let fixture = format!(
+            "secret: \"{QUOTED_SECRET_VALUE}\"\n\
+             password: \"{ESCAPED_QUOTED_SECRET_VALUE}\"\n\
+             credential: \"{MULTILINE_SECRET_VALUE}\"\n\
+             safe-after-secrets"
+        );
+        let output = redact_text(&fixture);
+
+        assert!(!output.contains(QUOTED_SECRET_VALUE));
+        assert!(!output.contains(ESCAPED_QUOTED_SECRET_VALUE));
+        assert!(!output.contains(MULTILINE_SECRET_VALUE));
+        assert!(output.contains("safe-after-secrets"));
     }
 
     #[test]

@@ -149,7 +149,7 @@ fn render_part(part: &MessagePart) -> Result<Value, TranslationError> {
             "type": "tool_call",
             "id": call.id.as_str(),
             "name": call.name.as_str(),
-            "arguments": parse_raw_json(&call.arguments_json)?,
+            "arguments": parse_replayed_tool_json(&call.arguments_json)?,
         })),
         MessagePart::ToolResult(result) => Ok(json!({
             "type": "tool_result",
@@ -172,6 +172,14 @@ fn parse_raw_json(raw: &str) -> Result<Value, TranslationError> {
     serde_json::from_str(raw).map_err(|error| {
         TranslationError::Defect(PreparationDefect::SerializationFailed {
             detail: error.to_string(),
+        })
+    })
+}
+
+fn parse_replayed_tool_json(raw: &str) -> Result<Value, TranslationError> {
+    serde_json::from_str(raw).map_err(|error| {
+        TranslationError::Failure(PreparationFailure::UnsupportedOperation {
+            detail: format!("replayed tool-call arguments are not valid JSON: {error}"),
         })
     })
 }

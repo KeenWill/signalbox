@@ -61,6 +61,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_message("message-last", "not a response envelope");
             completed();
         }
+        "credential_envelope_error" => {
+            envelope(&format!(
+                r#"{{"outcome":"{}","text":"","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_ENVELOPE_TOKEN
+            ));
+            completed();
+        }
         "deep_agent_message" => {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-deep","name":"{}","arguments":{}}}]}}"#,
@@ -158,13 +165,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed();
-            std::process::Command::new("sh")
+            let descendant = std::process::Command::new("sh")
                 .arg("-c")
                 .arg("sleep 60")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
                 .spawn()?;
+            std::fs::write(
+                "fake-codex-inherited-stderr-pid",
+                descendant.id().to_string(),
+            )?;
+        }
+        "filtered_environment" => {
+            if std::env::var_os("PWD").is_some() || std::env::var_os("PATH").is_none() {
+                failed("subprocess environment was not filtered");
+            } else {
+                envelope(&format!(
+                    r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                    fixtures::BUFFERED_ANSWER
+                ));
+                completed();
+            }
         }
         "stderr_redaction" => {
             eprintln!(
