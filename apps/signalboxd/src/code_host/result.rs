@@ -51,7 +51,10 @@ fn valid_url(value: &str) -> bool {
 }
 
 fn valid_path(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_RESULT_PATH_BYTES && !value.contains('\0')
+    !value.is_empty()
+        && !value.starts_with('/')
+        && value.len() <= MAX_RESULT_PATH_BYTES
+        && !value.contains('\0')
 }
 
 /// Typed result of `change_request_summary`.

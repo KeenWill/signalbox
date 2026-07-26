@@ -980,6 +980,27 @@ mod tests {
         assert_eq!(parse_changed_file(&value), Ok((expected_file, None)));
     }
 
+    /// Paths returned by GitHub remain repository-relative across both result
+    /// shapes that expose them.
+    #[test]
+    fn returned_paths_reject_absolute_values() {
+        let absolute_path = String::from("/src/lib.rs");
+        let changed_file =
+            ChangedFile::try_new(absolute_path.clone(), String::from("modified"), 1, 0);
+        let review_thread = ReviewThread::try_new(ReviewThreadFields {
+            id: String::from("PRRT_fixture"),
+            resolved: false,
+            outdated: false,
+            path: absolute_path,
+            line: Some(1),
+            comments: Vec::new(),
+            comments_truncated: false,
+        });
+
+        assert_eq!(changed_file, None);
+        assert_eq!(review_thread, None);
+    }
+
     /// A GraphQL mutation error cannot be mistaken for a definitive
     /// no-mutation acknowledgement.
     #[test]
