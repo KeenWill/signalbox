@@ -534,7 +534,8 @@ fn decode_arguments(
         .filter(|value| value.len() <= MAX_URL_BYTES)
         .ok_or(InvalidWebFetchArguments)?;
     let url = Url::parse(supplied).map_err(|_| InvalidWebFetchArguments)?;
-    if !matches!(url.scheme(), "http" | "https")
+    if url.as_str().len() > MAX_URL_BYTES
+        || !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -633,6 +634,23 @@ mod tests {
             ),
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
+    }
+
+    /// Typed decoding applies the URL bound to the final serialized URL, so
+    /// percent encoding cannot expand a short supplied value past the cap.
+    #[test]
+    fn web_fetch_typed_decode_rejects_percent_encoded_url_over_cap() {
+        let supplied_url = format!(
+            "https://example.com/{}",
+            "\u{00e9}".repeat(MAX_URL_BYTES / 4)
+        );
+        let supplied = serde_json::json!({"url": supplied_url}).to_string();
+
+        assert!(supplied_url.len() <= MAX_URL_BYTES);
+        assert_eq!(
+            decode_arguments(&arguments(&supplied)),
+            Err(InvalidWebFetchArguments)
+        );
     }
 
     /// Typed decoding rejects a direct loopback destination before execution.
