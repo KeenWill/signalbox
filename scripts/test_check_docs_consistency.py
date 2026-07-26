@@ -1315,6 +1315,122 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification", "spec-verification"],
         )
 
+    def test_scoped_verification_tail_may_wrap_inside_a_block_quote(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "> Verified through PR #12 (`agent/example`; the refusal path\n"
+            "> in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_scoped_verification_tail_may_not_cross_a_quoted_blank_line(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "> Verified through PR #12 (`agent/example`; the refusal path\n"
+            ">\n"
+            "> in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_scoped_verification_tail_may_not_cross_a_quoted_list_item(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "> - Verified through PR #12 (`agent/example`; the refusal path\n"
+            "> - in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_scoped_verification_tail_may_not_cross_a_nested_quoted_blank_line(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "> > Verified through PR #12 (`agent/example`; the refusal path\n"
+            "> >\n"
+            "> > in `production_connection_options` under src/tests.rs).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_empty_scope_tail_is_rejected(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`;).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_whitespace_only_scope_tail_is_rejected(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`;   ).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification", "spec-verification"],
+        )
+
+    def test_single_character_scope_tail_parses(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/example`; x).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_inline_verification_text_does_not_satisfy_reference(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
             "# Example\n\n"
