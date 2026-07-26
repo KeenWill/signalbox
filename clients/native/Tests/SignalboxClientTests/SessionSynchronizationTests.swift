@@ -353,6 +353,44 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testINV033UnadmittedCurrentModelCallFieldFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.currentModelCallWithUnadmittedField()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testINV033UnadmittedTerminalModelCallFieldFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.terminalModelCallWithUnadmittedField()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testINV033FailedTurnWithCallWithoutAttemptFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -1585,6 +1623,49 @@ private enum SynchronizationFixture {
           "current_model_call":{
             "model_call_id":"\(modelCall)",
             "state":{"type":"fixture_future_model_call_state"}
+          }
+        }
+      }
+      """
+    )
+  }
+
+  static func currentModelCallWithUnadmittedField() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_running",
+          "current_attempt_id":"44444444-4444-4444-8444-444444444444",
+          "current_model_call":{
+            "model_call_id":"\(modelCall)",
+            "state":{"type":"in_flight"},
+            "fixture_unadmitted":true
+          }
+        }
+      }
+      """
+    )
+  }
+
+  static func terminalModelCallWithUnadmittedField() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"failed",
+          "terminal_frontier_id":"\(frontier)",
+          "terminal_attempt_id":"44444444-4444-4444-8444-444444444444",
+          "terminal_model_call":{
+            "model_call_id":"\(modelCall)",
+            "disposition":"known_failed",
+            "fixture_unadmitted":true
           }
         }
       }

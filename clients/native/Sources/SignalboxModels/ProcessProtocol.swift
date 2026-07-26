@@ -709,9 +709,13 @@ public struct SignalboxFailedTerminalModelCall: Decodable, Equatable, Sendable {
   public let modelCallID: SignalboxCanonicalUUID
   public let disposition: SignalboxFailedModelCallDisposition
 
-  private enum CodingKeys: String, CodingKey {
-    case modelCallID = "model_call_id"
-    case disposition
+  public init(from decoder: Decoder) throws {
+    try SignalboxUntaggedPayload(from: decoder).rejectUnadmittedFields(
+      ["model_call_id", "disposition"],
+      decoder: decoder
+    )
+    modelCallID = try decoder.decode("model_call_id")
+    disposition = try decoder.decode("disposition")
   }
 }
 
@@ -724,9 +728,13 @@ public struct SignalboxCurrentModelCall: Decodable, Equatable, Sendable {
   public let modelCallID: SignalboxCanonicalUUID
   public let state: SignalboxCurrentModelCallState
 
-  private enum CodingKeys: String, CodingKey {
-    case modelCallID = "model_call_id"
-    case state
+  public init(from decoder: Decoder) throws {
+    try SignalboxUntaggedPayload(from: decoder).rejectUnadmittedFields(
+      ["model_call_id", "state"],
+      decoder: decoder
+    )
+    modelCallID = try decoder.decode("model_call_id")
+    state = try decoder.decode("state")
   }
 }
 
@@ -1302,6 +1310,38 @@ private struct SignalboxTaggedPayload: Decodable {
       .init(
         codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
         debugDescription: "Tagged object contains an unadmitted field."
+      )
+    )
+  }
+}
+
+/// The decoded members of a closed object that carries no `type` discriminator.
+///
+/// A tagged variant names its admitted fields through ``SignalboxTaggedPayload``
+/// once its discriminator selects the shape. A nested record such as
+/// `current_model_call` or `terminal_model_call` has one shape and no
+/// discriminator, so it names its admitted fields directly and rejects every
+/// other member rather than letting a synthesized decoder discard it.
+private struct SignalboxUntaggedPayload: Decodable {
+  let payload: [String: SignalboxJSONValue]
+
+  init(from decoder: Decoder) throws {
+    payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
+  }
+
+  func rejectUnadmittedFields(
+    _ admittedFields: Set<String>,
+    decoder: Decoder
+  ) throws {
+    guard
+      let field = payload.keys.sorted().first(where: { !admittedFields.contains($0) })
+    else {
+      return
+    }
+    throw DecodingError.dataCorrupted(
+      .init(
+        codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
+        debugDescription: "Closed object contains an unadmitted field."
       )
     )
   }
