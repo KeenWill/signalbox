@@ -193,6 +193,31 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential header split between streamed reasoning and a
+/// provider failure message keeps redacting through the value, not just
+/// through the marker: terminal failure evidence carries the stateful
+/// stream redaction, never a stateless re-redaction of the raw message.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_failure_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_failure",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+    let error = provider_error(&result.evidence);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some("[redacted]"),
+        "terminal failure evidence must carry the stateful stream redaction"
+    );
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn only_the_last_agent_message_is_decoded_as_the_terminal_envelope() {
     let result = execute_scenario(

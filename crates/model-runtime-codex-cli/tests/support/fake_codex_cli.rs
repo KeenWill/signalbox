@@ -107,6 +107,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "split_stream_authorization_before_failure" => {
+            reasoning("reason-split-authorization-failed", "Authorization:");
+            unrecoverable(&format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+        }
         "last_agent_message" => {
             agent_message("message-intermediate", "not a response envelope");
             envelope(&format!(

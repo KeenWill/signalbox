@@ -451,9 +451,12 @@ credential-shape clean. Caller JSON remains raw through serialization,
 preserving deep admitted values and their numeric lexemes. Buffered delivery
 retains its content without deltas; streamed delivery feeds raw bounded CLI
 reasoning and final-envelope text through the stateful redactor before emitting
-ordered deltas and the same terminal evidence. Usage comes only from
-`turn.completed`; an omitted cache counter remains unreported rather than
-becoming a reported zero.
+ordered deltas and the same terminal evidence. A provider failure message
+consults the same held lookbehind state before it enters provider-error
+evidence: a message that extends a held credential candidate, or that arrives
+during oversized-credential suppression, is suppressed whole rather than
+statelessly re-redacted. Usage comes only from `turn.completed`; an omitted
+cache counter remains unreported rather than becoming a reported zero.
 
 The pinned CLI exposes no argv, configuration, or subscription request controls
 for output-token ceiling, temperature, top-p, or stop sequences. This adapter is
