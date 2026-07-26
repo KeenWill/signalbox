@@ -71,6 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "split_stream_authorization_before_final_text" => {
+            reasoning("reason-split-authorization", "Authorization:");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
         "last_agent_message" => {
             agent_message("message-intermediate", "not a response envelope");
             envelope(&format!(
@@ -161,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "error_target_not_found" => failed("model not found"),
         "error_request_too_large" => failed("request too large"),
         "error_rate_limited" => failed("rate limit exceeded"),
-        "error_quota_exhausted" => failed("quota exhausted"),
+        "error_quota_exhausted" => failed("insufficient_quota"),
         "error_overloaded" => failed("provider overloaded"),
         "error_provider_internal" => failed("internal server error"),
         "error_unrecognized" => failed("future failure shape"),
@@ -174,6 +182,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }
         "malformed_event" => emit("{not-json"),
+        "reasoning_then_malformed_event" => {
+            reasoning("reason-before-malformed", fixtures::PENDING_PROGRESS_TEXT);
+            emit("{not-json");
+        }
         "malformed_known_lifecycle" => {
             emit(r#"{"type":"item.started"}"#);
             envelope(&format!(
@@ -193,9 +205,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             completed();
         }
         "redaction" => {
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"Bearer {}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":"{}"}}]}}"#,
+            let text = format!(
+                r#"Bearer {} and {{"client_secret":"{}"}}"#,
                 fixtures::SENSITIVE_OUTPUT_TOKEN,
+                fixtures::SENSITIVE_COMPOSITE_SECRET
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":"{}"}}]}}"#,
+                json_escape(&text),
                 fixtures::TOOL_NAME,
                 json_escape(&format!(
                     r#"{{"access_token":"{}","city":"Oslo"}}"#,

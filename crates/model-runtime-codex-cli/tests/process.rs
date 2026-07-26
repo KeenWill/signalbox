@@ -160,6 +160,24 @@ async fn inv_035_split_credential_before_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
+/// INV-035: a credential header split between reasoning and final text keeps
+/// redacting through the value, not just through the marker.
+#[tokio::test]
+async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
+    let result = execute_scenario(
+        "split_stream_authorization_before_final_text",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let streamed = streamed_provider_text(&result.observations);
+
+    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
+    assert!(streamed.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn only_the_last_agent_message_is_decoded_as_the_terminal_envelope() {
     let result = execute_scenario(
@@ -530,6 +548,29 @@ async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
 #[tokio::test]
 async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
+}
+
+#[tokio::test]
+async fn decoded_progress_is_flushed_before_a_later_event_fails() {
+    let result = execute_scenario(
+        "reasoning_then_malformed_event",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        provider_error(&result.evidence).kind,
+        ProviderErrorKind::Unrecognized
+    );
+    assert!(result.observations.iter().any(|observation| {
+        observation.fact
+            == ObservationFact::ThinkingDelta {
+                index: 0,
+                text: fixtures::PENDING_PROGRESS_TEXT.to_string(),
+            }
+    }));
 }
 
 #[tokio::test]
@@ -933,7 +974,45 @@ async fn inv_035_cli_output_is_credential_shape_redacted() {
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_OUTPUT_TOKEN));
     assert!(!diagnostic.contains(fixtures::SENSITIVE_REFRESH_TOKEN));
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
     assert!(diagnostic.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn synchronous_preparation_wins_over_ready_cancellation() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let _prepared = prepare_with_cancellation(
+        &runtime,
+        operation(
+            "buffered_completed",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+        CancellationSignal::already_cancelled(),
+    )
+    .await;
+
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+async fn prepare_with_cancellation(
+    runtime: &CodexCliRuntime,
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+) -> signalbox_model_runtime_codex_cli::CodexCliPreparedRequest<String> {
+    match runtime.prepare(operation, cancellation).await {
+        PreparationOutcome::Prepared(prepared) => prepared,
+        PreparationOutcome::Cancelled { .. } => {
+            panic!("synchronous offline preparation must win over cancellation")
+        }
+        PreparationOutcome::Failed { failure, .. } => {
+            panic!("offline preparation failed: {failure:?}")
+        }
+        PreparationOutcome::Defect { defect, .. } => {
+            panic!("offline preparation found a defect: {defect:?}")
+        }
+    }
 }
 
 /// INV-035: distinct credential-shaped provider ids remain distinct without

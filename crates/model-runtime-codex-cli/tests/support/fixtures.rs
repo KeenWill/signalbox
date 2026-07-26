@@ -5,6 +5,7 @@ pub const STREAM_ERROR_MESSAGE: &str = "quota exhausted for the active plan";
 pub const BUFFERED_ANSWER: &str = "buffered answer";
 pub const STREAMED_ANSWER: &str = "streamed answer";
 pub const REASONING_TEXT: &str = "considering";
+pub const PENDING_PROGRESS_TEXT: &str = "harmless";
 pub const REFUSAL_TEXT: &str = "request refused";
 pub const TOOL_NAME: &str = "lookup";
 pub const TOOL_ARGUMENTS: &str = r#"{ "city" : "Oslo", "limit": 3 }"#;
@@ -20,6 +21,8 @@ pub const SENSITIVE_TOOL_ID_ONE: &str = "sk-sensitive-call-one";
 pub const SENSITIVE_TOOL_ID_TWO: &str = "API_KEY=sensitive-call-two";
 pub const SENSITIVE_ENVELOPE_TOKEN: &str = "authorization=Bearer sensitive-envelope-token";
 pub const SENSITIVE_SPLIT_STREAM_TOKEN: &str = "sk-sensitive-stream-token";
+pub const SENSITIVE_SPLIT_AUTHORIZATION: &str = "sensitive-split-authorization";
+pub const SENSITIVE_COMPOSITE_SECRET: &str = "sensitive-composite-secret";
 #[allow(
     dead_code,
     reason = "process-only expected values share this module with the fake executable"

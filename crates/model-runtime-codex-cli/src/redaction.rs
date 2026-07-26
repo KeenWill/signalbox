@@ -44,7 +44,7 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
 const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
 
 pub(crate) fn redact_text(text: &str) -> String {
-    let mut sanitized = text.to_string();
+    let mut sanitized = redact_json_credential_values(text);
     for marker in LINE_CREDENTIAL_MARKERS {
         sanitized = redact_line_value(&sanitized, marker);
     }
@@ -55,6 +55,61 @@ pub(crate) fn redact_text(text: &str) -> String {
         sanitized = redact_prefixed_token(&sanitized, prefix);
     }
     sanitized
+}
+
+fn redact_json_credential_values(text: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some((_key_start, value_start)) = next_json_credential_value(remaining) {
+        output.push_str(&remaining[..value_start]);
+        let (prefix, token_start, value_end) =
+            credential_value_bounds(remaining, value_start, ValueTermination::Token);
+        output.push_str(prefix);
+        output.push_str(REDACTED);
+        remaining = &remaining[value_end.max(token_start)..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn next_json_credential_value(text: &str) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    while let Some(relative_start) = text[offset..].find('"') {
+        let key_start = offset + relative_start;
+        if !json_key_can_start_at(text, key_start) {
+            offset = key_start + 1;
+            continue;
+        }
+        let key_end = quoted_value_end(text, key_start + 1, '"');
+        if key_end == text.len() {
+            return None;
+        }
+        let encoded_key = &text[key_start..=key_end];
+        let Ok(key) = serde_json::from_str::<String>(encoded_key) else {
+            offset = key_end + 1;
+            continue;
+        };
+        let whitespace_end = key_end
+            + 1
+            + text[key_end + 1..]
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .map(char::len_utf8)
+                .sum::<usize>();
+        if text.as_bytes().get(whitespace_end) == Some(&b':') && credential_key(&key) {
+            return Some((key_start, whitespace_end + 1));
+        }
+        offset = key_end + 1;
+    }
+    None
+}
+
+fn json_key_can_start_at(text: &str, key_start: usize) -> bool {
+    text[..key_start]
+        .chars()
+        .rev()
+        .find(|character| !character.is_whitespace())
+        .is_some_and(|character| matches!(character, '{' | ','))
 }
 
 pub(crate) fn redact_json(raw: &str) -> String {
@@ -127,36 +182,56 @@ fn redact_after_marker(text: &str, marker: &str) -> String {
     while let Some(index) = find_ascii_case_insensitive(remaining, marker) {
         let value_start = index + marker.len();
         output.push_str(&remaining[..value_start]);
-        let whitespace = remaining[value_start..]
-            .chars()
-            .take_while(|character| character.is_whitespace())
-            .map(char::len_utf8)
-            .sum::<usize>();
-        output.push_str(&remaining[value_start..value_start + whitespace]);
-        let opening_quote = remaining[value_start + whitespace..]
-            .chars()
-            .next()
-            .filter(|character| matches!(character, '"' | '\''));
-        if opening_quote.is_some() {
-            output.push_str(&remaining[value_start + whitespace..value_start + whitespace + 1]);
-        }
+        let (prefix, token_start, value_end) =
+            credential_value_bounds(remaining, value_start, ValueTermination::Token);
+        output.push_str(prefix);
         output.push_str(REDACTED);
-        let token_start = value_start + whitespace + usize::from(opening_quote.is_some());
-        let value_end = opening_quote.map_or_else(
-            || {
-                remaining[token_start..]
-                    .find(|character: char| {
-                        character.is_whitespace()
-                            || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
-                    })
-                    .map_or(remaining.len(), |length| token_start + length)
-            },
-            |quote| quoted_value_end(remaining, token_start, quote),
-        );
-        remaining = &remaining[value_end..];
+        remaining = &remaining[value_end.max(token_start)..];
     }
     output.push_str(remaining);
     output
+}
+
+#[derive(Clone, Copy)]
+enum ValueTermination {
+    Line,
+    Token,
+}
+
+fn credential_value_bounds(
+    text: &str,
+    value_start: usize,
+    termination: ValueTermination,
+) -> (&str, usize, usize) {
+    let whitespace = text[value_start..]
+        .chars()
+        .take_while(|character| {
+            character.is_whitespace()
+                && (!matches!(termination, ValueTermination::Line)
+                    || !matches!(character, '\r' | '\n'))
+        })
+        .map(char::len_utf8)
+        .sum::<usize>();
+    let opening_quote = text[value_start + whitespace..]
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '"' | '\''));
+    let prefix_end = value_start + whitespace + usize::from(opening_quote.is_some());
+    let value_end = opening_quote.map_or_else(
+        || match termination {
+            ValueTermination::Line => text[prefix_end..]
+                .find(['\r', '\n'])
+                .map_or(text.len(), |length| prefix_end + length),
+            ValueTermination::Token => text[prefix_end..]
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
+                })
+                .map_or(text.len(), |length| prefix_end + length),
+        },
+        |quote| quoted_value_end(text, prefix_end, quote),
+    );
+    (&text[value_start..prefix_end], prefix_end, value_end)
 }
 
 fn quoted_value_end(text: &str, value_start: usize, quote: char) -> usize {
@@ -179,19 +254,11 @@ fn redact_line_value(text: &str, marker: &str) -> String {
     while let Some(index) = find_ascii_case_insensitive(remaining, marker) {
         let value_start = index + marker.len();
         output.push_str(&remaining[..value_start]);
-        let whitespace = remaining[value_start..]
-            .chars()
-            .take_while(|character| {
-                character.is_whitespace() && *character != '\r' && *character != '\n'
-            })
-            .map(char::len_utf8)
-            .sum::<usize>();
-        output.push_str(&remaining[value_start..value_start + whitespace]);
+        let (prefix, token_start, value_end) =
+            credential_value_bounds(remaining, value_start, ValueTermination::Line);
+        output.push_str(prefix);
         output.push_str(REDACTED);
-        let value_end = remaining[value_start + whitespace..]
-            .find(['\r', '\n'])
-            .map_or(remaining.len(), |length| value_start + whitespace + length);
-        remaining = &remaining[value_end..];
+        remaining = &remaining[value_end.max(token_start)..];
     }
     output.push_str(remaining);
     output
@@ -233,10 +300,7 @@ struct PendingStreamText<C> {
     text: String,
 }
 
-/// Holds a possible trailing credential-shape prefix between streamed facts.
-///
-/// A fact-boundary change forces the held prefix to cross the boundary as a
-/// redaction marker, never as its provider-controlled bytes.
+/// Holds an incomplete credential shape between streamed facts.
 pub(crate) struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     pending: Option<PendingStreamText<C>>,
@@ -250,27 +314,41 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         }
     }
 
-    pub(crate) fn flush(&mut self) {
+    fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
-            let (emitted, held) = redact_complete_shapes_and_hold_prefix(pending.text);
-            self.emit(
-                pending.field,
-                pending.index,
-                pending.correlation.clone(),
-                emitted,
-            );
-            if !held.is_empty() {
+            if stream_candidate_starts_at_zero(&pending.text) {
                 self.emit(
                     pending.field,
                     pending.index,
                     pending.correlation,
                     REDACTED.to_string(),
                 );
+            } else if let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text) {
+                self.emit(
+                    pending.field,
+                    pending.index,
+                    pending.correlation.clone(),
+                    redact_text(&pending.text[..unsafe_start]),
+                );
+                self.emit(
+                    pending.field,
+                    pending.index,
+                    pending.correlation,
+                    REDACTED.to_string(),
+                );
+            } else {
+                self.emit(
+                    pending.field,
+                    pending.index,
+                    pending.correlation,
+                    redact_text(&pending.text),
+                );
             }
         }
     }
 
-    fn flush_at_stream_end(&mut self) {
+    /// Flushes already-decoded text when no later provider text can extend it.
+    pub(crate) fn finish(&mut self) {
         if let Some(pending) = self.pending.take() {
             self.emit(
                 pending.field,
@@ -293,23 +371,66 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     }
 
     fn redact_delta(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.field != field || pending.index != index)
-        {
-            self.flush();
-        }
-        match &mut self.pending {
-            Some(pending) => pending.text.push_str(&text),
-            None => {
-                self.pending = Some(PendingStreamText {
-                    field,
-                    index,
-                    correlation,
-                    text,
-                });
+        if let Some(mut pending) = self.pending.take() {
+            if !stream_candidate_starts_at_zero(&pending.text)
+                && let Some(unsafe_start) = unsafe_stream_suffix_start(&pending.text)
+            {
+                self.emit(
+                    pending.field,
+                    pending.index,
+                    pending.correlation.clone(),
+                    redact_text(&pending.text[..unsafe_start]),
+                );
+                pending.text = pending.text[unsafe_start..].to_string();
             }
+            let mut combined = pending.text.clone();
+            combined.push_str(&text);
+            if stream_candidate_starts_at_zero(&combined) {
+                if let Some(unsafe_start) = unsafe_stream_suffix_start(&combined) {
+                    if unsafe_start == 0 {
+                        pending.text = combined;
+                        self.pending = Some(pending);
+                        return;
+                    }
+                    self.emit(
+                        pending.field,
+                        pending.index,
+                        pending.correlation,
+                        redact_text(&combined[..unsafe_start]),
+                    );
+                    self.pending = Some(PendingStreamText {
+                        field,
+                        index,
+                        correlation,
+                        text: combined[unsafe_start..].to_string(),
+                    });
+                    return;
+                }
+                self.emit(
+                    pending.field,
+                    pending.index,
+                    pending.correlation,
+                    redact_text(&combined),
+                );
+                return;
+            }
+            self.emit(
+                pending.field,
+                pending.index,
+                pending.correlation,
+                redact_text(&pending.text),
+            );
+        }
+
+        if unsafe_stream_suffix_start(&text).is_some() {
+            self.pending = Some(PendingStreamText {
+                field,
+                index,
+                correlation,
+                text,
+            });
+        } else {
+            self.emit(field, index, correlation, redact_text(&text));
         }
     }
 }
@@ -327,14 +448,14 @@ impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
                 // No later provider text can follow the completion's usage
                 // barrier, so a held proper prefix is harmless and may be
                 // emitted without destroying clean output.
-                self.flush_at_stream_end();
+                self.finish();
                 self.inner.observe(Observation {
                     correlation: observation.correlation,
                     fact: ObservationFact::UsageReported(usage),
                 });
             }
             fact => {
-                self.flush();
+                self.flush_boundary();
                 self.inner.observe(Observation {
                     correlation: observation.correlation,
                     fact,
@@ -344,25 +465,133 @@ impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
     }
 }
 
-fn redact_complete_shapes_and_hold_prefix(text: String) -> (String, String) {
-    let mut redacted = redact_text(&text);
-    let held_length = longest_trailing_credential_prefix(&redacted);
-    let pending = redacted.split_off(redacted.len() - held_length);
-    (redacted, pending)
+fn stream_candidate_starts_at_zero(text: &str) -> bool {
+    LINE_CREDENTIAL_MARKERS
+        .iter()
+        .chain(VALUE_CREDENTIAL_MARKERS)
+        .any(|marker| {
+            (text.len() <= marker.len()
+                && marker.as_bytes()[..text.len()].eq_ignore_ascii_case(text.as_bytes()))
+                || (text.len() > marker.len()
+                    && text.as_bytes()[..marker.len()].eq_ignore_ascii_case(marker.as_bytes()))
+        })
+        || TOKEN_PREFIXES.iter().any(|prefix| {
+            (text.len() <= prefix.len() && prefix.as_bytes()[..text.len()] == *text.as_bytes())
+                || text.starts_with(prefix)
+        })
+        || json_credential_value_at_start(text).is_some()
+        || unterminated_json_key_start(text) == Some(0)
 }
 
-fn longest_trailing_credential_prefix(text: &str) -> usize {
-    let mut longest = 0;
+fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
+    let mut earliest = None;
     for marker in LINE_CREDENTIAL_MARKERS
         .iter()
         .chain(VALUE_CREDENTIAL_MARKERS)
     {
-        longest = longest.max(trailing_marker_prefix(text, marker, true));
+        let length = trailing_marker_prefix(text, marker, true);
+        if length > 0 {
+            earliest = Some(earliest.map_or(text.len() - length, |current: usize| {
+                current.min(text.len() - length)
+            }));
+        }
     }
     for marker in TOKEN_PREFIXES {
-        longest = longest.max(trailing_marker_prefix(text, marker, false));
+        let length = trailing_marker_prefix(text, marker, false);
+        if length > 0 {
+            earliest = Some(earliest.map_or(text.len() - length, |current: usize| {
+                current.min(text.len() - length)
+            }));
+        }
     }
-    longest
+    for marker in LINE_CREDENTIAL_MARKERS {
+        earliest = unterminated_marker_start(text, marker, ValueTermination::Line)
+            .map_or(earliest, |start| {
+                Some(earliest.map_or(start, |current| current.min(start)))
+            });
+    }
+    for marker in VALUE_CREDENTIAL_MARKERS {
+        earliest = unterminated_marker_start(text, marker, ValueTermination::Token)
+            .map_or(earliest, |start| {
+                Some(earliest.map_or(start, |current| current.min(start)))
+            });
+    }
+    for prefix in TOKEN_PREFIXES {
+        earliest = unterminated_marker_start(text, prefix, ValueTermination::Token)
+            .map_or(earliest, |start| {
+                Some(earliest.map_or(start, |current| current.min(start)))
+            });
+    }
+    if let Some(start) = unterminated_json_credential_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    if let Some(start) = unterminated_json_key_start(text) {
+        earliest = Some(earliest.map_or(start, |current| current.min(start)));
+    }
+    earliest
+}
+
+fn unterminated_json_credential_start(text: &str) -> Option<usize> {
+    if let Some(value_start) = json_credential_value_at_start(text) {
+        let (_, token_start, value_end) =
+            credential_value_bounds(text, value_start, ValueTermination::Token);
+        if value_end.max(token_start) == text.len() {
+            return Some(0);
+        }
+    }
+    let mut offset = 0;
+    while let Some((relative_start, relative_value_start)) =
+        next_json_credential_value(&text[offset..])
+    {
+        let start = offset + relative_start;
+        let value_start = offset + relative_value_start;
+        let (_, token_start, value_end) =
+            credential_value_bounds(text, value_start, ValueTermination::Token);
+        if value_end.max(token_start) == text.len() {
+            return Some(start);
+        }
+        offset = value_end.max(token_start);
+    }
+    None
+}
+
+fn json_credential_value_at_start(text: &str) -> Option<usize> {
+    let wrapped = format!("{{{text}");
+    next_json_credential_value(&wrapped)
+        .and_then(|(start, value_start)| (start == 1).then_some(value_start - 1))
+}
+
+fn unterminated_json_key_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(relative_start) = text[offset..].find('"') {
+        let start = offset + relative_start;
+        if (start == 0 || json_key_can_start_at(text, start))
+            && quoted_value_end(text, start + 1, '"') == text.len()
+        {
+            return Some(start);
+        }
+        offset = start + 1;
+    }
+    None
+}
+
+fn unterminated_marker_start(
+    text: &str,
+    marker: &str,
+    termination: ValueTermination,
+) -> Option<usize> {
+    let mut offset = 0;
+    let mut last = None;
+    while let Some(relative) = find_ascii_case_insensitive(&text[offset..], marker) {
+        let start = offset + relative;
+        let value_start = start + marker.len();
+        let (_, token_start, value_end) = credential_value_bounds(text, value_start, termination);
+        if value_end.max(token_start) == text.len() {
+            last = Some(start);
+        }
+        offset = value_start;
+    }
+    last
 }
 
 fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool) -> usize {
@@ -383,7 +612,9 @@ fn trailing_marker_prefix(text: &str, marker: &str, ascii_case_insensitive: bool
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_complete_shapes_and_hold_prefix, redact_json, redact_text};
+    use super::{
+        redact_json, redact_text, stream_candidate_starts_at_zero, unsafe_stream_suffix_start,
+    };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
     const QUOTED_CREDENTIAL_VALUE: &str = "another-sensitive-value";
@@ -399,6 +630,7 @@ mod tests {
     const QUOTED_SECRET_VALUE: &str = "sensitive value with spaces";
     const ESCAPED_QUOTED_SECRET_VALUE: &str = r#"sensitive \"quoted\" value"#;
     const MULTILINE_SECRET_VALUE: &str = "sensitive\nmultiline\nvalue";
+    const COMPOSITE_SECRET_VALUE: &str = "sensitive-composite-value";
 
     /// INV-035: credential-shaped text never leaves the CLI adapter.
     #[test]
@@ -457,6 +689,19 @@ mod tests {
         assert!(output.contains("safe-after-secrets"));
     }
 
+    /// INV-035: composite credential keys embedded in arbitrary CLI text are
+    /// redacted with the same contains-based key policy as decoded JSON.
+    #[test]
+    fn inv_035_redacts_composite_json_keys_in_text() {
+        let fixture = format!(
+            r#"provider detail: {{"client_secret":"{COMPOSITE_SECRET_VALUE}","bedrock_api_key":"{COMPOSITE_SECRET_VALUE}"}}"#
+        );
+        let output = redact_text(&fixture);
+
+        assert!(!output.contains(COMPOSITE_SECRET_VALUE));
+        assert!(output.contains("[redacted]"));
+    }
+
     #[test]
     fn harmless_tool_arguments_remain_byte_exact() {
         let input = r#"{ "city" : "Oslo", "limit": 3 }"#;
@@ -466,17 +711,22 @@ mod tests {
 
     #[test]
     fn inv_035_stream_redaction_holds_a_split_token_prefix() {
-        let (emitted, pending) = redact_complete_shapes_and_hold_prefix("safe s".to_string());
-
-        assert_eq!(emitted, "safe ");
-        assert_eq!(pending, "s");
+        assert_eq!(unsafe_stream_suffix_start("safe s"), Some(5));
     }
 
     #[test]
-    fn inv_035_stream_redaction_completes_and_redacts_a_held_token() {
-        let (emitted, pending) = redact_complete_shapes_and_hold_prefix("sk-sensitive".to_string());
+    fn inv_035_stream_redaction_holds_an_unterminated_credential() {
+        assert_eq!(unsafe_stream_suffix_start("sk-sensitive"), Some(0));
+    }
 
-        assert_eq!(emitted, "[redacted]");
-        assert_eq!(pending, "");
+    #[test]
+    fn inv_035_stream_redaction_releases_a_terminated_credential() {
+        assert_eq!(unsafe_stream_suffix_start("sk-sensitive done."), None);
+    }
+
+    #[test]
+    fn inv_035_stream_redaction_holds_a_split_composite_json_key() {
+        assert_eq!(unsafe_stream_suffix_start(r#"safe {"client_sec"#), Some(6));
+        assert!(stream_candidate_starts_at_zero(r#""client_secret":"#));
     }
 }

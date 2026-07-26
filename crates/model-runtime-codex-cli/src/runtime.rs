@@ -284,13 +284,8 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
     async fn prepare(
         &self,
         operation: ModelOperation<C>,
-        mut cancellation: CancellationSignal,
+        _cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
-        if already_fired(&mut cancellation) {
-            return PreparationOutcome::Cancelled {
-                correlation: operation.correlation,
-            };
-        }
         self.prepare_request(operation)
     }
 
@@ -450,6 +445,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                     let detail = format!("undecodable Codex event: {}", error.into_detail());
                     force_kill(&mut child).await;
                     abort_stderr_task(stderr_task).await;
+                    redacting_sink.finish();
                     return decoder.provider_error(&detail);
                 }
                 if !decoder.terminal_observed()
@@ -462,6 +458,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                     )
                     .await;
                     abort_stderr_task(stderr_task).await;
+                    redacting_sink.finish();
                     return decoder.boundary_loss(LossCause::CancellationRequested);
                 }
                 if !decoder.terminal_observed()
@@ -470,6 +467,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                 {
                     force_kill(&mut child).await;
                     abort_stderr_task(stderr_task).await;
+                    redacting_sink.finish();
                     return decoder.boundary_loss(LossCause::TimedOut(TransportFacts::new(
                         "Codex CLI process exceeded its exchange timeout",
                     )));
@@ -479,6 +477,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             ProcessStep::Line(Err(error)) => {
                 force_kill(&mut child).await;
                 abort_stderr_task(stderr_task).await;
+                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::StreamProtocolViolation {
                     detail: error.to_string(),
                 });
@@ -490,11 +489,13 @@ async fn execute_process<C: Clone + Send + Sync>(
                 )
                 .await;
                 abort_stderr_task(stderr_task).await;
+                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
                 force_kill(&mut child).await;
                 abort_stderr_task(stderr_task).await;
+                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::TimedOut(TransportFacts::new(
                     "Codex CLI process exceeded its exchange timeout",
                 )));
@@ -516,25 +517,32 @@ async fn execute_process<C: Clone + Send + Sync>(
                 )
                 .await;
                 abort_stderr_task(stderr_task).await;
+                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
             interrupt_then_kill(&mut child, cleanup_grace).await;
             abort_stderr_task(stderr_task).await;
-            return decoder.finish(&mut redacting_sink);
+            let evidence = decoder.finish(&mut redacting_sink);
+            redacting_sink.finish();
+            return evidence;
         },
         () = tokio::time::sleep_until(deadline) => {
             let process_group_id = child.id();
+            // `try_wait` reaps an exited group leader. Signal while that
+            // leader still pins the process-group identity, so a disappearing
+            // last descendant cannot make the numeric id reusable first.
+            kill_process_group(process_group_id);
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    kill_process_group(process_group_id);
+                Ok(Some(status)) if !was_killed_by_group_cleanup(&status) => {
                     abort_stderr_task(stderr_task).await;
                     reaped_status = Some(Ok(status));
                     "Codex stderr was unavailable at the process-cleanup deadline".to_string()
                 }
-                Ok(None) | Err(_) => {
+                Ok(Some(_)) | Ok(None) | Err(_) => {
                     force_kill(&mut child).await;
                     abort_stderr_task(stderr_task).await;
+                    redacting_sink.finish();
                     return decoder.boundary_loss(timeout_cause());
                 }
             }
@@ -551,10 +559,12 @@ async fn execute_process<C: Clone + Send + Sync>(
                     remaining_interrupt_grace(prepared.interrupt_grace, deadline),
                 )
                 .await;
+                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             },
             () = tokio::time::sleep_until(deadline) => {
                 force_kill(&mut child).await;
+                redacting_sink.finish();
                 return decoder.boundary_loss(timeout_cause());
             },
         },
@@ -563,7 +573,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     match status {
         Ok(status) if status.success() => {
             let evidence = decoder.finish(&mut redacting_sink);
-            redacting_sink.flush();
+            redacting_sink.finish();
             evidence
         }
         Ok(status) => {
@@ -572,11 +582,15 @@ async fn execute_process<C: Clone + Send + Sync>(
             } else {
                 format!("Codex CLI exited with status {status}: {stderr}")
             };
+            redacting_sink.finish();
             decoder.provider_error_after_exit(&message)
         }
-        Err(error) => decoder.boundary_loss(LossCause::TransportFailed(TransportFacts::new(
-            format!("could not wait for Codex CLI process: {error}"),
-        ))),
+        Err(error) => {
+            redacting_sink.finish();
+            decoder.boundary_loss(LossCause::TransportFailed(TransportFacts::new(format!(
+                "could not wait for Codex CLI process: {error}"
+            ))))
+        }
     }
 }
 
@@ -692,6 +706,20 @@ fn kill_process_group(process_group_id: Option<u32>) {
     }
     #[cfg(not(unix))]
     let _ = process_group_id;
+}
+
+fn was_killed_by_group_cleanup(status: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.signal() == Some(rustix::process::Signal::KILL.as_raw())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
 }
 
 async fn abort_stderr_task(stderr_task: tokio::task::JoinHandle<std::io::Result<String>>) {
