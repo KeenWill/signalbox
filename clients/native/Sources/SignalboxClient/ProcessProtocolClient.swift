@@ -133,7 +133,7 @@ public actor SignalboxProcessClient {
       return true
     }
     guard responseVersion == .one,
-      case .error(let error) = message
+      case .protocolError(let error) = message
     else {
       return false
     }

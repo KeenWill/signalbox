@@ -343,7 +343,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case transcriptContent(SignalboxTranscriptContent)
   case transcriptSnapshotEnd(SignalboxTranscriptSnapshotEnd)
   case sessionEvent(SignalboxFollowedSessionEvent)
-  case error(SignalboxProcessError)
+  case protocolError(SignalboxProcessError)
   case unknown(
     kind: String,
     payload: [String: SignalboxJSONValue],
@@ -395,7 +395,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       case "session_event":
         self = .sessionEvent(try SignalboxFollowedSessionEvent(from: decoder))
       case "error":
-        self = .error(try SignalboxProcessError(from: decoder))
+        self = .protocolError(try SignalboxProcessError(from: decoder))
       default:
         self = .unknown(kind: tagged.kind, payload: tagged.payload, decodingDiagnostic: nil)
       }
