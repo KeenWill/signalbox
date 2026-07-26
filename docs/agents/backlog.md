@@ -342,6 +342,66 @@ the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
 outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
 executors, with replay eligibility conditioned on turn state.
 
+## Tool catalog buildout [ready] [size: L, spread over batches]
+
+Owns: catalog declarations and their executors — one new tool module per entry
+with its argument schema, permission default, and effect class, plus the
+integration clients the credentialed tools need. Collides-with: the tool-loop
+registry surface, since every batch touches the compiled catalog wiring;
+individual tools are otherwise disjoint from each other, so batches parallelize
+well among themselves and poorly against the foundation itself. Best pulled as
+small batches of related tools rather than one pass.
+
+Owner direction, 2026-07-25 (orientation only; per-tool argument shapes, result
+shapes, and failure taxonomies are settled in the owning specification diff at
+pickup): the inventory below distills the owner's prior work into the tools the
+platform wants, tiered by what gates them. It is a menu and a sequencing map,
+not a design.
+
+Tier 0 — daemon-side, no credentials, unblocked now. An echo tool (a conformance
+and test fixture more than a capability), a bounded single-URL web fetch, and a
+session status update tool that writes through the session-metadata satellites
+owned by the entry below.
+
+Tier 1 — daemon-side behind held credentials, also unblocked now. Daemon-held
+credentials ride the existing configuration channel (the same file-path pattern
+as the provider keys); the runner entry's credential-profile machinery is not a
+prerequisite here — its (tool, profile) approval pairing governs this tier only
+once profiles exist, and until then the registry's own approval defaults apply.
+A change-request review suite against the code host: summary, changed files,
+per-file patch, checks status, comment, review threads, thread reply, thread
+resolve, CI job log, and rerun failed jobs. Its first consumer is the platform's
+own review workflows (the review-workflow tier below), which is why it leads the
+tier. Alongside it, a library-documentation lookup service.
+
+Tier 2 — runner-side workspace tools [blocked-on: runner protocol design pass].
+File operations (read, multi-read, contextual read, write, text replace, patch
+apply, copy, move, delete, directory create, list, glob, content search, stat);
+version-control inspection (status, diff, log, show); shell execution and
+interactive process management (start, read, write, stop, list); and project dev
+loops (build, lint, test). This tier is the concrete catalog input to that
+design pass — the placement, dispatch, and advertised-catalog machinery in the
+runner protocol and placement entry below exists to carry exactly this list, so
+the two are read together.
+
+Tier 3 — feature-coupled, each item blocked on the feature it needs rather than
+on any tool machinery. Task management tools [blocked-on: a task aggregate] —
+the domain feature of the durable session tasks entry below, not a tool;
+delegation tools, meaning delegate to a sub-session plus list, read, and
+summarize delegated sessions \[blocked-on: a child-session delegation substrate
+— goal mode alone owns goal-session semantics, not child sessions\]; skills,
+guidance, and profile tools [blocked-on: those concepts existing at all]; report
+and artifact persistence [blocked-on: the artifact-boundary open question];
+image inspection [blocked-on: multimodal input]; and MCP-bridged tools
+[blocked-on: the deferred MCP pass].
+
+Every tool added under the current seam follows the compiled-registry pattern
+the first compiled tool `current_time` established — a process-lifetime
+immutable catalog value carrying each tool's permission default and effect
+class. The per-tool placement and effect-class declarations recorded as owner
+direction in the runner protocol and placement entry below govern this catalog
+once that design lands; this entry does not restate them.
+
 ## Session metadata, tags, and visibility [in-flight] [size: M-L]
 
 Owns: session satellite tables, list projection, additive protocol frames.
