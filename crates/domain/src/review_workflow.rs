@@ -2,7 +2,10 @@
 //!
 //! The normative specification is `docs/spec/review-workflows.md`.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::{NonZeroU32, NonZeroU64},
+};
 
 use crate::{
     AcceptedInputId, ContextFrontierId, ReviewExternalLinkId, ReviewFindingId, ReviewPassId,
@@ -454,6 +457,33 @@ impl ReviewTarget {
         })
     }
 
+    /// Reconstitutes a target snapshot after authenticating the parent
+    /// identity stored on the child row against the supplied canonical parent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_reconstitute(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<ReviewTargetId>,
+        stack_parent_evidence: Option<&ReviewTarget>,
+    ) -> Result<Self, ReviewTargetError> {
+        if stack_parent != stack_parent_evidence.map(Self::id) {
+            return Err(ReviewTargetError::ParentIdentityMismatch { target: id });
+        }
+        Self::try_new(
+            id,
+            provider,
+            repository,
+            subject,
+            head_revision,
+            base_revision,
+            stack_parent_evidence,
+        )
+    }
+
     /// Returns the target identity.
     pub const fn id(&self) -> ReviewTargetId {
         self.id
@@ -531,6 +561,12 @@ pub enum ReviewTargetError {
     /// One stack chain contains two snapshots of the same change request.
     RepeatedChangeRequest {
         /// The child snapshot whose proposed chain repeats its logical subject.
+        target: ReviewTargetId,
+    },
+    /// The parent identity stored on the child row differs from the supplied
+    /// canonical parent evidence.
+    ParentIdentityMismatch {
+        /// The child snapshot whose stored parent edge was rejected.
         target: ReviewTargetId,
     },
 }
@@ -1770,7 +1806,8 @@ pub struct ReviewPassReconstitutionInput {
     workflow_run: ReviewRunRef,
     workflow: ReviewWorkflowKind,
     session: SessionId,
-    accepted_input: ReviewPassAcceptedInputEvidence,
+    accepted_input: AcceptedInputId,
+    accepted_input_evidence: ReviewPassAcceptedInputEvidence,
     state: ReviewPassState,
     turn_evidence: Option<ReviewPassTurnEvidence>,
 }
@@ -1784,7 +1821,8 @@ impl ReviewPassReconstitutionInput {
         workflow_run: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         session: SessionId,
-        accepted_input: ReviewPassAcceptedInputEvidence,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
         state: ReviewPassState,
         turn_evidence: Option<ReviewPassTurnEvidence>,
     ) -> Self {
@@ -1795,6 +1833,7 @@ impl ReviewPassReconstitutionInput {
             workflow,
             session,
             accepted_input,
+            accepted_input_evidence,
             state,
             turn_evidence,
         }
@@ -1826,8 +1865,13 @@ impl ReviewPassReconstitutionInput {
     }
 
     /// Returns the accepted input stored on the pass.
-    pub const fn accepted_input(&self) -> ReviewPassAcceptedInputEvidence {
+    pub const fn accepted_input(&self) -> AcceptedInputId {
         self.accepted_input
+    }
+
+    /// Returns the canonical evidence loaded for the stored accepted input.
+    pub const fn accepted_input_evidence(&self) -> ReviewPassAcceptedInputEvidence {
+        self.accepted_input_evidence
     }
 
     /// Returns the stored pass state.
@@ -1919,7 +1963,7 @@ impl ReviewPass {
                 failure,
             });
         }
-        let Some(origin_turn) = input.accepted_input.origin_turn else {
+        let Some(origin_turn) = input.accepted_input_evidence.origin_turn else {
             return Err(ReviewPassReconstitutionError {
                 input: Box::new(input),
                 failure: ReviewPassReconstitutionFailure::AcceptedInputHasNoOriginTurn,
@@ -1929,7 +1973,7 @@ impl ReviewPass {
             reference: input.reference,
             kind: input.kind,
             session: input.session,
-            accepted_input: input.accepted_input.accepted_input,
+            accepted_input: input.accepted_input,
             origin_turn,
             state: input.state,
         })
@@ -2119,10 +2163,13 @@ fn validate_pass_reconstitution(
     if !workflow_matches_pass_kind(input.workflow, input.kind) {
         return Some(ReviewPassReconstitutionFailure::RunWorkflowMismatch);
     }
-    if input.session != input.accepted_input.session {
+    if input.accepted_input != input.accepted_input_evidence.accepted_input {
+        return Some(ReviewPassReconstitutionFailure::AcceptedInputEvidenceMismatch);
+    }
+    if input.session != input.accepted_input_evidence.session {
         return Some(ReviewPassReconstitutionFailure::AcceptedInputSessionMismatch);
     }
-    let Some(origin_turn) = input.accepted_input.origin_turn else {
+    let Some(origin_turn) = input.accepted_input_evidence.origin_turn else {
         return Some(ReviewPassReconstitutionFailure::AcceptedInputHasNoOriginTurn);
     };
     if let Some(failure) = validate_pass_result(input.reference, input.kind, &input.state) {
@@ -2130,7 +2177,7 @@ fn validate_pass_reconstitution(
     }
     validate_pass_turn_evidence(
         input.session,
-        input.accepted_input.accepted_input,
+        input.accepted_input,
         origin_turn,
         &input.state,
         input.turn_evidence,
@@ -2413,6 +2460,9 @@ pub enum ReviewPassReconstitutionFailure {
     ForeignWorkflowRun,
     /// The pass kind is incompatible with its canonical run workflow.
     RunWorkflowMismatch,
+    /// The accepted-input identity stored on the pass differs from the
+    /// supplied canonical accepted-input evidence.
+    AcceptedInputEvidenceMismatch,
     /// The accepted input belongs to another session.
     AcceptedInputSessionMismatch,
     /// The accepted input is pending or consumed steering with no origin turn.
@@ -3040,7 +3090,8 @@ impl ReviewFindingEventKind {
 pub struct ReviewFindingEvent {
     finding: ReviewFindingRef,
     ordinal: ReviewEventOrdinal,
-    pass: ReviewPassEvidence,
+    pass: ReviewPassRef,
+    pass_evidence: ReviewPassEvidence,
     run: ReviewRunEvidence,
     kind: ReviewFindingEventKind,
 }
@@ -3050,7 +3101,8 @@ impl ReviewFindingEvent {
     pub const fn new(
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         kind: ReviewFindingEventKind,
     ) -> Self {
@@ -3058,6 +3110,7 @@ impl ReviewFindingEvent {
             finding,
             ordinal,
             pass,
+            pass_evidence,
             run,
             kind,
         }
@@ -3075,12 +3128,12 @@ impl ReviewFindingEvent {
 
     /// Returns the producing pass.
     pub const fn pass(&self) -> ReviewPassRef {
-        self.pass.reference()
+        self.pass
     }
 
     /// Returns the canonical producing-pass evidence.
     pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
-        &self.pass
+        &self.pass_evidence
     }
 
     /// Returns the canonical producing-run evidence.
@@ -3100,6 +3153,9 @@ pub struct ReviewFinding {
     proposal: ReviewFindingProposal,
     events: Vec<ReviewFindingEvent>,
     status: ReviewFindingStatus,
+    pass_claims: BTreeMap<ReviewPassId, (ReviewPassEvidence, ReviewRunEvidence)>,
+    run_claims: BTreeMap<ReviewRunId, (ReviewPassEvidence, ReviewRunEvidence)>,
+    publication_links: BTreeSet<ReviewExternalLinkId>,
 }
 
 impl ReviewFinding {
@@ -3109,6 +3165,9 @@ impl ReviewFinding {
             proposal,
             events: Vec::new(),
             status: ReviewFindingStatus::Open,
+            pass_claims: BTreeMap::new(),
+            run_claims: BTreeMap::new(),
+            publication_links: BTreeSet::new(),
         }
     }
 
@@ -3156,16 +3215,22 @@ impl ReviewFinding {
                 ReviewFindingTransitionFailure::NoncontiguousOrdinal { expected },
             ));
         }
-        if event.pass.reference().target() != self.proposal.reference.target() {
+        if event.pass.target() != self.proposal.reference.target() {
             return Err(self.event_error(event, ReviewFindingTransitionFailure::ForeignEventPass));
         }
-        if !run_evidence_matches_pass(event.run, &event.pass) {
+        if event.pass != event.pass_evidence.reference() {
+            return Err(self.event_error(
+                event,
+                ReviewFindingTransitionFailure::EventPassEvidenceMismatch,
+            ));
+        }
+        if !run_evidence_matches_pass(event.run, &event.pass_evidence) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::IncompatibleEventRunEvidence,
             ));
         }
-        if event.run.policy() != event.pass.policy()
+        if event.run.policy() != event.pass_evidence.policy()
             || event.run.policy() != self.proposal.producing_pass.policy()
         {
             return Err(
@@ -3183,17 +3248,14 @@ impl ReviewFinding {
                 },
             ),
         );
-        let prior_pass = if self.proposal.producing_pass.reference().pass()
-            == event.pass.reference().pass()
-        {
+        let prior_pass = if self.proposal.producing_pass.reference().pass() == event.pass.pass() {
             Some(producing_claim)
         } else {
-            self.events
-                .iter()
-                .find(|previous| previous.pass.reference().pass() == event.pass.reference().pass())
-                .map(|previous| (&previous.pass, previous.run))
+            self.pass_claims
+                .get(&event.pass.pass())
+                .map(|(pass, run)| (pass, *run))
         };
-        if prior_pass.is_some_and(|prior| prior != (&event.pass, event.run)) {
+        if prior_pass.is_some_and(|prior| prior != (&event.pass_evidence, event.run)) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::ConflictingPassEvidence,
@@ -3212,18 +3274,17 @@ impl ReviewFinding {
                 ),
             ))
         } else {
-            self.events
-                .iter()
-                .find(|previous| previous.run.reference().run() == event.run.reference().run())
-                .map(|previous| (&previous.pass, previous.run))
+            self.run_claims
+                .get(&event.run.reference().run())
+                .map(|(pass, run)| (pass, *run))
         };
-        if prior_run.is_some_and(|prior| prior != (&event.pass, event.run)) {
+        if prior_run.is_some_and(|prior| prior != (&event.pass_evidence, event.run)) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::ConflictingRunEvidence,
             ));
         }
-        if !finding_event_matches_pass_evidence(&event, &event.pass) {
+        if !finding_event_matches_pass_evidence(&event, &event.pass_evidence) {
             return Err(self.event_error(
                 event,
                 ReviewFindingTransitionFailure::IncompatibleEventPassEvidence,
@@ -3248,14 +3309,7 @@ impl ReviewFinding {
         }
         validate_finding_reference(&self, &event)?;
         if let ReviewFindingEventKind::Posted { link } = &event.kind
-            && self.events.iter().any(|previous| {
-                matches!(
-                    previous.kind(),
-                    ReviewFindingEventKind::Posted {
-                        link: previous_link
-                    } if previous_link.link() == link.link()
-                )
-            })
+            && self.publication_links.contains(&link.link())
         {
             return Err(
                 self.event_error(event, ReviewFindingTransitionFailure::ReusedPublicationLink)
@@ -3270,6 +3324,16 @@ impl ReviewFinding {
                 },
             ));
         };
+        let pass_claim = (event.pass_evidence.clone(), event.run);
+        self.pass_claims
+            .entry(event.pass.pass())
+            .or_insert_with(|| pass_claim.clone());
+        self.run_claims
+            .entry(event.run.reference().run())
+            .or_insert(pass_claim);
+        if let ReviewFindingEventKind::Posted { link } = &event.kind {
+            self.publication_links.insert(link.link());
+        }
         self.status = next_status;
         self.events.push(event);
         Ok(self)
@@ -3482,6 +3546,9 @@ pub enum ReviewFindingTransitionFailure {
     ForeignEventFinding,
     /// An event pass belongs to another target.
     ForeignEventPass,
+    /// The pass identity stored on the event differs from the supplied
+    /// canonical pass evidence.
+    EventPassEvidenceMismatch,
     /// The event pass contradicts its independently loaded owning run.
     IncompatibleEventRunEvidence,
     /// An event pass's run carries a different policy from the finding.
@@ -3740,6 +3807,8 @@ pub struct ReviewExternalLink {
     object_kind: ReviewExternalObjectKind,
     attachment: Option<ReviewExternalLinkAttachment>,
     observations: Vec<ReviewExternalLinkObservation>,
+    pass_claims: BTreeMap<ReviewPassId, (ReviewPassEvidence, ReviewRunEvidence)>,
+    run_claims: BTreeMap<ReviewRunId, (ReviewPassEvidence, ReviewRunEvidence)>,
 }
 
 impl ReviewExternalLink {
@@ -3764,6 +3833,8 @@ impl ReviewExternalLink {
             object_kind,
             attachment: None,
             observations: Vec::new(),
+            pass_claims: BTreeMap::new(),
+            run_claims: BTreeMap::new(),
         })
     }
 
@@ -3797,6 +3868,34 @@ impl ReviewExternalLink {
         }
     }
 
+    fn claim_failure(
+        &self,
+        pass: &ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Option<ReviewExternalLinkTransitionFailure> {
+        if self
+            .pass_claims
+            .get(&pass.reference().pass())
+            .is_some_and(|(prior_pass, prior_run)| prior_pass != pass || *prior_run != run)
+        {
+            return Some(ReviewExternalLinkTransitionFailure::ConflictingPassEvidence);
+        }
+        self.run_claims
+            .get(&run.reference().run())
+            .is_some_and(|(prior_pass, prior_run)| prior_pass != pass || *prior_run != run)
+            .then_some(ReviewExternalLinkTransitionFailure::ConflictingRunEvidence)
+    }
+
+    fn record_claim(&mut self, pass: &ReviewPassEvidence, run: ReviewRunEvidence) {
+        let claim = (pass.clone(), run);
+        self.pass_claims
+            .entry(pass.reference().pass())
+            .or_insert_with(|| claim.clone());
+        self.run_claims
+            .entry(run.reference().run())
+            .or_insert(claim);
+    }
+
     /// Attaches the exact external identity after reservation.
     pub fn attach(
         mut self,
@@ -3817,6 +3916,9 @@ impl ReviewExternalLink {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatibleAttachmentRunEvidence,
             ));
+        }
+        if let Some(failure) = self.claim_failure(&attachment.pass, attachment.run) {
+            return Err(self.transition_error(failure));
         }
         let Some(result) = (match attachment.pass.state() {
             ReviewPassState::Succeeded {
@@ -3858,6 +3960,7 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::IncompatibleAttachmentPass,
             ));
         }
+        self.record_claim(&attachment.pass, attachment.run);
         self.attachment = Some(attachment);
         Ok(self)
     }
@@ -3916,48 +4019,10 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::NoncontiguousOrdinal { expected },
             ));
         }
-        let attachment_claim = self
-            .attachment
-            .as_ref()
-            .filter(|attachment| {
-                attachment.pass.reference().pass() == observation.pass.reference().pass()
-            })
-            .map(|attachment| (&attachment.pass, attachment.run));
-        let prior_claim = self
-            .observations
-            .iter()
-            .find(|previous| {
-                previous.pass.reference().pass() == observation.pass.reference().pass()
-            })
-            .map(|previous| (&previous.pass, previous.run));
-        if attachment_claim
-            .or(prior_claim)
-            .is_some_and(|prior| prior != (&observation.pass, observation.run))
-        {
-            return Err(
-                self.transition_error(ReviewExternalLinkTransitionFailure::ConflictingPassEvidence)
-            );
+        if let Some(failure) = self.claim_failure(&observation.pass, observation.run) {
+            return Err(self.transition_error(failure));
         }
-        let attachment_run_claim = self
-            .attachment
-            .as_ref()
-            .filter(|attachment| {
-                attachment.run.reference().run() == observation.run.reference().run()
-            })
-            .map(|attachment| (&attachment.pass, attachment.run));
-        let prior_run_claim = self
-            .observations
-            .iter()
-            .find(|previous| previous.run.reference().run() == observation.run.reference().run())
-            .map(|previous| (&previous.pass, previous.run));
-        if attachment_run_claim
-            .or(prior_run_claim)
-            .is_some_and(|prior| prior != (&observation.pass, observation.run))
-        {
-            return Err(
-                self.transition_error(ReviewExternalLinkTransitionFailure::ConflictingRunEvidence)
-            );
-        }
+        self.record_claim(&observation.pass, observation.run);
         self.observations.push(observation);
         Ok(self)
     }
@@ -3965,7 +4030,7 @@ impl ReviewExternalLink {
     /// Confirms that one import pass reported the latest durable state without
     /// appending another observation.
     pub fn confirm_unchanged(
-        self,
+        mut self,
         pass: ReviewPassEvidence,
         run: ReviewRunEvidence,
     ) -> Result<Self, ReviewExternalLinkTransitionError> {
@@ -4002,49 +4067,17 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::IncompatibleObservationPass,
             ));
         }
-        let attachment_claim = self
-            .attachment
-            .as_ref()
-            .filter(|attachment| attachment.pass.reference().pass() == pass.reference().pass())
-            .map(|attachment| (&attachment.pass, attachment.run));
-        let prior_claim = self
-            .observations
-            .iter()
-            .find(|previous| previous.pass.reference().pass() == pass.reference().pass())
-            .map(|previous| (&previous.pass, previous.run));
-        if attachment_claim
-            .or(prior_claim)
-            .is_some_and(|prior| prior != (&pass, run))
-        {
-            return Err(
-                self.transition_error(ReviewExternalLinkTransitionFailure::ConflictingPassEvidence)
-            );
+        if let Some(failure) = self.claim_failure(&pass, run) {
+            return Err(self.transition_error(failure));
         }
-        let attachment_run_claim = self
-            .attachment
-            .as_ref()
-            .filter(|attachment| attachment.run.reference().run() == run.reference().run())
-            .map(|attachment| (&attachment.pass, attachment.run));
-        let prior_run_claim = self
-            .observations
-            .iter()
-            .find(|previous| previous.run.reference().run() == run.reference().run())
-            .map(|previous| (&previous.pass, previous.run));
-        if attachment_run_claim
-            .or(prior_run_claim)
-            .is_some_and(|prior| prior != (&pass, run))
-        {
-            return Err(
-                self.transition_error(ReviewExternalLinkTransitionFailure::ConflictingRunEvidence)
-            );
-        }
+        self.record_claim(&pass, run);
         Ok(self)
     }
 
     /// Authenticates one blocked publication against this exact pending
     /// reservation.
     pub fn block_publication(
-        self,
+        mut self,
         pass: ReviewPassEvidence,
         run: ReviewRunEvidence,
     ) -> Result<Self, ReviewExternalLinkTransitionError> {
@@ -4071,6 +4104,10 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockPass,
             ));
         }
+        if let Some(failure) = self.claim_failure(&pass, run) {
+            return Err(self.transition_error(failure));
+        }
+        self.record_claim(&pass, run);
         Ok(self)
     }
 
@@ -4601,6 +4638,7 @@ mod tests {
         ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             kind,
@@ -4633,6 +4671,7 @@ mod tests {
         ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Posted {
@@ -5017,6 +5056,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(accepted_input_id(5), session_id(4), state.turn()),
             state.clone(),
             Some(ReviewPassTurnEvidence::new(
@@ -5244,6 +5284,40 @@ mod tests {
         assert_eq!(
             error,
             ReviewTargetError::ForeignParent {
+                target: target_id(1)
+            }
+        );
+    }
+
+    /// INV-040: reconstitution preserves the child row's exact parent
+    /// identity instead of adopting a compatible joined target.
+    #[test]
+    fn inv040_review_target_reconstitution_rejects_substituted_parent_identity() {
+        let canonical_parent = ReviewTarget::try_new(
+            target_id(2),
+            key("code-host"),
+            key("repository"),
+            ReviewTargetSubject::Commit,
+            key("parent-head"),
+            None,
+            None,
+        )
+        .expect("canonical parent target is valid");
+        let error = ReviewTarget::try_reconstitute(
+            target_id(1),
+            canonical_parent.provider().clone(),
+            canonical_parent.repository().clone(),
+            ReviewTargetSubject::Commit,
+            key("child-head"),
+            Some(canonical_parent.head_revision().clone()),
+            Some(target_id(3)),
+            Some(&canonical_parent),
+        )
+        .expect_err("the joined parent must equal the parent stored on the child row");
+
+        assert_eq!(
+            error,
+            ReviewTargetError::ParentIdentityMismatch {
                 target: target_id(1)
             }
         );
@@ -6014,6 +6088,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(
                 accepted_input_id(5),
                 session_id(4),
@@ -6175,6 +6250,7 @@ mod tests {
                 ReviewRunRef::new(target_id(1), run_id(9)),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6235,6 +6311,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::ReadOnlyReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(
                 accepted_input_id(5),
                 session_id(4),
@@ -6257,6 +6334,30 @@ mod tests {
         );
     }
 
+    /// INV-040: pass reconstitution preserves the pass row's accepted-input
+    /// identity instead of adopting the joined evidence identity.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_substituted_accepted_input_identity() {
+        assert_pass_reconstitution_rejects(
+            ReviewPassReconstitutionInput::new(
+                pass_ref(3),
+                ReviewPassKind::ReadOnlyReview,
+                run_ref(),
+                ReviewWorkflowKind::ReadOnlyReview,
+                session_id(4),
+                accepted_input_id(9),
+                ReviewPassAcceptedInputEvidence::new(
+                    accepted_input_id(5),
+                    session_id(4),
+                    Some(turn_id(6)),
+                ),
+                ReviewPassState::Queued,
+                None,
+            ),
+            ReviewPassReconstitutionFailure::AcceptedInputEvidenceMismatch,
+        );
+    }
+
     /// INV-040: the accepted input must belong to the pass session.
     #[test]
     fn inv040_pass_reconstitution_rejects_foreign_accepted_input_session() {
@@ -6267,6 +6368,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(9),
@@ -6299,6 +6401,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6325,6 +6428,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6353,6 +6457,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6385,6 +6490,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6417,6 +6523,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6449,6 +6556,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6481,6 +6589,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6580,6 +6689,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6609,6 +6719,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -6821,6 +6932,36 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
+    /// INV-040: finding-event reconstitution preserves the event row's exact
+    /// pass identity instead of adopting compatible joined pass evidence.
+    #[test]
+    fn inv040_finding_history_rejects_substituted_event_pass_identity() {
+        let finding = finding_ref(10);
+        let ordinal = ReviewEventOrdinal::one();
+        let pass = pass_with_finding_event(
+            finding,
+            ordinal,
+            succeeded_pass(20, ReviewPassKind::Judge),
+            &ReviewFindingEventKind::Accepted,
+        );
+        let event = ReviewFindingEvent::new(
+            finding,
+            ordinal,
+            pass_ref(21),
+            pass.clone(),
+            pass_run_evidence(&pass),
+            ReviewFindingEventKind::Accepted,
+        );
+        let error = ReviewFinding::new(proposal())
+            .apply(event)
+            .expect_err("canonical pass evidence must match the pass stored on the event");
+
+        assert_eq!(
+            error.failure(),
+            ReviewFindingTransitionFailure::EventPassEvidenceMismatch
+        );
+    }
+
     /// INV-040: a referenced finding naming the aggregate's own identity is a
     /// self-reference even when its producing-pass ancestry is cross-wired.
     #[test]
@@ -6917,6 +7058,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass,
             run,
             ReviewFindingEventKind::Accepted,
@@ -6954,6 +7096,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass,
             run,
             ReviewFindingEventKind::Accepted,
@@ -6982,6 +7125,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ReviewEventOrdinal::one(),
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Accepted,
@@ -7171,6 +7315,44 @@ mod tests {
         );
     }
 
+    /// INV-040: complete history replay maintains indexed pass, run, and
+    /// publication claims instead of rescanning the growing event vector.
+    #[test]
+    fn inv040_finding_history_indexes_replay_claims() {
+        let finding = ReviewFinding::new(proposal())
+            .apply(finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::one(),
+                succeeded_pass(19, ReviewPassKind::Judge),
+                ReviewFindingEventKind::Accepted,
+            ))
+            .expect("finding may be accepted")
+            .apply(finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                blocked_pass(20, ReviewPassKind::Publish),
+                ReviewFindingEventKind::BlockedWithReason {
+                    reason: text("lost acknowledgement"),
+                    link: Some(Box::new(pending_finding_link_ref(
+                        finding_ref(10),
+                        link_id(31),
+                    ))),
+                },
+            ))
+            .expect("publication block retains its claim")
+            .apply(posted_finding_event(
+                finding_ref(10),
+                ReviewEventOrdinal::try_new(3).expect("positive ordinal"),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                link_id(31),
+            ))
+            .expect("confirmed attachment reconciles the publication");
+
+        assert_eq!(finding.pass_claims.len(), 3);
+        assert_eq!(finding.run_claims.len(), 3);
+        assert_eq!(finding.publication_links, BTreeSet::from([link_id(31)]));
+    }
+
     /// INV-040: a compatible pass kind cannot author a finding event after a
     /// failed outcome.
     #[test]
@@ -7217,6 +7399,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Posted {
@@ -7663,6 +7846,62 @@ mod tests {
                 .state(),
             ReviewExternalObjectState::Current
         );
+        let error = confirmed
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect_err("a no-change pass cannot later claim a changed observation");
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ConflictingPassEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: an unchanged report also retains its owning run
+    /// claim against a later pass substitution.
+    #[test]
+    fn inv040_inv041_external_link_no_change_retains_run_claim() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let no_change = no_change_pass(
+            reservation,
+            succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let reused_run = ReviewPassEvidence::new(
+            ReviewPassRef::new(no_change.reference().run(), pass_id(23)),
+            ReviewPassKind::ImportExternalContext,
+            no_change.policy(),
+            succeeded_pass(23, ReviewPassKind::ImportExternalContext)
+                .state()
+                .clone(),
+        );
+        let confirmed = link
+            .confirm_unchanged(no_change.clone(), pass_run_evidence(&no_change))
+            .expect("the exact latest state consumes the import pass");
+        let error = confirmed
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                reused_run,
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect_err("one run cannot move to another pass after no-change");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ConflictingRunEvidence
+        );
     }
 
     /// INV-040 / INV-041: a no-change result cannot name a different
@@ -8095,13 +8334,15 @@ mod tests {
     /// INV-040: a produced-finding inventory is bounded to 32 identities.
     #[test]
     fn inv040_produced_findings_reject_over_budget_inventory() {
-        let error = ReviewProducedFindings::try_new(over_budget_finding_inventory())
+        let inventory = over_budget_finding_inventory();
+        let actual = inventory.len();
+        let error = ReviewProducedFindings::try_new(inventory)
             .expect_err("the defensive result budget is exact");
 
         assert_eq!(
             error,
             ReviewProducedFindingsError::TooMany {
-                actual: 33,
+                actual,
                 maximum: REVIEW_PRODUCED_FINDINGS_MAXIMUM,
             }
         );
@@ -8152,6 +8393,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(
                     accepted_input_id(5),
                     session_id(4),
@@ -8433,6 +8675,7 @@ mod tests {
             run_ref(),
             ReviewWorkflowKind::PublishReview,
             session_id(4),
+            accepted_input_id(5),
             ReviewPassAcceptedInputEvidence::new(
                 accepted_input_id(5),
                 session_id(4),
@@ -8488,6 +8731,7 @@ mod tests {
                 run_ref(),
                 ReviewWorkflowKind::ReadOnlyReview,
                 session_id(4),
+                accepted_input_id(5),
                 ReviewPassAcceptedInputEvidence::new(accepted_input_id(5), session_id(4), None),
                 ReviewPassState::Queued,
                 None,
@@ -8513,6 +8757,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Rejected {
@@ -8547,6 +8792,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Duplicate {
@@ -8581,6 +8827,7 @@ mod tests {
         let event = ReviewFindingEvent::new(
             finding,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             ReviewFindingEventKind::Duplicate {

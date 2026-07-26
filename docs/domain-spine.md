@@ -5290,6 +5290,7 @@ pub enum ReviewTargetError {
     MissingParentBase { target: ReviewTargetId },
     DisconnectedParent { target: ReviewTargetId },
     RepeatedChangeRequest { target: ReviewTargetId },
+    ParentIdentityMismatch { target: ReviewTargetId },
 }
 impl ReviewTarget {
     pub fn try_new(
@@ -5300,6 +5301,16 @@ impl ReviewTarget {
         head_revision: ReviewKey,
         base_revision: Option<ReviewKey>,
         stack_parent: Option<&ReviewTarget>,
+    ) -> Result<Self, ReviewTargetError>;
+    pub fn try_reconstitute(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<ReviewTargetId>,
+        stack_parent_evidence: Option<&ReviewTarget>,
     ) -> Result<Self, ReviewTargetError>;
     // accessors: id(), provider(), repository(), subject(), head_revision(),
     // base_revision(), stack_parent(), ancestry()
@@ -5574,12 +5585,13 @@ impl ReviewPassReconstitutionInput {
         workflow_run: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         session: SessionId,
-        accepted_input: ReviewPassAcceptedInputEvidence,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
         state: ReviewPassState,
         turn_evidence: Option<ReviewPassTurnEvidence>,
     ) -> Self;
     // accessors: reference(), kind(), workflow_run(), workflow(), session(),
-    // accepted_input(), state(), turn_evidence()
+    // accepted_input(), accepted_input_evidence(), state(), turn_evidence()
 }
 pub struct ReviewPass { /* reference + session input + origin turn + state */ }
 pub enum ReviewPassConstructionFailure {
@@ -5598,6 +5610,7 @@ impl ReviewPassConstructionError {
 pub enum ReviewPassReconstitutionFailure {
     ForeignWorkflowRun,
     RunWorkflowMismatch,
+    AcceptedInputEvidenceMismatch,
     AcceptedInputSessionMismatch,
     AcceptedInputHasNoOriginTurn,
     MissingTurnEvidence,
@@ -5756,14 +5769,15 @@ impl ReviewFindingEvent {
     pub const fn new(
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         kind: ReviewFindingEventKind,
     ) -> Self;
     // accessors: finding(), ordinal(), pass(), pass_evidence(), run_evidence(),
     // kind()
 }
-pub struct ReviewFinding { /* proposal + complete event history + derived status */ }
+pub struct ReviewFinding { /* proposal + history + derived status + replay indexes */ }
 impl ReviewFinding {
     pub const fn new(proposal: ReviewFindingProposal) -> Self;
     pub fn try_reconstitute(
@@ -5783,6 +5797,7 @@ pub enum ReviewFindingTransitionFailure {
     IncompatibleProducingPassEvidence,
     ForeignEventFinding,
     ForeignEventPass,
+    EventPassEvidenceMismatch,
     IncompatibleEventRunEvidence,
     EventPolicyMismatch,
     ConflictingPassEvidence,
@@ -5848,7 +5863,7 @@ impl ReviewExternalLinkObservation {
     // accessors: link(), ordinal(), pass(), pass_evidence(), run_evidence(),
     // state()
 }
-pub struct ReviewExternalLink { /* reservation + optional attachment + observations */ }
+pub struct ReviewExternalLink { /* reservation + attachment + observations + consumed claims */ }
 impl ReviewExternalLink {
     pub fn try_reserve(
         id: ReviewExternalLinkId,
