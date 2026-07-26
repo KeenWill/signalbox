@@ -16,9 +16,10 @@ checked-in example path were verified through PR #258
 (`agent/signalboxd-rename`). The daemon-held GitHub credential channel and its
 code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
-defaults boundary was verified through PR #272 (`agent/mid-session-model`).
-Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
-tag.
+defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
+credential-file value narrowing and the credential-shaped code-host detail were
+verified through PR #285 (`agent/dev-instance-code-host-credential`). Invariant
+law lives in [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
 

@@ -16,7 +16,8 @@ are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The
 tool-attributed metadata command and reconstitution surface was verified through
-PR #265 (`agent/tool-batch-tier0`).
+PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
+were verified through PR #285 (`agent/dev-instance-code-host-credential`).
 
 ## Identity model
 
