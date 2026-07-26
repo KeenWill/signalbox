@@ -400,6 +400,7 @@ impl GitHubCodeHostTransport {
         arguments: super::CiJobLogArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let started = tokio::time::Instant::now();
         let url = self.repository_url(
             arguments.repository(),
             &["actions", "jobs", &arguments.job_id().to_string(), "logs"],
@@ -425,7 +426,8 @@ impl GitHubCodeHostTransport {
         {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
-        let redirect_client = public_destination_client(&redirect, DEFAULT_TIMEOUT)
+        let remaining = remaining_exchange_timeout(started.elapsed())?;
+        let redirect_client = public_destination_client(&redirect, remaining)
             .await
             .map_err(classify_public_destination_error)?;
         let response = redirect_client
@@ -771,11 +773,18 @@ fn parse_review_thread_comment(
     .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
+fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
+    DEFAULT_TIMEOUT
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(CodeHostTransportFailure::DispatchUnknown)
+}
+
 fn reject_graphql_errors(value: &serde_json::Value) -> Result<(), CodeHostTransportFailure> {
     match value.get("errors") {
         None => Ok(()),
         Some(serde_json::Value::Array(errors)) if errors.is_empty() => Ok(()),
-        Some(serde_json::Value::Array(_errors)) => Err(CodeHostTransportFailure::Rejected),
+        Some(serde_json::Value::Array(_errors)) => Err(CodeHostTransportFailure::DispatchUnknown),
         Some(_) => Err(CodeHostTransportFailure::InvalidResponse),
     }
 }
@@ -995,16 +1004,26 @@ mod tests {
         );
     }
 
-    /// A GraphQL error from a read is a definitive rejection that can return
-    /// ordinary known-failure evidence.
+    /// A GraphQL error from a read can report resolver, rate-limit, or server
+    /// failure and therefore remains infrastructure failure.
     #[test]
-    fn graphql_read_error_is_rejected() {
-        let value = serde_json::json!({"errors": [{"message": "fixture rejection"}]});
+    fn graphql_read_error_is_dispatch_unknown() {
+        let value = serde_json::json!({"errors": [{"message": "fixture server failure"}]});
 
         assert_eq!(
             reject_graphql_errors(&value),
-            Err(CodeHostTransportFailure::Rejected)
+            Err(CodeHostTransportFailure::DispatchUnknown)
         );
+    }
+
+    /// The authenticated redirect response consumes the same timeout budget
+    /// later used for DNS admission and the credential-free download.
+    #[test]
+    fn job_log_redirect_uses_remaining_exchange_timeout() {
+        const ELAPSED: Duration = Duration::from_secs(7);
+        const EXPECTED_REMAINING: Duration = Duration::from_secs(23);
+
+        assert_eq!(remaining_exchange_timeout(ELAPSED), Ok(EXPECTED_REMAINING));
     }
 
     /// A read-only server failure remains an infrastructure failure rather
