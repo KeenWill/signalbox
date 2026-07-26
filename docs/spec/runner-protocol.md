@@ -1,15 +1,15 @@
 # Runner protocol and placement
 
 This page specifies the implemented runner-protocol foundation. Its domain
-surface is verified against the implementing stack rooted at PR #259
-(`agent/runner-protocol`) through PR #260; its relational persistence clauses
-are verified against PR #267 (`agent/runner-persistence`). It owns logical
-runner enrollment, daemon-authoritative catalog validation, runner leases,
-session placement and affinity, credential-profile grants, and workspace
-requirements. The tool registry's common declarations remain owned by
-[tool loop](tool-loop.md); session transcript and frontier mechanics remain
-owned by [sessions and transcript](sessions-and-transcript.md); physical tool
-attempts remain owned by [tool loop](tool-loop.md). Invariant tags cite
+surface is verified through PR #260 (`agent/runner-protocol-domain`); its
+relational persistence clauses are verified against PR #267
+(`agent/runner-persistence`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, session placement and
+affinity, credential-profile grants, and workspace requirements. The common
+tool-registry declarations remain owned by [tool loop](tool-loop.md); session
+transcript and frontier mechanics remain owned by
+[sessions and transcript](sessions-and-transcript.md); physical tool attempts
+remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant catalog](../invariants.md).
 
 The verified surface includes the domain aggregates and their PostgreSQL store
@@ -112,11 +112,15 @@ Each `RunnerToolDeclaration` contains:
 - `DaemonOrRunner { selector }`.
 
 A runner selector is either one exact `RunnerId` or one `RunnerCapabilityClass`.
-When both loci are admissible, dispatch selects the session's attached runner
-when that runner satisfies the selector and currently advertises the tool;
-otherwise daemon-local execution is admissible. Placement is immutable
-declaration metadata, not a per-call choice supplied by a runner or model. An
-MCP locus is not part of the vocabulary.
+When both loci are admissible, the domain retains daemon-local admissibility if
+the attached runner does not currently advertise the tool, while runner lease
+creation fails `ToolUnavailable`. It does not transfer the consumed runner
+authorization or credential-profile grant to daemon execution. Later application
+orchestration must select the locus before authorization; a change to daemon
+fallback discards runner-pair authority and resolves the daemon-local tool
+policy without the runner-resident profile. Placement is immutable declaration
+metadata, not a per-call choice supplied by a runner or model. An MCP locus is
+not part of the vocabulary.
 
 `RunnerToolDeclaration` is the one daemon-authoritative runner-dispatch
 declaration. Every runner-advertisable tool therefore has model-facing
@@ -165,14 +169,20 @@ fail-closed adapter behavior is not a fourth domain effect class.
 A `RunnerLease` binds one lease identity, exact tool name, complete authorized
 physical-attempt dispatch correlation, session, runner, effect class, and
 positive lease-lineage generation. Lease creation is not a free constructor: it
-consumes the tool loop's `AuthorizedToolAttempt`, which exists only after the
-automatic or owner decision authorizes that exact attempt. Current active
+consumes one `RunnerToolAttemptAuthorization`, which binds the approved request
+and its exact tool name to the tool loop's `AuthorizedToolAttempt`. The latter
+exists only after the automatic or owner decision authorizes that exact attempt,
+and neither authority nor the resulting lease is cloneable. Current active
 enrollment, pinned placement, its exact validated registration, and any selected
-active credential grant jointly authorize the offer. The attempt's session and
-two-way crash class must match the placement and declaration-derived effect
-class (`Pure` to `EffectFree`; `Idempotent` or `SideEffecting` to
-`ExternalEffect`). Revoked enrollment, lost placement, or a mismatched runner,
-tool, attempt, effect, profile, or grant cannot create a lease.
+active credential grant jointly authorize every offer after the first. The
+initial offer instead creates that pinned placement, any selected grant, and
+generation-one lease in one checked transition from `Unpinned`; it does not
+require those products to exist beforehand. The request, attempt, session, and
+two-way crash class must match the selected tool, placement, and
+declaration-derived effect class (`Pure` to `EffectFree`; `Idempotent` or
+`SideEffecting` to `ExternalEffect`). Revoked enrollment, lost placement, or a
+mismatched runner, request, tool, attempt, effect, profile, or grant cannot
+create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
@@ -197,12 +207,14 @@ the checked successor lease-lineage generation. Loss after claim follows the
 required retry law:
 
 - `Pure` and `Idempotent` produce typed re-lease authority at the checked
-  successor generation; every successor offer consumes exact
-  `AuthorizedToolAttempt` authority, authority after claim requires a fresh
-  physical `ToolAttemptId`, while authority lost before claim retains the
-  never-executed attempt identity; and
-- `SideEffecting` produces typed crash-classification authority naming the exact
-  physical attempt and never produces re-lease authority.
+  successor generation; after claim that authority consumes the owning checked
+  `ToolBatch`, retires the prior in-flight attempt to its effect-correct
+  terminal history, installs and authorizes a fresh physical `ToolAttemptId`,
+  and returns both attempt records with the updated batch, while authority lost
+  before claim retains the never-executed attempt identity; and
+- `SideEffecting` produces typed crash-classification authority whose physical
+  attempt is derived from the opaque lost lease and never produces re-lease
+  authority.
 
 Generation exhaustion and claimed-attempt identity reuse fail closed. Re-leasing
 continues one logical tool request and lease lineage. Its successor
@@ -253,7 +265,8 @@ reconnect resynchronization, and exact wire correlations remain later stacks.
 
 ## Session placement and affinity
 
-`SessionRunnerPlacement` starts with one immutable request:
+`SessionRunnerPlacement` starts with one request that is immutable between
+explicit replacement transitions:
 
 - a `RunnerSelector`, targeting a capability class or exact runner identity;
 - `WorkingDirectorySelection`, either runner default or one exact bounded
@@ -268,17 +281,18 @@ nonempty, U+0000-free, at-most-4,096-byte contract.
 
 Before execution, placement is `Unpinned`. Mere attachment does not pin it. The
 first authorized runner lease atomically validates the request against that
-runner's exact validated registration and produces `Pinned` state together with
-the initial offered lease. Selector, credential-profile availability, workspace
-capability, and authorized-attempt correlation must all match. The pinned state
-contains the runner, selected working directory, credential-profile selection,
-tool inventory, runner-required tool inventory, and any provisioned workspace.
-When a profile was requested, that same transition constructs its initial grant
-from the now-exact runner and registration; session creation cannot construct a
+runner's exact validated registration and produces `Pinned` state, any requested
+initial credential grant, and the initial offered lease together. Selector,
+credential-profile availability, workspace capability, and the tool-bound
+authorized-attempt correlation must all match. The pinned state contains the
+runner, selected working directory, credential-profile selection, tool
+inventory, runner-required tool inventory, and any provisioned workspace. When a
+profile was requested, that same transition constructs its initial grant from
+the now-exact runner and registration; session creation cannot construct a
 runner-bound grant while class-targeted placement is still unpinned. Once
-pinned, ordinary attachment and lease creation accept only that exact runner.
-There is no automatic migration or class-based rescheduling to a different
-runner (INV-044).
+pinned, ordinary attachment and lease creation accept only that exact runner and
+require the current grant when a profile is selected. There is no automatic
+migration or class-based rescheduling to a different runner (INV-044).
 
 For `RepositoryWorktree`, the provisioned workspace's working directory is the
 selected execution directory. Attachment and reconstitution reject a provisioned
@@ -296,24 +310,32 @@ registration leaves the placement unchanged.
 
 Runner loss is explicit state, not implicit reassignment. Marking the pinned
 runner lost retains the prior placement and disables future lease creation. An
-owner-directed replacement supplies a new validated registration, working
-directory, credential-profile selection, tool inventory, and provisioned
-workspace. It advances a positive placement revision and returns one
-`RunnerPlacementChange` value carrying the complete before-and-after placement
-facts needed for a later frontier-extending injected message. Reconstitution
-rejects an unpinned revision other than one, a pinned or lost state that does
-not match its current request and validated capabilities. The store retains
-append-only created, pinned, runner-lost, runner-replaced, and profile-replaced
-records behind one current pointer. Relational transition checks require
-contiguous event history, exact revision succession, unchanged affinity facts at
-runner loss, profile-only changes for profile replacement, and each stored
-tool's runner-required flag to match its declaration's runner-only or combined
-locus. Every appended record must advance the current-placement head in the same
-transaction. Reconstitution reads the current record with its exact validated
-registration and tool inventory. The loaded persistence wrapper retains that
-historical registration and its durable revision so a caller can reconcile
-against newer availability and persist `RunnerLost` without reconstructing or
-guessing the pinned evidence.
+owner-directed replacement supplies and installs a new complete placement
+request, validated registration, working directory, credential-profile
+selection, tool inventory, and provisioned workspace. Exact-runner placement
+therefore changes identity only through this explicit replacement. It advances a
+positive placement revision and returns one `RunnerPlacementChange` value
+carrying the complete before-and-after placement requests and pinned facts
+needed for a later frontier-extending injected message. Reconstitution accepts a
+complete public raw-facts input and rejects an unpinned revision other than one
+or a pinned or lost state that does not match its current request and validated
+capabilities. Pinned or lost reconstitution validates against the exact
+registration snapshot that produced the pin and rejects any stored tool or
+runner-required-tool inventory that differs from that checked result. A current
+narrowed re-registration is reconciled separately and is not substituted for
+that historical snapshot.
+
+The store retains append-only created, pinned, runner-lost, runner-replaced, and
+profile-replaced records behind one current pointer. Relational transition checks
+require contiguous event history, exact revision succession, unchanged affinity
+facts at runner loss, profile-only changes for profile replacement, and each
+stored tool's runner-required flag to match its declaration's runner-only or
+combined locus. Every appended record advances the current-placement head in the
+same transaction. Reconstitution reads the current record with its exact
+validated registration and tool inventory. The loaded persistence wrapper
+retains that historical registration and its durable revision so a caller can
+reconcile against newer availability and persist `RunnerLost` without
+reconstructing or guessing the pinned evidence.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -350,35 +372,34 @@ availability known. The grant binds the session, runner, profile, and positive
 grant revision. A runner that did not advertise the profile cannot receive the
 grant. Lease creation requires the current active grant, the same pinned runner
 and profile, a tool present in the snapshot, and consumption of the exact
-`AuthorizedToolAttempt` produced after approval resolution. The grant records
-the exact tool/profile posture without issuing a reusable standalone dispatch
-token.
+`RunnerToolAttemptAuthorization` produced after approval resolution and bound to
+that tool. The grant records the exact tool/profile posture without issuing a
+reusable standalone dispatch token.
 
 Grant replacement is forward-only. It checks the current revision and installs
 one complete later snapshot, returning a `CredentialProfileChange` with the
-before-and-after profile and tool inventories for later frontier injection. When
-runner replacement consumes a prior pinned-profile grant, it creates a checked
-successor revision and cannot recreate revision one, including after the prior
-grant was revoked. The prior revoked revision remains terminal. A profile-free
-prior placement carries no grant into replacement; selecting a profile then
-starts an independent grant lineage at revision one for the newly pinned runner.
-Every successor binds its predecessor through the immediately prior placement's
-exact runner and grant revision, so equal revision numbers in independent
-session grant lines cannot cross-wire provenance. Revocation is also
-forward-only and gates later lease creation. A lease already offered is already
-dispatched and completes or crash-classifies normally; revocation neither
-rewrites nor cancels it. A revoked grant revision cannot become active again.
-Complete reconstitution checks an independently authoritative expected session
-and rejects foreign runner facts, a profile absent from the validated
-registration, or a tool set wider than the advertisement. Grants created by
-initial pin or runner replacement must contain the complete validated
+before-and-after profile and tool inventories for later frontier injection.
+Runner replacement consumes any prior grant lineage and creates a checked
+successor revision. A profileless replacement carries the lineage forward as a
+new terminal tombstone, so restoring a previously selected profile cannot
+recreate revision one. Every prior revoked revision remains terminal. Every
+successor binds its predecessor through the immediately prior placement exact
+runner and grant revision, so equal revision numbers in independent session
+grant lines cannot cross-wire provenance. Revocation is also forward-only and
+gates later lease creation. A lease already offered is already dispatched and
+completes or crash-classifies normally; revocation neither rewrites nor cancels
+it. A revoked grant revision cannot become active again. Complete reconstitution
+accepts a complete public raw-facts input, checks an independently authoritative
+expected session, and rejects foreign runner facts, a profile absent from the
+validated registration, or a tool set wider than the advertisement. Grants
+created by initial pin or runner replacement contain the complete validated
 registration tool inventory; explicit profile replacement may select a checked
 subset. The store retains normalized grant snapshots and append-only issued,
 replaced, and revoked audit events. Grant relations contain only profile names,
 tool names, pair approval posture, and typed audit correlations: there is no
-credential-value or generic payload column. A stored grant must preserve an
-explicit profile approval exactly; only a genuinely absent policy pair may use
-the session-policy fallback. Truncation of immutable grant audit evidence is
+credential-value or generic payload column. A stored grant preserves an explicit
+profile approval exactly; only a genuinely absent policy pair may use the
+session-policy fallback. Truncation of immutable grant audit evidence is
 rejected. Lease insertion joins the current unrevoked grant and exact
 tool/profile pair atomically with dispatch authorization (INV-035, INV-045).
 
@@ -412,10 +433,11 @@ the later runner workspace stack.
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Catalog file parsing, reload, revision pinning, and safe rebinding are
   recorded in [Tool safety](../open-questions.md#tool-safety).
-- Application orchestration that resolves credential-pair posture through the
-  existing tool-decision path, compilation of runner argument schemas into
-  executable validators, and the compatibility projection from current
-  daemon-local tool definitions is recorded in
+- Application orchestration that selects runner or daemon locus before
+  authorization, resolves credential-pair posture through the existing
+  tool-decision path, discards runner-pair authority before daemon fallback,
+  compiles runner argument schemas into executable validators, and projects from
+  current daemon-local tool definitions is recorded in
   [Tool safety](../open-questions.md#tool-safety).
 - Runner result-egress policy, including whether and how arbitrary tool output
   is screened for credential disclosure, is recorded in

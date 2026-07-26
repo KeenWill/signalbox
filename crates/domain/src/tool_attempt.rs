@@ -616,7 +616,7 @@ impl CurrentToolAttempt {
 }
 
 /// An in-flight attempt paired with the only valid executor fence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AuthorizedToolAttempt {
     attempt: CurrentToolAttempt,
     correlation: ToolAttemptDispatchCorrelation,

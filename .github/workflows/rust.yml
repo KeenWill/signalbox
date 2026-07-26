@@ -41,7 +41,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            d155ba839d3e85d0a14a312a4a1a87b9bc34a3147e49f87dbcd23f9e5a855075
+            889a6062736e3a858441c15ca0cef16d19efc400a070d9c58536f7c65821343d
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -91,9 +91,9 @@ jobs:
               --features postgres-integration
               --tests
               -- --ignored --test-threads=4
-          - suite: hubd
+          - suite: signalboxd
             command: >-
-              cargo test -p signalbox-hubd
+              cargo test -p signalboxd
               --tests
               -- --ignored --test-threads=4
           - suite: terminal-client

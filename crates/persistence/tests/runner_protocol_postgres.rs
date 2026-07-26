@@ -8,18 +8,22 @@ use std::{error::Error, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AuthorizedToolAttempt, CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval,
-    ProvisionedWorkspace, ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId,
-    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolDispatchGeneration, ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId,
-    TurnAttemptId, TurnId, WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey,
-    WorkspaceRequirement,
+    ApprovedToolRequest, AuthorizedToolAttempt, CredentialProfileGrant,
+    CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
+    CredentialToolApproval, ModelCallId, NormalizedToolArguments, ProvisionedWorkspace,
+    ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
+    RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration,
+    RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerSelector, RunnerToolAttemptAuthorization,
+    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
+    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -142,10 +146,29 @@ fn model_definition() -> RunnerToolModelDefinition {
     .expect("the fixture model definition is valid")
 }
 
+fn approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
+    let request = ToolRequestReconstitutionInput::new(
+        ToolRequestId::from_uuid(uuid(facts.request)),
+        SessionId::from_uuid(uuid(SESSION)),
+        TurnId::from_uuid(uuid(facts.turn)),
+        ModelCallId::from_uuid(uuid(facts.turn + (RELATED_IDENTITY_OFFSET * 2))),
+        ToolRequestOrdinal::from_u32(0),
+        tool("inspect"),
+        NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+            .expect("the fixture arguments are canonical"),
+    )
+    .into_request();
+    let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+        .reconstitute()
+        .expect("the fixture registry policy approves");
+    ApprovedToolRequest::try_from_resolution(request, approval)
+        .expect("the fixture approval matches its request")
+}
+
 fn authorized_with_effect(
     facts: PhysicalAttemptFacts,
     effect: ToolEffectClass,
-) -> AuthorizedToolAttempt {
+) -> RunnerToolAttemptAuthorization {
     let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
         ToolAttemptDispatchCorrelationReconstitutionInput {
             session: SessionId::from_uuid(uuid(SESSION)),
@@ -171,11 +194,13 @@ fn authorized_with_effect(
     let ReconstitutedToolAttempt::Current(attempt) = attempt else {
         panic!("the fixture attempt is current")
     };
-    AuthorizedToolAttempt::reconstitute(attempt, dispatch)
-        .expect("the canonical in-flight fixture authorizes")
+    let authorized = AuthorizedToolAttempt::reconstitute(attempt, dispatch)
+        .expect("the canonical in-flight fixture authorizes");
+    RunnerToolAttemptAuthorization::try_new(approved_request(facts), authorized)
+        .expect("the approved request binds the authorized fixture attempt")
 }
 
-fn authorized(facts: PhysicalAttemptFacts) -> AuthorizedToolAttempt {
+fn authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
     authorized_with_effect(facts, ToolEffectClass::EffectFree)
 }
 
@@ -223,6 +248,67 @@ fn lease_with_cross_wired_dispatch(lease: &RunnerLease) -> RunnerLease {
         recorded_state: lease.state(),
     })
     .expect("the cross-wired dispatch remains internally self-consistent")
+}
+
+fn duplicate_lease(lease: &RunnerLease) -> RunnerLease {
+    let correlation = lease.correlation();
+    let authorization = lease.credential_authorization().cloned();
+    RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
+        lease: correlation.lease,
+        dispatch: correlation.dispatch,
+        runner: lease.runner(),
+        tool: lease.tool().clone(),
+        effect: lease.effect(),
+        credential_authorization: authorization.clone(),
+        generation: lease.generation(),
+        state: lease.state(),
+        recorded_correlation: correlation,
+        recorded_session: lease.session(),
+        recorded_effect: lease.effect(),
+        recorded_credential_authorization: authorization,
+        recorded_state: lease.state(),
+    })
+    .expect("the fixture lease facts reconstitute")
+}
+
+fn duplicate_placement(
+    placement: &SessionRunnerPlacement,
+    registration: Option<&ValidatedRunnerRegistration>,
+) -> SessionRunnerPlacement {
+    SessionRunnerPlacement::reconstitute(
+        SessionRunnerPlacementReconstitutionInput {
+            session: placement.session(),
+            revision: placement.revision(),
+            request: placement.request().clone(),
+            state: placement.state().clone(),
+        },
+        placement.session(),
+        registration,
+    )
+    .expect("the fixture placement facts reconstitute")
+}
+
+fn duplicate_grant(
+    grant: &CredentialProfileGrant,
+    registration: &ValidatedRunnerRegistration,
+) -> CredentialProfileGrant {
+    CredentialProfileGrant::reconstitute(
+        CredentialProfileGrantReconstitutionInput {
+            session: grant.session(),
+            runner: grant.runner(),
+            revision: grant.revision(),
+            profile: grant.profile().clone(),
+            tools: grant.tools().cloned().collect(),
+            approvals: grant
+                .approvals()
+                .map(|(tool, approval)| (tool.clone(), approval))
+                .collect(),
+            state: grant.state(),
+        },
+        grant.session(),
+        registration,
+    )
+    .expect("the fixture grant facts reconstitute")
 }
 
 fn enrollment() -> RunnerEnrollment {
@@ -1272,9 +1358,7 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
 {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
-    let claimed = pin
-        .lease
-        .clone()
+    let claimed = duplicate_lease(&pin.lease)
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
     store.store_lease(&claimed).await?;
@@ -1494,11 +1578,9 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
         .grant
         .as_ref()
         .expect("the fixture pin carries a credential grant");
-    let replacement = pin
-        .placement
-        .clone()
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
         .replace_credential_profile(
-            original_grant.clone(),
+            duplicate_grant(original_grant, registration.registration()),
             registration.registration(),
             replacement_profile(),
             [tool("inspect")],
@@ -1518,7 +1600,7 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
     .bind(Decimal::from(original_grant.revision().get()))
     .fetch_one(&mut *revocation)
     .await?;
-    let replacement_grant = replacement.grant.grant.clone();
+    let replacement_grant = duplicate_grant(&replacement.grant.grant, registration.registration());
     let mut replacement_store = Box::pin(store.store_placement(
         &replacement.placement,
         Some(&registration),
@@ -1540,7 +1622,7 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
     .execute(&mut *revocation)
     .await?;
     revocation.commit().await?;
-    let stored = replacement_store
+    replacement_store
         .await
         .expect("the serialized successor does not reactivate its revoked predecessor");
     let loaded = store
@@ -1548,8 +1630,6 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
         .await?
         .expect("the successor placement remains loadable");
 
-    assert_eq!(stored.placement(), &replacement.placement);
-    assert_eq!(stored.grant(), Some(&replacement_grant));
     assert_eq!(loaded.placement(), &replacement.placement);
     assert_eq!(loaded.grant(), Some(&replacement_grant));
     drop(pool);
@@ -1566,11 +1646,9 @@ async fn s32_inv045_replaced_grant_is_not_a_current_revocation_target() -> Resul
         .grant
         .as_ref()
         .expect("the fixture pin carries a credential grant");
-    let replacement = pin
-        .placement
-        .clone()
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
         .replace_credential_profile(
-            original_grant.clone(),
+            duplicate_grant(original_grant, registration.registration()),
             registration.registration(),
             replacement_profile(),
             [tool("inspect")],
@@ -1894,11 +1972,12 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         )
         .expect("the validated registration pins the placement");
     let claimed_pin = SessionRunnerPin {
-        placement: pin.placement.clone(),
-        grant: pin.grant.clone(),
-        lease: pin
-            .lease
-            .clone()
+        placement: duplicate_placement(&pin.placement, Some(registration.registration())),
+        grant: pin
+            .grant
+            .as_ref()
+            .map(|grant| duplicate_grant(grant, registration.registration())),
+        lease: duplicate_lease(&pin.lease)
             .claim(pin.lease.correlation())
             .expect("the exact fixture correlation claims its lease"),
     };
@@ -1948,18 +2027,20 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("canonical profile selection requires its exact grant on every lease");
 
     assert_store_check_violation(missing_current_grant);
-    let profile_replacement = pin
-        .placement
-        .clone()
-        .replace_credential_profile(
-            pin.grant
-                .clone()
-                .expect("the fixture pin carries a credential grant"),
-            registration.registration(),
-            replacement_profile(),
-            [tool("inspect")],
-        )
-        .expect("the replacement profile is valid for the pinned runner");
+    let profile_replacement =
+        duplicate_placement(&pin.placement, Some(registration.registration()))
+            .replace_credential_profile(
+                duplicate_grant(
+                    pin.grant
+                        .as_ref()
+                        .expect("the fixture pin carries a credential grant"),
+                    registration.registration(),
+                ),
+                registration.registration(),
+                replacement_profile(),
+                [tool("inspect")],
+            )
+            .expect("the replacement profile is valid for the pinned runner");
     let predecessor_grant = store
         .store_placement(
             &profile_replacement.placement,
@@ -1970,18 +2051,20 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("a replacement placement cannot retain its predecessor grant");
 
     assert_store_domain_error(predecessor_grant, RunnerDomainError::CorruptStoredFacts);
-    let same_profile_replacement = pin
-        .placement
-        .clone()
-        .replace_credential_profile(
-            pin.grant
-                .clone()
-                .expect("the fixture pin carries a credential grant"),
-            registration.registration(),
-            profile(),
-            [tool("inspect")],
-        )
-        .expect("an explicit same-profile replacement still advances grant lineage");
+    let same_profile_replacement =
+        duplicate_placement(&pin.placement, Some(registration.registration()))
+            .replace_credential_profile(
+                duplicate_grant(
+                    pin.grant
+                        .as_ref()
+                        .expect("the fixture pin carries a credential grant"),
+                    registration.registration(),
+                ),
+                registration.registration(),
+                profile(),
+                [tool("inspect")],
+            )
+            .expect("an explicit same-profile replacement still advances grant lineage");
     let stale_grant_revision = store
         .store_placement(
             &same_profile_replacement.placement,
@@ -1992,9 +2075,7 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("a replacement cannot retain its predecessor grant revision");
 
     assert_store_check_violation(stale_grant_revision);
-    let lost = pin
-        .placement
-        .clone()
+    let lost = duplicate_placement(&pin.placement, Some(registration.registration()))
         .mark_runner_lost()
         .expect("the pinned runner may be marked lost");
     store
@@ -2161,11 +2242,14 @@ async fn s32_inv044_loaded_placement_retains_reconciliation_registration()
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
         .expect("the pinned placement and historical registration reload together");
-    let lost = loaded
-        .placement()
-        .clone()
-        .reconcile_registration(current.registration())
-        .expect("withdrawn runner-required availability marks the placement lost");
+    let lost = duplicate_placement(
+        loaded.placement(),
+        loaded
+            .registration()
+            .map(StoredValidatedRunnerRegistration::registration),
+    )
+    .reconcile_registration(current.registration())
+    .expect("withdrawn runner-required availability marks the placement lost");
     store
         .store_placement(&lost, loaded.registration(), loaded.grant())
         .await?;
@@ -2251,8 +2335,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, _, lease) = stored_later_lease_fixture(&pool).await?;
     store.store_lease(&lease).await?;
-    let claimed = lease
-        .clone()
+    let claimed = duplicate_lease(&lease)
         .claim(lease.correlation())
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed);
@@ -2271,9 +2354,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
 async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
-    let claimed = pin
-        .lease
-        .clone()
+    let claimed = duplicate_lease(&pin.lease)
         .claim(pin.lease.correlation())
         .expect("the exact lease fence claims");
     store.store_lease(&claimed).await?;
@@ -2408,9 +2489,7 @@ async fn s30_inv042_explicit_automatic_grant_approval_cannot_be_downgraded()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
-    let lost = pin
-        .placement
-        .clone()
+    let lost = duplicate_placement(&pin.placement, Some(registration.registration()))
         .mark_runner_lost()
         .expect("the pinned runner may be marked lost");
     store
@@ -2498,13 +2577,14 @@ async fn s32_inv045_grant_audit_rejects_truncate() -> Result<(), Box<dyn Error>>
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
-    let replacement = pin
-        .placement
-        .clone()
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
         .replace_credential_profile(
-            pin.grant
-                .clone()
-                .expect("the fixture pin carries a credential grant"),
+            duplicate_grant(
+                pin.grant
+                    .as_ref()
+                    .expect("the fixture pin carries a credential grant"),
+                registration.registration(),
+            ),
             registration.registration(),
             replacement_profile(),
             [tool("inspect")],
@@ -2537,11 +2617,9 @@ async fn s32_inv045_grant_audit_kind_is_revision_bound() -> Result<(), Box<dyn E
         .grant
         .as_ref()
         .expect("the fixture pin carries its issued grant");
-    let replacement = pin
-        .placement
-        .clone()
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
         .replace_credential_profile(
-            initial.clone(),
+            duplicate_grant(initial, registration.registration()),
             registration.registration(),
             replacement_profile(),
             [tool("inspect")],
@@ -2685,9 +2763,7 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
         )
         .expect("the first runner pins the placement");
     store.store_pin(&pin, &first_registration).await?;
-    let lost = pin
-        .placement
-        .clone()
+    let lost = duplicate_placement(&pin.placement, Some(first_registration.registration()))
         .mark_runner_lost()
         .expect("the first runner may be marked lost");
     store
@@ -2705,7 +2781,9 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
             RunnerWorkingDirectory::try_new("/workspace/second".to_owned())
                 .expect("the replacement runner directory is valid"),
             None,
-            pin.grant.clone(),
+            pin.grant
+                .as_ref()
+                .map(|grant| duplicate_grant(grant, first_registration.registration())),
         )
         .expect("the replacement advances the cross-runner grant lineage");
     store
@@ -2728,8 +2806,8 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
--> Result<(), Box<dyn Error>> {
+async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result<(), Box<dyn Error>>
+{
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -2789,15 +2867,29 @@ async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
             pin.grant,
         )
         .expect("the replacement may intentionally omit a credential profile");
+    let tombstone = profile_free
+        .grant
+        .expect("the profile-free replacement carries a terminal grant tombstone");
+    let expected_tombstone_revision = tombstone.revision();
+    let expected_tombstone_runner = tombstone.runner();
     store
-        .store_placement(&profile_free.placement, Some(&second_registration), None)
+        .store_placement(
+            &profile_free.placement,
+            Some(&second_registration),
+            Some(&tombstone),
+        )
         .await?;
+    let stored_profile_free = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the profile-free replacement remains loadable");
+    assert_eq!(stored_profile_free.grant(), Some(&tombstone));
     let second_lost = profile_free
         .placement
         .mark_runner_lost()
         .expect("the profile-free runner may be marked lost");
     store
-        .store_placement(&second_lost, Some(&second_registration), None)
+        .store_placement(&second_lost, Some(&second_registration), Some(&tombstone))
         .await?;
     let later_enrollment = RunnerEnrollment::new(
         RunnerEnrollmentId::from_uuid(uuid(LATER_ENROLLMENT)),
@@ -2816,9 +2908,9 @@ async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
             RunnerWorkingDirectory::try_new("/workspace/later".to_owned())
                 .expect("the later runner directory is valid"),
             None,
-            None,
+            Some(tombstone),
         )
-        .expect("profile selection after a profile-free placement starts a grant lineage");
+        .expect("profile selection after a profile-free placement advances the grant lineage");
     store
         .store_placement(
             &later.placement,
@@ -2833,14 +2925,28 @@ async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
 
     assert_eq!(loaded.placement(), &later.placement);
     assert_eq!(loaded.grant(), later.grant.as_ref());
-    let later_grant = later
+    let restored_grant = later
         .grant
-        .clone()
-        .expect("the later profiled replacement starts its grant lineage");
+        .as_ref()
+        .expect("the restored profile carries its successor grant");
+    assert_eq!(
+        restored_grant.revision(),
+        expected_tombstone_revision
+            .checked_next()
+            .expect("the tombstone successor revision is representable"),
+    );
+    let later_grant = duplicate_grant(
+        later
+            .grant
+            .as_ref()
+            .expect("the later profiled replacement starts its grant lineage"),
+        later_registration.registration(),
+    );
+    let expected_prior_runner = later_grant.runner();
     let successor = later
         .placement
         .replace_credential_profile(
-            later_grant.clone(),
+            later_grant,
             later_registration.registration(),
             replacement_profile(),
             [tool("inspect")],
@@ -2866,7 +2972,8 @@ async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(RunnerId::from_uuid(prior_runner), later_grant.runner());
+    assert_eq!(RunnerId::from_uuid(prior_runner), expected_prior_runner);
+    assert_eq!(expected_prior_runner, expected_tombstone_runner);
     drop(pool);
     Ok(())
 }
@@ -2943,9 +3050,7 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
-    let claimed = pin
-        .lease
-        .clone()
+    let claimed = duplicate_lease(&pin.lease)
         .claim(pin.lease.correlation())
         .expect("the exact first lease fence claims");
     store.store_lease(&claimed).await?;
@@ -3032,9 +3137,7 @@ async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
         )
         .expect("the idempotent registration pins its external-effect attempt");
     store.store_pin(&pin, &registration).await?;
-    let claimed = pin
-        .lease
-        .clone()
+    let claimed = duplicate_lease(&pin.lease)
         .claim(pin.lease.correlation())
         .expect("the exact idempotent lease fence claims");
     store.store_lease(&claimed).await?;
@@ -3105,7 +3208,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
             offer_request(),
         )
         .expect("the validated registration pins the placement");
-    let offered = pin.lease.clone();
+    let offered = duplicate_lease(&pin.lease);
     store.store_pin(&pin, &registration).await?;
     let correlation = offered.correlation();
     let claimed = offered
@@ -3237,7 +3340,7 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
             offer_request(),
         )
         .expect("the validated registration pins the placement");
-    let offered = pin.lease.clone();
+    let offered = duplicate_lease(&pin.lease);
     store.store_pin(&pin, &registration).await?;
     let correlation = offered.correlation();
     let claimed = offered

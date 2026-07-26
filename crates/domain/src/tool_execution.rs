@@ -9,11 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     ActiveTurnPhase, ApprovedToolRequest, AuthorizedToolAttempt, CurrentToolAttempt,
-    CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, PreparedDecideToolRequest,
-    ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
-    ToolApprovalResolution, ToolAttemptEnd, ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind,
-    ToolRequest, ToolRequestId, TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
+    CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, EndedToolAttempt,
+    PreparedDecideToolRequest, ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
+    ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd,
+    ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
+    TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
 };
 
 /// Stored active phase for one complete logical tool batch.
@@ -425,6 +426,90 @@ impl ToolBatch {
             })?;
         Ok(PreparedToolAttempt {
             attempt: approved.prepare_attempt(attempt, turn_attempt, effect_class),
+        })
+    }
+
+    pub(crate) fn replace_claimed_attempt(
+        mut self,
+        claimed_attempt: ToolAttemptId,
+        replacement_attempt: ToolAttemptId,
+    ) -> Result<PreparedClaimedToolAttemptReplacement, ToolBatchExecutionError> {
+        let ToolBatchPhase::Executing { turn_attempt } = self.phase else {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::NotExecuting,
+            });
+        };
+        if self.attempts.values().any(|candidate| {
+            let candidate_id = match candidate {
+                ReconstitutedToolAttempt::Current(current) => current.attempt(),
+                ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
+            };
+            candidate_id == replacement_attempt
+        }) {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptIdentityReuse,
+            });
+        }
+        let Some((request, current)) =
+            self.attempts
+                .iter()
+                .find_map(|(request, candidate)| match candidate {
+                    ReconstitutedToolAttempt::Current(current)
+                        if current.attempt() == claimed_attempt
+                            && current.state() == CurrentToolAttemptState::InFlight =>
+                    {
+                        Some((*request, current.clone()))
+                    }
+                    ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => {
+                        None
+                    }
+                })
+        else {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            });
+        };
+        let request_record = self
+            .requests
+            .iter()
+            .find(|candidate| candidate.id() == request)
+            .cloned()
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        let approval = self
+            .approvals
+            .get(&request)
+            .cloned()
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::ApprovalMismatch,
+            })?;
+        let approved =
+            ApprovedToolRequest::try_from_resolution(request_record, approval).map_err(|_| {
+                ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::ApprovalMismatch,
+                }
+            })?;
+        let effect_class = current.effect_class();
+        let retired = match current.classify_crash_loss() {
+            ToolAttemptCrashOutcome::KnownFailed(retired)
+            | ToolAttemptCrashOutcome::Ambiguous(retired) => retired,
+        };
+        let authorized = approved
+            .prepare_attempt(replacement_attempt, turn_attempt, effect_class)
+            .authorize()
+            .map_err(|_| ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+            })?;
+        self.attempts.insert(
+            request,
+            ReconstitutedToolAttempt::Current(authorized.attempt().clone()),
+        );
+        Ok(PreparedClaimedToolAttemptReplacement {
+            batch: self,
+            retired,
+            approved,
+            authorized,
         })
     }
 
@@ -967,6 +1052,13 @@ impl PreparedToolAttempt {
     pub fn into_attempt(self) -> CurrentToolAttempt {
         self.attempt
     }
+}
+
+pub(crate) struct PreparedClaimedToolAttemptReplacement {
+    pub(crate) batch: ToolBatch,
+    pub(crate) retired: EndedToolAttempt,
+    pub(crate) approved: ApprovedToolRequest,
+    pub(crate) authorized: AuthorizedToolAttempt,
 }
 
 /// Why no next serialized attempt can be prepared.

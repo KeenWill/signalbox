@@ -83,7 +83,7 @@ impl StoredValidatedRunnerRegistration {
 }
 
 /// One canonical placement record and its adapter event ordinal.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct StoredSessionRunnerPlacement {
     event_ordinal: u64,
     placement: SessionRunnerPlacement,
@@ -106,6 +106,22 @@ impl StoredSessionRunnerPlacement {
 
     pub const fn grant(&self) -> Option<&CredentialProfileGrant> {
         self.grant.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        u64,
+        SessionRunnerPlacement,
+        Option<StoredValidatedRunnerRegistration>,
+        Option<CredentialProfileGrant>,
+    ) {
+        (
+            self.event_ordinal,
+            self.placement,
+            self.registration,
+            self.grant,
+        )
     }
 }
 
@@ -345,7 +361,7 @@ impl RunnerProtocolStore {
         placement: &SessionRunnerPlacement,
         registration: Option<&StoredValidatedRunnerRegistration>,
         grant: Option<&CredentialProfileGrant>,
-    ) -> Result<StoredSessionRunnerPlacement, RunnerProtocolStoreError> {
+    ) -> Result<(), RunnerProtocolStoreError> {
         validate_placement_snapshot(placement, registration, grant)?;
 
         let mut transaction = self.pool.begin().await?;
@@ -375,6 +391,7 @@ impl RunnerProtocolStore {
                 &mut transaction,
                 prior.as_ref(),
                 event_ordinal,
+                placement,
                 grant,
                 registration,
             )
@@ -392,14 +409,8 @@ impl RunnerProtocolStore {
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
-        Ok(StoredSessionRunnerPlacement {
-            event_ordinal,
-            placement: placement.clone(),
-            registration: registration.cloned(),
-            grant: grant.cloned(),
-        })
+        Ok(())
     }
-
     /// Atomically stores the first pinned placement, grant, and offered lease.
     pub async fn store_pin(
         &self,
@@ -439,6 +450,7 @@ impl RunnerProtocolStore {
                 &mut transaction,
                 prior.as_ref(),
                 event_ordinal,
+                &pin.placement,
                 grant,
                 registration,
             )
@@ -509,12 +521,10 @@ impl RunnerProtocolStore {
                 .map(StoredValidatedRunnerRegistration::registration),
         )
         .await?;
-        let grant = match registration.as_ref() {
-            Some(registration) => {
-                load_grant_for_placement(transaction.as_mut(), &row, registration.registration())
-                    .await?
-            }
-            None => None,
+        let grant = if registration.is_some() {
+            load_grant_for_placement(transaction.as_mut(), &row).await?
+        } else {
+            None
         };
         transaction.commit().await?;
         Ok(Some(StoredSessionRunnerPlacement {
@@ -552,7 +562,8 @@ impl RunnerProtocolStore {
             transaction.rollback().await?;
             return Ok(None);
         };
-        let locked_runner = locked_placement.try_get::<Option<Uuid>, _>("pinned_runner_id")?;
+        let locked_runner =
+            locked_placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
         let locked_revision =
             locked_placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
         let locked_profile =
@@ -1118,10 +1129,11 @@ async fn insert_placement_record(
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
-             workspace_working_directory, credential_grant_revision)
+             workspace_working_directory, credential_grant_runner_id,
+             credential_grant_revision)
          VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-             $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+             $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
          )",
     )
     .bind(placement.session().into_uuid())
@@ -1150,6 +1162,7 @@ async fn insert_placement_record(
     .bind(count_decimal(state.tools.len())?)
     .bind(state.workspace_repository)
     .bind(state.workspace_directory)
+    .bind(grant.map(|grant| grant.runner().into_uuid()))
     .bind(grant.map(|grant| Decimal::from(grant.revision().get())))
     .execute(&mut **transaction)
     .await?;
@@ -1173,9 +1186,54 @@ async fn insert_grant_if_new(
     transaction: &mut Transaction<'_, Postgres>,
     prior_placement: Option<&PgRow>,
     placement_event: u64,
+    placement: &SessionRunnerPlacement,
     grant: &CredentialProfileGrant,
     registration: &StoredValidatedRunnerRegistration,
 ) -> Result<(), RunnerProtocolStoreError> {
+    let historical_registration;
+    let tombstone = matches!(
+        placement.state(),
+        SessionRunnerPlacementState::Pinned(pinned)
+            | SessionRunnerPlacementState::RunnerLost(pinned)
+            if pinned.credential_profile.is_none()
+    );
+    let grant_registration = if !tombstone {
+        registration
+    } else {
+        let prior_revision = grant
+            .revision()
+            .get()
+            .checked_sub(1)
+            .filter(|revision| *revision > 0)
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+        let row = sqlx::query(
+            "SELECT registration_enrollment_id, registration_revision
+               FROM runner_credential_grant
+              WHERE session_id = $1
+                AND runner_id = $2
+                AND grant_revision = $3",
+        )
+        .bind(grant.session().into_uuid())
+        .bind(grant.runner().into_uuid())
+        .bind(Decimal::from(prior_revision))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+        historical_registration = load_registration_in(
+            transaction.as_mut(),
+            runner_enrollment_id(row.get("registration_enrollment_id")),
+            decode_registration_revision(row.get("registration_revision"))?,
+        )
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        &historical_registration
+    };
+    CredentialProfileGrant::reconstitute(
+        grant_input(grant),
+        grant.session(),
+        grant_registration.registration(),
+    )
+    .map_err(RunnerProtocolStoreError::Domain)?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -1244,9 +1302,9 @@ async fn insert_grant_if_new(
         };
         if row.get::<String, _>("credential_profile_name") != grant.profile().as_str()
             || runner_enrollment_id(row.get("registration_enrollment_id"))
-                != registration.registration.enrollment()
+                != grant_registration.registration.enrollment()
             || decode_registration_revision(row.get("registration_revision"))?
-                != registration.revision
+                != grant_registration.revision
             || approvals != expected_approvals
             || stored_state != grant.state()
         {
@@ -1264,7 +1322,7 @@ async fn insert_grant_if_new(
     let prior_runner: Option<Uuid> = match (prior, prior_placement) {
         (Some(expected_revision), Some(prior_placement)) => {
             let runner = prior_placement
-                .try_get::<Option<Uuid>, _>("pinned_runner_id")?
+                .try_get::<Option<Uuid>, _>("credential_grant_runner_id")?
                 .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
             let revision = prior_placement
                 .try_get::<Option<Decimal>, _>("credential_grant_revision")?
@@ -1289,8 +1347,8 @@ async fn insert_grant_if_new(
     .bind(grant.runner().into_uuid())
     .bind(Decimal::from(grant.revision().get()))
     .bind(grant.profile().as_str())
-    .bind(registration.registration.enrollment().into_uuid())
-    .bind(Decimal::from(registration.revision.get()))
+    .bind(grant_registration.registration.enrollment().into_uuid())
+    .bind(Decimal::from(grant_registration.revision.get()))
     .bind(Decimal::from(placement_event))
     .bind(prior_runner)
     .bind(prior)
@@ -1447,13 +1505,14 @@ async fn decode_placement(
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
-    SessionRunnerPlacement::reconstitute_from_facts(
+    SessionRunnerPlacement::reconstitute(
         SessionRunnerPlacementReconstitutionInput {
             session,
             revision: decode_generation(row.get("placement_revision"))?,
             request,
             state,
         },
+        session,
         registration,
     )
     .map_err(RunnerProtocolStoreError::Domain)
@@ -1462,15 +1521,13 @@ async fn decode_placement(
 async fn load_grant_for_placement(
     connection: &mut PgConnection,
     placement: &PgRow,
-    registration: &ValidatedRunnerRegistration,
 ) -> Result<Option<CredentialProfileGrant>, RunnerProtocolStoreError> {
     let revision = placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
-    let runner = placement.try_get::<Option<Uuid>, _>("pinned_runner_id")?;
-    let profile = placement.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
-    if revision.is_none() && profile.is_none() {
+    let runner = placement.try_get::<Option<Uuid>, _>("credential_grant_runner_id")?;
+    if revision.is_none() && runner.is_none() {
         return Ok(None);
     }
-    let (Some(revision), Some(runner), Some(profile)) = (revision, runner, profile) else {
+    let (Some(revision), Some(runner)) = (revision, runner) else {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     };
     let session = session_id(placement.get("session_id"));
@@ -1497,9 +1554,22 @@ async fn load_grant_for_placement(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
-    if row.get::<String, _>("credential_profile_name") != profile {
+    let profile = row.get::<String, _>("credential_profile_name");
+    let pinned_profile =
+        placement.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
+    if pinned_profile
+        .as_ref()
+        .is_some_and(|pinned| pinned != &profile)
+    {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    let grant_registration = load_registration_in(
+        connection,
+        runner_enrollment_id(row.get("registration_enrollment_id")),
+        decode_registration_revision(row.get("registration_revision"))?,
+    )
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     let tool_rows = sqlx::query(
         "SELECT tool_name, approval_kind
            FROM runner_credential_grant_tool
@@ -1534,7 +1604,7 @@ async fn load_grant_for_placement(
             },
         },
         session,
-        registration,
+        grant_registration.registration(),
     )
     .map(Some)
     .map_err(RunnerProtocolStoreError::Domain)
@@ -1762,31 +1832,21 @@ fn validate_placement_snapshot(
     registration: Option<&StoredValidatedRunnerRegistration>,
     grant: Option<&CredentialProfileGrant>,
 ) -> Result<(), RunnerProtocolStoreError> {
-    SessionRunnerPlacement::reconstitute_from_facts(
+    SessionRunnerPlacement::reconstitute(
         SessionRunnerPlacementReconstitutionInput {
             session: placement.session(),
             revision: placement.revision(),
             request: placement.request().clone(),
             state: placement.state().clone(),
         },
+        placement.session(),
         registration.map(StoredValidatedRunnerRegistration::registration),
     )
     .map_err(RunnerProtocolStoreError::Domain)?;
-    match (grant, registration) {
-        (Some(grant), Some(registration)) => {
-            CredentialProfileGrant::reconstitute(
-                grant_input(grant),
-                placement.session(),
-                registration.registration(),
-            )
-            .map_err(RunnerProtocolStoreError::Domain)?;
-        }
-        (Some(_), None) => {
-            return Err(RunnerProtocolStoreError::Corruption(
-                RunnerProtocolCorruption::MissingCanonicalRegistration,
-            ));
-        }
-        (None, _) => {}
+    if grant.is_some() && registration.is_none() {
+        return Err(RunnerProtocolStoreError::Corruption(
+            RunnerProtocolCorruption::MissingCanonicalRegistration,
+        ));
     }
     let binding_matches = match (placement.state(), grant) {
         (SessionRunnerPlacementState::Unpinned, None) => true,
@@ -1794,11 +1854,18 @@ fn validate_placement_snapshot(
             SessionRunnerPlacementState::Pinned(pinned)
             | SessionRunnerPlacementState::RunnerLost(pinned),
             Some(grant),
-        ) => {
-            pinned.credential_profile.as_ref() == Some(grant.profile())
-                && placement.session() == grant.session()
-                && pinned.runner == grant.runner()
-        }
+        ) => match pinned.credential_profile.as_ref() {
+            Some(profile) => {
+                profile == grant.profile()
+                    && placement.session() == grant.session()
+                    && pinned.runner == grant.runner()
+            }
+            None => {
+                placement.session() == grant.session()
+                    && grant.state() == CredentialProfileGrantState::Revoked
+                    && grant.revision() != RunnerGeneration::one()
+            }
+        },
         (
             SessionRunnerPlacementState::Pinned(pinned)
             | SessionRunnerPlacementState::RunnerLost(pinned),
