@@ -1571,19 +1571,30 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
-    match selected_session_required_protocol_version(version, pool, session).await {
-        Ok(Some(required_version)) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::unsupported_version(required_version),
-            )
-            .await;
-        }
-        Ok(None) => {}
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let repository = SubmitInputRepository::new(pool.clone());
+    let command_is_claimed = match repository.load(command_id).await {
+        Ok(Some(_)) | Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => true,
+        Ok(None) => false,
         Err(error) => {
-            return write_process_read_error(writer, version, request_id, error).await;
+            return write_submit_input_repository_error(writer, version, request_id, error).await;
+        }
+    };
+    if !command_is_claimed {
+        match selected_session_required_protocol_version(version, pool, session).await {
+            Ok(Some(required_version)) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::unsupported_version(required_version),
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return write_process_read_error(writer, version, request_id, error).await;
+            }
         }
     }
     let Some(expected_version) =
@@ -1607,7 +1618,7 @@ where
         .await;
     };
     let request = SubmitInputRequest::try_new(
-        DurableCommandId::from_uuid(command_id),
+        command_id,
         session,
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
@@ -1629,7 +1640,7 @@ where
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         ConfiguredSubmitInputTransaction {
-            repository: SubmitInputRepository::new(pool.clone()),
+            repository,
             model_configuration,
         },
         eligibility_nudge.clone(),
@@ -1670,55 +1681,9 @@ where
             )
             .await
         }
-        Err(SubmitInputRepositoryError::Database(_)) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::mutation_unavailable(false),
-            )
-            .await
-        }
-        Err(SubmitInputRepositoryError::CommitAmbiguous(_)) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::mutation_unavailable(true),
-            )
-            .await
-        }
-        Err(SubmitInputRepositoryError::ModelExecution(error)) => match error.as_ref() {
-            signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
-                commit_ambiguous,
-                ..
-            } => {
-                write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::mutation_unavailable(*commit_ambiguous),
-                )
-                .await
-            }
-            _ => {
-                write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::Internal),
-                )
-                .await
-            }
-        },
         Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_),
-        )))
-        | Err(
-            SubmitInputRepositoryError::DifferentCommandKind { .. }
-            | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
-            | SubmitInputRepositoryError::Corruption(_),
-        ) => {
+        ))) => {
             write_error(
                 writer,
                 version,
@@ -1727,7 +1692,36 @@ where
             )
             .await
         }
+        Err(error) => write_submit_input_repository_error(writer, version, request_id, error).await,
     }
+}
+
+async fn write_submit_input_repository_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    error: SubmitInputRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        SubmitInputRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
+        SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
+        SubmitInputRepositoryError::ModelExecution(error) => match error.as_ref() {
+            signalbox_persistence::model_execution::ModelCallRepositoryError::Database {
+                commit_ambiguous,
+                ..
+            } => ProtocolError::mutation_unavailable(*commit_ambiguous),
+            _ => ProtocolError::without_detail(ErrorCode::Internal),
+        },
+        SubmitInputRepositoryError::DifferentCommandKind { .. }
+        | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
+        | SubmitInputRepositoryError::Corruption(_) => {
+            ProtocolError::without_detail(ErrorCode::Internal)
+        }
+    };
+    write_error(writer, version, request_id, protocol_error).await
 }
 
 fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {

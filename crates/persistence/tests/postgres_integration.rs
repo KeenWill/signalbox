@@ -224,6 +224,14 @@ fn application_model_identity(message: &ModelConversationMessage) -> (u64, Direc
 }
 
 #[track_caller]
+fn submit_input_database_error(error: SubmitInputRepositoryError) -> sqlx::Error {
+    match error {
+        SubmitInputRepositoryError::Database(error) => error,
+        error => panic!("fixture expected a submit-input database error, got {error:?}"),
+    }
+}
+
+#[track_caller]
 fn process_user_entry(entry: &ProcessTranscriptEntry) -> (AcceptedInputId, TurnId, &str) {
     match entry {
         ProcessTranscriptEntry::User {
@@ -13070,19 +13078,17 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
-        !pending_acceptance.is_finished(),
-        "pending acceptance must wait for the source lifecycle row"
+        blocked_backends_reached(&pool, 1).await?,
+        "pending acceptance must remain blocked on the source lifecycle row"
     );
 
     terminalize_source.commit().await?;
-    let pending_error = pending_acceptance
-        .await?
-        .expect_err("steering must fail after racing source terminalization commits");
-    let SubmitInputRepositoryError::Database(pending_database_error) = pending_error else {
-        panic!("the rejected racing commit must report its database constraint");
-    };
+    let pending_database_error = submit_input_database_error(
+        pending_acceptance
+            .await?
+            .expect_err("steering must fail after racing source terminalization commits"),
+    );
     assert_eq!(
         pending_database_error
             .as_database_error()
