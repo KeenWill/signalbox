@@ -934,18 +934,32 @@ impl ReviewExternalLinkObservationResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkNoChangeResult {
     link: ReviewExternalLinkId,
+    observed_through: ReviewEventOrdinal,
     state: ReviewExternalObjectState,
 }
 
 impl ReviewExternalLinkNoChangeResult {
-    /// Commits one reservation and its unchanged reported state.
-    pub const fn new(link: ReviewExternalLinkId, state: ReviewExternalObjectState) -> Self {
-        Self { link, state }
+    /// Commits one reservation, consumed observation frontier, and unchanged state.
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        observed_through: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self {
+        Self {
+            link,
+            observed_through,
+            state,
+        }
     }
 
     /// Returns the exact reservation.
     pub const fn link(self) -> ReviewExternalLinkId {
         self.link
+    }
+
+    /// Returns the exact latest observation consumed by this report.
+    pub const fn observed_through(self) -> ReviewEventOrdinal {
+        self.observed_through
     }
 
     /// Returns the exact unchanged reported state.
@@ -2343,7 +2357,11 @@ fn validate_pass_result(
             .findings()
             .iter()
             .any(|finding| finding.target() != reference.target()),
-        ReviewPassResult::FindingEvent(event) => event.finding().target() != reference.target(),
+        ReviewPassResult::FindingEvent(event) => {
+            event.finding().target() != reference.target()
+                || referenced_finding_result(event)
+                    .is_some_and(|referenced| referenced.reference().target() != reference.target())
+        }
         ReviewPassResult::ExternalLinkAttachment(result) => result
             .finding_event()
             .is_some_and(|event| event.finding().target() != reference.target()),
@@ -2366,6 +2384,7 @@ fn validate_pass_result(
         (ReviewPassState::Succeeded { .. }, ReviewPassResult::FindingEvent(event)) => {
             !matches!(event.kind(), ReviewFindingEventResultKind::Posted { .. })
                 && event.finding().target() == reference.target()
+                && finding_event_result_reference_is_compatible(event)
                 && finding_event_result_matches_pass(
                     event.kind(),
                     kind,
@@ -2374,6 +2393,7 @@ fn validate_pass_result(
         }
         (ReviewPassState::Blocked { .. }, ReviewPassResult::FindingEvent(event)) => {
             event.finding().target() == reference.target()
+                && finding_event_result_reference_is_compatible(event)
                 && finding_event_result_matches_pass(
                     event.kind(),
                     kind,
@@ -2408,6 +2428,28 @@ fn validate_pass_result(
         _ => false,
     };
     (!compatible).then_some(ReviewPassReconstitutionFailure::IncompatibleResult)
+}
+
+fn referenced_finding_result(
+    event: &ReviewFindingEventResult,
+) -> Option<ReviewReferencedFindingEvidence> {
+    match event.kind() {
+        ReviewFindingEventResultKind::Duplicate { canonical } => Some(*canonical),
+        ReviewFindingEventResultKind::Superseded { successor } => Some(*successor),
+        _ => None,
+    }
+}
+
+fn finding_event_result_reference_is_compatible(event: &ReviewFindingEventResult) -> bool {
+    referenced_finding_result(event).is_none_or(|referenced| {
+        referenced.reference().finding() != event.finding().finding()
+            && referenced.reference().run() == event.finding().run()
+            && referenced.producing_pass() == event.finding().pass()
+            && matches!(
+                referenced.status(),
+                ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
+            )
+    })
 }
 
 fn finding_event_result_matches_pass(
@@ -3750,7 +3792,8 @@ pub enum ReviewExternalObjectKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewExternalLinkAttachment {
     link: ReviewExternalLinkId,
-    pass: ReviewPassEvidence,
+    pass: ReviewPassRef,
+    pass_evidence: ReviewPassEvidence,
     run: ReviewRunEvidence,
     external_object: ReviewKey,
 }
@@ -3759,13 +3802,15 @@ impl ReviewExternalLinkAttachment {
     /// Constructs attachment evidence.
     pub const fn new(
         link: ReviewExternalLinkId,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         external_object: ReviewKey,
     ) -> Self {
         Self {
             link,
             pass,
+            pass_evidence,
             run,
             external_object,
         }
@@ -3778,12 +3823,12 @@ impl ReviewExternalLinkAttachment {
 
     /// Returns the producing pass.
     pub const fn pass(&self) -> ReviewPassRef {
-        self.pass.reference()
+        self.pass
     }
 
     /// Returns the canonical producing-pass evidence.
     pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
-        &self.pass
+        &self.pass_evidence
     }
 
     /// Returns the canonical producing-run evidence.
@@ -3813,7 +3858,8 @@ pub enum ReviewExternalObjectState {
 pub struct ReviewExternalLinkObservation {
     link: ReviewExternalLinkId,
     ordinal: ReviewEventOrdinal,
-    pass: ReviewPassEvidence,
+    pass: ReviewPassRef,
+    pass_evidence: ReviewPassEvidence,
     run: ReviewRunEvidence,
     state: ReviewExternalObjectState,
 }
@@ -3823,7 +3869,8 @@ impl ReviewExternalLinkObservation {
     pub const fn new(
         link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         state: ReviewExternalObjectState,
     ) -> Self {
@@ -3831,6 +3878,7 @@ impl ReviewExternalLinkObservation {
             link,
             ordinal,
             pass,
+            pass_evidence,
             run,
             state,
         }
@@ -3848,12 +3896,12 @@ impl ReviewExternalLinkObservation {
 
     /// Returns the observing pass.
     pub const fn pass(&self) -> ReviewPassRef {
-        self.pass.reference()
+        self.pass
     }
 
     /// Returns the canonical observing-pass evidence.
     pub const fn pass_evidence(&self) -> &ReviewPassEvidence {
-        &self.pass
+        &self.pass_evidence
     }
 
     /// Returns the canonical observing-run evidence.
@@ -4038,10 +4086,10 @@ impl ReviewExternalLink {
                 claim.pass.kind() == ReviewPassKind::ImportExternalContext
                     && result.link() == self.id
                     && self.attachment.is_some()
-                    && self
-                        .observations
-                        .iter()
-                        .any(|observation| observation.state == result.state())
+                    && self.observations.last().is_some_and(|observation| {
+                        observation.ordinal == result.observed_through()
+                            && observation.state == result.state()
+                    })
             }
             ReviewPassState::Blocked {
                 result: Some(_), ..
@@ -4075,18 +4123,23 @@ impl ReviewExternalLink {
                 self.transition_error(ReviewExternalLinkTransitionFailure::ForeignAttachmentLink)
             );
         }
-        if attachment.pass.reference().target() != self.association.target() {
+        if attachment.pass != attachment.pass_evidence.reference() {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::AttachmentPassEvidenceMismatch,
+            ));
+        }
+        if attachment.pass.target() != self.association.target() {
             return Err(self.transition_error(ReviewExternalLinkTransitionFailure::ForeignPass));
         }
-        if !run_evidence_matches_pass(attachment.run, &attachment.pass) {
+        if !run_evidence_matches_pass(attachment.run, &attachment.pass_evidence) {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatibleAttachmentRunEvidence,
             ));
         }
-        if let Some(failure) = self.claim_failure(&attachment.pass, attachment.run) {
+        if let Some(failure) = self.claim_failure(&attachment.pass_evidence, attachment.run) {
             return Err(self.transition_error(failure));
         }
-        let Some(result) = (match attachment.pass.state() {
+        let Some(result) = (match attachment.pass_evidence.state() {
             ReviewPassState::Succeeded {
                 result: Some(ReviewPassResult::ExternalLinkAttachment(result)),
                 ..
@@ -4098,7 +4151,7 @@ impl ReviewExternalLink {
             ));
         };
         if !matches!(
-            attachment.pass.kind(),
+            attachment.pass_evidence.kind(),
             ReviewPassKind::Publish | ReviewPassKind::ImportExternalContext
         ) || result.link() != self.id
             || result.external_object() != &attachment.external_object
@@ -4117,7 +4170,7 @@ impl ReviewExternalLink {
                     )
                     || !finding_event_result_matches_pass(
                         event.kind(),
-                        attachment.pass.kind(),
+                        attachment.pass_evidence.kind(),
                         ReviewPassTurnOutcome::Completed,
                     )
             })
@@ -4126,7 +4179,7 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::IncompatibleAttachmentPass,
             ));
         }
-        self.record_claim(&attachment.pass, attachment.run);
+        self.record_claim(&attachment.pass_evidence, attachment.run);
         self.attachment = Some(attachment);
         Ok(self)
     }
@@ -4144,17 +4197,22 @@ impl ReviewExternalLink {
                 self.transition_error(ReviewExternalLinkTransitionFailure::ForeignObservationLink)
             );
         }
-        if observation.pass.reference().target() != self.association.target() {
+        if observation.pass != observation.pass_evidence.reference() {
+            return Err(self.transition_error(
+                ReviewExternalLinkTransitionFailure::ObservationPassEvidenceMismatch,
+            ));
+        }
+        if observation.pass.target() != self.association.target() {
             return Err(self.transition_error(ReviewExternalLinkTransitionFailure::ForeignPass));
         }
-        if !run_evidence_matches_pass(observation.run, &observation.pass) {
+        if !run_evidence_matches_pass(observation.run, &observation.pass_evidence) {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatibleObservationRunEvidence,
             ));
         }
-        if observation.pass.kind() != ReviewPassKind::ImportExternalContext
+        if observation.pass_evidence.kind() != ReviewPassKind::ImportExternalContext
             || !matches!(
-                observation.pass.state(),
+                observation.pass_evidence.state(),
                 ReviewPassState::Succeeded {
                     result: Some(ReviewPassResult::ExternalLinkObservation(result)),
                     ..
@@ -4185,10 +4243,10 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::NoncontiguousOrdinal { expected },
             ));
         }
-        if let Some(failure) = self.claim_failure(&observation.pass, observation.run) {
+        if let Some(failure) = self.claim_failure(&observation.pass_evidence, observation.run) {
             return Err(self.transition_error(failure));
         }
-        self.record_claim(&observation.pass, observation.run);
+        self.record_claim(&observation.pass_evidence, observation.run);
         self.observations.push(observation);
         Ok(self)
     }
@@ -4224,10 +4282,9 @@ impl ReviewExternalLink {
         };
         if pass.kind() != ReviewPassKind::ImportExternalContext
             || result.link() != self.id
-            || self
-                .observations
-                .last()
-                .is_none_or(|previous| previous.state != result.state())
+            || self.observations.last().is_none_or(|previous| {
+                previous.ordinal != result.observed_through() || previous.state != result.state()
+            })
         {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatibleObservationPass,
@@ -4467,10 +4524,14 @@ pub enum ReviewExternalLinkTransitionFailure {
     ForeignPass,
     /// Attachment evidence did not canonically succeed in an attaching pass.
     IncompatibleAttachmentPass,
+    /// The stored attachment pass identity contradicts its canonical evidence.
+    AttachmentPassEvidenceMismatch,
     /// Attachment pass evidence contradicts its independently loaded run.
     IncompatibleAttachmentRunEvidence,
     /// Observation evidence did not canonically succeed in an import pass.
     IncompatibleObservationPass,
+    /// The stored observation pass identity contradicts its canonical evidence.
+    ObservationPassEvidenceMismatch,
     /// Observation pass evidence contradicts its independently loaded run.
     IncompatibleObservationRunEvidence,
     /// Publication-block evidence did not name this pending reservation.
@@ -4859,6 +4920,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -5123,6 +5185,7 @@ mod tests {
         let pass = pass_with_attachment_result(pass, link, &external_object);
         ReviewExternalLinkAttachment::new(
             link,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -5157,6 +5220,7 @@ mod tests {
         ReviewExternalLinkObservation::new(
             link,
             ordinal,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             state,
@@ -5177,7 +5241,7 @@ mod tests {
                 turn: *turn,
                 output_frontier: *output_frontier,
                 result: Some(ReviewPassResult::ExternalLinkNoChange(
-                    ReviewExternalLinkNoChangeResult::new(link, state),
+                    ReviewExternalLinkNoChangeResult::new(link, ReviewEventOrdinal::one(), state),
                 )),
             },
             other => other.clone(),
@@ -6900,6 +6964,7 @@ mod tests {
         let pass = succeeded_pass(70, ReviewPassKind::ImportExternalContext);
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
             link_id(71),
+            ReviewEventOrdinal::one(),
             ReviewExternalObjectState::Current,
         ));
 
@@ -6935,14 +7000,18 @@ mod tests {
         let pass = succeeded_pass(71, ReviewPassKind::ImportExternalContext);
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
             link_id(72),
+            ReviewEventOrdinal::one(),
             ReviewExternalObjectState::Current,
         ));
         let projected = pass
             .project_result(result.clone())
             .expect("result-free succeeded evidence admits its first result");
-        let distinct = ReviewPassResult::ExternalLinkNoChange(
-            ReviewExternalLinkNoChangeResult::new(link_id(72), ReviewExternalObjectState::Outdated),
-        );
+        let distinct =
+            ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+                link_id(72),
+                ReviewEventOrdinal::one(),
+                ReviewExternalObjectState::Outdated,
+            ));
 
         assert_eq!(projected.project_result(result), Some(projected.clone()));
         assert_eq!(projected.project_result(distinct), None);
@@ -6989,6 +7058,7 @@ mod tests {
     fn inv040_non_effect_pass_evidence_rejects_result_projection() {
         let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
             link_id(75),
+            ReviewEventOrdinal::one(),
             ReviewExternalObjectState::Current,
         ));
         let queued = ReviewPassEvidence::new(
@@ -8015,6 +8085,7 @@ mod tests {
         let error = pending
             .attach(ReviewExternalLinkAttachment::new(
                 link_id(30),
+                succeeded_pass(20, ReviewPassKind::Judge).reference(),
                 succeeded_pass(20, ReviewPassKind::Judge),
                 pass_run_evidence(&succeeded_pass(20, ReviewPassKind::Judge)),
                 key("external-comment-42"),
@@ -8059,6 +8130,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link_id(30),
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -8104,6 +8176,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link_id(30),
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
@@ -8124,6 +8197,7 @@ mod tests {
             .observe(ReviewExternalLinkObservation::new(
                 link_id(30),
                 ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::Judge).reference(),
                 succeeded_pass(21, ReviewPassKind::Judge),
                 pass_run_evidence(&succeeded_pass(21, ReviewPassKind::Judge)),
                 ReviewExternalObjectState::Current,
@@ -8207,6 +8281,42 @@ mod tests {
         assert_eq!(
             error.failure(),
             ReviewExternalLinkTransitionFailure::ConflictingPassEvidence
+        );
+    }
+
+    /// INV-040 / INV-041: a no-change claim authenticates the exact latest
+    /// observation, not an equal historical state.
+    #[test]
+    fn inv040_inv041_external_link_rejects_stale_no_change_frontier() {
+        let reservation = link_id(30);
+        let link = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first state is meaning-bearing")
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect("changed state advances the observation frontier");
+        let pass = no_change_pass(
+            reservation,
+            succeeded_pass(23, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+
+        let error = link
+            .confirm_unchanged(pass.clone(), pass_run_evidence(&pass))
+            .expect_err("a historical matching state cannot authenticate no-change");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::IncompatibleObservationPass
         );
     }
 
@@ -8404,6 +8514,64 @@ mod tests {
         );
     }
 
+    /// INV-040 / INV-041: an attachment row retains its independently stored
+    /// producing-pass identity.
+    #[test]
+    fn inv040_inv041_external_link_rejects_substituted_attachment_pass_identity() {
+        let pass = pass_with_attachment_result(
+            succeeded_pass(20, ReviewPassKind::Publish),
+            link_id(30),
+            &key("external-comment-42"),
+        );
+        let substituted = ReviewPassRef::new(pass.reference().run(), pass_id(99));
+        let error = pending_link(
+            link_id(30),
+            ReviewExternalLinkAssociation::Finding(finding_ref(10)),
+            ReviewExternalObjectKind::ReviewComment,
+        )
+        .attach(ReviewExternalLinkAttachment::new(
+            link_id(30),
+            substituted,
+            pass.clone(),
+            pass_run_evidence(&pass),
+            key("external-comment-42"),
+        ))
+        .expect_err("stored attachment pass identity cannot be reattributed");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::AttachmentPassEvidenceMismatch
+        );
+    }
+
+    /// INV-040 / INV-041: an observation row retains its independently stored
+    /// observing-pass identity.
+    #[test]
+    fn inv040_inv041_external_link_rejects_substituted_observation_pass_identity() {
+        let observation = observation_evidence(
+            link_id(30),
+            ReviewEventOrdinal::one(),
+            succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let substituted = ReviewPassRef::new(observation.pass().run(), pass_id(99));
+        let error = attached_finding_link(finding_ref(10), link_id(30))
+            .observe(ReviewExternalLinkObservation::new(
+                observation.link(),
+                observation.ordinal(),
+                substituted,
+                observation.pass_evidence().clone(),
+                observation.run_evidence(),
+                observation.state(),
+            ))
+            .expect_err("stored observation pass identity cannot be reattributed");
+
+        assert_eq!(
+            error.failure(),
+            ReviewExternalLinkTransitionFailure::ObservationPassEvidenceMismatch
+        );
+    }
+
     /// INV-041: attachment evidence must be joined to the exact canonical run
     /// that owns its pass.
     #[test]
@@ -8426,6 +8594,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link_id(30),
+            pass.reference(),
             pass,
             run,
             key("external-comment-42"),
@@ -8462,6 +8631,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link_id(30),
+            pass.reference(),
             pass,
             run,
             key("external-comment-42"),
@@ -8489,6 +8659,7 @@ mod tests {
             .observe(ReviewExternalLinkObservation::new(
                 link_id(30),
                 ReviewEventOrdinal::one(),
+                pass.reference(),
                 pass,
                 run,
                 ReviewExternalObjectState::Current,
@@ -8511,7 +8682,7 @@ mod tests {
             succeeded_pass(21, ReviewPassKind::ImportExternalContext),
             ReviewExternalObjectState::Current,
         )
-        .pass
+        .pass_evidence
         .clone();
         let run = ReviewRunEvidence::new(
             pass.reference().run(),
@@ -8525,6 +8696,7 @@ mod tests {
             .observe(ReviewExternalLinkObservation::new(
                 link_id(30),
                 ReviewEventOrdinal::one(),
+                pass.reference(),
                 pass,
                 run,
                 ReviewExternalObjectState::Current,
@@ -8669,6 +8841,7 @@ mod tests {
             .observe(ReviewExternalLinkObservation::new(
                 link_id(31),
                 ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext).reference(),
                 succeeded_pass(21, ReviewPassKind::ImportExternalContext),
                 pass_run_evidence(&succeeded_pass(21, ReviewPassKind::ImportExternalContext)),
                 ReviewExternalObjectState::Current,
@@ -8692,6 +8865,7 @@ mod tests {
         let error = pending
             .attach(ReviewExternalLinkAttachment::new(
                 link_id(31),
+                succeeded_pass(20, ReviewPassKind::Publish).reference(),
                 succeeded_pass(20, ReviewPassKind::Publish),
                 pass_run_evidence(&succeeded_pass(20, ReviewPassKind::Publish)),
                 key("external-comment-42"),
@@ -8878,6 +9052,58 @@ mod tests {
                 )),
             ),
             ReviewPassReconstitutionFailure::ForeignResultTarget,
+        );
+    }
+
+    /// INV-040: nested finding references in a pass result must preserve the
+    /// owning run, producing pass, distinct identity, and eligible status.
+    #[test]
+    fn inv040_pass_reconstitution_rejects_incompatible_nested_finding_reference() {
+        let finding = finding_ref(10);
+        let referenced = ReviewReferencedFindingEvidence {
+            reference: ReviewFindingRef::new(
+                ReviewPassRef::new(finding.run(), pass_id(99)),
+                finding_id(11),
+            ),
+            status: ReviewFindingStatus::Open,
+        };
+        let input = ReviewPassReconstitutionInput::new(
+            pass_ref(3),
+            ReviewPassKind::Dedupe,
+            run_ref(),
+            ReviewWorkflowKind::DedupeFindings,
+            session_id(4),
+            accepted_input_id(5),
+            ReviewPassAcceptedInputEvidence::new(
+                accepted_input_id(5),
+                session_id(4),
+                Some(turn_id(6)),
+            ),
+            ReviewPassState::Succeeded {
+                turn: turn_id(6),
+                output_frontier: frontier_id(8),
+                result: Some(ReviewPassResult::FindingEvent(
+                    ReviewFindingEventResult::new(
+                        finding,
+                        ReviewEventOrdinal::one(),
+                        ReviewFindingEventResultKind::Duplicate {
+                            canonical: referenced,
+                        },
+                    ),
+                )),
+            },
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::Completed,
+                Some(frontier_id(8)),
+            )),
+        );
+
+        assert_pass_reconstitution_rejects(
+            input,
+            ReviewPassReconstitutionFailure::IncompatibleResult,
         );
     }
 
@@ -9386,6 +9612,7 @@ mod tests {
         )
         .attach(ReviewExternalLinkAttachment::new(
             link,
+            pass.reference(),
             pass.clone(),
             pass_run_evidence(&pass),
             external_object,
