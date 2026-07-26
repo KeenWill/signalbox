@@ -5,13 +5,13 @@ use std::{error::Error, fmt, future::Future};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     OperatorFailureClass, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, ToolArgumentValidator, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    ReplaceSessionMetadataService, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence,
 };
 use signalbox_domain::{
     Actor, DurableCommandId, NormalizedToolArguments, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, SessionId, SessionMetadataContent, SessionMetadataSnapshot,
-    ToolEffectClass, ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault, ToolRequestId,
     ToolResultText,
 };
 use signalbox_persistence::session_metadata::{
@@ -19,34 +19,9 @@ use signalbox_persistence::session_metadata::{
 };
 use sqlx::PgPool;
 
+use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+
 pub(crate) const SESSION_STATUS_UPDATE_NAME: &str = "session_status_update";
-const SESSION_STATUS_UPDATE_DESCRIPTION: &str =
-    "Replaces the current session's complete title, tags, attributes, and archive status.";
-const SESSION_STATUS_UPDATE_SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "title": {
-            "type": ["string", "null"],
-            "description": "Optional exact session title."
-        },
-        "tags": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Complete exact session tag set."
-        },
-        "attributes": {
-            "type": "object",
-            "additionalProperties": {"type": "string"},
-            "description": "Complete exact machine-facing attribute map."
-        },
-        "archived": {
-            "type": "boolean",
-            "description": "Whether the session is hidden from the default view."
-        }
-    },
-    "required": ["title", "tags", "attributes", "archived"],
-    "additionalProperties": false
-}"#;
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one complete admitted title, tags, attributes, and archived snapshot";
 const SESSION_NOT_FOUND_DETAIL: &str = "session metadata target does not exist";
@@ -87,6 +62,53 @@ pub struct SessionStatusTool<Writer> {
     executor: SessionStatusExecutor<Writer>,
 }
 
+impl<Writer> ToolContract for SessionStatusTool<Writer> {
+    type Arguments = SessionStatusUpdateArguments;
+    const NAME: &'static str = SESSION_STATUS_UPDATE_NAME;
+    const DESCRIPTION: &'static str =
+        "Replaces the current session's complete title, tags, attributes, and archive status.";
+}
+
+/// Typed `session_status_update` argument shape; decoder and rendered schema
+/// share it. Field order is the declared `required` order.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionStatusUpdateArguments {
+    /// Optional exact session title.
+    title: SessionStatusTitle,
+    /// Complete exact session tag set.
+    tags: Vec<String>,
+    /// Complete exact machine-facing attribute map.
+    attributes: std::collections::BTreeMap<String, String>,
+    /// Whether the session is hidden from the default view.
+    archived: bool,
+}
+
+/// One nullable-but-required title member.
+///
+/// The replacement seam distinguishes "no title" from an absent member: the
+/// member must be present, and `null` — not omission — states titlelessness,
+/// so this newtype keeps the member required while admitting `null`.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(transparent)]
+struct SessionStatusTitle(Option<String>);
+
+impl schemars::JsonSchema for SessionStatusTitle {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("SessionStatusTitle")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": ["string", "null"],
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 impl SessionStatusTool<PostgresSessionStatusWriter> {
     /// Composes the production writer around the existing metadata application
     /// service and PostgreSQL transaction.
@@ -98,23 +120,20 @@ impl SessionStatusTool<PostgresSessionStatusWriter> {
 impl<Writer> SessionStatusTool<Writer> {
     /// Compiles immutable metadata around one injected writer.
     pub fn try_new(writer: Writer) -> Result<Self, SessionStatusToolConstructionError> {
-        let name = ToolName::try_new(String::from(SESSION_STATUS_UPDATE_NAME))
-            .map_err(|_| SessionStatusToolConstructionError::Name)?;
-        let schema = ToolInputSchema::try_new(String::from(SESSION_STATUS_UPDATE_SCHEMA))
-            .map_err(|_| SessionStatusToolConstructionError::Schema)?;
         let invalid_arguments_detail =
             ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
                 .map_err(|_| SessionStatusToolConstructionError::ErrorDetail)?;
         let session_not_found_detail =
             ToolExecutionErrorDetail::try_new(String::from(SESSION_NOT_FOUND_DETAIL))
                 .map_err(|_| SessionStatusToolConstructionError::ErrorDetail)?;
-        let definition = ToolDefinition::new(
-            name,
-            String::from(SESSION_STATUS_UPDATE_DESCRIPTION),
-            schema,
+        let definition = compile_contract_definition::<Self>(
             ToolPermissionDefault::Confirm,
             ToolEffectClass::ExternalEffect,
-        );
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => SessionStatusToolConstructionError::Name,
+            ToolContractCompileError::Schema => SessionStatusToolConstructionError::Schema,
+        })?;
         let compiled = CompiledTool::new(
             definition,
             SessionStatusArgumentValidator {
@@ -451,49 +470,15 @@ fn decode_arguments(
 fn decode_metadata_content(
     arguments: &NormalizedToolArguments,
 ) -> Result<SessionMetadataContent, InvalidSessionStatusArguments> {
-    let serde_json::Value::Object(mut object) =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidSessionStatusArguments)?
-    else {
-        return Err(InvalidSessionStatusArguments);
-    };
-    if object.len() != 4 {
-        return Err(InvalidSessionStatusArguments);
-    }
-    let archived = object
-        .remove("archived")
-        .and_then(|value| value.as_bool())
-        .ok_or(InvalidSessionStatusArguments)?;
-    let title = match object
-        .remove("title")
-        .ok_or(InvalidSessionStatusArguments)?
-    {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(value) => Some(value),
-        _ => return Err(InvalidSessionStatusArguments),
-    };
-    let serde_json::Value::Array(tag_values) =
-        object.remove("tags").ok_or(InvalidSessionStatusArguments)?
-    else {
-        return Err(InvalidSessionStatusArguments);
-    };
-    let tags = tag_values
-        .into_iter()
-        .map(|value| value.as_str().map(str::to_owned))
-        .collect::<Option<Vec<_>>>()
-        .ok_or(InvalidSessionStatusArguments)?;
-    let serde_json::Value::Object(attribute_values) = object
-        .remove("attributes")
-        .ok_or(InvalidSessionStatusArguments)?
-    else {
-        return Err(InvalidSessionStatusArguments);
-    };
-    let attributes = attribute_values
-        .into_iter()
-        .map(|(key, value)| value.as_str().map(|value| (key, value.to_owned())))
-        .collect::<Option<Vec<_>>>()
-        .ok_or(InvalidSessionStatusArguments)?;
-    SessionMetadataContent::try_new(title, tags, attributes, archived)
-        .map_err(|_| InvalidSessionStatusArguments)
+    let decoded: SessionStatusUpdateArguments =
+        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidSessionStatusArguments)?;
+    SessionMetadataContent::try_new(
+        decoded.title.0,
+        decoded.tags,
+        decoded.attributes.into_iter().collect(),
+        decoded.archived,
+    )
+    .map_err(|_| InvalidSessionStatusArguments)
 }
 
 fn session_status_result_text(
@@ -553,6 +538,60 @@ mod tests {
             ToolPermissionDefault::Confirm
         );
         assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
+    }
+
+    /// The complete rendered wire schema. The pretty golden is the review
+    /// surface; the byte-exact assertion pins the canonical compact form the
+    /// registry stores and providers receive as its exact serialization.
+    #[test]
+    fn session_status_rendered_schema_is_the_exact_wire_artifact() {
+        let (catalog, _executor) = SessionStatusTool::try_new(RejectingWriter)
+            .expect("static session_status_update tool compiles")
+            .into_parts();
+        let definition = &catalog.definitions()[0];
+        let schema: serde_json::Value = serde_json::from_str(definition.input_schema().as_str())
+            .expect("registry schema is valid JSON");
+
+        expect_test::expect![[r#"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "archived": {
+                  "description": "Whether the session is hidden from the default view.",
+                  "type": "boolean"
+                },
+                "attributes": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Complete exact machine-facing attribute map.",
+                  "type": "object"
+                },
+                "tags": {
+                  "description": "Complete exact session tag set.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "title": {
+                  "description": "Optional exact session title.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "title",
+                "tags",
+                "attributes",
+                "archived"
+              ],
+              "type": "object"
+            }"#]]
+        .assert_eq(&format!("{schema:#}"));
+        assert_eq!(definition.input_schema().as_str(), schema.to_string());
     }
 
     /// Typed decoding accepts exactly the existing complete metadata shape.
