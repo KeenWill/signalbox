@@ -70,12 +70,6 @@ pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
                 AND grant_revision = $3
               FOR UPDATE";
 
-pub(crate) const RUNNER_GRANT_PREDECESSOR: &str = "SELECT runner_id
-               FROM runner_credential_grant
-              WHERE session_id = $1
-                AND grant_revision = $2
-              FOR SHARE";
-
 pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
                FROM runner_enrollment
               WHERE enrollment_id = $1

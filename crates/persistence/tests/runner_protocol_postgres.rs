@@ -1652,6 +1652,110 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv045_pin_grant_requires_complete_registration_inventory()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            expanded_advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the expanded registration pins its complete tool inventory");
+    store.store_pin(&pin, &registration).await?;
+    let grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant
+         DISABLE TRIGGER runner_credential_grant_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant_tool
+         DISABLE TRIGGER runner_credential_grant_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM runner_credential_grant_tool
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3
+            AND tool_name = $4",
+    )
+    .bind(grant.session().into_uuid())
+    .bind(grant.runner().into_uuid())
+    .bind(Decimal::from(grant.revision().get()))
+    .bind(tool("catalog_only").as_str())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_credential_grant
+            SET tool_count = tool_count - 1
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3",
+    )
+    .bind(grant.session().into_uuid())
+    .bind(grant.runner().into_uuid())
+    .bind(Decimal::from(grant.revision().get()))
+    .execute(&mut *malformed)
+    .await?;
+    let incomplete = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("a pin-created grant must snapshot every registration tool");
+
+    assert_check_violation(incomplete);
+    malformed.rollback().await?;
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant_tool
+         ENABLE TRIGGER runner_credential_grant_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_credential_grant
+         ENABLE TRIGGER runner_credential_grant_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv044_loaded_placement_retains_reconciliation_registration()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -2120,6 +2224,40 @@ async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
 
     assert_eq!(loaded.placement(), &later.placement);
     assert_eq!(loaded.grant(), later.grant.as_ref());
+    let later_grant = later
+        .grant
+        .clone()
+        .expect("the later profiled replacement starts its grant lineage");
+    let successor = later
+        .placement
+        .replace_credential_profile(
+            later_grant.clone(),
+            later_registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the independent grant lineage may advance");
+    store
+        .store_placement(
+            &successor.placement,
+            Some(&later_registration),
+            Some(&successor.grant.grant),
+        )
+        .await?;
+    let prior_runner: Uuid = sqlx::query_scalar(
+        "SELECT prior_runner_id
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3",
+    )
+    .bind(successor.grant.grant.session().into_uuid())
+    .bind(successor.grant.grant.runner().into_uuid())
+    .bind(Decimal::from(successor.grant.grant.revision().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(RunnerId::from_uuid(prior_runner), later_grant.runner());
     drop(pool);
     Ok(())
 }
@@ -2186,6 +2324,47 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
     .expect_err("a pinned worktree placement requires both provisioned facts");
 
     assert_check_violation(missing_workspace);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = pin
+        .lease
+        .clone()
+        .claim(pin.lease.correlation())
+        .expect("the exact first lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed pure work may enter durable retry classification");
+    store.store_lease(loss.lost()).await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let retired_attempts: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT attempt_id
+           FROM runner_current_tool_attempt
+          WHERE request_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.request))
+    .fetch_all(&pool)
+    .await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let fresh_attempts: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT attempt_id
+           FROM runner_current_tool_attempt
+          WHERE request_id = $1",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.request))
+    .fetch_all(&pool)
+    .await?;
+
+    assert!(retired_attempts.is_empty());
+    assert_eq!(fresh_attempts, vec![uuid(RETRY_PHYSICAL_ATTEMPT.attempt)]);
     drop(pool);
     Ok(())
 }
@@ -2630,6 +2809,53 @@ async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<
         .expect_err("noncanonical durable schema text must fail closed");
 
     assert_store_corruption(malformed, RunnerProtocolCorruption::InvalidEncoding);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_idempotent_registration_tool_requires_runner_only_locus()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let stored = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_registration_tool
+         DISABLE TRIGGER runner_registration_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let invalid_locus = sqlx::query(
+        "UPDATE runner_registration_tool
+            SET effect_class = 'idempotent',
+                loci_kind = 'daemon_or_runner'
+          WHERE enrollment_id = $1
+            AND registration_revision = $2
+            AND tool_name = $3",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(stored.revision().get()))
+    .bind(tool("inspect").as_str())
+    .execute(&pool)
+    .await
+    .expect_err("idempotent tools have no daemon-local projection");
+    sqlx::query(
+        "ALTER TABLE runner_registration_tool
+         ENABLE TRIGGER runner_registration_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(invalid_locus);
     drop(pool);
     Ok(())
 }

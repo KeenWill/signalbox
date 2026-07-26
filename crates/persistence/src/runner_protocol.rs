@@ -32,7 +32,7 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::lock_inventory::{
-    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_GRANT_PREDECESSOR, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
+    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
@@ -371,7 +371,14 @@ impl RunnerProtocolStore {
         )
         .await?;
         if let (Some(grant), Some(registration)) = (grant, registration) {
-            insert_grant_if_new(&mut transaction, event_ordinal, grant, registration).await?;
+            insert_grant_if_new(
+                &mut transaction,
+                prior.as_ref(),
+                event_ordinal,
+                grant,
+                registration,
+            )
+            .await?;
         }
         sqlx::query(
             "INSERT INTO runner_current_session_placement
@@ -428,7 +435,14 @@ impl RunnerProtocolStore {
         )
         .await?;
         if let Some(grant) = pin.grant.as_ref() {
-            insert_grant_if_new(&mut transaction, event_ordinal, grant, registration).await?;
+            insert_grant_if_new(
+                &mut transaction,
+                prior.as_ref(),
+                event_ordinal,
+                grant,
+                registration,
+            )
+            .await?;
         }
         sqlx::query(
             "INSERT INTO runner_current_session_placement
@@ -1157,6 +1171,7 @@ async fn insert_placement_record(
 
 async fn insert_grant_if_new(
     transaction: &mut Transaction<'_, Postgres>,
+    prior_placement: Option<&PgRow>,
     placement_event: u64,
     grant: &CredentialProfileGrant,
     registration: &StoredValidatedRunnerRegistration,
@@ -1246,16 +1261,21 @@ async fn insert_grant_if_new(
         .checked_sub(1)
         .filter(|value| *value > 0)
         .map(Decimal::from);
-    let prior_runner: Option<Uuid> = match prior {
-        Some(prior) => Some(
-            sqlx::query_scalar(RUNNER_GRANT_PREDECESSOR)
-                .bind(grant.session().into_uuid())
-                .bind(prior)
-                .fetch_optional(&mut **transaction)
-                .await?
-                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
-        ),
-        None => None,
+    let prior_runner: Option<Uuid> = match (prior, prior_placement) {
+        (Some(expected_revision), Some(prior_placement)) => {
+            let runner = prior_placement
+                .try_get::<Option<Uuid>, _>("pinned_runner_id")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+            let revision = prior_placement
+                .try_get::<Option<Decimal>, _>("credential_grant_revision")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+            if revision != expected_revision {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+            Some(runner)
+        }
+        (Some(_), None) => return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into()),
+        (None, _) => None,
     };
     sqlx::query(
         "INSERT INTO runner_credential_grant

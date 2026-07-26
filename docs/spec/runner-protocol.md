@@ -85,9 +85,11 @@ The owner-editable catalog is validated into one `RunnerCatalog` domain value.
 It contains allowed capability classes, complete runner-tool declarations,
 credential-profile policies, and allowed workspace capabilities. Duplicate
 names, a credential policy naming an undeclared tool, or an internally
-inconsistent placement declaration rejects the complete catalog.
-Configuration-file parsing and replacement are later application work; the
-domain value is independent of TOML.
+inconsistent placement declaration rejects the complete catalog. Idempotent
+tools are runner-only because the daemon-local tool attempt model cannot carry
+their three-way retry classification; relational registration shape rejects an
+idempotent combined-locus row as well. Configuration-file parsing and
+replacement are later application work; the domain value is independent of TOML.
 
 Each `RunnerToolDeclaration` contains:
 
@@ -225,7 +227,11 @@ canonical enrollment, current registration pointer, and selected grant authority
 locks, so enrollment or grant revocation and registration replacement serialize
 before the relational checks admit a new generation. Loads independently join
 the physical-attempt tool and pinned runner before invoking lease
-reconstitution. The single runner-initiated outbound stream, reconnect
+reconstitution. After claimed retryable loss, the failed physical attempt leaves
+the tool-loop current-attempt projection before its fresh replacement is
+prepared and authorized; that fresh attempt becomes current before its successor
+lease generation is stored, avoiding a circular dependency between authorization
+and lease persistence. The single runner-initiated outbound stream, reconnect
 resynchronization, and exact wire correlations remain later stacks.
 
 ## Session placement and affinity
@@ -336,16 +342,21 @@ successor revision and cannot recreate revision one, including after the prior
 grant was revoked. The prior revoked revision remains terminal. A profile-free
 prior placement carries no grant into replacement; selecting a profile then
 starts an independent grant lineage at revision one for the newly pinned runner.
-Revocation is also forward-only and gates later lease creation. A lease already
-offered is already dispatched and completes or crash-classifies normally;
-revocation neither rewrites nor cancels it. A revoked grant revision cannot
-become active again. Complete reconstitution checks an independently
-authoritative expected session and rejects foreign runner facts, a profile
-absent from the validated registration, or a tool set wider than the
-advertisement. The store retains normalized grant snapshots and append-only
-issued, replaced, and revoked audit events. Grant relations contain only profile
-names, tool names, pair approval posture, and typed audit correlations: there is
-no credential-value or generic payload column. Lease insertion joins the current
+Every successor binds its predecessor through the immediately prior placement's
+exact runner and grant revision, so equal revision numbers in independent
+session grant lines cannot cross-wire provenance. Revocation is also
+forward-only and gates later lease creation. A lease already offered is already
+dispatched and completes or crash-classifies normally; revocation neither
+rewrites nor cancels it. A revoked grant revision cannot become active again.
+Complete reconstitution checks an independently authoritative expected session
+and rejects foreign runner facts, a profile absent from the validated
+registration, or a tool set wider than the advertisement. Grants created by
+initial pin or runner replacement must contain the complete validated
+registration tool inventory; explicit profile replacement may select a checked
+subset. The store retains normalized grant snapshots and append-only issued,
+replaced, and revoked audit events. Grant relations contain only profile names,
+tool names, pair approval posture, and typed audit correlations: there is no
+credential-value or generic payload column. Lease insertion joins the current
 unrevoked grant and exact tool/profile pair atomically with dispatch
 authorization (INV-035, INV-045).
 

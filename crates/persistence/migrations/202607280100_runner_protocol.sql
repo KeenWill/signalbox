@@ -414,6 +414,11 @@ CREATE TABLE runner_registration_tool (
         CHECK (effect_class IN ('pure', 'idempotent', 'side_effecting')),
     CONSTRAINT runner_registration_tool_loci_closed
         CHECK (loci_kind IN ('runner_only', 'daemon_or_runner')),
+    CONSTRAINT runner_registration_tool_idempotent_runner_only
+        CHECK (
+            effect_class <> 'idempotent'
+            OR loci_kind = 'runner_only'
+        ),
     CONSTRAINT runner_registration_tool_selector_shape
         CHECK (
             (
@@ -1602,6 +1607,52 @@ BEGIN
     IF grant_row.tool_count <> actual_tools
        OR invalid_tools <> 0
        OR initial_audit <> 1
+       OR (
+            grant_row.grant_revision > 1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_session_placement_record AS prior_placement
+                 WHERE prior_placement.session_id =
+                        grant_row.session_id
+                   AND prior_placement.event_ordinal =
+                        grant_row.placement_event_ordinal - 1
+                   AND prior_placement.pinned_runner_id =
+                        grant_row.prior_runner_id
+                   AND prior_placement.credential_grant_revision =
+                        grant_row.prior_grant_revision
+            )
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM runner_session_placement_record AS placement
+             WHERE placement.session_id = grant_row.session_id
+               AND placement.event_ordinal =
+                    grant_row.placement_event_ordinal
+               AND placement.event_kind IN (
+                    'pinned',
+                    'runner_replaced'
+               )
+               AND EXISTS (
+                    SELECT 1
+                      FROM runner_registration_tool AS available
+                     WHERE available.enrollment_id =
+                            grant_row.registration_enrollment_id
+                       AND available.registration_revision =
+                            grant_row.registration_revision
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM runner_credential_grant_tool AS granted
+                             WHERE granted.session_id =
+                                    grant_row.session_id
+                               AND granted.runner_id =
+                                    grant_row.runner_id
+                               AND granted.grant_revision =
+                                    grant_row.grant_revision
+                               AND granted.tool_name =
+                                    available.tool_name
+                       )
+               )
+       )
        OR NOT EXISTS (
             SELECT 1
               FROM runner_session_placement_record AS placement
@@ -1948,15 +1999,17 @@ SELECT attempt.*
   FROM tool_attempt AS attempt
  WHERE NOT EXISTS (
         SELECT 1
-          FROM runner_lease_generation AS prior_generation
-          JOIN runner_lease_generation AS successor_generation
-            ON successor_generation.lease_id =
-                prior_generation.lease_id
-           AND successor_generation.generation >
-                prior_generation.generation
-           AND successor_generation.attempt_id <>
-                prior_generation.attempt_id
-         WHERE prior_generation.attempt_id = attempt.attempt_id
+          FROM runner_lease_generation AS generation
+          JOIN runner_current_lease_event AS current_event
+            ON current_event.lease_id = generation.lease_id
+           AND current_event.generation = generation.generation
+          JOIN runner_lease_event AS event
+            ON event.lease_id = current_event.lease_id
+           AND event.generation = current_event.generation
+           AND event.event_ordinal = current_event.event_ordinal
+         WHERE generation.attempt_id = attempt.attempt_id
+           AND generation.effect_class IN ('pure', 'idempotent')
+           AND event.state_kind = 'lost_claimed'
  );
 
 CREATE FUNCTION require_runner_initial_pin_has_lease()

@@ -3154,6 +3154,9 @@ pub struct ToolAttemptDispatchCorrelationReconstitutionInput {
     /* public complete typed fence facts */
 }
 impl ToolAttemptDispatchCorrelation {
+    pub const fn reconstitute(
+        input: ToolAttemptDispatchCorrelationReconstitutionInput,
+    ) -> Self;
     pub const fn bind(
         self,
         observation: ToolAttemptObservation,
@@ -3177,7 +3180,13 @@ impl CurrentToolAttempt {
     // generation(), state()
 }
 pub struct AuthorizedToolAttempt { /* private */ }
-// fail-closed in-flight reconstitution; accessors: attempt(), correlation(), into_parts()
+impl AuthorizedToolAttempt {
+    pub fn reconstitute(
+        attempt: CurrentToolAttempt,
+        recorded_correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<Self, ToolAttemptTransitionError>;
+    // accessors: attempt(), correlation(), into_parts()
+}
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -5294,7 +5303,7 @@ impl CredentialProfilePolicy {
         name: CredentialProfileName,
         approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
     ) -> Result<Self, RunnerDomainError>;
-    // accessors: name(), approval_for()
+    // accessors: name(), approval_for(), approvals()
 }
 pub enum WorkspaceCapability {
     WorktreePerSession,
@@ -5390,7 +5399,7 @@ pub enum RunnerLeaseState {
 pub struct RunnerLease { /* private */ }
 impl RunnerLease {
     // accessors: correlation(), state(), generation(), attempt(), tool(),
-    //   credential_authorization()
+    //   credential_authorization(), session(), runner(), effect()
     pub fn claim(
         self,
         correlation: RunnerLeaseCorrelation,
