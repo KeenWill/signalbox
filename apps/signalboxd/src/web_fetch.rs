@@ -276,7 +276,7 @@ async fn fetch_with_client(
         .get(request.url)
         .send()
         .await
-        .map_err(|_| WebFetchTransportFailure::DispatchUnknown)?;
+        .map_err(classify_send_failure)?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -316,6 +316,14 @@ async fn fetch_with_client(
     };
     WebFetchResponse::new(status, content_type, body, completeness)
         .ok_or(WebFetchTransportFailure::DispatchUnknown)
+}
+
+fn classify_send_failure(error: reqwest::Error) -> WebFetchTransportFailure {
+    if error.is_connect() {
+        WebFetchTransportFailure::RequestFailed
+    } else {
+        WebFetchTransportFailure::DispatchUnknown
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -736,6 +744,34 @@ mod tests {
         let resolution = resolve_public_destination(&request, Duration::from_secs(2)).await;
 
         assert_eq!(resolution, Err(WebFetchTransportFailure::RequestFailed));
+    }
+
+    /// A definite connection-establishment failure occurs before request
+    /// dispatch and is therefore a sanitized known failure.
+    #[tokio::test]
+    async fn web_fetch_connection_failure_is_known() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener address is available");
+        drop(listener);
+        let host = "example.test";
+        let request = WebFetchRequest {
+            url: Url::parse(&format!("http://{host}:{}/", address.port()))
+                .expect("fixture URL is valid"),
+        };
+        let destination = ResolvedPublicDestination {
+            host: String::from(host),
+            addresses: vec![address],
+        };
+        let client = build_web_fetch_client(Duration::from_secs(2), Some(&destination))
+            .expect("fixed test client builds");
+
+        let response = fetch_with_client(client, request).await;
+
+        assert_eq!(response, Err(WebFetchTransportFailure::RequestFailed));
     }
 
     /// Bounded binary input becomes deterministic lossy text plus metadata.

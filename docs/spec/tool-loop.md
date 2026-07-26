@@ -495,10 +495,10 @@ tools:
   KiB of response bytes and at most 1,024 bytes of a valid content-type header.
   Success is compact JSON containing the exact requested `url`, numeric
   `status`, optional `content_type`, a lossy UTF-8 `body`, and `truncated`.
-  Resolution and client-setup failure before dispatch returns a fixed sanitized
-  known failure; timeout, transport, or body loss after dispatch begins is
-  commit-ambiguous. Truncation stops body consumption and never follows or
-  issues another request.
+  Resolution, client-setup, and definite connection-establishment failure before
+  request dispatch returns a fixed sanitized known failure; timeout, transport,
+  or body loss after dispatch begins is commit-ambiguous. Truncation stops body
+  consumption and never follows or issues another request.
 - `session_status_update` requires one complete existing session-metadata shape:
   nullable `title`, complete `tags`, complete string-to-string `attributes`, and
   `archived`. Partial patches are invalid. The invocation's session is the
