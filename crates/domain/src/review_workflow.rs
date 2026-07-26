@@ -4002,13 +4002,8 @@ impl ReviewExternalLink {
         if claim.pass.reference().target() != self.association.target() {
             return Err(ReviewExternalLinkTransitionFailure::ForeignPass);
         }
-        let publication_block = matches!(
-            claim.pass.state(),
-            ReviewPassState::Blocked {
-                result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(_)),
-                ..
-            }
-        );
+        let publication_block = claim.pass.kind() == ReviewPassKind::Publish
+            && matches!(claim.pass.state(), ReviewPassState::Blocked { .. });
         if !run_evidence_matches_pass(claim.run, &claim.pass) {
             return Err(if publication_block {
                 ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockRunEvidence
@@ -4030,9 +4025,8 @@ impl ReviewExternalLink {
                         .any(|observation| observation.state == result.state())
             }
             ReviewPassState::Blocked {
-                result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(result)),
-                ..
-            } => claim.pass.kind() == ReviewPassKind::Publish && result.link() == self.id,
+                result: Some(_), ..
+            } => publication_block_matches_link(&claim.pass, self.association, self.id),
             _ => false,
         };
         if !compatible {
@@ -4245,27 +4239,7 @@ impl ReviewExternalLink {
                 ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockRunEvidence,
             ));
         }
-        let compatible = match pass.state() {
-            ReviewPassState::Blocked {
-                result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(result)),
-                ..
-            } => pass.kind() == ReviewPassKind::Publish && result.link() == self.id,
-            ReviewPassState::Blocked {
-                result: Some(ReviewPassResult::FindingEvent(event)),
-                ..
-            } => {
-                pass.kind() == ReviewPassKind::Publish
-                    && self.association == ReviewExternalLinkAssociation::Finding(event.finding())
-                    && matches!(
-                        event.kind(),
-                        ReviewFindingEventResultKind::BlockedWithReason {
-                            link: Some(link),
-                            ..
-                        } if *link == self.id
-                    )
-            }
-            _ => false,
-        };
+        let compatible = publication_block_matches_link(&pass, self.association, self.id);
         if !compatible {
             return Err(self.transition_error(
                 ReviewExternalLinkTransitionFailure::IncompatiblePublicationBlockPass,
@@ -4311,6 +4285,34 @@ impl ReviewExternalLink {
     /// Borrows canonical no-change and publication-block claims.
     pub fn claims(&self) -> &[ReviewExternalLinkClaim] {
         &self.claims
+    }
+}
+
+fn publication_block_matches_link(
+    pass: &ReviewPassEvidence,
+    association: ReviewExternalLinkAssociation,
+    link: ReviewExternalLinkId,
+) -> bool {
+    match pass.state() {
+        ReviewPassState::Blocked {
+            result: Some(ReviewPassResult::ExternalLinkPublicationBlocked(result)),
+            ..
+        } => pass.kind() == ReviewPassKind::Publish && result.link() == link,
+        ReviewPassState::Blocked {
+            result: Some(ReviewPassResult::FindingEvent(event)),
+            ..
+        } => {
+            pass.kind() == ReviewPassKind::Publish
+                && association == ReviewExternalLinkAssociation::Finding(event.finding())
+                && matches!(
+                    event.kind(),
+                    ReviewFindingEventResultKind::BlockedWithReason {
+                        link: Some(result_link),
+                        ..
+                    } if *result_link == link
+                )
+        }
+        _ => false,
     }
 }
 
