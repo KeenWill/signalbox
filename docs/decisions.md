@@ -10,6 +10,27 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Retain a bounded native synchronization diagnostic history
+
+**Context.** The native synchronization machine reports every diagnostic as an
+effect and also retains recent diagnostics so a fallback does not erase the
+reason it occurred. A long-lived follow can encounter arbitrarily many future
+unknown events, stale completions, and recoveries, so retaining the complete
+history would make tolerated input an unbounded heap-growth path.
+
+**Decision.** Retain the most recent 128 synchronization diagnostics in the
+machine while continuing to emit every diagnostic to the caller. New diagnostics
+evict the oldest retained entries after the bound. Recovery and successful
+reconnection preserve the bounded history.
+
+**Rejected alternatives.** Retaining every diagnostic permits unbounded growth.
+Retaining only the latest diagnostic loses nearby fallback context. Moving all
+history to the application would duplicate a machine-owned diagnostic-state
+requirement without changing the need for an explicit bound.
+
+**Affects.** The native synchronization machine and its scripted transport
+tests.
+
 ## 2026-07-26 — Bound native snapshot validation in memory
 
 **Context.** The process protocol deliberately has no aggregate transcript-size

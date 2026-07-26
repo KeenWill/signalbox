@@ -5,12 +5,16 @@ import XCTest
 
 final class SessionSynchronizationTests: XCTestCase {
   func testScriptedTransportTraversesEverySynchronizationPhase() throws {
+    let snapshotCursor = SynchronizationFixture.initialCursor
     var transport = try SynchronizationFixture.transport()
 
     let connectEffects = transport.send(.start)
     let helloEffects = transport.send(.connected(generation: 1))
     let historyEffects = transport.send(
-      .frame(generation: 1, message: try SynchronizationFixture.snapshotStart(cursor: 10))
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.snapshotStart(cursor: snapshotCursor)
+      )
     )
     let turnEffects = transport.send(
       .frame(generation: 1, message: try SynchronizationFixture.queuedTurn())
@@ -25,7 +29,7 @@ final class SessionSynchronizationTests: XCTestCase {
       .frame(
         generation: 1,
         message: try SynchronizationFixture.snapshotEnd(
-          cursor: 10,
+          cursor: snapshotCursor,
           turnCount: 1,
           entryCount: 1
         )
@@ -67,7 +71,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertTrue(turnEffects.isEmpty)
     XCTAssertTrue(textEffects.isEmpty)
     XCTAssertTrue(contentEffects.isEmpty)
-    XCTAssertEqual(snapshot.cursor.rawValue, 10)
+    XCTAssertEqual(snapshot.cursor.rawValue, snapshotCursor)
     XCTAssertEqual(snapshot.records.count, 3)
     XCTAssertEqual(
       steadyEffects,
@@ -77,60 +81,82 @@ final class SessionSynchronizationTests: XCTestCase {
       transport.machine.phase,
       .steady(
         generation: 1,
-        cursor: SignalboxCanonicalUInt64(rawValue: 10),
+        cursor: SignalboxCanonicalUInt64(rawValue: snapshotCursor),
         refreshID: nil
       )
     )
   }
 
-  func testS24INV032ReplayDeduplicatesSnapshotCursorAndPreservesUnknownEvent() throws {
-    var transport = try SynchronizationFixture.transportAtReplay(cursor: 10)
+  func testS24INV032ReplayDeduplicatesSnapshotCursor() throws {
+    let snapshotCursor = SynchronizationFixture.initialCursor
+    let laterCursor = SynchronizationFixture.laterCursor
+    var transport = try SynchronizationFixture.transportAtReplay(cursor: snapshotCursor)
 
     let duplicateEffects = transport.send(
       .frame(
         generation: 1,
-        message: try SynchronizationFixture.inputAcceptedEvent(cursor: 10)
-      )
-    )
-    let unknownEffects = transport.send(
-      .frame(
-        generation: 1,
-        message: try SynchronizationFixture.unknownEvent(cursor: 11)
+        message: try SynchronizationFixture.inputAcceptedEvent(cursor: snapshotCursor)
       )
     )
     let laterEffects = transport.send(
       .frame(
         generation: 1,
-        message: try SynchronizationFixture.inputAcceptedEvent(cursor: 13)
+        message: try SynchronizationFixture.inputAcceptedEvent(cursor: laterCursor)
       )
     )
     let replayEffects = transport.send(.replayCompleted(generation: 1))
 
     XCTAssertTrue(duplicateEffects.isEmpty)
-    XCTAssertEqual(unknownEffects.count, 1)
     XCTAssertEqual(laterEffects.count, 0)
     XCTAssertEqual(
       SynchronizationFixture.publishedEventCursors(in: replayEffects),
-      [11, 13]
+      [laterCursor]
     )
-    XCTAssertEqual(transport.machine.diagnostics.count, 1)
+    XCTAssertTrue(transport.machine.diagnostics.isEmpty)
     XCTAssertEqual(
       transport.machine.phase,
       .steady(
         generation: 1,
-        cursor: SignalboxCanonicalUInt64(rawValue: 13),
+        cursor: SignalboxCanonicalUInt64(rawValue: laterCursor),
         refreshID: nil
       )
     )
   }
 
+  func testReplayPreservesFutureUnknownEvent() throws {
+    let snapshotCursor = SynchronizationFixture.initialCursor
+    let unknownCursor = SynchronizationFixture.unknownCursor
+    var transport = try SynchronizationFixture.transportAtReplay(cursor: snapshotCursor)
+
+    let unknownEffects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.unknownEvent(cursor: unknownCursor)
+      )
+    )
+    let replayEffects = transport.send(.replayCompleted(generation: 1))
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(unknownEffects),
+      ["report_diagnostic"]
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.publishedEventCursors(in: replayEffects),
+      [unknownCursor]
+    )
+    XCTAssertEqual(transport.machine.diagnostics.last?.kind, .decoding)
+  }
+
   func testMalformedKnownEventPublishesDiagnosticWithoutKillingSteadyStream() throws {
-    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+    let eventCursor = SynchronizationFixture.unknownCursor
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
 
     let effects = transport.send(
       .frame(
         generation: 1,
-        message: try SynchronizationFixture.malformedKnownEvent(cursor: 11)
+        message: try SynchronizationFixture.malformedKnownEvent(cursor: eventCursor)
       )
     )
 
@@ -143,14 +169,174 @@ final class SessionSynchronizationTests: XCTestCase {
       transport.machine.phase,
       .steady(
         generation: 1,
-        cursor: SignalboxCanonicalUInt64(rawValue: 11),
+        cursor: SignalboxCanonicalUInt64(rawValue: eventCursor),
         refreshID: nil
       )
     )
   }
 
+  func testMalformedSnapshotStartEntersHelloRecovery() throws {
+    var transport = try SynchronizationFixture.transport()
+
+    _ = transport.send(.start)
+    _ = transport.send(.connected(generation: 1))
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.malformedSnapshotStart()
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["cancel_deadline", "close_follow", "report_diagnostic", "schedule_reconnect"]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .hello, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testMalformedSideSnapshotStartEntersSideHistoryRecovery() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.completedEvent(cursor: 20)
+      )
+    )
+    let effects = transport.send(
+      .sideFrame(
+        generation: 1,
+        refreshID: 1,
+        message: try SynchronizationFixture.malformedSnapshotStart()
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .sideHistory, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testMalformedNestedTurnFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.malformedQueuedTurn()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testMalformedNestedEntryFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.malformedTranscriptEntry()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testMalformedNestedTextEntryFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.malformedTextEntry()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testSessionEventBeforeSnapshotEndFailsFrameOrderClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.inputAcceptedEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testMalformedLiveEventEnvelopeReconnectsForFreshSnapshot() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.malformedSessionEventEnvelope()
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .steady, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testRetainedDiagnosticHistoryIsBounded() throws {
+    var transport = try SynchronizationFixture.transport()
+
+    _ = transport.send(.start)
+    _ = transport.send(.connected(generation: 1))
+    try SynchronizationFixture.reportMoreThanRetainedDiagnosticCapacity(to: &transport)
+
+    XCTAssertEqual(
+      transport.machine.diagnostics.count,
+      SignalboxSessionSynchronizationMachine.maximumRetainedDiagnostics
+    )
+    XCTAssertEqual(transport.machine.phase, .hello(generation: 1, reconnectAttempt: 0))
+  }
+
   func testUnknownFrameDoesNotDiscardOtherwiseValidSnapshotPage() throws {
-    var transport = try SynchronizationFixture.transportInHistory(cursor: 10)
+    let snapshotCursor = SynchronizationFixture.initialCursor
+    var transport = try SynchronizationFixture.transportInHistory(cursor: snapshotCursor)
 
     let diagnosticEffects = transport.send(
       .frame(
@@ -162,7 +348,7 @@ final class SessionSynchronizationTests: XCTestCase {
       .frame(
         generation: 1,
         message: try SynchronizationFixture.snapshotEnd(
-          cursor: 10,
+          cursor: snapshotCursor,
           turnCount: 0,
           entryCount: 0
         )
@@ -176,12 +362,15 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertTrue(SynchronizationFixture.containsPublishedSnapshot(replayEffects))
     XCTAssertEqual(
       transport.machine.phase,
-      .replay(generation: 1, cursor: SignalboxCanonicalUInt64(rawValue: 10))
+      .replay(generation: 1, cursor: SignalboxCanonicalUInt64(rawValue: snapshotCursor))
     )
   }
 
   func testFreshSideSnapshotMergesBeforeBufferedStreamEvent() throws {
-    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+    let bufferedCursor = SynchronizationFixture.sideBufferedCursor
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
 
     let triggerEffects = transport.send(
       .frame(
@@ -192,7 +381,7 @@ final class SessionSynchronizationTests: XCTestCase {
     let bufferedEffects = transport.send(
       .frame(
         generation: 1,
-        message: try SynchronizationFixture.inputAcceptedEvent(cursor: 21)
+        message: try SynchronizationFixture.inputAcceptedEvent(cursor: bufferedCursor)
       )
     )
     let sideStartEffects = transport.send(
@@ -226,13 +415,13 @@ final class SessionSynchronizationTests: XCTestCase {
     )
     XCTAssertEqual(
       SynchronizationFixture.publishedEventCursors(in: sideEndEffects),
-      [21]
+      [bufferedCursor]
     )
     XCTAssertEqual(
       transport.machine.phase,
       .steady(
         generation: 1,
-        cursor: SignalboxCanonicalUInt64(rawValue: 21),
+        cursor: SignalboxCanonicalUInt64(rawValue: bufferedCursor),
         refreshID: nil
       )
     )
@@ -298,7 +487,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: firstFailure),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       secondConnect.first,
@@ -306,7 +495,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: secondFailure),
-      .milliseconds(200)
+      SynchronizationFixture.policy.retry.delays.last
     )
     XCTAssertEqual(
       thirdConnect.first,
@@ -330,7 +519,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       transport.machine.phase,
@@ -352,7 +541,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       transport.machine.phase,
@@ -369,7 +558,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       transport.machine.phase,
@@ -392,7 +581,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       transport.machine.phase,
@@ -409,7 +598,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       transport.machine.phase,
@@ -446,7 +635,7 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
     XCTAssertEqual(
       transport.machine.phase,
@@ -455,6 +644,7 @@ final class SessionSynchronizationTests: XCTestCase {
   }
 
   func testDiagnosticSurvivesFallbackAndSuccessfulReconnect() throws {
+    let recoveredCursor = SynchronizationFixture.recoveredCursor
     var transport = try SynchronizationFixture.transport()
 
     _ = transport.send(.start)
@@ -469,13 +659,16 @@ final class SessionSynchronizationTests: XCTestCase {
     _ = transport.send(.retryReady(generation: 2))
     _ = transport.send(.connected(generation: 2))
     _ = transport.send(
-      .frame(generation: 2, message: try SynchronizationFixture.snapshotStart(cursor: 30))
+      .frame(
+        generation: 2,
+        message: try SynchronizationFixture.snapshotStart(cursor: recoveredCursor)
+      )
     )
     _ = transport.send(
       .frame(
         generation: 2,
         message: try SynchronizationFixture.snapshotEnd(
-          cursor: 30,
+          cursor: recoveredCursor,
           turnCount: 0,
           entryCount: 0
         )
@@ -489,7 +682,7 @@ final class SessionSynchronizationTests: XCTestCase {
       transport.machine.phase,
       .steady(
         generation: 2,
-        cursor: SignalboxCanonicalUInt64(rawValue: 30),
+        cursor: SignalboxCanonicalUInt64(rawValue: recoveredCursor),
         refreshID: nil
       )
     )
@@ -732,7 +925,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
     XCTAssertEqual(
       SynchronizationFixture.reconnectDelay(in: effects),
-      .milliseconds(100)
+      SynchronizationFixture.policy.retry.delays.first
     )
   }
 }
@@ -748,6 +941,11 @@ private struct ScriptedSynchronizationTransport {
 }
 
 private enum SynchronizationFixture {
+  static let initialCursor: UInt64 = 10
+  static let unknownCursor: UInt64 = 11
+  static let laterCursor: UInt64 = 13
+  static let sideBufferedCursor: UInt64 = 21
+  static let recoveredCursor: UInt64 = 30
   static let session = "11111111-1111-4111-8111-111111111111"
   static let turn = "22222222-2222-4222-8222-222222222222"
   static let acceptedInput = "33333333-3333-4333-8333-333333333333"
@@ -836,6 +1034,74 @@ private enum SynchronizationFixture {
         "type":"transcript_snapshot_start",
         "session_id":"\(session)",
         "cursor":"\(cursor)"
+      }
+      """
+    )
+  }
+
+  static func malformedSnapshotStart() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_snapshot_start",
+        "session_id":17,
+        "cursor":"10"
+      }
+      """
+    )
+  }
+
+  static func malformedQueuedTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"queued",
+          "accepted_input_id":17,
+          "content":"fixture prompt"
+        }
+      }
+      """
+    )
+  }
+
+  static func malformedTranscriptEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_entry",
+        "entry_index":"0",
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{
+          "type":"assistant_tool_use",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "tool_request_id":"88888888-8888-4888-8888-888888888888",
+          "tool_name":17,
+          "arguments":"{}"
+        }
+      }
+      """
+    )
+  }
+
+  static func malformedTextEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_text_entry",
+        "entry_index":"0",
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{
+          "type":"user",
+          "accepted_input_id":17,
+          "turn_id":"\(turn)"
+        }
       }
       """
     )
@@ -988,6 +1254,19 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func malformedSessionEventEnvelope() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":17,
+        "session_id":"\(session)",
+        "event":{"type":"session_created"}
+      }
+      """
+    )
+  }
+
   static func malformedKnownSnapshotEntry() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -1021,6 +1300,16 @@ private enum SynchronizationFixture {
       {"type":"fixture_future_message","retained":true}
       """
     )
+  }
+
+  static func reportMoreThanRetainedDiagnosticCapacity(
+    to transport: inout ScriptedSynchronizationTransport
+  ) throws {
+    for _ in 0...SignalboxSessionSynchronizationMachine.maximumRetainedDiagnostics {
+      _ = transport.send(
+        .frame(generation: 1, message: try unknownTopLevelMessage())
+      )
+    }
   }
 
   static func message(_ object: String) throws -> SignalboxProcessServerMessage {
@@ -1078,6 +1367,17 @@ private enum SynchronizationFixture {
     _ effects: [SignalboxSessionSynchronizationEffect]
   ) -> Bool {
     effects.contains(.terminalFailure)
+  }
+
+  static func containsRetrySchedule(
+    _ effects: [SignalboxSessionSynchronizationEffect]
+  ) -> Bool {
+    effects.contains { effect in
+      if case .scheduleReconnect = effect {
+        return true
+      }
+      return false
+    }
   }
 
   static func containsSideMerge(

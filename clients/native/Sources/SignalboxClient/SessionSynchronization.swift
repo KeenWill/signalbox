@@ -214,6 +214,8 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
 /// back as inputs. Generation and refresh identities make every completion
 /// race explicit and allow stale work to be ignored without mutating state.
 public struct SignalboxSessionSynchronizationMachine: Sendable {
+  static let maximumRetainedDiagnostics = 128
+
   public private(set) var phase: SignalboxSessionSynchronizationPhase = .stopped
   public private(set) var diagnostics: [SignalboxSynchronizationDiagnostic] = []
 
@@ -223,6 +225,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   private var failureCount = 0
   private var accumulator: SignalboxSnapshotAccumulator?
   private var replayBuffer: [SignalboxBufferedFollowedEvent] = []
+  private var replayBufferHead = 0
   private var activeRefresh: SignalboxSideSnapshotRefresh?
   private var nextRefreshID: UInt64 = 1
 
@@ -339,7 +342,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         boundary: boundary,
         capacity: policy.snapshotCapacity
       )
-      replayBuffer = []
+      clearReplayBuffer()
       phase = .history(
         generation: currentGeneration,
         reconnectAttempt: reconnectAttempt,
@@ -355,7 +358,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .protocolError(let remote):
       return remoteFailure(remote, stage: .hello)
     case .unknown(let kind, _, let decodingDiagnostic):
-      return reportUnknown(
+      return unknownFrame(
         kind: kind,
         decodingDiagnostic: decodingDiagnostic,
         stage: .hello
@@ -380,15 +383,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .accepted:
       accumulator = currentAccumulator
       return []
-    case .buffered(let followed):
-      accumulator = currentAccumulator
-      replayBuffer.append(
-        SignalboxBufferedFollowedEvent(
-          followed: followed,
-          alreadyObserved: false
-        )
-      )
-      return diagnosticEffects(for: followed, stage: .history)
     case .diagnostic(let kind, let decodingDiagnostic):
       accumulator = currentAccumulator
       if let decodingDiagnostic {
@@ -433,7 +427,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .protocolError(let remote):
       return remoteFailure(remote, stage: .replay)
     case .unknown(let kind, _, let decodingDiagnostic):
-      return reportUnknown(
+      return unknownFrame(
         kind: kind,
         decodingDiagnostic: decodingDiagnostic,
         stage: .replay
@@ -474,7 +468,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .protocolError(let remote):
       return remoteFailure(remote, stage: .steady)
     case .unknown(let kind, _, let decodingDiagnostic):
-      return reportUnknown(
+      return unknownFrame(
         kind: kind,
         decodingDiagnostic: decodingDiagnostic,
         stage: .steady
@@ -584,7 +578,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .protocolError(let remote):
         return remoteFailure(remote, stage: .sideHistory)
       case .unknown(let kind, _, let decodingDiagnostic):
-        return reportUnknown(
+        return unknownFrame(
           kind: kind,
           decodingDiagnostic: decodingDiagnostic,
           stage: .sideHistory
@@ -637,11 +631,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       return effects
     case .remoteFailure(let remote):
       return remoteFailure(remote, stage: .sideHistory)
-    case .buffered:
-      return protocolFailure(
-        stage: .sideHistory,
-        message: "A side history connection carried a followed event."
-      )
     case .invalid(let message):
       return protocolFailure(stage: .sideHistory, message: message)
     }
@@ -651,8 +640,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     generation currentGeneration: UInt64
   ) -> [SignalboxSessionSynchronizationEffect] {
     var effects: [SignalboxSessionSynchronizationEffect] = []
-    while activeRefresh == nil, !replayBuffer.isEmpty {
-      let buffered = replayBuffer.removeFirst()
+    while activeRefresh == nil, replayBufferHead < replayBuffer.count {
+      let buffered = replayBuffer[replayBufferHead]
+      replayBufferHead += 1
       let nextEffects =
         buffered.alreadyObserved
         ? publishPreviouslyObservedEvent(
@@ -665,6 +655,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
           reportDiagnostics: false
         )
       effects.append(contentsOf: nextEffects)
+    }
+    if replayBufferHead == replayBuffer.count {
+      clearReplayBuffer()
     }
     return effects
   }
@@ -737,7 +730,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     }
     generation = receivedGeneration
     accumulator = nil
-    replayBuffer = []
+    clearReplayBuffer()
     activeRefresh = nil
     phase = .connect(
       generation: receivedGeneration,
@@ -762,7 +755,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     }
     phase = .stopped
     accumulator = nil
-    replayBuffer = []
+    clearReplayBuffer()
     activeRefresh = nil
     return [cancellation, .closeFollow(generation: oldGeneration)].compactMap { $0 }
   }
@@ -824,9 +817,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: failedStage,
       message: message
     )
-    diagnostics.append(diagnostic)
+    retainDiagnostic(diagnostic)
     accumulator = nil
-    replayBuffer = []
+    clearReplayBuffer()
     activeRefresh = nil
 
     let retryDelay = permitsRetry ? policy.retry.delay(afterFailure: failureCount) : nil
@@ -849,7 +842,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: failedStage,
         message: "Synchronization stopped after a non-retriable protocol failure."
       )
-      diagnostics.append(terminal)
+      retainDiagnostic(terminal)
       effects.append(.reportDiagnostic(terminal))
       effects.append(.terminalFailure)
       return effects
@@ -862,7 +855,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: failedStage,
         message: "The bounded synchronization retry policy was exhausted."
       )
-      diagnostics.append(exhausted)
+      retainDiagnostic(exhausted)
       effects.append(.reportDiagnostic(exhausted))
       effects.append(.retryLimitReached)
     }
@@ -877,8 +870,23 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: staleStage,
       message: "Ignored a completion from superseded synchronization work."
     )
-    diagnostics.append(diagnostic)
+    retainDiagnostic(diagnostic)
     return [.reportDiagnostic(diagnostic)]
+  }
+
+  private mutating func unknownFrame(
+    kind: String,
+    decodingDiagnostic: SignalboxDecodingDiagnostic?,
+    stage currentStage: SignalboxSynchronizationStage
+  ) -> [SignalboxSessionSynchronizationEffect] {
+    guard let decodingDiagnostic else {
+      return reportUnknown(
+        kind: kind,
+        decodingDiagnostic: nil,
+        stage: currentStage
+      )
+    }
+    return protocolFailure(stage: currentStage, message: decodingDiagnostic.message)
   }
 
   private mutating func reportUnknown(
@@ -894,7 +902,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: currentStage,
       message: message
     )
-    diagnostics.append(diagnostic)
+    retainDiagnostic(diagnostic)
     return [.reportDiagnostic(diagnostic)]
   }
 
@@ -915,8 +923,23 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: currentStage,
       message: message
     )
-    diagnostics.append(diagnostic)
+    retainDiagnostic(diagnostic)
     return [.reportDiagnostic(diagnostic)]
+  }
+
+  private mutating func retainDiagnostic(
+    _ diagnostic: SignalboxSynchronizationDiagnostic
+  ) {
+    diagnostics.append(diagnostic)
+    let overflow = diagnostics.count - Self.maximumRetainedDiagnostics
+    if overflow > 0 {
+      diagnostics.removeFirst(overflow)
+    }
+  }
+
+  private mutating func clearReplayBuffer() {
+    replayBuffer.removeAll(keepingCapacity: true)
+    replayBufferHead = 0
   }
 
   private func deadlineIsCurrent(
@@ -1037,7 +1060,6 @@ private struct SignalboxBufferedFollowedEvent: Sendable {
 
 private enum SignalboxSnapshotAccumulatorOutcome {
   case accepted
-  case buffered(SignalboxFollowedSessionEvent)
   case diagnostic(kind: String, decodingDiagnostic: SignalboxDecodingDiagnostic?)
   case completed(SignalboxSynchronizationSnapshot)
   case remoteFailure(SignalboxProcessError)
@@ -1084,6 +1106,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     switch message {
     case .transcriptTurn(let turn):
       guard
+        !turn.state.hasDecodingDiagnostic,
         !entriesStarted,
         turn.acceptancePosition.rawValue != 0,
         priorAcceptancePosition.map({ $0 < turn.acceptancePosition.rawValue }) ?? true,
@@ -1100,6 +1123,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptEntry(let entry):
       entriesStarted = true
       guard
+        !entry.entry.hasDecodingDiagnostic,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1118,6 +1142,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptTextEntry(let entry):
       entriesStarted = true
       guard
+        !entry.entry.hasDecodingDiagnostic,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1151,8 +1176,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
           records: records
         )
       )
-    case .sessionEvent(let followed):
-      return .buffered(followed)
+    case .sessionEvent:
+      return .invalid("A followed event arrived before the snapshot ended.")
     case .protocolError(let remote):
       return .remoteFailure(remote)
     case .unknown(let kind, _, let decodingDiagnostic):
@@ -1223,6 +1248,13 @@ extension SignalboxSynchronizationSnapshot.Record {
 }
 
 extension SignalboxTranscriptTurnState {
+  fileprivate var hasDecodingDiagnostic: Bool {
+    if case .unknown(_, _, let diagnostic) = self {
+      return diagnostic != nil
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .queued(_, let content):
@@ -1252,6 +1284,13 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
+  fileprivate var hasDecodingDiagnostic: Bool {
+    if case .unknown(_, _, let diagnostic) = self {
+      return diagnostic != nil
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .assistantToolUse(_, _, _, let toolName, let arguments):
@@ -1272,6 +1311,13 @@ extension SignalboxTranscriptEntry {
 }
 
 extension SignalboxTranscriptTextEntry {
+  fileprivate var hasDecodingDiagnostic: Bool {
+    if case .unknown(_, _, let diagnostic) = self {
+      return diagnostic != nil
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .imported(_, _, let sourceSpeaker):
