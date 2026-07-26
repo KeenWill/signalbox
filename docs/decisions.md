@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Separate daemon tools into workspace crates
+
+**Context.** The daemon crate owned the Tier 0 and code-host tool
+implementations together with process composition. That coupled unrelated tool
+changes to the daemon build graph, prevented the tool suites from compiling and
+testing in isolation, and left their dependency direction implicit.
+
+**Decision.** Move the derive-based contract compiler to
+`signalbox-tool-contract`, the four Tier 0 tools to `signalbox-tools-basic`, and
+the ten code-host tools and their transport to `signalbox-tools-code-host`. Tool
+crates depend inward on domain/application contracts and the shared tool
+contract; the code-host transport reuses the basic crate's public-destination
+HTTP seam. `signalboxd` depends on the tool crates and owns only catalog and
+executor composition. This relocation changes no tool name, description, schema,
+permission, effect class, validation, execution, or result behavior.
+
+**Rejected alternatives.** Leaving implementations in `signalboxd` would keep
+the build and caching boundary coupled. One combined tools crate would isolate
+the daemon but not independent Tier 0 and code-host rebuilds. Moving tool
+implementations into domain or application crates would reverse the accepted
+dependency direction and mix infrastructure transports with policy types.
+
+**Affects.** Workspace membership and manifests; `crates/tool-contract`,
+`crates/tools-basic`, `crates/tools-code-host`; `apps/signalboxd` composition
+and re-exports; source-path citations in the invariant catalog and
+configuration-and-credentials specification.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a
