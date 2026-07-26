@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Add sccache as the devenv shared compiler cache
+
+**Context.** Every checkout and worktree cold-builds the full dependency graph,
+which takes tens of minutes on the primary development machine, and concurrent
+agent worktrees repeat identical dependency compilation. Continuous integration
+already caches its target directory; local builds share nothing across
+worktrees.
+
+**Decision.** The developer environment provides sccache and sets
+`RUSTC_WRAPPER` inside the devenv shell. Dependency compilation is cached once
+per machine, in sccache's per-user default cache directory (`SCCACHE_DIR`
+overrides), and reused across checkouts and worktrees; workspace crates keep
+incremental compilation and pass through uncached. No machine-specific path is
+committed. Continuous integration does not enter the devenv environment and
+keeps its existing target-directory cache.
+
+**Rejected alternatives.** A committed `.cargo/config.toml` imposes the wrapper
+on every consumer, including CI and machines without sccache installed. A shared
+`CARGO_TARGET_DIR` across worktrees serializes concurrent builds on the
+target-directory lock and collides on profiles and features. Adding sccache to
+CI duplicates the existing target-directory cache and, without a shared remote
+backend, every job would start against a cold cache.
+
+**Affects.** `devenv.nix`, the build-tooling guidance in `AGENTS.md`, and build
+behavior inside the devenv shell only; no Cargo dependency, workspace
+configuration, or CI behavior changes.
+
 ## 2026-07-26 — Renumber the review-workflow migration after main advanced
 
 **Context.** The review-workflow foundation reserved the `2026072602xx` block
