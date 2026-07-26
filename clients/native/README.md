@@ -74,7 +74,11 @@ scripts/check-screenshot-goldens.sh
 The `new-session`, operations, and remote setup captures intentionally present
 capability gates. They are not previews of unimplemented server behavior.
 Selective capture fails before building when a requested screenshot name is not
-in the checked-in matrix, so a typo cannot silently validate an empty selection.
+in the checked-in matrix or the selection normalizes to no names, so a typo or
+blank selector cannot silently validate an empty selection. The iPad capture
+uses UI automation only to establish landscape orientation, then launches each
+state independently with a bounded settle so one state cannot carry transient
+lifecycle diagnostics into the next golden.
 
 ## Tart VM validation
 

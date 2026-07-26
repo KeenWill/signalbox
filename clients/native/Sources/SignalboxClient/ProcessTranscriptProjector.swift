@@ -116,6 +116,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           pendingInputs.append(SignalboxProcessPendingInput(
             id: acceptedInputID,
             turnID: turn.turnID,
+            acceptancePosition: turn.acceptancePosition,
             content: content
           ))
         }

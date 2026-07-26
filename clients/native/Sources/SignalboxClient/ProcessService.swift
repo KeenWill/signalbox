@@ -405,9 +405,23 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     guard tagsAreStrictlyIncreasingUTF8(summary.tags) else {
       return false
     }
+    guard summary.title.map(metadataStringIsAdmissible) ?? true,
+      summary.tags.allSatisfy(indexedMetadataStringIsAdmissible)
+    else {
+      return false
+    }
     let titleBytes = summary.title?.utf8.count ?? 0
     let tagBytes = summary.tags.reduce(0) { $0 + $1.utf8.count }
     return titleBytes + tagBytes <= SignalboxProcessProtocol.maximumMetadataSummaryUTF8Bytes
+  }
+
+  private func metadataStringIsAdmissible(_ value: String) -> Bool {
+    !value.isEmpty && !value.unicodeScalars.contains("\0")
+  }
+
+  private func indexedMetadataStringIsAdmissible(_ value: String) -> Bool {
+    metadataStringIsAdmissible(value)
+      && value.utf8.count <= SignalboxProcessProtocol.maximumIndexedMetadataUTF8Bytes
   }
 
   private func tagsAreStrictlyIncreasingUTF8(_ tags: [String]) -> Bool {
@@ -498,7 +512,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     request: SignalboxProcessClientRequest,
     body: (any SignalboxProcessExchange) async throws -> Success
   ) async throws -> Success {
-    let exchange = try await requester.open(request)
+    let exchange = try await openExchange(request)
     do {
       let result = try await body(exchange)
       await exchange.close()
@@ -506,6 +520,34 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     } catch {
       await exchange.close()
       throw error
+    }
+  }
+
+  private func openExchange(
+    _ request: SignalboxProcessClientRequest
+  ) async throws -> any SignalboxProcessExchange {
+    try await withThrowingTaskGroup(
+      of: DeadlineResult<any SignalboxProcessExchange>.self
+    ) { group in
+      group.addTask {
+        .value(try await self.requester.open(request))
+      }
+      group.addTask {
+        try await Task.sleep(for: self.policy.oneShotResponseDeadline)
+        return .expired
+      }
+      guard let first = try await group.next() else {
+        throw CancellationError()
+      }
+      group.cancelAll()
+      switch first {
+      case .value(let exchange):
+        return exchange
+      case .expired:
+        throw SignalboxProcessServiceError.deadlineExceeded(
+          "The process request exceeded its response deadline while opening."
+        )
+      }
     }
   }
 

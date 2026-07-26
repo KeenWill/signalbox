@@ -27,7 +27,6 @@ enum MockProcessProtocolFixtures {
   static let snapshotCursor = "4"
   static let firstAcceptancePosition = "1"
   static let submittedAcceptancePosition = "2"
-  static let emptyTurnCount = "0"
   static let singleTurnCount = "1"
   static let transcriptEntryCount = "2"
   static let selectionID = "aaaaaaaa-0000-4000-8000-000000000001"
@@ -430,7 +429,7 @@ private actor MockProcessProtocolState {
         userText: conversation.user,
         assistantText: conversation.assistant
       ),
-      turnCount: MockProcessProtocolFixtures.emptyTurnCount,
+      turnCount: MockProcessProtocolFixtures.singleTurnCount,
       entryCount: MockProcessProtocolFixtures.transcriptEntryCount
     )
   }
@@ -441,6 +440,17 @@ private actor MockProcessProtocolState {
     assistantText: String
   ) -> [[String: Any]] {
     [
+      [
+        "type": "transcript_turn",
+        "turn_id": MockProcessProtocolFixtures.activeTurnID,
+        "acceptance_position": MockProcessProtocolFixtures.firstAcceptancePosition,
+        "state": [
+          "type": "completed",
+          "terminal_frontier_id": MockProcessProtocolFixtures.completedFrontierID,
+          "terminal_attempt_id": MockProcessProtocolFixtures.completedAttemptID,
+          "terminal_model_call_id": MockProcessProtocolFixtures.activeModelCallID,
+        ],
+      ],
       textEntry(
         index: "0",
         sessionID: sessionID,

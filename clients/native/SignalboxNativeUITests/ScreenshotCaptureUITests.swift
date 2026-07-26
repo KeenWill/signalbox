@@ -144,6 +144,14 @@ private struct ScreenshotCaptureSpecification {
     static func selectedByEnvironment(
         outputDirectory: URL
     ) throws -> [ScreenshotCaptureSpecification] {
+        if ProcessInfo.processInfo.environment["SIGNALBOX_NATIVE_SCREENSHOT_ORIENTATION_ONLY"] == "1" {
+            return []
+        }
+        if FileManager.default.fileExists(
+            atPath: outputDirectory.appendingPathComponent(".capture-orientation-only").path
+        ) {
+            return []
+        }
         let configuredNames = ProcessInfo.processInfo.environment["SIGNALBOX_NATIVE_SCREENSHOT_NAMES"]
             ?? (try? String(contentsOf: outputDirectory.appendingPathComponent(".capture-screenshot-names"), encoding: .utf8))
         guard let rawNames = configuredNames, !rawNames.isEmpty else {

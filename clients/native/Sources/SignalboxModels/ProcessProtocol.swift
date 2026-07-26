@@ -6,6 +6,7 @@ public enum SignalboxProcessProtocol {
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
   // docs/spec/process-protocol.md owns the version-five metadata projection bounds.
   public static let maximumMetadataTags = 256
+  public static let maximumIndexedMetadataUTF8Bytes = 1_024
   public static let maximumMetadataSummaryUTF8Bytes = 262_144
 }
 

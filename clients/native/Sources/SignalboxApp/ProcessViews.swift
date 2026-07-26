@@ -387,9 +387,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           SignalboxProcessPendingInput(
             id: submitted.acceptedInputID,
             turnID: submitted.turnID,
+            acceptancePosition: submitted.acceptancePosition,
             content: prepared.content
           )
         )
+        pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
       }
       unresolvedSubmission = nil
       if hasExactUTF8(composerText, prepared.content) {
@@ -462,17 +464,23 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func applyLiveEvent(_ event: SignalboxProcessSessionEvent) {
     switch event {
-    case .inputAccepted(let acceptedInputID, let turnID, _, let content):
-      pendingInputs.removeAll { $0.id == acceptedInputID }
+    case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
       if !materializedAcceptedInputIDs.contains(acceptedInputID) {
-        pendingInputs.append(
-          SignalboxProcessPendingInput(
-            id: acceptedInputID,
-            turnID: turnID,
-            content: content
-          )
+        let pending = SignalboxProcessPendingInput(
+          id: acceptedInputID,
+          turnID: turnID,
+          acceptancePosition: acceptancePosition,
+          content: content
         )
-        activity = .init(state: .queued, label: "Queued")
+        if let index = pendingInputs.firstIndex(where: { $0.id == acceptedInputID }) {
+          pendingInputs[index] = pending
+        } else {
+          pendingInputs.append(pending)
+        }
+        pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        if !activityRepresentsActiveTurn {
+          activity = .init(state: .queued, label: "Queued")
+        }
       }
     case .turnActivated:
       activity = .init(state: .running, label: "Running")
@@ -502,6 +510,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       activity = .init(state: .recoveryRequired, label: "Recovery required")
     case .sessionCreated, .unknown:
       break
+    }
+  }
+
+  private var activityRepresentsActiveTurn: Bool {
+    switch activity.state {
+    case .running, .waitingForToolDecision, .recoveryRequired:
+      return true
+    case .unavailable, .queued, .failed, .completed, .refused, .cancelled:
+      return false
     }
   }
 

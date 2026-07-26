@@ -13,7 +13,7 @@ BOOT_TIMEOUT_SECONDS="${SIMULATOR_BOOT_TIMEOUT_SECONDS:-300}"
 TERMINATE_TIMEOUT_SECONDS="${SIMULATOR_TERMINATE_TIMEOUT_SECONDS:-10}"
 LAUNCH_TIMEOUT_SECONDS="${SIMULATOR_LAUNCH_TIMEOUT_SECONDS:-45}"
 SCREENSHOT_SETTLE_SECONDS="${SCREENSHOT_SETTLE_SECONDS:-4}"
-IPAD_SCREENSHOT_BATCH_SIZE="${IPAD_SCREENSHOT_BATCH_SIZE:-6}"
+IPAD_SCREENSHOT_SETTLE_SECONDS="${IPAD_SCREENSHOT_SETTLE_SECONDS:-12}"
 OUTPUT_ROOT="$ROOT/Screenshots"
 IOS_OUTPUT_ROOT="$OUTPUT_ROOT/iOS"
 IPADOS_OUTPUT_ROOT="$OUTPUT_ROOT/iPadOS"
@@ -53,15 +53,21 @@ else
 fi
 
 if [[ -n "${SCREENSHOT_STATE_NAMES:-}" ]]; then
+	HAS_REQUESTED_SCREENSHOT_NAMES=1
 	IFS=',' read -r -a REQUESTED_SCREENSHOT_NAMES <<<"$SCREENSHOT_STATE_NAMES"
 else
+	HAS_REQUESTED_SCREENSHOT_NAMES=0
 	REQUESTED_SCREENSHOT_NAMES=()
 fi
 
+NORMALIZED_SCREENSHOT_NAME_COUNT=0
 for requested in "${REQUESTED_SCREENSHOT_NAMES[@]}"; do
 	trimmed_requested="${requested#"${requested%%[![:space:]]*}"}"
 	trimmed_requested="${trimmed_requested%"${trimmed_requested##*[![:space:]]}"}"
 	known_screenshot=0
+	if [[ -n "$trimmed_requested" ]]; then
+		NORMALIZED_SCREENSHOT_NAME_COUNT=$((NORMALIZED_SCREENSHOT_NAME_COUNT + 1))
+	fi
 	for screenshot_name in "${SCREENSHOT_NAMES[@]}"; do
 		if [[ "$trimmed_requested" == "$screenshot_name" ]]; then
 			known_screenshot=1
@@ -73,6 +79,10 @@ for requested in "${REQUESTED_SCREENSHOT_NAMES[@]}"; do
 		exit 2
 	fi
 done
+if [[ "$HAS_REQUESTED_SCREENSHOT_NAMES" -eq 1 && "$NORMALIZED_SCREENSHOT_NAME_COUNT" -eq 0 ]]; then
+	echo "Screenshot state selection contains no names." >&2
+	exit 2
+fi
 
 CMD_BUILD=(
 	xcodebuild
@@ -332,6 +342,36 @@ capture_scenario() {
 	printf '\n'
 	"${CMD_SCREENSHOT[@]}"
 	sleep 1
+	rm -f "$device_output_dir/${name}.out" "$device_output_dir/${name}.err"
+}
+
+capture_ipad_scenario() {
+	local SCREENSHOT_SETTLE_SECONDS="$IPAD_SCREENSHOT_SETTLE_SECONDS"
+	capture_scenario "$@"
+}
+
+capture_screenshot_matrix() {
+	local capture_function="$1"
+	local device_id="$2"
+	local device_output_dir="$3"
+
+	"$capture_function" "$device_id" "$device_output_dir" setup setup light large
+	"$capture_function" "$device_id" "$device_output_dir" sessions sessions light large
+	"$capture_function" "$device_id" "$device_output_dir" new-session new-session light large
+	"$capture_function" "$device_id" "$device_output_dir" active-chat active-chat light large
+	"$capture_function" "$device_id" "$device_output_dir" markdown-basics markdown-basics light large
+	"$capture_function" "$device_id" "$device_output_dir" markdown-table markdown-table light large
+	"$capture_function" "$device_id" "$device_output_dir" markdown-code markdown-code light large
+	"$capture_function" "$device_id" "$device_output_dir" markdown-message markdown-message light large
+	"$capture_function" "$device_id" "$device_output_dir" pending-approval pending-approval light large
+	"$capture_function" "$device_id" "$device_output_dir" completed-tool completed-tool light large
+	"$capture_function" "$device_id" "$device_output_dir" failed-tool failed-tool light large
+	"$capture_function" "$device_id" "$device_output_dir" artifact-preview artifact-preview light large
+	"$capture_function" "$device_id" "$device_output_dir" runners runners light large
+	"$capture_function" "$device_id" "$device_output_dir" monitor monitor light large
+	"$capture_function" "$device_id" "$device_output_dir" settings settings light large
+	"$capture_function" "$device_id" "$device_output_dir" dark active-chat dark large
+	"$capture_function" "$device_id" "$device_output_dir" large-type pending-approval light accessibility-extra-extra-extra-large
 }
 
 capture_ipad_device() {
@@ -340,13 +380,10 @@ capture_ipad_device() {
 	local device_slug="$3"
 	local device_output_dir="$IPADOS_OUTPUT_ROOT/$device_slug"
 	local capture_output_file="$OUTPUT_ROOT/.capture-output-dir"
-	local capture_names_file="$device_output_dir/.capture-screenshot-names"
+	local orientation_marker="$device_output_dir/.capture-orientation-only"
 	local screenshot
 	local selected_names=()
 	local screenshot_name
-	local batch_start
-	local batch_index=1
-	local batch_names
 	local result_bundle_path
 
 	while IFS= read -r screenshot_name; do
@@ -363,52 +400,48 @@ capture_ipad_device() {
 	mkdir -p "$DERIVED_DATA_PATH/Logs/Test"
 	clear_selected_screenshots "$device_output_dir"
 	printf '%s\n' "$device_output_dir" >"$capture_output_file"
+	: >"$orientation_marker"
 
 	echo "Capturing $device_name ($device_id) in landscape into $device_output_dir"
 	boot_device "$device_id"
 
-	for ((batch_start = 0; batch_start < ${#selected_names[@]}; batch_start += IPAD_SCREENSHOT_BATCH_SIZE)); do
-		batch_names="$(printf '%s\n' "${selected_names[@]:batch_start:IPAD_SCREENSHOT_BATCH_SIZE}" | paste -sd, -)"
-		printf '%s\n' "$batch_names" >"$capture_names_file"
-		result_bundle_path="$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-iPadOS-${device_slug}-batch-${batch_index}.xcresult"
-
-		CMD_IPAD_SCREENSHOTS=(
-			xcodebuild
-			-quiet
-			-project "$ROOT/SignalboxNative.xcodeproj"
-			-scheme "SignalboxNative"
-			-configuration "Debug"
-			-destination "platform=iOS Simulator,id=$device_id"
-			-derivedDataPath "$DERIVED_DATA_PATH"
-			-resultBundlePath "$result_bundle_path"
-			-only-testing:SignalboxNativeUITests/ScreenshotCaptureUITests/testCaptureScreenshotMatrix
-			-parallel-testing-enabled NO
-			-test-timeouts-enabled YES
-			-maximum-test-execution-time-allowance 900
-			CODE_SIGNING_ALLOWED=YES
-			CODE_SIGN_IDENTITY=-
-			test
-		)
-		printf '+ SIGNALBOX_NATIVE_SCREENSHOT_OUTPUT_DIR=%q SIGNALBOX_NATIVE_SCREENSHOT_NAMES=%q ' "$device_output_dir" "$batch_names"
-		printf '%q ' "${CMD_IPAD_SCREENSHOTS[@]}"
-		printf '\n'
-		rm -rf "$result_bundle_path"
-		if ! SIGNALBOX_NATIVE_SCREENSHOT_OUTPUT_DIR="$device_output_dir" SIGNALBOX_NATIVE_SCREENSHOT_NAMES="$batch_names" "${CMD_IPAD_SCREENSHOTS[@]}"; then
-			rm -f "$capture_output_file" "$capture_names_file"
-			return 1
-		fi
-		if ! assert_xcresult_passed "$result_bundle_path"; then
-			rm -f "$capture_output_file" "$capture_names_file"
-			return 1
-		fi
-		batch_index=$((batch_index + 1))
-	done
-
-	if ! verify_selected_screenshots_exist "$device_output_dir"; then
-		rm -f "$capture_output_file" "$capture_names_file"
+	result_bundle_path="$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-iPadOS-${device_slug}-orientation.xcresult"
+	CMD_IPAD_ORIENTATION=(
+		xcodebuild
+		-quiet
+		-project "$ROOT/SignalboxNative.xcodeproj"
+		-scheme "SignalboxNative"
+		-configuration "Debug"
+		-destination "platform=iOS Simulator,id=$device_id"
+		-derivedDataPath "$DERIVED_DATA_PATH"
+		-resultBundlePath "$result_bundle_path"
+		-only-testing:SignalboxNativeUITests/ScreenshotCaptureUITests/testCaptureScreenshotMatrix
+		-parallel-testing-enabled NO
+		-test-timeouts-enabled YES
+		-maximum-test-execution-time-allowance 900
+		CODE_SIGNING_ALLOWED=YES
+		CODE_SIGN_IDENTITY=-
+		test
+	)
+	printf '+ SIGNALBOX_NATIVE_SCREENSHOT_ORIENTATION_ONLY=1 SIGNALBOX_NATIVE_SCREENSHOT_OUTPUT_DIR=%q ' "$device_output_dir"
+	printf '%q ' "${CMD_IPAD_ORIENTATION[@]}"
+	printf '\n'
+	rm -rf "$result_bundle_path"
+	if ! SIGNALBOX_NATIVE_SCREENSHOT_ORIENTATION_ONLY=1 SIGNALBOX_NATIVE_SCREENSHOT_OUTPUT_DIR="$device_output_dir" "${CMD_IPAD_ORIENTATION[@]}"; then
+		rm -f "$capture_output_file" "$orientation_marker"
 		return 1
 	fi
-	rm -f "$capture_output_file" "$capture_names_file"
+	if ! assert_xcresult_passed "$result_bundle_path"; then
+		rm -f "$capture_output_file" "$orientation_marker"
+		return 1
+	fi
+	rm -f "$capture_output_file" "$orientation_marker"
+
+	capture_screenshot_matrix capture_ipad_scenario "$device_id" "$device_output_dir"
+
+	if ! verify_selected_screenshots_exist "$device_output_dir"; then
+		return 1
+	fi
 
 	for screenshot in "$device_output_dir"/*.png; do
 		[[ -f "$screenshot" ]] || continue
@@ -475,23 +508,7 @@ capture_device() {
 	printf '\n'
 	"${CMD_INSTALL[@]}"
 
-	capture_scenario "$device_id" "$device_output_dir" setup setup light large
-	capture_scenario "$device_id" "$device_output_dir" sessions sessions light large
-	capture_scenario "$device_id" "$device_output_dir" new-session new-session light large
-	capture_scenario "$device_id" "$device_output_dir" active-chat active-chat light large
-	capture_scenario "$device_id" "$device_output_dir" markdown-basics markdown-basics light large
-	capture_scenario "$device_id" "$device_output_dir" markdown-table markdown-table light large
-	capture_scenario "$device_id" "$device_output_dir" markdown-code markdown-code light large
-	capture_scenario "$device_id" "$device_output_dir" markdown-message markdown-message light large
-	capture_scenario "$device_id" "$device_output_dir" pending-approval pending-approval light large
-	capture_scenario "$device_id" "$device_output_dir" completed-tool completed-tool light large
-	capture_scenario "$device_id" "$device_output_dir" failed-tool failed-tool light large
-	capture_scenario "$device_id" "$device_output_dir" artifact-preview artifact-preview light large
-	capture_scenario "$device_id" "$device_output_dir" runners runners light large
-	capture_scenario "$device_id" "$device_output_dir" monitor monitor light large
-	capture_scenario "$device_id" "$device_output_dir" settings settings light large
-	capture_scenario "$device_id" "$device_output_dir" dark active-chat dark large
-	capture_scenario "$device_id" "$device_output_dir" large-type pending-approval light accessibility-extra-extra-extra-large
+	capture_screenshot_matrix capture_scenario "$device_id" "$device_output_dir"
 
 	CMD_RESET_APPEARANCE=(xcrun simctl ui "$device_id" appearance light)
 	printf '+ %q ' "${CMD_RESET_APPEARANCE[@]}"

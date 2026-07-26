@@ -22,18 +22,20 @@ deadlines separate from heartbeat concerns.
 initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
 second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
 records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
-MiB. Metadata uses 100-row pages with a 100-page cap. An exact
-`commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds, then
-stops. Each list is the complete cap; there is no implicit retry.
+MiB. One-shot application exchanges allow 20 seconds for connection opening and
+for each response frame. Metadata uses 100-row pages with a 100-page cap. An
+exact `commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds,
+then stops. Each list is the complete cap; there is no implicit retry.
 
 **Rejected alternatives.** Unbounded retries and memory permit indefinite work
 or heap growth. One shared timeout conflates stages with different costs.
 Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
 Using the wire frame limit as an aggregate history limit does not bound a
-multi-frame snapshot.
+multi-frame snapshot. Timing only response reads leaves socket opening
+unbounded.
 
-**Affects.** Native application composition, metadata paging, mutation retry,
-and synchronization runtime behavior.
+**Affects.** Native application composition, one-shot request exchange, metadata
+paging, mutation retry, and synchronization runtime behavior.
 
 ## 2026-07-26 — Bound native followed-event buffering in memory
 

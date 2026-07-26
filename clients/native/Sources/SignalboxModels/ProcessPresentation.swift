@@ -39,15 +39,18 @@ public struct SignalboxProcessSession: Identifiable, Equatable, Sendable {
 public struct SignalboxProcessPendingInput: Identifiable, Equatable, Sendable {
   public let id: SignalboxCanonicalUUID
   public let turnID: SignalboxCanonicalUUID
+  public let acceptancePosition: SignalboxCanonicalUInt64
   public let content: String
 
   public init(
     id: SignalboxCanonicalUUID,
     turnID: SignalboxCanonicalUUID,
+    acceptancePosition: SignalboxCanonicalUInt64,
     content: String
   ) {
     self.id = id
     self.turnID = turnID
+    self.acceptancePosition = acceptancePosition
     self.content = content
   }
 }
