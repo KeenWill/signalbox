@@ -5,7 +5,8 @@ The check is deterministic and offline. It verifies:
 
 1. every relative file citation in an invariant Enforcement cell resolves to a
    repository file; a code-spanned test name bound to a cited file must appear
-   in that file,
+   in that file, every ``INV-NNN``-tagged enforcement citation contains that
+   tag, and every Rust test file carrying an INV tag is cited by that row,
 2. every relative Markdown link in ``docs/**/*.md`` and the root ``AGENTS.md``
    resolves inside the repository, including GitHub-style heading fragments,
 3. every H2 in ``docs/decisions.md`` is a valid dated entry and entry dates are
@@ -17,11 +18,14 @@ The check is deterministic and offline. It verifies:
    but it must render as more than whitespace and quote markers, may name code
    in backticks without the span's parentheses closing the reference, and may
    not leave the reference's own block. ``docs/spec/README.md`` states this
-   format; this check enforces it.
+   format; this check enforces it and verifies that each historical token
+   names the exact source branch of a PR merge commit reachable from ``HEAD``.
+   Tokens for one in-flight PR may instead match the checked-out branch locally or the
+   pull-request number and head branch in the GitHub Actions event.
 
-External links, semantic freshness of verification references, and reverse
-discovery of every INV-tagged test are deliberately outside this check. Run
-from any directory; exits nonzero with one stable line per violation.
+External links and semantic freshness beyond reachability are outside this
+check. Run from any directory; exits nonzero with one stable line per
+violation.
 
 The input domain is mdformat-canonical Markdown: CI enforces ``mdformat
 --check`` over the same files before this check runs, so shapes that
@@ -35,8 +39,11 @@ out of scope while that gate holds.
 from __future__ import annotations
 
 import html
+import json
+import os
 import re
 import string
+import subprocess
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -223,6 +230,29 @@ NATURAL_TEST_BINDING = re.compile(
     r")"
     r"[ \t]+in\b",
     re.IGNORECASE,
+)
+INVARIANT_TAG = re.compile(
+    r"(?<![A-Za-z0-9])INV[-_]?(?P<number>[0-9]{3})(?![0-9])",
+    re.IGNORECASE,
+)
+RUST_TEST_DECLARATION = re.compile(
+    r"(?P<prefix>(?:"
+    r"^[ \t]*///[^\n]*(?:\n|$)"
+    r"|^[ \t]*#\[[^\]]*\][ \t]*(?:\n|$)"
+    r")+)"
+    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
+    r"(?:async[ \t]+)?fn[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+RUST_TEST_ATTRIBUTE = re.compile(
+    r"#\[[ \t\r\n]*(?:[A-Za-z_][A-Za-z0-9_]*::)*"
+    r"test(?=[ \t\r\n(\]])[^\]]*\]",
+    re.IGNORECASE,
+)
+PULL_REQUEST_MERGE = re.compile(
+    r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
+    r"[^/\s]+/(?P<branch>[^\r\n]+)$",
+    re.MULTILINE,
 )
 
 
@@ -1307,6 +1337,34 @@ def named_tests(
     return bindings
 
 
+def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
+    """Return distinct INV tags and declaration lines from Rust tests."""
+    found: dict[str, int] = {}
+    for declaration in RUST_TEST_DECLARATION.finditer(text):
+        prefix = declaration.group("prefix")
+        if RUST_TEST_ATTRIBUTE.search(prefix) is None:
+            continue
+        material = f"{prefix}\n{declaration.group('name')}"
+        declaration_line = line_number(text, declaration.start("name"))
+        for tag in INVARIANT_TAG.finditer(material):
+            invariant = f"INV-{tag.group('number')}"
+            found.setdefault(invariant, declaration_line)
+    return sorted(found.items())
+
+
+def rust_invariant_test_files(root: Path) -> dict[tuple[str, str], int]:
+    """Discover every repository Rust test file carrying an INV tag."""
+    found: dict[tuple[str, str], int] = {}
+    for source in sorted(root.rglob("*.rs")):
+        if ".git" in source.parts or "target" in source.parts:
+            continue
+        source_label = repository_path(root, source)
+        text = source.read_text(encoding="utf-8", errors="replace")
+        for invariant, line in rust_test_invariant_tags(text):
+            found[(invariant, source_label)] = line
+    return found
+
+
 def check_invariant_citations(
     root: Path,
 ) -> tuple[list[Violation], set[tuple[int, str]]]:
@@ -1315,6 +1373,7 @@ def check_invariant_citations(
     definitions = reference_definitions(text)
     violations: list[Violation] = []
     enforcement_links: set[tuple[int, str]] = set()
+    catalog_pairs: set[tuple[str, str]] = set()
 
     for number, line in enumerate(text.splitlines(), start=1):
         if not re.match(r"^\|[ \t]*INV-[0-9]{3}[ \t]*\|", line):
@@ -1332,6 +1391,10 @@ def check_invariant_citations(
             continue
         invariant = cells[0]
         enforcement = cells[4]
+        tagged_claim = re.search(
+            rf"(?i)(?<![A-Za-z0-9]){re.escape(invariant)}-tagged(?![A-Za-z0-9])",
+            enforcement,
+        ) is not None
         citation_enforcement = mask_inline_code(enforcement)
         for link in extract_resolved_links(citation_enforcement, definitions):
             resolved = resolve_relative_target(root, source, link.destination)
@@ -1362,6 +1425,27 @@ def check_invariant_citations(
                         f"`{link.destination}`",
                     )
                 )
+            else:
+                target_label = repository_path(root, target)
+                catalog_pairs.add((invariant, target_label))
+                target_text = target.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                invariant_number = invariant.removeprefix("INV-")
+                tag = re.compile(
+                    rf"(?i)(?<![A-Za-z0-9])INV[-_]?"
+                    rf"{invariant_number}(?![0-9])"
+                )
+                if tagged_claim and tag.search(target_text) is None:
+                    violations.append(
+                        Violation(
+                            INVARIANTS.as_posix(),
+                            number,
+                            "invariant-tag",
+                            f"{invariant} cites `{target_label}` as tagged "
+                            f"enforcement, but the file contains no {invariant} tag",
+                        )
+                    )
 
         for test_name, link in named_tests(enforcement, definitions):
             resolved = resolve_relative_target(root, source, link.destination)
@@ -1383,6 +1467,20 @@ def check_invariant_citations(
                         f"`{terminal_name}`",
                     )
                 )
+
+    for pair, line in rust_invariant_test_files(root).items():
+        if pair in catalog_pairs:
+            continue
+        invariant, source_label = pair
+        violations.append(
+            Violation(
+                source_label,
+                line,
+                "invariant-registration",
+                f"{invariant}-tagged tests in `{source_label}` are not cited "
+                f"by the {invariant} Enforcement cell",
+            )
+        )
 
     return violations, enforcement_links
 
@@ -1596,8 +1694,71 @@ def verification_is_negated(text: str, offset: int) -> bool:
     return VERIFICATION_NEGATION.search(preceding) is not None
 
 
+def reachable_pull_request_branches(
+    root: Path,
+) -> tuple[dict[int, set[str]], str | None]:
+    """Read GitHub merge subjects reachable from the checked-out HEAD."""
+    result = subprocess.run(
+        ["git", "log", "HEAD", "--format=%H%x1f%B%x1e"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git log failed without diagnostics"
+        return {}, detail
+    branches: dict[int, set[str]] = {}
+    for record in result.stdout.split("\x1e"):
+        _, separator, message = record.lstrip("\n").partition("\x1f")
+        if not separator:
+            continue
+        merge = PULL_REQUEST_MERGE.search(message)
+        if merge is None:
+            continue
+        number = int(merge.group("number"))
+        branches.setdefault(number, set()).add(merge.group("branch"))
+    return branches, None
+
+
+def current_checkout_branch(root: Path) -> str | None:
+    """Return the symbolic checkout branch, or ``None`` for detached HEAD."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None
+
+
+def github_pull_request_event() -> tuple[tuple[int, str] | None, str | None]:
+    """Read the current GitHub pull-request identity from its local event."""
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if event_path is None:
+        return None, None
+    try:
+        payload = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        number = payload["number"]
+        branch = payload["pull_request"]["head"]["ref"]
+        if type(number) is not int or not isinstance(branch, str) or not branch:
+            raise ValueError("pull-request number or head branch has the wrong type")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        return None, str(error)
+    return (number, branch), None
+
+
 def check_spec_verification_references(root: Path) -> list[Violation]:
     violations: list[Violation] = []
+    reachable_branches, history_error = reachable_pull_request_branches(root)
+    event_pull_request, event_error = github_pull_request_event()
+    github_event_present = "GITHUB_EVENT_PATH" in os.environ
+    checkout_branch = current_checkout_branch(root)
+    in_flight_identity: tuple[int, str] | None = None
     specification_index = (root / SPEC_DIR / "README.md").resolve()
     for source in sorted((root / SPEC_DIR).rglob("*.md")):
         if source.resolve() == specification_index:
@@ -1618,6 +1779,51 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
             token = PR_TOKEN.match(text, candidate_start)
             if token is not None:
                 valid_reference = True
+                number = int(token.group(1))
+                branch = token.group(2)
+                line = line_number(text, candidate_start)
+                historical_match = (
+                    number in reachable_branches
+                    and branch in reachable_branches[number]
+                )
+                event_match = event_pull_request == (number, branch)
+                local_match = (
+                    not github_event_present and branch == checkout_branch
+                )
+                in_flight_match = event_match or local_match
+                if historical_match:
+                    continue
+                if in_flight_match:
+                    candidate_identity = (number, branch)
+                    if in_flight_identity is None:
+                        in_flight_identity = candidate_identity
+                    if in_flight_identity == candidate_identity:
+                        continue
+                if history_error is not None:
+                    message = f"cannot inspect reachable HEAD history: {history_error}"
+                elif event_error is not None:
+                    message = f"cannot inspect GitHub pull-request event: {event_error}"
+                elif in_flight_match:
+                    message = "only one unmerged verification PR identity is permitted"
+                elif number not in reachable_branches:
+                    message = f"PR #{number} has no merge commit reachable from HEAD"
+                else:
+                    actual = ", ".join(
+                        f"`{candidate}`"
+                        for candidate in sorted(reachable_branches[number])
+                    )
+                    message = (
+                        f"PR #{number} names branch `{branch}`, but its "
+                        f"reachable merge commit names {actual}"
+                    )
+                violations.append(
+                    Violation(
+                        source_label,
+                        line,
+                        "spec-verification-history",
+                        message,
+                    )
+                )
                 continue
             violations.append(
                 Violation(
