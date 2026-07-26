@@ -8,10 +8,10 @@ use std::{
 };
 
 use crate::{
-    ApprovedToolRequest, AuthorizedToolAttempt, NormalizedToolArguments, RunnerAuthenticationId,
-    RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId, ToolArgumentsKind,
-    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolDecisionSource, ToolEffectClass, ToolName,
-    ToolPermissionDefault, TurnAttemptId,
+    ApprovedToolRequest, AuthorizedToolAttempt, EndedToolAttempt, NormalizedToolArguments,
+    RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId,
+    ToolArgumentsKind, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch,
+    ToolDecisionSource, ToolEffectClass, ToolName, ToolPermissionDefault,
 };
 
 const NAME_MAX_BYTES: usize = 64;
@@ -823,11 +823,7 @@ impl RunnerLease {
             RunnerLeaseState::LostUnclaimed
         };
         if claimed && self.effect == RunnerToolEffectClass::SideEffecting {
-            let attempt = self.dispatch.attempt();
-            return Ok(RunnerLeaseLoss::CrashClassificationRequired {
-                lost: self,
-                attempt,
-            });
+            return Ok(RunnerLeaseLoss::CrashClassificationRequired { lost: self });
         }
         let generation = self
             .generation
@@ -856,10 +852,20 @@ impl RunnerLease {
             generation: input.generation,
             state: input.state,
         };
+        let credential_matches =
+            lease
+                .credential_authorization
+                .as_ref()
+                .is_none_or(|authorization| {
+                    authorization.session == lease.dispatch.session()
+                        && authorization.runner == lease.runner
+                        && authorization.tool == lease.tool
+                });
         if lease.correlation() != input.recorded_correlation
             || lease.dispatch.session() != input.recorded_session
             || lease.effect != input.recorded_effect
             || lease.credential_authorization != input.recorded_credential_authorization
+            || !credential_matches
             || lease.state != input.recorded_state
         {
             return Err(RunnerDomainError::CorruptStoredFacts);
@@ -905,7 +911,6 @@ pub enum RunnerLeaseLoss {
     },
     CrashClassificationRequired {
         lost: RunnerLease,
-        attempt: ToolAttemptId,
     },
 }
 
@@ -920,8 +925,30 @@ impl RunnerLeaseLoss {
     pub const fn crash_attempt(&self) -> Option<ToolAttemptId> {
         match self {
             Self::RetryPermitted { .. } => None,
-            Self::CrashClassificationRequired { attempt, .. } => Some(*attempt),
+            Self::CrashClassificationRequired { lost } => Some(lost.dispatch.attempt()),
         }
+    }
+}
+
+/// One checked claimed-retry batch successor with both physical attempts.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerClaimedAttemptReplacement {
+    batch: ToolBatch,
+    retired: EndedToolAttempt,
+    authorization: RunnerToolAttemptAuthorization,
+}
+
+impl RunnerClaimedAttemptReplacement {
+    pub const fn batch(&self) -> &ToolBatch {
+        &self.batch
+    }
+
+    pub const fn retired(&self) -> &EndedToolAttempt {
+        &self.retired
+    }
+
+    pub fn into_parts(self) -> (ToolBatch, EndedToolAttempt, RunnerToolAttemptAuthorization) {
+        (self.batch, self.retired, self.authorization)
     }
 }
 
@@ -938,36 +965,38 @@ impl RunnerLeaseRetryAuthority {
         self.generation
     }
 
-    /// Produces a fresh physical attempt for claimed retryable work.
+    /// Produces a fresh physical attempt through its owning batch.
     pub fn prepare_claimed_attempt(
         &self,
-        approved: ApprovedToolRequest,
+        batch: ToolBatch,
         attempt: ToolAttemptId,
-        issuing_attempt: TurnAttemptId,
-    ) -> Result<RunnerToolAttemptAuthorization, RunnerDomainError> {
+    ) -> Result<RunnerClaimedAttemptReplacement, RunnerDomainError> {
         let claimed = self
             .claimed_attempt
             .ok_or(RunnerDomainError::InvalidState)?;
-        let request = approved.request();
         if attempt == claimed {
             return Err(RunnerDomainError::AttemptIdentityReuse);
         }
-        if request.id() != self.source.correlation.dispatch.request()
-            || request.session() != self.source.correlation.dispatch.session()
-            || request.turn() != self.source.correlation.dispatch.turn()
-            || request.name() != &self.source.correlation.tool
+        let replacement = batch
+            .replace_claimed_attempt(claimed, attempt)
+            .map_err(|_| RunnerDomainError::CorrelationMismatch)?;
+        if replacement.approved.request().id() != self.source.correlation.dispatch.request()
+            || replacement.approved.request().session()
+                != self.source.correlation.dispatch.session()
+            || replacement.approved.request().turn() != self.source.correlation.dispatch.turn()
+            || replacement.approved.request().name() != &self.source.correlation.tool
+            || replacement.retired.attempt() != claimed
+            || replacement.retired.effect_class() != tool_effect_class(self.source.effect)
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
-        let authorized = approved
-            .prepare_attempt(
-                attempt,
-                issuing_attempt,
-                tool_effect_class(self.source.effect),
-            )
-            .authorize()
-            .map_err(|_| RunnerDomainError::InvalidState)?;
-        RunnerToolAttemptAuthorization::try_new(approved, authorized)
+        let authorization =
+            RunnerToolAttemptAuthorization::try_new(replacement.approved, replacement.authorized)?;
+        Ok(RunnerClaimedAttemptReplacement {
+            batch: replacement.batch,
+            retired: replacement.retired,
+            authorization,
+        })
     }
 }
 
@@ -1243,54 +1272,21 @@ impl SessionRunnerPlacement {
             .checked_next()
             .ok_or(RunnerDomainError::GenerationExhausted)?;
         let after = validate_placement(self.session, &request, registration, directory, workspace)?;
-        let grant = match (before.credential_profile.as_ref(), prior_grant) {
-            (Some(profile), Some(prior))
-                if prior.matches_binding(self.session, before.runner, profile) =>
-            {
-                let revision = prior
-                    .revision
-                    .checked_next()
-                    .ok_or(RunnerDomainError::GenerationExhausted)?;
-                after
-                    .credential_profile
-                    .clone()
-                    .map(|profile| {
-                        build_grant(
-                            self.session,
-                            revision,
-                            registration,
-                            profile,
-                            registration.tool_names().cloned(),
-                            CredentialProfileGrantState::Active,
-                        )
-                    })
-                    .transpose()?
-            }
-            (Some(_), _) => return Err(RunnerDomainError::CorrelationMismatch),
-            (None, None) => match after.credential_profile.clone() {
-                Some(profile) => Some(build_grant(
-                    self.session,
-                    RunnerGeneration::one(),
-                    registration,
-                    profile,
-                    registration.tool_names().cloned(),
-                    CredentialProfileGrantState::Active,
-                )?),
-                None => None,
-            },
-            (None, Some(_)) => return Err(RunnerDomainError::CorrelationMismatch),
-        };
+        let prior_request = self.request;
+        let grant = successor_grant(self.session, &before, &after, registration, prior_grant)?;
         Ok(RunnerPlacementReplacement {
             placement: Self {
                 session: self.session,
                 revision,
-                request,
+                request: request.clone(),
                 state: SessionRunnerPlacementState::Pinned(after.clone()),
             },
             change: RunnerPlacementChange {
                 session: self.session,
                 prior_revision: self.revision,
                 replacement_revision: revision,
+                before_request: prior_request,
+                after_request: request,
                 before,
                 after,
             },
@@ -1327,19 +1323,22 @@ impl SessionRunnerPlacement {
         let grant = grant.replace_for(registration, profile.clone(), tools)?;
         let mut after = before.clone();
         after.credential_profile = Some(profile.clone());
+        let before_request = self.request.clone();
         let mut request = self.request;
         request.credential_profile = Some(profile);
         Ok(CredentialProfilePlacementReplacement {
             placement: Self {
                 session: self.session,
                 revision,
-                request,
+                request: request.clone(),
                 state: SessionRunnerPlacementState::Pinned(after.clone()),
             },
             placement_change: RunnerPlacementChange {
                 session: self.session,
                 prior_revision: self.revision,
                 replacement_revision: revision,
+                before_request,
+                after_request: request.clone(),
                 before,
                 after,
             },
@@ -1348,30 +1347,38 @@ impl SessionRunnerPlacement {
     }
 
     pub fn reconstitute(
-        self,
+        input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
         registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError> {
-        if self.session != expected_session {
+        if input.session != expected_session {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
-        match &self.state {
-            SessionRunnerPlacementState::Unpinned if self.revision == RunnerGeneration::one() => {
-                Ok(self)
+        let placement = Self {
+            session: input.session,
+            revision: input.revision,
+            request: input.request,
+            state: input.state,
+        };
+        match &placement.state {
+            SessionRunnerPlacementState::Unpinned
+                if placement.revision == RunnerGeneration::one() =>
+            {
+                Ok(placement)
             }
             SessionRunnerPlacementState::Pinned(stored)
             | SessionRunnerPlacementState::RunnerLost(stored) => {
                 let pinned_registration =
                     registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
                 let checked = validate_placement(
-                    self.session,
-                    &self.request,
+                    placement.session,
+                    &placement.request,
                     pinned_registration,
                     stored.working_directory.clone(),
                     stored.workspace.clone(),
                 )?;
                 if checked == *stored {
-                    Ok(self)
+                    Ok(placement)
                 } else {
                     Err(RunnerDomainError::CorruptStoredFacts)
                 }
@@ -1379,6 +1386,15 @@ impl SessionRunnerPlacement {
             _ => Err(RunnerDomainError::CorruptStoredFacts),
         }
     }
+}
+
+/// Complete placement facts loaded from one canonical durable revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRunnerPlacementReconstitutionInput {
+    pub session: SessionId,
+    pub revision: RunnerGeneration,
+    pub request: SessionRunnerPlacementRequest,
+    pub state: SessionRunnerPlacementState,
 }
 
 struct ValidatedRunnerDispatch {
@@ -1559,6 +1575,8 @@ pub struct RunnerPlacementChange {
     pub session: SessionId,
     pub prior_revision: RunnerGeneration,
     pub replacement_revision: RunnerGeneration,
+    pub before_request: SessionRunnerPlacementRequest,
+    pub after_request: SessionRunnerPlacementRequest,
     pub before: PinnedRunnerPlacement,
     pub after: PinnedRunnerPlacement,
 }
@@ -1696,26 +1714,97 @@ impl CredentialProfileGrant {
     }
 
     pub fn reconstitute(
-        self,
+        input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError> {
-        if self.session != expected_session {
+        if input.session != expected_session {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
         let checked = build_grant(
-            self.session,
-            self.revision,
+            input.session,
+            input.revision,
             registration,
-            self.profile.clone(),
-            self.tools.clone(),
-            self.state,
+            input.profile,
+            input.tools,
+            input.state,
         )?;
-        if checked == self {
-            Ok(self)
+        if checked.runner == input.runner && checked.approvals == input.approvals {
+            Ok(checked)
         } else {
             Err(RunnerDomainError::CorruptStoredFacts)
         }
+    }
+}
+
+/// Complete credential-grant facts loaded from canonical storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfileGrantReconstitutionInput {
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tools: BTreeSet<ToolName>,
+    pub approvals: BTreeMap<ToolName, CredentialToolApproval>,
+    pub state: CredentialProfileGrantState,
+}
+
+fn successor_grant(
+    session: SessionId,
+    before: &PinnedRunnerPlacement,
+    after: &PinnedRunnerPlacement,
+    registration: &ValidatedRunnerRegistration,
+    prior: Option<CredentialProfileGrant>,
+) -> Result<Option<CredentialProfileGrant>, RunnerDomainError> {
+    let prior = match (before.credential_profile.as_ref(), prior) {
+        (Some(profile), Some(prior)) if prior.matches_binding(session, before.runner, profile) => {
+            Some(prior)
+        }
+        (None, Some(prior))
+            if prior.session == session && prior.state == CredentialProfileGrantState::Revoked =>
+        {
+            Some(prior)
+        }
+        (Some(_), _) | (None, Some(_)) => {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        (None, None) => None,
+    };
+    let Some(prior) = prior else {
+        return after
+            .credential_profile
+            .clone()
+            .map(|profile| {
+                build_grant(
+                    session,
+                    RunnerGeneration::one(),
+                    registration,
+                    profile,
+                    registration.tool_names().cloned(),
+                    CredentialProfileGrantState::Active,
+                )
+            })
+            .transpose();
+    };
+    let revision = prior
+        .revision
+        .checked_next()
+        .ok_or(RunnerDomainError::GenerationExhausted)?;
+    match after.credential_profile.clone() {
+        Some(profile) => build_grant(
+            session,
+            revision,
+            registration,
+            profile,
+            registration.tool_names().cloned(),
+            CredentialProfileGrantState::Active,
+        )
+        .map(Some),
+        None => Ok(Some(CredentialProfileGrant {
+            revision,
+            state: CredentialProfileGrantState::Revoked,
+            ..prior
+        })),
     }
 }
 
@@ -1784,12 +1873,14 @@ mod tests {
     use super::*;
     use crate::{
         ApprovedToolRequest, DangerousToolAutoApproval, DecideToolRequest, DurableCommandId,
-        ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolRequest,
-        ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, ToolApprovalDecision,
+        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolExecutionErrorKind,
+        ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         test_support::{
-            model_call_id, runner_authentication_id, runner_enrollment_id, runner_id,
-            runner_lease_id, session_id, tool_attempt_id, tool_request_id, turn_attempt_id,
-            turn_id,
+            context_frontier_id, model_call_id, runner_authentication_id, runner_enrollment_id,
+            runner_id, runner_lease_id, session_id, tool_attempt_id, tool_request_id,
+            turn_attempt_id, turn_id,
         },
     };
 
@@ -1801,6 +1892,8 @@ mod tests {
     const ATTEMPT: u128 = 0x7500;
     const RETRY_ATTEMPT: u128 = 0x7501;
     const SESSION: u128 = 0x7600;
+    /// Arbitrary empty context-frontier identity for complete batch fixtures.
+    const YIELDED_FRONTIER: u128 = 0x7a00;
 
     fn class() -> RunnerCapabilityClass {
         RunnerCapabilityClass::try_new("linux.workspace".to_owned())
@@ -1913,6 +2006,15 @@ mod tests {
         }
     }
 
+    fn profileless_placement_request() -> SessionRunnerPlacementRequest {
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+        }
+    }
+
     fn directory(value: &str) -> RunnerWorkingDirectory {
         RunnerWorkingDirectory::try_new(value.to_owned())
             .expect("fixture working directories are valid")
@@ -1961,6 +2063,46 @@ mod tests {
         };
         ApprovedToolRequest::try_from_resolution(request, applied.resolution().clone())
             .expect("the fixture approval matches its request")
+    }
+
+    fn claimed_batch(tool_name: &str, effect: RunnerToolEffectClass) -> ToolBatch {
+        let approved = approved_request(tool_name);
+        let current = approved
+            .prepare_attempt(
+                tool_attempt_id(ATTEMPT),
+                turn_attempt_id(0x7b00),
+                tool_effect_class(effect),
+            )
+            .authorize()
+            .expect("the claimed fixture attempt authorizes once")
+            .into_parts()
+            .0;
+        ToolBatchReconstitutionInput::new(
+            session_id(SESSION),
+            turn_id(0x7800),
+            model_call_id(0x7900),
+            ResolvedContextFrontierSnapshot::try_from_candidate(
+                session_id(SESSION),
+                context_frontier_id(YIELDED_FRONTIER),
+                Vec::new(),
+            )
+            .expect("an empty fixture snapshot is valid"),
+            vec![approved.request().clone()],
+            vec![approved.approval().clone()],
+            vec![ReconstitutedToolAttempt::Current(current)],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(0x7b00),
+            },
+        )
+        .reconstitute()
+        .expect("the claimed fixture batch is complete")
+    }
+
+    fn current_attempt_id(batch: &ToolBatch, request: ToolRequestId) -> Option<ToolAttemptId> {
+        batch.attempt(request).map(|attempt| match attempt {
+            ReconstitutedToolAttempt::Current(current) => current.attempt(),
+            ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
+        })
     }
 
     fn automatically_approved_request(tool_name: &str) -> ApprovedToolRequest {
@@ -2130,6 +2272,31 @@ mod tests {
             recorded_effect: lease.effect,
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
+        }
+    }
+
+    fn placement_reconstitution_input(
+        placement: SessionRunnerPlacement,
+    ) -> SessionRunnerPlacementReconstitutionInput {
+        SessionRunnerPlacementReconstitutionInput {
+            session: placement.session,
+            revision: placement.revision,
+            request: placement.request,
+            state: placement.state,
+        }
+    }
+
+    fn grant_reconstitution_input(
+        grant: CredentialProfileGrant,
+    ) -> CredentialProfileGrantReconstitutionInput {
+        CredentialProfileGrantReconstitutionInput {
+            session: grant.session,
+            runner: grant.runner,
+            revision: grant.revision,
+            profile: grant.profile,
+            tools: grant.tools,
+            approvals: grant.approvals,
+            state: grant.state,
         }
     }
 
@@ -2487,15 +2654,15 @@ mod tests {
             .expect("the exact fence claims the offered lease");
 
         let loss = claimed.lose().expect("a claimed lease can be lost");
-        let authorization = loss
+        let prepared = loss
             .retry()
             .expect("claimed pure work carries retry authority")
             .prepare_claimed_attempt(
-                approved_request("inspect"),
+                claimed_batch("inspect", RunnerToolEffectClass::Pure),
                 retry_attempt,
-                turn_attempt_id(0x7b00),
             )
             .expect("retry authority produces a fresh physical attempt");
+        let (retry_batch, retired_attempt, authorization) = prepared.into_parts();
         let replacement = placement
             .offer_retry(
                 &enrollment_for(registration.runner()),
@@ -2506,6 +2673,17 @@ mod tests {
             )
             .expect("pure claimed work permits a fresh physical attempt");
 
+        assert_eq!(retired_attempt.attempt(), tool_attempt_id(ATTEMPT));
+        assert_eq!(
+            retired_attempt.end(),
+            &ToolAttemptEnd::KnownFailed {
+                error: crate::ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
+            }
+        );
+        assert_eq!(
+            current_attempt_id(&retry_batch, request("inspect").id()),
+            Some(retry_attempt)
+        );
         assert_eq!(replacement.attempt(), retry_attempt);
         assert_eq!(replacement.tool(), &expected_tool);
     }
@@ -2524,9 +2702,8 @@ mod tests {
             loss.retry()
                 .expect("claimed idempotent work carries retry authority")
                 .prepare_claimed_attempt(
-                    approved_request("sync"),
+                    claimed_batch("sync", RunnerToolEffectClass::Idempotent),
                     tool_attempt_id(ATTEMPT),
-                    turn_attempt_id(0x7b00),
                 ),
             Err(RunnerDomainError::AttemptIdentityReuse)
         );
@@ -2545,9 +2722,8 @@ mod tests {
             loss.retry()
                 .expect("claimed idempotent work carries retry authority")
                 .prepare_claimed_attempt(
-                    approved_request("inspect"),
+                    claimed_batch("inspect", RunnerToolEffectClass::Pure),
                     tool_attempt_id(RETRY_ATTEMPT),
-                    turn_attempt_id(0x7b00),
                 ),
             Err(RunnerDomainError::CorrelationMismatch)
         );
@@ -2562,9 +2738,8 @@ mod tests {
             loss.retry()
                 .expect("unclaimed pure work carries retry authority")
                 .prepare_claimed_attempt(
-                    approved_request("inspect"),
+                    claimed_batch("inspect", RunnerToolEffectClass::Pure),
                     tool_attempt_id(RETRY_ATTEMPT),
-                    turn_attempt_id(0x7b00),
                 ),
             Err(RunnerDomainError::InvalidState)
         );
@@ -2578,17 +2753,18 @@ mod tests {
             .claim(correlation)
             .expect("the exact fence claims the offered lease");
         let loss = claimed.lose().expect("a claimed lease can be lost");
-        let authorization = loss
+        let prepared = loss
             .retry()
             .expect("claimed idempotent work carries retry authority")
             .prepare_claimed_attempt(
-                approved_request("sync"),
+                claimed_batch("sync", RunnerToolEffectClass::Idempotent),
                 tool_attempt_id(RETRY_ATTEMPT),
-                turn_attempt_id(0x7b00),
             )
             .expect("retry authority preserves the source effect");
+        let (_, retired_attempt, authorization) = prepared.into_parts();
         let (attempt, _) = authorization.authorized.into_parts();
 
+        assert_eq!(retired_attempt.end(), &ToolAttemptEnd::Ambiguous);
         assert_eq!(
             attempt.effect_class(),
             tool_effect_class(declared_effect("sync"))
@@ -2776,6 +2952,27 @@ mod tests {
     }
 
     #[test]
+    fn s31_inv043_lease_reconstitution_rejects_cross_wired_credential_correlation() {
+        let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let mut input = lease_reconstitution_input(lease);
+        let authorization = input
+            .credential_authorization
+            .take()
+            .expect("the profiled fixture carries credential authorization");
+        let cross_wired = CredentialDispatchAuthorization {
+            session: session_id(SESSION + 1),
+            ..authorization
+        };
+        input.credential_authorization = Some(cross_wired.clone());
+        input.recorded_credential_authorization = Some(cross_wired);
+
+        assert_eq!(
+            RunnerLease::reconstitute(input),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
     fn s31_inv043_lease_reconstitution_rejects_cross_wired_session() {
         let (_, _, _, lease) = offered("inspect", tool_attempt_id(ATTEMPT));
         let mut input = lease_reconstitution_input(lease);
@@ -2842,12 +3039,29 @@ mod tests {
     }
 
     #[test]
+    fn s30_inv044_placement_reconstitution_accepts_raw_pinned_facts() {
+        let (registration, pin) = pinned("readonly");
+        let expected_state = pin.placement.state().clone();
+        let input = placement_reconstitution_input(pin.placement);
+
+        let reconstituted =
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration))
+                .expect("complete pinned facts reconstitute");
+
+        assert_eq!(reconstituted.state(), &expected_state);
+    }
+
+    #[test]
     fn s30_inv044_placement_reconstitution_rejects_cross_wired_session() {
         let (registration, pin) = pinned("readonly");
+        let input = placement_reconstitution_input(pin.placement);
 
         assert_eq!(
-            pin.placement
-                .reconstitute(session_id(SESSION + 1), Some(&registration)),
+            SessionRunnerPlacement::reconstitute(
+                input,
+                session_id(SESSION + 1),
+                Some(&registration),
+            ),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -2856,9 +3070,10 @@ mod tests {
     fn s30_inv044_placement_reconstitution_rejects_missing_required_tool() {
         let (registration, pin) = pinned("readonly");
         let corrupted = placement_without_required_tool(pin.placement, &tool("deploy"));
+        let input = placement_reconstitution_input(corrupted);
 
         assert_eq!(
-            corrupted.reconstitute(session_id(SESSION), Some(&registration)),
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration),),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -3121,6 +3336,101 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv044_replacement_change_retains_policy_only_request_change() {
+        let registration = registration();
+        let before_request = placement_request(profile("readonly"));
+        let after_request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(registration.runner()),
+            ..before_request.clone()
+        };
+        let mut pin = SessionRunnerPlacement::new(session_id(SESSION), before_request.clone())
+            .pin_and_offer_lease(
+                &enrollment(),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("the initial request pins the selected runner");
+        let prior_grant = pin
+            .grant
+            .take()
+            .expect("profile selection creates a prior grant");
+        let lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the pinned runner can be marked lost");
+
+        let replaced = lost
+            .replace_lost_runner(
+                after_request.clone(),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            )
+            .expect("the exact-runner request selects the same pinned facts");
+
+        assert_eq!(replaced.change.before, replaced.change.after);
+        assert_eq!(replaced.change.before_request, before_request);
+        assert_eq!(replaced.change.after_request, after_request);
+    }
+
+    #[test]
+    fn s32_inv045_profileless_replacement_retains_grant_lineage() {
+        let registration = registration();
+        let mut pin = pinned("readonly").1;
+        let prior_grant = pin
+            .grant
+            .take()
+            .expect("profile selection creates a prior grant");
+        let first_lost = pin
+            .placement
+            .mark_runner_lost()
+            .expect("the profiled placement can be marked lost");
+        let profileless = first_lost
+            .replace_lost_runner(
+                profileless_placement_request(),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(prior_grant),
+            )
+            .expect("profileless replacement retains a terminal grant lineage");
+        let tombstone = profileless
+            .grant
+            .expect("the prior grant lineage remains as a tombstone");
+        let second_lost = profileless
+            .placement
+            .mark_runner_lost()
+            .expect("the profileless placement can be marked lost");
+
+        let restored = second_lost
+            .replace_lost_runner(
+                placement_request(profile("readonly")),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                Some(tombstone),
+            )
+            .expect("restoring the prior profile advances its retained lineage");
+        let restored_grant = restored
+            .grant
+            .expect("the restored profile creates an active successor grant");
+
+        assert_eq!(
+            restored_grant.revision(),
+            RunnerGeneration::try_from_u64(3).expect("three is positive")
+        );
+        assert_eq!(restored_grant.state(), CredentialProfileGrantState::Active);
+    }
+
+    #[test]
     fn s32_inv044_workspace_cannot_cross_runner_ownership() {
         let registration = registration();
         let request = SessionRunnerPlacementRequest {
@@ -3371,15 +3681,30 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv045_grant_reconstitution_accepts_raw_active_facts() {
+        let (registration, mut pin) = pinned("readonly");
+        let grant = pin.grant.take().expect("profile selection creates a grant");
+        let expected_profile = grant.profile().clone();
+        let input = grant_reconstitution_input(grant);
+
+        let reconstituted =
+            CredentialProfileGrant::reconstitute(input, session_id(SESSION), &registration)
+                .expect("complete active grant facts reconstitute");
+
+        assert_eq!(reconstituted.profile(), &expected_profile);
+    }
+
+    #[test]
     fn s32_inv045_grant_reconstitution_rejects_changed_pair_policy() {
         let (registration, mut pin) = pinned("readonly");
-        let mut grant = pin.grant.take().expect("profile selection creates a grant");
-        grant
+        let grant = pin.grant.take().expect("profile selection creates a grant");
+        let mut input = grant_reconstitution_input(grant);
+        input
             .approvals
             .insert(tool("inspect"), CredentialToolApproval::SessionPolicy);
 
         assert_eq!(
-            grant.reconstitute(session_id(SESSION), &registration),
+            CredentialProfileGrant::reconstitute(input, session_id(SESSION), &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -3388,9 +3713,10 @@ mod tests {
     fn s32_inv045_grant_reconstitution_rejects_cross_wired_session() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
+        let input = grant_reconstitution_input(grant);
 
         assert_eq!(
-            grant.reconstitute(session_id(SESSION + 1), &registration),
+            CredentialProfileGrant::reconstitute(input, session_id(SESSION + 1), &registration,),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }

@@ -1,8 +1,8 @@
 # Runner protocol and placement
 
 This page specifies the implemented runner-protocol domain foundation as
-verified against the implementing stack rooted at PR #259
-(`agent/runner-protocol`). It owns logical runner enrollment,
+verified against the implementing stack through PR #260
+(`agent/runner-protocol-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
@@ -178,12 +178,14 @@ the checked successor lease-lineage generation. Loss after claim follows the
 required retry law:
 
 - `Pure` and `Idempotent` produce typed re-lease authority at the checked
-  successor generation; every successor offer consumes exact
-  `RunnerToolAttemptAuthorization` authority, authority after claim requires a
-  fresh physical `ToolAttemptId`, while authority lost before claim retains the
-  never-executed attempt identity; and
-- `SideEffecting` produces typed crash-classification authority naming the exact
-  physical attempt and never produces re-lease authority.
+  successor generation; after claim that authority consumes the owning checked
+  `ToolBatch`, retires the prior in-flight attempt to its effect-correct
+  terminal history, installs and authorizes a fresh physical `ToolAttemptId`,
+  and returns both attempt records with the updated batch, while authority lost
+  before claim retains the never-executed attempt identity; and
+- `SideEffecting` produces typed crash-classification authority whose physical
+  attempt is derived from the opaque lost lease and never produces re-lease
+  authority.
 
 Generation exhaustion and claimed-attempt identity reuse fail closed. Re-leasing
 continues one logical tool request and lease lineage. Its successor
@@ -252,17 +254,17 @@ request, validated registration, working directory, credential-profile
 selection, tool inventory, and provisioned workspace. Exact-runner placement
 therefore changes identity only through this explicit replacement. It advances a
 positive placement revision and returns one `RunnerPlacementChange` value
-carrying the complete before-and-after placement facts needed for a later
-frontier-extending injected message. Reconstitution rejects an unpinned revision
-other than one, a pinned or lost state that does not match its current request
-and validated capabilities. Durable replacement-history verification belongs to
-the later persistence projection. Pinned or lost reconstitution validates
-against the exact registration snapshot that produced the pin and rejects any
-stored tool or runner-required-tool inventory that differs from that checked
-result. A current narrowed re-registration is reconciled separately and is not
-substituted for that historical snapshot. This domain aggregate accepts every
-positive revision because each is reachable through checked successor
-transitions.
+carrying the complete before-and-after placement requests and pinned facts
+needed for a later frontier-extending injected message. Reconstitution accepts a
+complete public raw-facts input and rejects an unpinned revision other than one,
+a pinned or lost state that does not match its current request and validated
+capabilities. Durable replacement-history verification belongs to the later
+persistence projection. Pinned or lost reconstitution validates against the
+exact registration snapshot that produced the pin and rejects any stored tool or
+runner-required-tool inventory that differs from that checked result. A current
+narrowed re-registration is reconciled separately and is not substituted for
+that historical snapshot. This domain aggregate accepts every positive revision
+because each is reachable through checked successor transitions.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -306,16 +308,18 @@ reusable standalone dispatch token.
 Grant replacement is forward-only. It checks the current revision and installs
 one complete later snapshot, returning a `CredentialProfileChange` with the
 before-and-after profile and tool inventories for later frontier injection.
-Runner replacement consumes any prior pinned-profile grant and creates a checked
-successor revision; it cannot recreate revision one, including after the prior
-grant was revoked. The prior revoked revision remains terminal. Revocation is
-also forward-only and gates later lease creation. A lease already offered is
+Runner replacement consumes any prior grant lineage and creates a checked
+successor revision. A profileless replacement carries the lineage forward as a
+new terminal tombstone, so restoring a previously selected profile cannot
+recreate revision one. Every prior revoked revision remains terminal. Revocation
+is also forward-only and gates later lease creation. A lease already offered is
 already dispatched and completes or crash-classifies normally; revocation
 neither rewrites nor cancels it. A revoked grant revision cannot become active
-again. Complete reconstitution checks an independently authoritative expected
-session and rejects foreign runner facts, a profile absent from the validated
-registration, or a tool set wider than the advertisement. Durable revision
-history and atomic store dispatch gating remain persistence work (INV-045).
+again. Complete reconstitution accepts a complete public raw-facts input, checks
+an independently authoritative expected session and rejects foreign runner
+facts, a profile absent from the validated registration, or a tool set wider
+than the advertisement. Durable revision history and atomic store dispatch
+gating remain persistence work (INV-045).
 
 ## Workspace provisioning
 

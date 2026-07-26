@@ -5413,7 +5413,6 @@ pub enum RunnerLeaseLoss {
     },
     CrashClassificationRequired {
         lost: RunnerLease,
-        attempt: ToolAttemptId,
     },
 }
 impl RunnerLeaseLoss {
@@ -5424,10 +5423,20 @@ impl RunnerLeaseRetryAuthority {
     // accessors: generation()
     pub fn prepare_claimed_attempt(
         &self,
-        approved: ApprovedToolRequest,
+        batch: ToolBatch,
         attempt: ToolAttemptId,
-        issuing_attempt: TurnAttemptId,
-    ) -> Result<RunnerToolAttemptAuthorization, RunnerDomainError>;
+    ) -> Result<RunnerClaimedAttemptReplacement, RunnerDomainError>;
+}
+pub struct RunnerClaimedAttemptReplacement { /* private */ }
+impl RunnerClaimedAttemptReplacement {
+    // accessors: batch(), retired()
+    pub fn into_parts(
+        self,
+    ) -> (
+        ToolBatch,
+        EndedToolAttempt,
+        RunnerToolAttemptAuthorization,
+    );
 }
 
 pub enum WorkingDirectorySelection {
@@ -5507,11 +5516,14 @@ impl SessionRunnerPlacement {
         tools: impl IntoIterator<Item = ToolName>,
     ) -> Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
     pub fn reconstitute(
-        self,
+        input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
         pinned_registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: state(), revision()
+}
+pub struct SessionRunnerPlacementReconstitutionInput {
+    /* public complete stored placement facts */
 }
 pub struct SessionRunnerPin {
     /* public placement, optional initial grant, and initial lease */
@@ -5520,7 +5532,7 @@ pub struct RunnerPlacementReplacement {
     /* public placement, change, and optional replacement grant */
 }
 pub struct RunnerPlacementChange {
-    /* public before-and-after facts */
+    /* public before-and-after request and pinned facts */
 }
 pub struct CredentialProfilePlacementReplacement {
     /* public placement, placement change, and grant replacement */
@@ -5535,10 +5547,13 @@ impl CredentialProfileGrant {
     // accessors: state(), revision(), profile()
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
-        self,
+        input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError>;
+}
+pub struct CredentialProfileGrantReconstitutionInput {
+    /* public complete stored grant facts */
 }
 pub struct CredentialDispatchAuthorization {
     /* public exact tool/profile decision facts; produced only inside a lease */
@@ -6343,8 +6358,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 44                   |
-| **signalbox-domain total**                         | **499 (+1 free fn)** |
+| domain: runner                                     | 47                   |
+| **signalbox-domain total**                         | **502 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

@@ -148,18 +148,19 @@ pub use review_workflow::{
 };
 pub use runner::{
     CredentialDispatchAuthorization, CredentialProfileChange, CredentialProfileGrant,
-    CredentialProfileGrantReplacement, CredentialProfileGrantState, CredentialProfileName,
-    CredentialProfilePlacementReplacement, CredentialProfilePolicy, CredentialToolApproval,
-    PinnedRunnerPlacement, ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass,
-    RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentReconstitutionInput,
+    CredentialProfileGrantReconstitutionInput, CredentialProfileGrantReplacement,
+    CredentialProfileGrantState, CredentialProfileName, CredentialProfilePlacementReplacement,
+    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
+    RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentReconstitutionInput,
     RunnerEnrollmentState, RunnerGeneration, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseLoss,
     RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority,
     RunnerLeaseState, RunnerPlacementChange, RunnerPlacementReplacement, RunnerSelector,
     RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerWorkingDirectory, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ValidatedRunnerRegistration,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
