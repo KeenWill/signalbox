@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::arguments::valid_opaque_id;
+use super::arguments::{valid_opaque_id, valid_revision};
 
 const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
@@ -109,7 +109,7 @@ impl ChangeRequestSummaryResult {
             && fields.author.as_deref().is_none_or(valid_required_text)
             && valid_required_text(&fields.base_ref)
             && valid_required_text(&fields.head_ref)
-            && valid_required_text(&fields.head_revision)
+            && valid_revision(&fields.head_revision)
             && valid_url(&fields.url))
         .then_some(Self {
             number: fields.number,

@@ -116,18 +116,25 @@ impl CodeHostChangeRequestNumber {
     }
 }
 
+/// Whether a value is one exact lowercase 40-hex revision. Returned revisions
+/// are admitted by this same predicate so a result can always be passed back
+/// as a revision argument.
+pub(super) fn valid_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// One exact lowercase 40-hex revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeHostRevision(String);
 
 impl CodeHostRevision {
     pub(super) fn try_new(value: String) -> Result<Self, InvalidCodeHostArguments> {
-        (value.len() == 40
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        .then_some(Self(value))
-        .ok_or(InvalidCodeHostArguments)
+        valid_revision(&value)
+            .then_some(Self(value))
+            .ok_or(InvalidCodeHostArguments)
     }
 
     /// Borrows the exact revision.

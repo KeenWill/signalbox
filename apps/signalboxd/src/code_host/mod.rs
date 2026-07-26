@@ -872,6 +872,32 @@ mod tests {
         assert_eq!(reply, None);
     }
 
+    /// A returned head revision the checks argument would refuse never enters
+    /// durable evidence as a successful summary.
+    #[test]
+    fn returned_summary_revision_rejects_revisions_the_argument_side_refuses() {
+        let malformed = String::from("HEAD");
+
+        let summary = ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
+            number: 17,
+            title: String::from("summary"),
+            body: None,
+            state: String::from("open"),
+            draft: false,
+            author: None,
+            base_ref: String::from("main"),
+            head_ref: String::from("feature"),
+            head_revision: malformed.clone(),
+            url: String::from("https://github.example/owner/repository/pull/17"),
+        });
+
+        assert!(
+            CodeHostRevision::try_new(malformed).is_err(),
+            "the argument side must refuse the revision this result is checked against"
+        );
+        assert_eq!(summary, None);
+    }
+
     /// A resolve result exists only for an acknowledgement that establishes
     /// the requested terminal posture.
     #[test]
