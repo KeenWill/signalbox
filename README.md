@@ -122,10 +122,9 @@ daemon process makes it before binding. Point the terminal client there with
 
 The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`,
 overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE`. No key material is
-committed or generated. That file is read per model call and never at startup,
-so the daemon boots, migrates, runs its startup scan, and serves the process
-socket with the file absent; only model calls fail, as an unavailable
-credential.
+committed or generated. When that file is read, and what its absence does, are
+stated in the
+[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)

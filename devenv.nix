@@ -1,6 +1,16 @@
 { pkgs, config, ... }:
 
 let
+  # Nix interpolates these values into shell text verbatim, and a double-quoted
+  # shell word still performs parameter and command substitution — so a
+  # checkout under a parent named `work$USER` or one holding a backtick would
+  # be rewritten at runtime, not merely word-split. Every Nix-derived value
+  # that reaches a command below is emitted as a single-quoted shell word
+  # instead, which suppresses splitting and substitution alike. Nix-derived
+  # values only: `$DEVENV_ROOT`, `$HOME`, and the shell variables the scripts
+  # define are ordinary shell text and stay as they are.
+  shellArg = pkgs.lib.escapeShellArg;
+
   # Dev-instance identity. The database name, role, and password are
   # local-only and loopback-bound; the password mirrors the convention the
   # committed integration suites already use for their disposable containers
@@ -191,65 +201,72 @@ in
   # existing state and local edits to the copied catalog survive.
   tasks."signalbox:dev-instance" = {
     description = "Provision dev-instance TLS material, home, and catalog.";
-    # Every interpolated path is quoted: DEVENV_STATE sits inside the
-    # checkout, so a directory name containing whitespace anywhere above the
-    # repository would otherwise word-split these commands.
     exec = ''
       set -euo pipefail
 
-      mkdir -p "${tlsRoot}" "${daemonHome}"
-      chmod 700 "${tlsRoot}"
+      mkdir -p ${shellArg tlsRoot} ${shellArg daemonHome}
+      chmod 700 ${shellArg tlsRoot}
 
       # The pgpass refusal is a presence check against the process home. Fail
       # loudly rather than deleting a file the developer put here on purpose.
-      if [ -e "${daemonHome}/.pgpass" ]; then
-        echo "dev instance: ${daemonHome}/.pgpass exists; the daemon refuses" \
-             "to parse its database URL while it does. Remove it." >&2
+      if [ -e ${shellArg "${daemonHome}/.pgpass"} ]; then
+        echo "dev instance:" ${shellArg "${daemonHome}/.pgpass"} \
+             "exists; the daemon refuses to parse its database URL while it" \
+             "does. Remove it." >&2
         exit 1
       fi
 
-      if [ ! -f "${authorityCertificate}" ] || [ ! -f "${serverCertificate}" ]; then
-        echo "dev instance: generating local TLS material under ${tlsRoot}"
-        rm -f "${authorityCertificate}" "${authorityKey}" \
-              "${serverCertificate}" "${serverKey}"
+      if [ ! -f ${shellArg authorityCertificate} ] \
+         || [ ! -f ${shellArg serverCertificate} ]; then
+        echo "dev instance: generating local TLS material under" \
+             ${shellArg tlsRoot}
+        rm -f ${shellArg authorityCertificate} ${shellArg authorityKey} \
+              ${shellArg serverCertificate} ${shellArg serverKey}
 
-        "${openssl}" req -x509 -newkey rsa:2048 -noenc -sha256 -days 3650 \
+        ${shellArg openssl} req -x509 -newkey rsa:2048 -noenc -sha256 -days 3650 \
           -subj "/CN=signalbox devenv dev-instance authority" \
           -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
           -addext "keyUsage=critical,keyCertSign,cRLSign" \
-          -keyout "${authorityKey}" -out "${authorityCertificate}" 2>/dev/null
+          -keyout ${shellArg authorityKey} \
+          -out ${shellArg authorityCertificate} 2>/dev/null
 
-        "${openssl}" req -newkey rsa:2048 -noenc -sha256 \
+        ${shellArg openssl} req -newkey rsa:2048 -noenc -sha256 \
           -subj "/CN=localhost" \
-          -keyout "${serverKey}" -out "${tlsRoot}/server.csr" 2>/dev/null
+          -keyout ${shellArg serverKey} \
+          -out ${shellArg "${tlsRoot}/server.csr"} 2>/dev/null
 
         printf '%s\n' \
           'basicConstraints=critical,CA:FALSE' \
           'keyUsage=critical,digitalSignature,keyEncipherment' \
           'extendedKeyUsage=serverAuth' \
-          'subjectAltName=DNS:localhost' > "${tlsRoot}/server.ext"
+          'subjectAltName=DNS:localhost' > ${shellArg "${tlsRoot}/server.ext"}
 
-        "${openssl}" x509 -req -in "${tlsRoot}/server.csr" -sha256 -days 3650 \
-          -CA "${authorityCertificate}" -CAkey "${authorityKey}" -CAcreateserial \
-          -extfile "${tlsRoot}/server.ext" -out "${serverCertificate}" 2>/dev/null
+        ${shellArg openssl} x509 -req -in ${shellArg "${tlsRoot}/server.csr"} \
+          -sha256 -days 3650 \
+          -CA ${shellArg authorityCertificate} -CAkey ${shellArg authorityKey} \
+          -CAcreateserial \
+          -extfile ${shellArg "${tlsRoot}/server.ext"} \
+          -out ${shellArg serverCertificate} 2>/dev/null
 
-        rm -f "${tlsRoot}/server.csr" "${tlsRoot}/server.ext"
+        rm -f ${shellArg "${tlsRoot}/server.csr"} ${shellArg "${tlsRoot}/server.ext"}
       fi
 
       # PostgreSQL refuses to start if the private key is group- or
       # world-readable.
-      chmod 600 "${authorityKey}" "${serverKey}"
-      chmod 644 "${authorityCertificate}" "${serverCertificate}"
+      chmod 600 ${shellArg authorityKey} ${shellArg serverKey}
+      chmod 644 ${shellArg authorityCertificate} ${shellArg serverCertificate}
 
       # Seeded verbatim from the checked-in example, which already states the
       # dated canonical model id. Keep it that way when editing the copy:
       # `provider_model` must be the exact identity the provider echoes back,
       # and an undated alias makes a call commit ambiguously, stops the daemon,
       # and wedges the session it was serving.
-      if [ ! -f "${daemonConfigFile}" ]; then
-        echo "dev instance: seeding ${daemonConfigFile} from config/signalboxd.example.toml"
-        cp "$DEVENV_ROOT/config/signalboxd.example.toml" "${daemonConfigFile}"
-        chmod 644 "${daemonConfigFile}"
+      if [ ! -f ${shellArg daemonConfigFile} ]; then
+        echo "dev instance: seeding" ${shellArg daemonConfigFile} \
+             "from config/signalboxd.example.toml"
+        cp "$DEVENV_ROOT/config/signalboxd.example.toml" \
+           ${shellArg daemonConfigFile}
+        chmod 644 ${shellArg daemonConfigFile}
       fi
     '';
   };
@@ -297,22 +314,22 @@ in
       # runtime directory does not survive between runs. Mode 0700 is exact:
       # the daemon rejects anything else, including the 0755 devenv gives its
       # own runtime directory.
-      mkdir -p "${daemonSocketDirectory}"
-      chmod 700 "${daemonSocketDirectory}"
+      mkdir -p ${shellArg daemonSocketDirectory}
+      chmod 700 ${shellArg daemonSocketDirectory}
 
       # Deployment-owned credential channel: a file whose bytes are the key.
-      # It is read lazily, per model call, never at startup — so the daemon
-      # boots, migrates, scans, and serves the process socket with this file
-      # absent. Only model calls fail, and they fail as an unavailable
-      # credential.
+      # Naming a path that does not exist is deliberate and safe here; the
+      # read timing and the effect of an absent file are stated in the
+      # credential lifecycle section of
+      # docs/spec/configuration-and-credentials.md.
       key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
 
       exec env ${scrub} \
-        HOME="${daemonHome}" \
-        DATABASE_URL="${databaseUrl}" \
-        SIGNALBOX_CONFIG_FILE="${daemonConfigFile}" \
+        HOME=${shellArg daemonHome} \
+        DATABASE_URL=${shellArg databaseUrl} \
+        SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
-        SIGNALBOX_SOCKET_PATH="${daemonSocketPath}" \
+        SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \
         "$daemon_executable"
     '';
   };
