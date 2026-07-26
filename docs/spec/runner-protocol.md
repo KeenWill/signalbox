@@ -88,10 +88,12 @@ MCP locus is not part of the vocabulary.
 
 Advertisement validation never synthesizes a declaration for an unknown tool.
 Unknown tools, credential profiles, capability classes, and workspace
-capabilities reject the complete advertisement. The resulting
-`ValidatedRunnerCatalog` exposes only exact advertised availability paired with
-daemon-owned policy. A runner can therefore neither self-widen its tool surface
-nor replace confirmation with automatic approval (INV-042).
+capabilities reject the complete advertisement. A daemon-only tool or a runner
+tool whose declared identity-or-class selector the advertisement does not
+satisfy also rejects the complete advertisement. The resulting
+`ValidatedRunnerRegistration` exposes only exact advertised availability paired
+with daemon-owned policy. A runner can therefore neither self-widen its tool
+surface nor replace confirmation with automatic approval (INV-042).
 
 ## Effect classes and runner leases
 

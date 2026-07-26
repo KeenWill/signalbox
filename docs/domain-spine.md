@@ -5213,6 +5213,7 @@ pub enum RunnerDomainError {
     EnrollmentRevoked,
     CapabilityClassNotAllowed(RunnerCapabilityClass),
     ToolUndeclared(ToolName),
+    ToolLocusNotAllowed(ToolName),
     CredentialProfileUndeclared(CredentialProfileName),
     WorkspaceCapabilityNotAllowed(WorkspaceCapability),
     InvalidState,

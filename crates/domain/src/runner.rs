@@ -28,6 +28,7 @@ pub enum RunnerDomainError {
     EnrollmentRevoked,
     CapabilityClassNotAllowed(RunnerCapabilityClass),
     ToolUndeclared(ToolName),
+    ToolLocusNotAllowed(ToolName),
     CredentialProfileUndeclared(CredentialProfileName),
     WorkspaceCapabilityNotAllowed(WorkspaceCapability),
     InvalidState,
@@ -409,6 +410,20 @@ impl RunnerEnrollment {
             .find(|tool| !catalog.tools.contains_key(*tool))
         {
             return Err(RunnerDomainError::ToolUndeclared(tool.clone()));
+        }
+        if let Some(tool) = advertisement.tools.iter().find(|tool| {
+            let Some(declaration) = catalog.tools.get(*tool) else {
+                return true;
+            };
+            match declaration.loci.runner_selector() {
+                Some(RunnerSelector::Identity(runner)) => runner != &self.runner,
+                Some(RunnerSelector::CapabilityClass(class)) => {
+                    !advertisement.classes.contains(class)
+                }
+                None => true,
+            }
+        }) {
+            return Err(RunnerDomainError::ToolLocusNotAllowed(tool.clone()));
         }
         if let Some(profile) = advertisement
             .profiles
@@ -1307,6 +1322,56 @@ mod tests {
         assert_eq!(
             enrollment.register(advertisement, &catalog()),
             Err(RunnerDomainError::ToolUndeclared(tool("unknown")))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_daemon_only_tool_rejects_the_complete_registration() {
+        let enrollment = RunnerEnrollment::new(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+        let daemon_only = RunnerToolDeclaration::new(
+            tool("daemon"),
+            ToolPermissionDefault::Auto,
+            RunnerToolEffectClass::Pure,
+            ToolAdmissibleLoci::DaemonOnly,
+        );
+        let catalog = RunnerCatalog::try_new([daemon_only], [], [])
+            .expect("the daemon-only declaration is internally consistent");
+        let advertisement = RunnerAdvertisement::new([], [tool("daemon")], [], []);
+
+        assert_eq!(
+            enrollment.register(advertisement, &catalog),
+            Err(RunnerDomainError::ToolLocusNotAllowed(tool("daemon")))
+        );
+    }
+
+    #[test]
+    fn s30_inv042_tool_selector_must_match_advertised_runner_capability() {
+        let enrollment = RunnerEnrollment::new(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+        let declaration = RunnerToolDeclaration::new(
+            tool("specialized"),
+            ToolPermissionDefault::Auto,
+            RunnerToolEffectClass::Pure,
+            ToolAdmissibleLoci::RunnerOnly {
+                selector: RunnerSelector::Identity(runner_id(REPLACEMENT_RUNNER)),
+            },
+        );
+        let catalog = RunnerCatalog::try_new([declaration], [], [])
+            .expect("the identity-targeted declaration is internally consistent");
+        let advertisement = RunnerAdvertisement::new([], [tool("specialized")], [], []);
+
+        assert_eq!(
+            enrollment.register(advertisement, &catalog),
+            Err(RunnerDomainError::ToolLocusNotAllowed(tool("specialized")))
         );
     }
 
