@@ -134,11 +134,9 @@ VERIFICATION_LEAD = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 VERIFICATION_NEGATION = re.compile(
-    r"(?:\b(?:not|never)(?:[ \t]+\w+){0,3}[ \t]+"
-    r"|\bcannot(?:[ \t]+\w+){0,3}[ \t]+"
-    r"|\bno(?:[ \t]+\w+){1,5}[ \t]+"
-    r"|\b[A-Za-z]+n['’]t(?:[ \t]+\w+){0,3}[ \t]+)$",
-    re.IGNORECASE,
+    r"\b(?:not|never|cannot|no|[A-Za-z]+n['’]t)\b"
+    rf"(?:(?!{CLAUSE_BOUNDARY}).)*?$",
+    re.IGNORECASE | re.DOTALL,
 )
 EMPHASIS_DELIMITER = re.compile(r"[*_~]+")
 THEMATIC_BREAK = re.compile(
@@ -1458,6 +1456,20 @@ def check_decision_order(root: Path) -> list[Violation]:
                 )
             )
             continue
+        if BLOCK_QUOTE_CONTAINER.match(line) and DECISION_ENTRY_HEADING.match(
+            strip_heading_containers(line)
+        ):
+            entries += 1
+            violations.append(
+                Violation(
+                    DECISIONS.as_posix(),
+                    number,
+                    "decision-order",
+                    "entry heading must be `## YYYY-MM-DD — <title>`; H2 "
+                    "headings nested inside a block quote are not permitted",
+                )
+            )
+            continue
         heading = DECISION_ENTRY_HEADING.match(line)
         if heading is None:
             continue
@@ -1512,10 +1524,15 @@ def check_decision_order(root: Path) -> list[Violation]:
 
 
 def verification_is_negated(text: str, offset: int) -> bool:
-    """Recognize nearby plain-language negation of ``verified``.
+    """Recognize plain-language negation of ``verified`` in the same clause.
 
-    Emphasis delimiters are removed first so that rendered negations such as
-    ``**not** verified`` read the same as their plain-text form.
+    The scan spans the whole clause preceding the phrase, bounded by the same
+    ``CLAUSE_BOUNDARY`` machinery that bounds ``VERIFICATION_LEAD``, so a
+    long-form disclaimer such as ``has not yet been fully and independently
+    verified`` is recognized while a negation in an earlier sentence, list
+    item, or paragraph is not. Emphasis delimiters are removed first so that
+    rendered negations such as ``**not** verified`` read the same as their
+    plain-text form.
     """
     preceding = EMPHASIS_DELIMITER.sub("", text[:offset])
     return VERIFICATION_NEGATION.search(preceding) is not None

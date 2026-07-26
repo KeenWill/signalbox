@@ -1038,6 +1038,25 @@ class DocsConsistencyTests(unittest.TestCase):
             failures[0].message,
         )
 
+    def test_block_quoted_h2_decision_entry_is_rejected(self) -> None:
+        (self.root / "docs/decisions.md").write_text(
+            "# Decisions\n\n"
+            "## 2026-07-24 — Old\n\n"
+            "> ## 2026-07-25 — Hidden newer\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["decision-order"],
+        )
+        self.assertIn(
+            "H2 headings nested inside a block quote are not permitted",
+            failures[0].message,
+        )
+
     def test_thematic_break_after_list_item_is_not_a_decision_entry(self) -> None:
         (self.root / "docs/decisions.md").write_text(
             "# Decisions\n\n"
@@ -1337,6 +1356,38 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification"],
         )
         self.assertIn("missing", failures[0].message)
+
+    def test_long_form_negated_verification_does_not_satisfy_page(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "This page has not yet been fully and independently verified "
+            "against PR #12 (`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification"],
+        )
+        self.assertIn("missing", failures[0].message)
+
+    def test_negation_in_a_preceding_sentence_still_allows_verification(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "The schema is not normative. Behavior is verified against "
+            "PR #12 (`agent/example`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
 
     def test_emphasized_negation_does_not_satisfy_page(self) -> None:
         (self.root / "docs/spec/example.md").write_text(
