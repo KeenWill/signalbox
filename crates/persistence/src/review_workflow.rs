@@ -980,6 +980,13 @@ impl ReviewWorkflowStore {
             _ => None,
         }
         .transpose()?;
+        if let Some(event) = posted_event.as_ref() {
+            let finding = vec![event.finding().finding().into_uuid()];
+            sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
+                .bind(&finding)
+                .fetch_all(&mut *transaction)
+                .await?;
+        }
         if posted_event.is_none()
             && let ReviewExternalLinkAssociation::Finding(reference) = next.association()
         {
@@ -1478,46 +1485,54 @@ impl ReviewWorkflowStore {
         let observation_rows = sqlx::query(
             "SELECT observation.external_link_id,
                     observation.observation_ordinal,
-                    observation.pass_run_id, observation.pass_id,
+                    observation.pass_run_id,
+                    observation.pass_run_id AS run_id,
+                    observation.pass_id,
                     observation.target_id, observation.object_state,
                     pass.pass_id AS canonical_observation_pass_id,
-                    pass.pass_kind, pass.state_kind AS pass_state_kind,
-                    pass.turn_id AS pass_turn_id,
-                    pass.output_frontier_id AS pass_output_frontier_id,
-                    pass.result_kind AS pass_result_kind,
-                    pass.result_finding_id
-                        AS pass_result_finding_id,
-                    pass.result_finding_run_id
-                        AS pass_result_finding_run_id,
-                    pass.result_finding_pass_id
-                        AS pass_result_finding_pass_id,
-                    pass.result_event_ordinal
-                        AS pass_result_event_ordinal,
-                    pass.result_event_kind AS pass_result_event_kind,
-                    pass.result_reason AS pass_result_reason,
-                    pass.result_referenced_finding_id
-                        AS pass_result_referenced_finding_id,
-                    pass.result_referenced_finding_run_id
-                        AS pass_result_referenced_finding_run_id,
-                    pass.result_referenced_finding_pass_id
-                        AS pass_result_referenced_finding_pass_id,
-                    pass.result_referenced_finding_status
-                        AS pass_result_referenced_finding_status,
-                    pass.result_external_link_id
-                        AS pass_result_external_link_id,
-                    pass.result_external_object_key
-                        AS pass_result_external_object_key,
-                    pass.result_observation_state
-                        AS pass_result_observation_state,
-                    pass_run.run_id AS canonical_observation_run_id,
-                    pass_run.workflow_kind AS pass_workflow_kind,
+                    pass.pass_kind, pass.state_kind,
+                    pass.session_id AS pass_session_id,
+                    pass.accepted_input_id, pass.origin_turn_id,
+                    pass.turn_id, pass.output_frontier_id,
+                    pass.result_kind, pass.result_finding_id,
+                    pass.result_finding_run_id,
+                    pass.result_finding_pass_id,
+                    pass.result_event_ordinal, pass.result_event_kind,
+                    pass.result_reason,
+                    pass.result_referenced_finding_id,
+                    pass.result_referenced_finding_run_id,
+                    pass.result_referenced_finding_pass_id,
+                    pass.result_referenced_finding_status,
+                    pass.result_external_link_id,
+                    pass.result_external_object_key,
+                    pass.result_observation_state,
+                    pass_run.run_id AS canonical_run_id,
+                    pass_run.target_id AS canonical_run_target_id,
+                    pass_run.workflow_kind AS run_workflow_kind,
                     pass_run.policy_version AS pass_policy_version,
                     pass_run.minimum_judge_confidence
                         AS pass_minimum_judge_confidence,
                     pass_run.minimum_publication_confidence
                         AS pass_minimum_publication_confidence,
-                    pass_run.state_kind AS pass_run_state_kind,
-                    pass_run.state_pass_id AS pass_run_state_pass_id
+                    pass_run.state_kind AS run_state_kind,
+                    pass_run.state_pass_id AS run_state_pass_id,
+                    canonical_target.target_id AS canonical_target_id,
+                    canonical_input.session_id
+                        AS accepted_input_session_id,
+                    canonical_input.origin_turn_id
+                        AS accepted_input_origin_turn_id,
+                    canonical_origin_turn.turn_id
+                        AS canonical_origin_turn_id,
+                    canonical_turn.turn_id AS evidence_turn_id,
+                    canonical_turn.session_id AS turn_session_id,
+                    canonical_turn.origin_accepted_input_id
+                        AS turn_accepted_input_id,
+                    canonical_turn.state_kind AS turn_state_kind,
+                    canonical_turn.terminal_disposition_kind
+                        AS turn_terminal_disposition_kind,
+                    canonical_turn.terminal_frontier_id
+                        AS turn_terminal_frontier_id,
+                    produced_findings.produced_finding_count
                FROM review_external_link_observation AS observation
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = observation.pass_id
@@ -1526,6 +1541,25 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_run AS pass_run
                  ON pass_run.run_id = pass.run_id
                 AND pass_run.target_id = pass.target_id
+               LEFT JOIN review_target AS canonical_target
+                 ON canonical_target.target_id = pass.target_id
+               LEFT JOIN accepted_input AS canonical_input
+                 ON canonical_input.accepted_input_id =
+                    pass.accepted_input_id
+               LEFT JOIN turn_lifecycle AS canonical_origin_turn
+                 ON canonical_origin_turn.turn_id = pass.origin_turn_id
+                AND canonical_origin_turn.session_id = pass.session_id
+                AND canonical_origin_turn.origin_accepted_input_id =
+                    pass.accepted_input_id
+               LEFT JOIN turn_lifecycle AS canonical_turn
+                 ON canonical_turn.turn_id = pass.turn_id
+               LEFT JOIN LATERAL (
+                   SELECT count(*) AS produced_finding_count
+                     FROM review_finding AS produced
+                    WHERE produced.producing_pass_id = pass.pass_id
+                      AND produced.run_id = pass.run_id
+                      AND produced.target_id = pass.target_id
+               ) AS produced_findings ON true
               WHERE observation.external_link_id = $1
               ORDER BY observation.observation_ordinal",
         )
@@ -1542,20 +1576,58 @@ impl ReviewWorkflowStore {
             )?;
             require_joined_reference(
                 &row,
-                "canonical_observation_run_id",
+                "canonical_run_id",
                 "review_external_link_observation",
                 "observing run row is missing",
             )?;
-            let pass_id = pass_id(row.try_get("pass_id")?);
-            let pass = load_pass_on_connection(connection, pass_id)
-                .await?
-                .ok_or_else(|| {
-                    corruption(
-                        "review_external_link_observation",
-                        String::from("observing pass row is missing"),
-                    )
-                })?
-                .evidence();
+            require_joined_reference(
+                &row,
+                "canonical_target_id",
+                "review_external_link_observation",
+                "observing target row is missing",
+            )?;
+            if row.try_get::<i64, _>("produced_finding_count")? != 0 {
+                return Err(corruption(
+                    "review_external_link_observation",
+                    String::from("observing pass unexpectedly produced findings"),
+                ));
+            }
+            let turn_evidence = decode_pass_turn_evidence(&row)?;
+            let pass = reconstitute_pass(&row, turn_evidence, Vec::new())?;
+            require_joined_reference(
+                &row,
+                "canonical_origin_turn_id",
+                "review_external_link_observation",
+                "observing pass origin turn row is missing",
+            )?;
+            let policy = decode_review_policy(
+                &row,
+                "pass_policy_version",
+                "pass_minimum_judge_confidence",
+                "pass_minimum_publication_confidence",
+                "review_external_link_observation",
+            )?;
+            let pass = ReviewPassEvidence::from_pass(&pass, policy);
+            ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
+                pass.reference().run(),
+                decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
+                policy,
+                decode_run_state(
+                    pass.reference().run(),
+                    &row.try_get::<String, _>("run_state_kind")?,
+                    row.try_get("run_state_pass_id")?,
+                )?,
+                Some(pass.clone()),
+            ))
+            .map_err(|error| {
+                corruption(
+                    "review_external_link_observation",
+                    format!(
+                        "observing run contradicts its pass projection: {:?}",
+                        error.failure()
+                    ),
+                )
+            })?;
             observations.push(decode_external_link_observation(&row, pass)?);
         }
         let claims = load_external_link_claims_on_connection(connection, link).await?;
@@ -3262,12 +3334,12 @@ fn decode_external_link_observation(
         pass.clone(),
         ReviewRunEvidence::new(
             reference.run(),
-            decode_workflow_kind(&row.try_get::<String, _>("pass_workflow_kind")?)?,
+            decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
             pass.policy(),
             decode_run_state(
                 reference.run(),
-                &row.try_get::<String, _>("pass_run_state_kind")?,
-                row.try_get("pass_run_state_pass_id")?,
+                &row.try_get::<String, _>("run_state_kind")?,
+                row.try_get("run_state_pass_id")?,
             )?,
         ),
         decode_external_object_state(&row.try_get::<String, _>("object_state")?)?,

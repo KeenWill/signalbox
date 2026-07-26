@@ -1766,6 +1766,11 @@ DECLARE
     canonical_result_event_kind text;
     logical_target uuid;
 BEGIN
+    PERFORM 1
+      FROM review_external_link
+     WHERE external_link_id = NEW.external_link_id
+     FOR NO KEY UPDATE;
+
     SELECT pass_kind, state_kind, result_kind,
            result_external_link_id, result_external_object_key,
            result_event_kind
@@ -2068,6 +2073,11 @@ CREATE TABLE review_finding_event (
 CREATE UNIQUE INDEX review_finding_event_publication_link_once
     ON review_finding_event (finding_id, external_link_id)
     WHERE event_kind = 'posted';
+
+CREATE INDEX review_finding_event_blocked_link_index
+    ON review_finding_event (external_link_id)
+    WHERE event_kind = 'blocked_with_reason'
+      AND external_link_id IS NOT NULL;
 
 CREATE INDEX review_finding_event_pass_index
     ON review_finding_event (
@@ -2777,6 +2787,12 @@ BEGIN
         RAISE EXCEPTION
             'unchanged external result differs from latest durable state'
             USING ERRCODE = '23514';
+    END IF;
+    IF NEW.result_kind = 'external_link_publication_blocked' THEN
+        PERFORM 1
+          FROM review_external_link
+         WHERE external_link_id = NEW.result_external_link_id
+         FOR NO KEY UPDATE;
     END IF;
     IF NEW.result_kind = 'external_link_publication_blocked'
        AND EXISTS (
