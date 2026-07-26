@@ -36,11 +36,11 @@ struct SessionDetailScreen: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(viewModel.timelineItems) { item in
+                        ForEach(viewModel.timeline) { item in
                             timelineView(for: item)
                                 .id(item.id)
                         }
-                        if viewModel.timelineItems.isEmpty {
+                        if viewModel.timeline.isEmpty {
                             EmptyStateView(
                                 systemImage: "text.bubble",
                                 title: "No events yet",
@@ -52,8 +52,8 @@ struct SessionDetailScreen: View {
                     .frame(maxWidth: 960)
                     .frame(maxWidth: .infinity)
                 }
-                .onChange(of: viewModel.timelineItems.count) { _, _ in
-                    if let lastID = viewModel.timelineItems.last?.id {
+                .onChange(of: viewModel.timeline.count) { _, _ in
+                    if let lastID = viewModel.timeline.last?.id {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo(lastID, anchor: .bottom)
                         }
@@ -77,9 +77,8 @@ struct SessionDetailScreen: View {
         #endif
         .task {
             viewModel.replaceServiceProvider { coordinator.service }
-            await viewModel.load()
+            await viewModel.loadAndConnect()
             presentScreenshotArtifactIfNeeded()
-            viewModel.connectStream()
         }
         .onDisappear {
             viewModel.disconnectStream()

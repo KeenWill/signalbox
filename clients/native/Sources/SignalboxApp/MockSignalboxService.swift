@@ -100,7 +100,9 @@ actor MockSignalboxService: SignalboxClientProtocol {
                 }
                 let decoder = SignalboxJSONCoding.decoder()
                 for rawMessage in MockSignalboxFixtures.streamMessages {
-                    try await Task.sleep(nanoseconds: 180_000_000)
+                    try await Task.sleep(
+                        nanoseconds: MockSignalboxFixtures.streamMessageDelayNanoseconds
+                    )
                     let message = try decoder.decode(SignalboxServerMessage.self, from: Data(rawMessage.utf8))
                     continuation.yield(message)
                 }
