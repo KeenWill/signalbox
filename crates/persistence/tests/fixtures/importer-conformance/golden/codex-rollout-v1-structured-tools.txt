@@ -1,0 +1,46 @@
+format: CodexRolloutJsonlV1
+raw_records: 7
+  1: raw="{\"timestamp\":\"2025-03-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-record\",\"session_id\":\"structured-tools-session\"}}"
+    normalized={"timestamp": "2025-03-01T00:00:00Z", "type": "session_meta", "payload": {"id": "session-record", "session_id": "structured-tools-session"}}
+  2: raw="{\"timestamp\":\"2025-03-01T00:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"tool_search_call\",\"call_id\":\"call-search\",\"arguments\":{\"query\":\"read_file\",\"limit\":2}}}"
+    normalized={"timestamp": "2025-03-01T00:00:01Z", "type": "response_item", "payload": {"type": "tool_search_call", "call_id": "call-search", "arguments": {"query": "read_file", "limit": 2}}}
+  3: raw="{\"timestamp\":\"2025-03-01T00:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"tool_search_output\",\"call_id\":\"call-search\",\"tools\":[{\"type\":\"function\",\"name\":\"read_file\"},\"bare-element\"]}}"
+    normalized={"timestamp": "2025-03-01T00:00:02Z", "type": "response_item", "payload": {"type": "tool_search_output", "call_id": "call-search", "tools": [{"type": "function", "name": "read_file"}, "bare-element"]}}
+  4: raw="{\"timestamp\":\"2025-03-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"local_shell_call\",\"call_id\":\"call-shell\",\"action\":{\"type\":\"exec\",\"command\":[\"list\",\"synthetic\"]}}}"
+    normalized={"timestamp": "2025-03-01T00:00:03Z", "type": "response_item", "payload": {"type": "local_shell_call", "call_id": "call-shell", "action": {"type": "exec", "command": ["list", "synthetic"]}}}
+  5: raw="{\"timestamp\":\"2025-03-01T00:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"web_search_call\",\"id\":\"item-web\",\"action\":{\"type\":\"search\",\"query\":\"synthetic reference\"}}}"
+    normalized={"timestamp": "2025-03-01T00:00:04Z", "type": "response_item", "payload": {"type": "web_search_call", "id": "item-web", "action": {"type": "search", "query": "synthetic reference"}}}
+  6: raw="{\"timestamp\":\"2025-03-01T00:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call-custom\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\\n*** End Patch\"}}"
+    normalized={"timestamp": "2025-03-01T00:00:05Z", "type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "call-custom", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"}}
+  7: raw="{\"timestamp\":\"2025-03-01T00:00:06Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-custom\",\"output\":\"applied\"}}"
+    normalized={"timestamp": "2025-03-01T00:00:06Z", "type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "call-custom", "output": "applied"}}
+entries: 7
+  1: raw=1.1 speaker=not_attested
+    content=source_event(type=attested("session_meta"))
+    source=record_id=attested("session-record") parent_record_id=not_attested source_session_id=attested("structured-tools-session") timestamp=attested("2025-03-01T00:00:00Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  2: raw=2.1 speaker=not_attested
+    content=tool_call(id=attested("call-search") name=not_attested input=attested({"query": "read_file", "limit": 2}) caller=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-03-01T00:00:01Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  3: raw=3.1 speaker=not_attested
+    content=tool_result(id=attested("call-search") content=attested(blocks([source_result_block(type=attested("function")), source_result_block(type=not_attested)])) is_error=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-03-01T00:00:02Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  4: raw=4.1 speaker=not_attested
+    content=tool_call(id=attested("call-shell") name=not_attested input=attested({"type": "exec", "command": ["list", "synthetic"]}) caller=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-03-01T00:00:03Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  5: raw=5.1 speaker=not_attested
+    content=tool_call(id=attested("item-web") name=not_attested input=attested({"type": "search", "query": "synthetic reference"}) caller=not_attested)
+    source=record_id=attested("item-web") parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-03-01T00:00:04Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  6: raw=6.1 speaker=not_attested
+    content=tool_call(id=attested("call-custom") name=attested("apply_patch") input=attested("*** Begin Patch\n*** End Patch") caller=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-03-01T00:00:05Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+  7: raw=7.1 speaker=not_attested
+    content=tool_result(id=attested("call-custom") content=attested(text("applied")) is_error=not_attested)
+    source=record_id=not_attested parent_record_id=not_attested source_session_id=not_attested timestamp=attested("2025-03-01T00:00:06Z") sidechain=not_attested metadata=not_attested message_role=not_attested
+addressable_frontiers: 7
+  1: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000400 through_position=1
+  2: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000401 through_position=2
+  3: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000402 through_position=3
+  4: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000403 through_position=4
+  5: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000404 through_position=5
+  6: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000405 through_position=6
+  7: conversation=00000000-0000-0000-0000-000000000300 through_entry=00000000-0000-0000-0000-000000000406 through_position=7
