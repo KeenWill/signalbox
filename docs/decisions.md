@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Preserve metadata command issuer as independent evidence
+
+**Context.** Metadata receipt reconstitution decoded the stored actor and then
+used that same value to construct the canonical command it was meant to check.
+Changing an owner actor to a supported tool actor therefore made the later
+comparison tautological, including when applied result attribution changed with
+it. The specification already requires the comparison to use independent facts.
+
+**Decision.** Add a forward-only migration that backfills and seals an
+owner-or-tool issuer discriminator and optional tool-request identity separately
+from the existing actor projection. New receipts write both facts. Loads
+construct the canonical command from the issuer proof, decode the actor
+projection separately, and let domain reconstitution reject disagreement for
+both applied and rejected receipts.
+
+**Rejected alternatives.** Treating the actor projection as its own canonical
+source preserves the tautology. Using the applied result actor cannot cover
+rejected receipts and still permits command and result actors to be changed
+together. Removing the comparison would weaken INV-012.
+
+**Affects.** [identity-and-commands](spec/identity-and-commands.md),
+[persistence-protocol](spec/persistence-protocol.md), migration
+`202607280202_metadata_command_issuer.sql`, and metadata receipt loading and
+PostgreSQL proofs.
+
 ## 2026-07-26 — Normalize an alias to its dated snapshot and keep substitution distinct
 
 **Context.** A live shakedown against PostgreSQL and a real provider
@@ -395,6 +420,63 @@ boundaries.
 INV-001 and INV-042, S30, the
 [runner-protocol specification](spec/runner-protocol.md), and later
 configuration, authentication, persistence, and transport stacks.
+
+## 2026-07-25 — Attribute metadata writes initiated by tools
+
+**Context.** The commissioned session-status tool must replace the existing
+session-metadata satellite snapshot through its durable application seam.
+`Actor::Tool { request }` and its storage columns already exist, but metadata
+command construction admitted only owner agency; using that constructor would
+misattribute an automated write.
+
+**Decision.** Admit a second, purpose-specific metadata command constructor and
+application request for one exact `ToolRequestId`. Include that actor in replay
+equality and the last-writer stamp. Continue to admit owner construction
+separately; model and recovery metadata writers remain unconstructible. Reuse
+the existing command, snapshot, transaction, actor encoding, and foreign keys,
+so no migration or metadata shape changes.
+
+**Rejected alternatives.** Recording the tool write as owner loses initiating
+agency. Adding a status field or reserved attribute key invents a second
+metadata shape. Allowing arbitrary actors broadens the boundary beyond the
+commissioned tool. Bypassing the application service loses durable replay and
+commit-ambiguity handling.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[identity-and-commands](spec/identity-and-commands.md), the domain/application
+metadata command boundary, PostgreSQL reconstitution, and the
+`session_status_update` tool.
+
+## 2026-07-25 — Bound daemon web fetches to one credential-free request
+
+**Context.** The first daemon tool batch needs useful web text without unbounded
+response retention, hidden request replay, ambient credential channels, or
+live-network tests. The existing provider transport already fixes the
+repository's redirect, proxy, retry, TLS, and idle-connection posture.
+
+**Decision.** Accept one absolute HTTP(S) URL of at most 8 KiB, rejecting user
+information, fragments, and direct non-public IP destinations. Before dispatch,
+resolve a domain to at most 32 addresses, reject the complete set if any address
+is non-public, and pin the admitted set into the request client so a second DNS
+answer cannot change the destination. Issue one GET with no credentials, ambient
+proxy, redirect following, protocol retry, or idle reuse, under a 15-second
+whole-exchange timeout and the existing rustls/TLS 1.2 floor. Retain at most 64
+KiB of response bytes, decode that prefix as lossy UTF-8, and return compact
+JSON with URL, status, bounded content type, body, and truncation metadata.
+Resolution and client-setup failures are sanitized known failures; after
+dispatch begins, transport, timeout, or body loss is commit-ambiguous.
+
+**Rejected alternatives.** Following redirects or enabling reqwest defaults can
+issue another physical request. Ambient proxies add an undeclared routing and
+credential channel. Trusting the URL text alone permits private-address access
+and DNS rebinding. Re-resolving during connection setup reopens the same race.
+Unbounded buffering violates result admission. Returning raw bytes would require
+a result-content variant the tool loop does not implement. A new HTTP stack
+would duplicate the focused reqwest/rustls dependencies already in the
+workspace.
+
+**Affects.** [tool-loop](spec/tool-loop.md), `apps/signalboxd` dependencies, the
+`web_fetch` declaration and executor, and its mocked offline proofs.
 
 ## 2026-07-25 — Ship the server daemon as signalboxd
 
