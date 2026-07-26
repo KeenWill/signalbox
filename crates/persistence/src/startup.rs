@@ -363,13 +363,24 @@ where
             StartupScanSessionOutcome::NoActiveTurn,
         ));
     };
-    if !matches!(
-        active_turn.phase(),
-        signalbox_domain::ActiveTurnPhase::Running { .. }
-    ) {
-        return Ok(TransactionDecision::Rollback(
-            StartupScanSessionOutcome::NoActiveTurn,
-        ));
+    match active_turn.phase() {
+        signalbox_domain::ActiveTurnPhase::Running { .. } => {}
+        // A prior process already ended this turn's physical tenure and
+        // recorded the exact ambiguity set, so there is no lost live end for
+        // the scan to classify. Reporting it separately keeps the wait visible
+        // to the operator instead of indistinguishable from a healed session.
+        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::AwaitingRecoveryDecision {
+                    turn: active_turn.turn(),
+                },
+            ));
+        }
+        signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. } => {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::NoActiveTurn,
+            ));
+        }
     }
     let pending_steering = active_turn
         .pending_steering()

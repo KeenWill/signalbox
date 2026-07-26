@@ -15,21 +15,28 @@ use std::{
 };
 
 use signalbox_application::{
-    CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
-    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
-    ImportConversationOutcome, ImportConversationService, ImportedConversationIdGenerator,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    AuthorizeModelCallOutcome, CreateSessionFromImportedFrontierIdGenerator,
+    CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
+    CreateSessionFromImportedFrontierService, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationIdGenerator, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, StartEligibleTurnOutcome, StartEligibleTurnService,
+    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversationFormat,
-    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
-    ModelSelectionRequest, SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionId,
+    ContextFrontierId, DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionId, TurnId,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
+    local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
+    startup::PostgresStartupScanRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
@@ -1324,6 +1331,235 @@ async fn process_runtime_admits_exact_limit_submitted_input() -> Result<(), Box<
         "x".repeat(MAX_SUBMITTED_INPUT_BYTES),
     )
     .await?;
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// Parks the session's active turn on an ambiguous model call exactly as a
+/// prior daemon incarnation would: the queued turn activates, its call is
+/// authorized for send, and the next startup scan classifies the unobserved
+/// issued call. The fixture writes no terminal state itself, so the parked
+/// shape is the one a real restart leaves behind.
+async fn park_turn_on_ambiguous_model_call(
+    pool: &PgPool,
+    session_id: CanonicalUuid,
+) -> Result<(), Box<dyn Error>> {
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(_) = activation.execute(session).await? else {
+        return Err(io::Error::other("the queued fixture turn must activate").into());
+    };
+
+    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        model_configuration.target_catalog(),
+        ModelCallCredentialReference::new("scripted-reconciliation-test"),
+    );
+    let call = ModelCallId::from_uuid(Uuid::now_v7());
+    let PrepareInitialModelCallOutcome::Checkpointed(_) = calls
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    TurnId::from_uuid(Uuid::now_v7()),
+                )
+            },
+        )
+        .await?
+    else {
+        return Err(io::Error::other("the fixture call must checkpoint").into());
+    };
+    let AuthorizeModelCallOutcome::Authorized(_) = calls.authorize_send(session, call).await?
+    else {
+        return Err(io::Error::other("the fixture call must authorize send").into());
+    };
+
+    let mut scan = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    let recovery = scan.execute().await?;
+    if recovery.recovered_turn_count() != 0 {
+        return Err(io::Error::other("an issued call must not terminalize its turn").into());
+    }
+    Ok(())
+}
+
+/// S04 / S07 / INV-029 / INV-033: a turn parked on an ambiguous model call
+/// refuses ordinary input until the owner reconciliation request supplies the
+/// interrupt authority that releases the slot and accepts the successor, and
+/// the same request is refused, without recording a command, for any turn that
+/// owes no reconciliation decision.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            3,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("work while the ambiguity is unresolved")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(
+        matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                detail,
+                ..
+            } if detail.value() == Some(RejectionDetail::ActiveTurnPresent {
+                session_id,
+                active_turn_id: parked_turn_id,
+            })
+        ),
+        "an ambiguity wait must keep refusing ordinary input while it holds the slot"
+    );
+
+    let unparked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xB1));
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            4,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: unparked_turn_id,
+                content: InputContent::new(String::from("names no parked turn")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            detail,
+            ..
+        } if detail.value() == Some(RejectionDetail::TurnNotAwaitingReconciliation {
+            session_id,
+            turn_id: unparked_turn_id,
+        })
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            5,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("continue after reconciliation")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    let successor_turn_id = match response_within(&mut connection).await?.message() {
+        ServerMessage::InputSubmitted {
+            session_id: reconciled_session,
+            acceptance_position,
+            turn_id,
+            ..
+        } if *reconciled_session == session_id && acceptance_position.value() == 2 => *turn_id,
+        message => {
+            return Err(io::Error::other(format!(
+                "unexpected reconciliation response: {message:?}"
+            ))
+            .into());
+        }
+    };
+    assert_ne!(successor_turn_id, parked_turn_id);
+
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            6,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("the decision is already recorded")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(
+        matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                detail,
+                ..
+            } if detail.value() == Some(RejectionDetail::TurnNotAwaitingReconciliation {
+                session_id,
+                turn_id: parked_turn_id,
+            })
+        ),
+        "the reconciliation verb never becomes a general active-turn stop"
+    );
+
+    connection
+        .request_version(
+            ProtocolVersion::Six,
+            7,
+            ClientRequest::ReadTranscript { session_id },
+        )
+        .await?;
+    let start = response_within(&mut connection).await?;
+    assert!(matches!(
+        start.message(),
+        ServerMessage::TranscriptSnapshotStart {
+            session_id: snapshot_session,
+            ..
+        } if *snapshot_session == session_id
+    ));
+    let reconciled_turn = response_within(&mut connection).await?;
+    assert!(matches!(
+        reconciled_turn.message(),
+        ServerMessage::TranscriptTurn {
+            turn_id,
+            acceptance_position,
+            state: TurnState::ReconciliationRequired {
+                terminal_attempt_id, ..
+            },
+        } if *turn_id == parked_turn_id
+            && acceptance_position.value() == 1
+            && *terminal_attempt_id != *turn_id
+    ));
+    let successor_turn = response_within(&mut connection).await?;
+    assert!(matches!(
+        successor_turn.message(),
+        ServerMessage::TranscriptTurn {
+            turn_id,
+            acceptance_position,
+            state: TurnState::Queued { .. },
+        } if *turn_id == successor_turn_id && acceptance_position.value() == 2
+    ));
 
     drop(connection);
     runtime.stop().await

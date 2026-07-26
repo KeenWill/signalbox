@@ -898,6 +898,33 @@ impl ProcessReadRepository {
         .map_err(Into::into)
     }
 
+    /// Returns the session's active turn when it is parked on the model-call
+    /// recovery wait, and `None` otherwise.
+    ///
+    /// This narrow read lets a process adapter refuse a reconciliation request
+    /// whose named turn owes no owner decision, before recording a durable
+    /// command. It is a precondition, never authority: the authoritative
+    /// transaction revalidates the exact expected active turn under the
+    /// session lock, and an ended attempt never returns to a live phase, so an
+    /// admitted wait can only stay parked or terminalize before that
+    /// transaction runs.
+    pub async fn active_model_call_recovery_turn(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<Option<TurnId>, ProcessReadError> {
+        let turn: Option<Uuid> = sqlx::query_scalar(
+            "SELECT turn_id
+               FROM turn_lifecycle
+              WHERE session_id = $1
+                AND state_kind = 'active'
+                AND active_phase_kind = 'awaiting_model_call_recovery'",
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(turn.map(TurnId::from_uuid))
+    }
+
     /// Reads one complete transcript snapshot, or `None` only when the session
     /// is absent from the shared transaction snapshot.
     pub async fn read_transcript(

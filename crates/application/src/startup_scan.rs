@@ -73,6 +73,13 @@ pub enum StartupScanSessionOutcome {
         /// Active turn whose result/next-attempt boundary is ready.
         turn: TurnId,
     },
+    /// A prior process already ended this turn's tenure and parked it on an
+    /// exact ambiguity set. The scan has nothing left to classify; only an
+    /// owner reconciliation decision can release the slot.
+    AwaitingRecoveryDecision {
+        /// The active turn holding the slot until reconciliation.
+        turn: TurnId,
+    },
     /// Pending steering keeps the source turn active until reclassification.
     DeferredPendingSteering {
         /// The accepted input that visibly blocks terminalization.
@@ -107,6 +114,7 @@ pub trait StartupScanRepository {
 pub struct StartupScanOutcome {
     recovered_turn_count: usize,
     pending_steering_sessions: Box<[SessionId]>,
+    awaiting_recovery_decision_sessions: Box<[SessionId]>,
 }
 
 impl StartupScanOutcome {
@@ -118,6 +126,16 @@ impl StartupScanOutcome {
     /// Returns every session whose pending steering visibly blocks startup.
     pub fn pending_steering_sessions(&self) -> &[SessionId] {
         &self.pending_steering_sessions
+    }
+
+    /// Returns every session whose active turn holds the slot awaiting an
+    /// owner reconciliation decision.
+    ///
+    /// The scan cannot classify these turns: a prior process already ended
+    /// their tenure and recorded the exact ambiguity set. They do not block
+    /// startup, so they are reported rather than counted as recovered.
+    pub fn awaiting_recovery_decision_sessions(&self) -> &[SessionId] {
+        &self.awaiting_recovery_decision_sessions
     }
 
     /// Returns whether startup may proceed to runtime scheduling.
@@ -233,6 +251,7 @@ where
             .map_err(StartupScanError::inventory)?;
         let mut recovered_turn_count = 0_usize;
         let mut pending_steering_sessions = Vec::new();
+        let mut awaiting_recovery_decision_sessions = Vec::new();
 
         for session in sessions {
             loop {
@@ -263,6 +282,10 @@ where
                         break;
                     }
                     Ok(StartupScanSessionOutcome::ResumableToolBatch { .. }) => break,
+                    Ok(StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }) => {
+                        awaiting_recovery_decision_sessions.push(session);
+                        break;
+                    }
                     Ok(StartupScanSessionOutcome::DeferredPendingSteering { .. }) => {
                         pending_steering_sessions.push(session);
                         break;
@@ -281,6 +304,8 @@ where
         Ok(StartupScanOutcome {
             recovered_turn_count,
             pending_steering_sessions: pending_steering_sessions.into_boxed_slice(),
+            awaiting_recovery_decision_sessions: awaiting_recovery_decision_sessions
+                .into_boxed_slice(),
         })
     }
 }
@@ -416,6 +441,35 @@ mod tests {
         assert_eq!(outcome.recovered_turn_count(), 0);
         assert_eq!(outcome.pending_steering_sessions(), &[second]);
         assert!(!outcome.is_complete());
+    }
+
+    /// INV-034: a turn parked on an owner reconciliation decision is neither
+    /// counted as recovered nor hidden — it is reported and startup proceeds.
+    #[test]
+    fn inv034_reports_awaiting_recovery_decision_without_blocking_startup() {
+        let parked = session(1);
+        let healthy = session(2);
+        let repository = FakeRepository {
+            inventory: Some(Ok(vec![parked, healthy].into_boxed_slice())),
+            responses: VecDeque::from([
+                Ok(StartupScanSessionOutcome::AwaitingRecoveryDecision {
+                    turn: TurnId::from_uuid(Uuid::from_u128(7)),
+                }),
+                Ok(StartupScanSessionOutcome::NoActiveTurn),
+            ]),
+            observed: Vec::new(),
+        };
+        let mut service = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
+
+        let outcome = run_ready(service.execute()).expect("scan succeeds");
+
+        assert_eq!(outcome.recovered_turn_count(), 0);
+        assert_eq!(outcome.awaiting_recovery_decision_sessions(), &[parked]);
+        assert_eq!(outcome.pending_steering_sessions(), &[] as &[SessionId]);
+        assert!(
+            outcome.is_complete(),
+            "a turn awaiting an owner reconciliation decision must not block startup"
+        );
     }
 
     /// docs/spec/turn-lifecycle-and-scheduling.md: non-collision
