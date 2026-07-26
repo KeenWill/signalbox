@@ -7,7 +7,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::{
@@ -51,6 +54,7 @@ pub struct ToolBatchReconstitutionInput {
     approvals: Vec<ToolApprovalResolution>,
     attempts: Vec<ReconstitutedToolAttempt>,
     retired_attempts: Vec<ToolAttemptId>,
+    runner_authorized_attempts: Vec<ToolAttemptId>,
     phase: ToolBatchPhaseReconstitutionInput,
 }
 
@@ -76,6 +80,7 @@ impl ToolBatchReconstitutionInput {
             approvals,
             attempts,
             retired_attempts: Vec::new(),
+            runner_authorized_attempts: Vec::new(),
             phase,
         }
     }
@@ -83,6 +88,15 @@ impl ToolBatchReconstitutionInput {
     /// Supplies the complete durable retired-attempt identity inventory.
     pub fn with_retired_attempts(mut self, retired_attempts: Vec<ToolAttemptId>) -> Self {
         self.retired_attempts = retired_attempts;
+        self
+    }
+
+    /// Supplies the complete durable runner-authorized attempt inventory.
+    pub fn with_runner_authorized_attempts(
+        mut self,
+        runner_authorized_attempts: Vec<ToolAttemptId>,
+    ) -> Self {
+        self.runner_authorized_attempts = runner_authorized_attempts;
         self
     }
 
@@ -178,11 +192,11 @@ pub struct ToolBatch {
     approvals: BTreeMap<ToolRequestId, ToolApprovalResolution>,
     attempts: BTreeMap<ToolRequestId, ReconstitutedToolAttempt>,
     retired_attempts: BTreeSet<ToolAttemptId>,
-    runner_issuance: Arc<AtomicBool>,
+    runner_issuance: BTreeMap<ToolAttemptId, Arc<AtomicBool>>,
     phase: ToolBatchPhase,
 }
 
-// The process-local runner issuance guard is not part of durable batch identity.
+// Runner issuance state is durable identity; atomics are shared by in-memory clones.
 impl PartialEq for ToolBatch {
     fn eq(&self, other: &Self) -> bool {
         self.session == other.session
@@ -193,6 +207,9 @@ impl PartialEq for ToolBatch {
             && self.approvals == other.approvals
             && self.attempts == other.attempts
             && self.retired_attempts == other.retired_attempts
+            && self
+                .runner_authorized_attempts()
+                .eq(other.runner_authorized_attempts())
             && self.phase == other.phase
     }
 }
@@ -238,6 +255,13 @@ impl ToolBatch {
     /// Returns every retired physical-attempt identity in stable order.
     pub fn retired_attempts(&self) -> impl Iterator<Item = ToolAttemptId> + '_ {
         self.retired_attempts.iter().copied()
+    }
+
+    /// Returns every physical attempt whose runner authority was durably issued.
+    pub fn runner_authorized_attempts(&self) -> impl Iterator<Item = ToolAttemptId> + '_ {
+        self.runner_issuance
+            .iter()
+            .filter_map(|(attempt, issued)| issued.load(Ordering::Acquire).then_some(*attempt))
     }
 
     /// Returns the evidence-derived active phase.
@@ -432,13 +456,15 @@ impl ToolBatch {
                 failure: ToolBatchExecutionFailure::TurnLevelFailure,
             });
         }
-        if self.attempts.values().any(|candidate| {
-            let candidate_id = match candidate {
-                ReconstitutedToolAttempt::Current(current) => current.attempt(),
-                ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
-            };
-            candidate_id == attempt
-        }) {
+        if self.retired_attempts.contains(&attempt)
+            || self.attempts.values().any(|candidate| {
+                let candidate_id = match candidate {
+                    ReconstitutedToolAttempt::Current(current) => current.attempt(),
+                    ReconstitutedToolAttempt::Ended(ended) => ended.attempt(),
+                };
+                candidate_id == attempt
+            })
+        {
             return Err(ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptIdentityReuse,
             });
@@ -532,9 +558,14 @@ impl ToolBatch {
             ToolAttemptCrashOutcome::KnownFailed(retired)
             | ToolAttemptCrashOutcome::Ambiguous(retired) => retired,
         };
+        let replacement_runner_issuance = Arc::new(AtomicBool::new(false));
+        self.runner_issuance.insert(
+            replacement_attempt,
+            Arc::clone(&replacement_runner_issuance),
+        );
         let authorized = approved
             .prepare_attempt(replacement_attempt, turn_attempt, effect_class)
-            .authorize_with_runner_issuance(Arc::clone(&self.runner_issuance))
+            .authorize_with_runner_issuance(replacement_runner_issuance)
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })?;
@@ -574,8 +605,15 @@ impl ToolBatch {
             .ok_or(ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptMissing,
             })?;
+        let runner_issuance =
+            self.runner_issuance
+                .get(&attempt)
+                .map(Arc::clone)
+                .ok_or(ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::AttemptMissing,
+                })?;
         current
-            .authorize_with_runner_issuance(Arc::clone(&self.runner_issuance))
+            .authorize_with_runner_issuance(runner_issuance)
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })
@@ -604,8 +642,15 @@ impl ToolBatch {
             .ok_or(ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptMissing,
             })?;
+        let runner_issuance =
+            self.runner_issuance
+                .get(&attempt)
+                .map(Arc::clone)
+                .ok_or(ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::AttemptMissing,
+                })?;
         current
-            .resume_in_flight_with_runner_issuance(Arc::clone(&self.runner_issuance))
+            .resume_in_flight_with_runner_issuance(runner_issuance)
             .map_err(|_| ToolBatchExecutionError {
                 failure: ToolBatchExecutionFailure::AttemptStageMismatch,
             })
@@ -1364,6 +1409,17 @@ fn reconstitute_batch(
             ));
         }
     }
+    let mut runner_authorized_attempts = BTreeSet::new();
+    for authorized in &input.runner_authorized_attempts {
+        if !(attempt_ids.contains(authorized) || retired_attempts.contains(authorized))
+            || !runner_authorized_attempts.insert(*authorized)
+        {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::AttemptInventoryMismatch,
+            ));
+        }
+    }
     if live_attempt_count > 1 {
         return Err(fail(
             input,
@@ -1470,6 +1526,18 @@ fn reconstitute_batch(
             ));
         }
     };
+    let runner_issuance = attempt_ids
+        .iter()
+        .chain(&retired_attempts)
+        .map(|attempt| {
+            (
+                *attempt,
+                Arc::new(AtomicBool::new(
+                    runner_authorized_attempts.contains(attempt),
+                )),
+            )
+        })
+        .collect();
     Ok(ToolBatch {
         session: input.session,
         turn: input.turn,
@@ -1479,7 +1547,7 @@ fn reconstitute_batch(
         approvals,
         attempts,
         retired_attempts,
-        runner_issuance: Arc::new(AtomicBool::new(false)),
+        runner_issuance,
         phase,
     })
 }
@@ -2321,8 +2389,9 @@ mod tests {
         let first_approved =
             ApprovedToolRequest::try_from_resolution(only.clone(), approval.clone())
                 .expect("the first approval matches its request");
-        let duplicate_approved = ApprovedToolRequest::try_from_resolution(only, approval)
-            .expect("the duplicate approval matches its request");
+        let duplicate_approved =
+            ApprovedToolRequest::try_from_resolution(only.clone(), approval.clone())
+                .expect("the duplicate approval matches its request");
         let first = batch
             .resume_in_flight_attempt(attempt_id)
             .expect("the checked batch restores local authority");
@@ -2332,9 +2401,39 @@ mod tests {
 
         crate::RunnerToolAttemptAuthorization::try_new(first_approved, first)
             .expect("the shared runner capability is consumed once");
+        let durable_issuance = batch.runner_authorized_attempts().collect::<Vec<_>>();
+        let current = batch
+            .attempt(only.id())
+            .expect("the durable batch retains the in-flight attempt")
+            .clone();
+        let restored = ToolBatchReconstitutionInput::new(
+            batch.session(),
+            batch.turn(),
+            batch.producing_call(),
+            batch.yielded_snapshot().clone(),
+            vec![only.clone()],
+            vec![approval.clone()],
+            vec![current],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(13),
+            },
+        )
+        .with_runner_authorized_attempts(durable_issuance.clone())
+        .reconstitute()
+        .expect("durable runner issuance restores with the batch");
+        let restored_authority = restored
+            .resume_in_flight_attempt(attempt_id)
+            .expect("the local in-flight fence remains restorable");
+        let restored_approved = ApprovedToolRequest::try_from_resolution(only, approval)
+            .expect("the restored approval matches its request");
 
+        assert_eq!(durable_issuance, vec![attempt_id]);
         assert_eq!(
             crate::RunnerToolAttemptAuthorization::try_new(duplicate_approved, duplicate),
+            Err(crate::RunnerDomainError::InvalidState)
+        );
+        assert_eq!(
+            crate::RunnerToolAttemptAuthorization::try_new(restored_approved, restored_authority,),
             Err(crate::RunnerDomainError::InvalidState)
         );
     }
@@ -2383,6 +2482,58 @@ mod tests {
                 .replace_claimed_attempt(current_id, retired_id)
                 .err()
                 .expect("a retired identity cannot be reused")
+                .failure(),
+            ToolBatchExecutionFailure::AttemptIdentityReuse
+        );
+    }
+
+    /// S31 / INV-004: ordinary preparation rejects every durably retired identity.
+    #[test]
+    fn s31_inv004_ordinary_preparation_rejects_retired_identity_reuse() {
+        let first = request(10, 0);
+        let second = request(11, 1);
+        let ended_id = tool_attempt_id(13);
+        let retired_id = tool_attempt_id(12);
+        let ended = ToolAttemptReconstitutionInput::new(
+            ended_id,
+            first.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(14),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed {
+                error: crate::ToolExecutionError::new(
+                    ToolExecutionErrorKind::ExecutionFailed,
+                    None,
+                ),
+            }),
+        )
+        .reconstitute()
+        .expect("the ended attempt is valid");
+        let batch = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first.clone(), second.clone()],
+            vec![
+                approval(first.id(), ToolApprovalDecision::Approve),
+                approval(second.id(), ToolApprovalDecision::Approve),
+            ],
+            vec![ended],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(14),
+            },
+        )
+        .with_retired_attempts(vec![retired_id])
+        .reconstitute()
+        .expect("the retired inventory and ended history are complete");
+
+        assert_eq!(
+            batch
+                .prepare_next_attempt(retired_id, ToolEffectClass::EffectFree)
+                .expect_err("ordinary preparation cannot reuse a retired identity")
                 .failure(),
             ToolBatchExecutionFailure::AttemptIdentityReuse
         );

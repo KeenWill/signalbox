@@ -144,18 +144,21 @@ consumes one `RunnerToolAttemptAuthorization`, which binds the approved request
 and its exact tool name to the tool loop's `AuthorizedToolAttempt`. The latter
 exists only after the automatic or owner decision authorizes that exact attempt,
 and neither authority nor the resulting lease is cloneable. Every checked
-`ToolBatch` instance and all of its clones share one runner-authority issuance
-guard. Prepared authorization and in-flight restoration retain the daemon-local
-durable fence, but converting either result into
-`RunnerToolAttemptAuthorization` consumes that shared guard, so the batch cannot
-mint a second runner lease capability. Current active enrollment, pinned
-placement, its exact validated registration, and any selected active credential
-grant jointly authorize every offer after the first. The initial offer instead
-creates that pinned placement, any selected grant, and generation-one lease in
-one checked transition from `Unpinned`; it does not require those products to
-exist beforehand. The request, attempt, session, and two-way crash class must
-match the selected tool, placement, and declaration-derived effect class (`Pure`
-to `EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
+`ToolBatch` carries a durable per-attempt inventory of runner authority already
+issued. Its in-memory clones share the exact atomic guard for each physical
+attempt, and complete reconstitution restores every consumed guard from that
+inventory. Prepared authorization and in-flight restoration retain the
+daemon-local durable fence, but converting either result into
+`RunnerToolAttemptAuthorization` marks that exact attempt issued in the batch; a
+later clone or reconstitution from the updated facts cannot mint a second runner
+lease capability. Current active enrollment, pinned placement, its exact
+validated registration, and any selected active credential grant jointly
+authorize every offer after the first. The initial offer instead creates that
+pinned placement, any selected grant, and generation-one lease in one checked
+transition from `Unpinned`; it does not require those products to exist
+beforehand. The request, attempt, session, and two-way crash class must match
+the selected tool, placement, and declaration-derived effect class (`Pure` to
+`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
 enrollment, lost placement, or a mismatched runner, request, tool, attempt,
 effect, profile, or grant cannot create a lease.
 
@@ -194,9 +197,10 @@ required retry law:
   attempt is derived from the opaque lost lease and never produces re-lease
   authority.
 
-Generation exhaustion, reuse of any current or retired attempt identity, and a
-standalone same-request authorization for claimed retry all fail closed.
-`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` or
+Generation exhaustion, reuse of any current or retired attempt identity for
+either claimed replacement or ordinary preparation, and a standalone
+same-request authorization for claimed retry all fail closed. `RunnerLeaseLoss`
+has sealed construction, so only `RunnerLease::lose` or
 `RunnerLease::reconstitute_loss` over an already-lost checked projection can
 produce retry or crash-classification authority. Re-leasing continues one
 logical tool request and lease lineage. Its successor `RunnerGeneration` is

@@ -1482,12 +1482,22 @@ impl SessionRunnerPlacement {
                     stored.workspace.clone(),
                 )?;
                 checked.grant_lineage = stored.grant_lineage;
-                let lineage_is_valid =
+                let lineage_is_valid = if placement.revision == RunnerGeneration::one() {
+                    match (stored.credential_profile.as_ref(), stored.grant_lineage) {
+                        (Some(_), Some(lineage)) => {
+                            lineage.runner == stored.runner
+                                && lineage.revision == RunnerGeneration::one()
+                        }
+                        (None, None) => true,
+                        (None, Some(_)) | (Some(_), None) => false,
+                    }
+                } else {
                     match (stored.credential_profile.as_ref(), stored.grant_lineage) {
                         (Some(_), Some(lineage)) => lineage.runner == stored.runner,
                         (None, _) => true,
                         (Some(_), None) => false,
-                    };
+                    }
+                };
                 if lineage_is_valid && checked == *stored {
                     Ok(placement)
                 } else {
@@ -2458,6 +2468,17 @@ mod tests {
         placement
     }
 
+    fn placement_with_grant_lineage(
+        mut placement: SessionRunnerPlacement,
+        lineage: RunnerCredentialGrantLineage,
+    ) -> SessionRunnerPlacement {
+        let SessionRunnerPlacementState::Pinned(pinned) = &mut placement.state else {
+            panic!("the fixture placement must be pinned")
+        };
+        pinned.grant_lineage = Some(lineage);
+        placement
+    }
+
     fn enrollment_reconstitution_input() -> RunnerEnrollmentReconstitutionInput {
         RunnerEnrollmentReconstitutionInput {
             enrollment: runner_enrollment_id(ENROLLMENT),
@@ -3332,6 +3353,56 @@ mod tests {
         assert_eq!(
             SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration),),
             Err(RunnerDomainError::CorruptStoredFacts),
+        );
+    }
+
+    #[test]
+    fn s30_inv044_generation_one_profiled_placement_rejects_later_grant_revision() {
+        let (registration, pin) = pinned("readonly");
+        let corrupted = placement_with_grant_lineage(
+            pin.placement,
+            RunnerCredentialGrantLineage {
+                runner: registration.runner(),
+                revision: RunnerGeneration::try_from_u64(2).expect("two is positive"),
+            },
+        );
+        let input = placement_reconstitution_input(corrupted);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration)),
+            Err(RunnerDomainError::CorruptStoredFacts)
+        );
+    }
+
+    #[test]
+    fn s30_inv044_generation_one_profileless_placement_rejects_grant_lineage() {
+        let registration = registration();
+        let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
+            .pin_and_offer_lease(
+                &enrollment(),
+                &registration,
+                directory("/workspace/session"),
+                None,
+                automatically_authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("profileless execution pins without a grant");
+        let corrupted = placement_with_grant_lineage(
+            pin.placement,
+            RunnerCredentialGrantLineage {
+                runner: registration.runner(),
+                revision: RunnerGeneration::one(),
+            },
+        );
+        let input = placement_reconstitution_input(corrupted);
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), Some(&registration)),
+            Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
 

@@ -3262,6 +3262,10 @@ impl ToolBatchReconstitutionInput {
         self,
         retired_attempts: Vec<ToolAttemptId>,
     ) -> Self;
+    pub fn with_runner_authorized_attempts(
+        self,
+        runner_authorized_attempts: Vec<ToolAttemptId>,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ToolBatch, ToolBatchReconstitutionError>;
 }
 pub enum ToolBatchReconstitutionFailure {
@@ -3290,6 +3294,9 @@ pub enum ToolBatchPhase {
 pub struct ToolBatch { /* private */ }
 impl ToolBatch {
     pub fn retired_attempts(&self) -> impl Iterator<Item = ToolAttemptId> + '_;
+    pub fn runner_authorized_attempts(
+        &self,
+    ) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
     pub fn prepare_owner_decision(
