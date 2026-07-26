@@ -50,6 +50,33 @@ Owns: hubd configuration/composition, the model catalog example. Collides-with:
 `apps/hubd`. The merged OpenAI adapter is unreachable; the catalog admits only
 one provider.
 
+## Model catalog automation [blocked-on: OpenAI composition wiring; the wrapped-CLI drift-defense scaffolding] [size: S-M]
+
+Owns: a scheduled provider-listing watcher and the catalog-diff step that rides
+the wrapped-CLI pin-bump smoke, plus the PRs either one opens. Collides-with:
+the drift-defense CI wiring the subscription-runtime tracks introduce, and
+whichever entry holds the catalog file when a generated PR lands. Keeping the
+catalog current is an operations concern the composition-wiring entry above does
+not own; that entry makes the catalog multi-provider once, this one keeps it
+from going stale.
+
+Owner direction, 2026-07-25 (orientation only; per-model defaults, alias policy,
+and identity-generation rules are settled in the owning spec diff at pickup, not
+here): keeping the model catalog current should be automated, with the owner as
+the merge gate. Two mechanisms, both composing with the drift-defense pattern
+already recorded in the subscription-runtime entry's pin/Renovate/gated-smoke
+addendum below rather than restating it. (1) A provider-API watcher — a
+scheduled, main-only job under the same environment-protected-secrets rules as
+the gated smokes — queries each configured provider's model-listing endpoint,
+diffs the result against the catalog file (the `[[models]]` records in the
+example daemon configuration, or wherever the catalog lives at pickup), and
+opens a PR drafting entries for the new models with generated identities and
+conservative defaults for owner review; it never merges anything itself. (2)
+CLI-bump piggyback — for the wrapped-CLI runtimes, the Renovate pin-bump PR's
+compatibility smoke also enumerates the CLI's advertised models and surfaces
+catalog diffs in that same PR, so a CLI update shipping new models forces the
+catalog question at the moment of change.
+
 ## De-hub naming pass [blocked-on: in-flight stacks landing] [size: S-M]
 
 Owns: the `apps/hubd` rename (binary and directory to `signalboxd`) and "hub"
@@ -92,6 +119,37 @@ import-time mode). Owner addendum: an importer conformance corpus — synthetic
 fixture conversations only, never the owner's real archives, covering each
 source-format era, with golden/expect assertions on the imported result — is
 part of the entry's scope.
+
+Owner direction, 2026-07-26 (orientation only; the provenance marker's
+representation and the lineage mechanism are settled in the owning spec diff at
+pickup, not here): agent-to-agent subagent session transcripts import as
+first-class conversations — the same imported-conversation store, the same
+importer identity model, nothing second-class about how they are held. Two
+additions come with them. First, linkage to the parent session's imported
+conversation, recorded as durable evidence in the same spirit as the
+source-session lineage evidence the header already carries. Second, a typed
+provenance marker distinguishing an agent-driven session from a human-driven
+one; it composes with the session satellites the session-metadata entry below
+owns rather than standing up a parallel mechanism, and whether it lands as a
+metadata tag or a dedicated typed field is the design pass's call.
+
+One tension is flagged for pickup rather than settled here. The import spec's
+recorded law forbids deriving identity from a filename or source path and keeps
+converters bytes-only, yet for some source formats the parent linkage lives only
+in the archive's directory layout — a per-session subagent directory whose
+placement, not whose bytes, names the parent. The likely resolution is declared
+lineage: the parent arrives as explicit caller-supplied evidence on the import
+request, the operator asserting the relationship, which keeps the converter
+pure. The same request also carries the source filename, captured as recorded
+provenance evidence and never as identity input, which leaves the byte-digest
+identity law untouched. It is cheap, auditable corroboration: some source
+formats name their files by session identifier, and that is worth the most
+exactly where in-band metadata is thin, as in the subagent case. The owning spec
+diff decides.
+
+Counting follows from the first-class stance: subagent conversations are
+conversations and count in any conversation inventory, with the provenance
+marker enabling filtered views rather than exclusion from the count.
 
 ## Migration baseline reset [blocked-on: schema-audit verdict; owner checkpoint call] [size: S-M]
 

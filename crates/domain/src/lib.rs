@@ -20,6 +20,7 @@ mod model_execution;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod review_workflow;
 mod semantic_entry;
 mod session;
 mod session_metadata;
@@ -117,6 +118,32 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsReconstitutionFailure, ReplaceSessionDefaultsReconstitutionInput,
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
+};
+pub use review_workflow::{
+    ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
+    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkClaim, ReviewExternalLinkNoChangeResult,
+    ReviewExternalLinkObservation, ReviewExternalLinkObservationResult,
+    ReviewExternalLinkPublicationBlockedResult, ReviewExternalLinkTransitionError,
+    ReviewExternalLinkTransitionFailure, ReviewExternalObjectClaim, ReviewExternalObjectClaimError,
+    ReviewExternalObjectKind, ReviewExternalObjectState, ReviewFinding, ReviewFindingContent,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReviewFindingEventResultKind, ReviewFindingEventType, ReviewFindingExternalLinkError,
+    ReviewFindingExternalLinkFailure, ReviewFindingExternalLinkRef, ReviewFindingLocation,
+    ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
+    ReviewFindingSeverity, ReviewFindingStatus, ReviewFindingTransitionError,
+    ReviewFindingTransitionFailure, ReviewKey, ReviewLineRange, ReviewLineRangeError, ReviewPass,
+    ReviewPassAcceptedInputEvidence, ReviewPassConstructionError, ReviewPassConstructionFailure,
+    ReviewPassEvidence, ReviewPassKind, ReviewPassReconstitutionError,
+    ReviewPassReconstitutionFailure, ReviewPassReconstitutionInput, ReviewPassRef,
+    ReviewPassResult, ReviewPassState, ReviewPassTransitionError, ReviewPassTransitionFailure,
+    ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewPolicyError,
+    ReviewPolicyVersion, ReviewPositiveNumberError, ReviewProducedFindings,
+    ReviewProducedFindingsError, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunEvidence,
+    ReviewRunEvidenceFailure, ReviewRunReconstitutionError, ReviewRunReconstitutionInput,
+    ReviewRunRef, ReviewRunState, ReviewRunTransitionError, ReviewRunTransitionFailure,
+    ReviewTarget, ReviewTargetError, ReviewTargetParentRef, ReviewTargetSubject, ReviewText,
+    ReviewValueError, ReviewValueFailure, ReviewWorkflowKind,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
@@ -295,6 +322,31 @@ define_identity!(
 define_identity!(
     /// Identifies one physical effort to execute a tool request.
     ToolAttemptId
+);
+
+define_identity!(
+    /// Identifies one immutable review-target snapshot.
+    ReviewTargetId
+);
+
+define_identity!(
+    /// Identifies one review workflow execution.
+    ReviewRunId
+);
+
+define_identity!(
+    /// Identifies one session-backed pass inside a review run.
+    ReviewPassId
+);
+
+define_identity!(
+    /// Identifies one structured review finding.
+    ReviewFindingId
+);
+
+define_identity!(
+    /// Identifies one durable external-object reservation.
+    ReviewExternalLinkId
 );
 
 #[cfg(test)]

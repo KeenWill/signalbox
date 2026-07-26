@@ -3,12 +3,13 @@
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
-through PR #254 (`agent/fix-parked-approval-interrupt`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
+through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
+in PR #227 (`agent/review-workflow-persistence`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -50,8 +51,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twenty-seven files, `202607180001` through
-`202607280001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twenty-eight files, `202607180001` through
+`202607280002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency

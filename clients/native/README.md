@@ -32,6 +32,9 @@ scripts/build-xcode.sh
 scripts/test-xcode.sh
 ```
 
+The scheme runs the app, client, model, and integration unit suites under the
+`SignalboxNativeTests` target.
+
 ## Launch In Simulator
 
 ```bash
@@ -93,10 +96,6 @@ order. This deferral and its ordering are owned by the
 findings to the rewire inventory"; the bullets below are descriptive inventory
 under that decision, not normative claims.
 
-- The Xcode project wires no test targets for `Tests/SignalboxAppTests`,
-  `Tests/SignalboxClientTests`, or `Tests/SignalboxModelsTests`, so those 44
-  tests are unreachable since the Bazel exclusion — restoring them is the
-  rewire's first task.
 - Saving settings persists the new server URL/API key without rebuilding the
   installed client, so traffic keeps flowing to the previous server until a
   successful Test Connection or relaunch.
