@@ -91,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "stderr_redaction" => {
             eprintln!(
-                "authentication failed api_key=\"{}\"",
+                "authentication failed API_KEY=\"{}\"",
                 fixtures::SENSITIVE_STDERR_TOKEN
             );
             std::process::exit(7);

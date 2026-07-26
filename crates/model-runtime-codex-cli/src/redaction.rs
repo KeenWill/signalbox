@@ -7,8 +7,10 @@ const REDACTED: &str = "[redacted]";
 pub(crate) fn redact_text(text: &str) -> String {
     let mut sanitized = text.to_string();
     for marker in [
-        "Bearer ",
         "bearer ",
+        "authorization=",
+        "authorization:",
+        "\"authorization\":",
         "api_key=",
         "api-key=",
         "api_key:",
@@ -27,10 +29,23 @@ pub(crate) fn redact_text(text: &str) -> String {
         "secret=",
         "secret:",
         "\"secret\":",
+        "credential=",
+        "credential:",
+        "\"credential\":",
+        "cookie=",
+        "cookie:",
+        "\"cookie\":",
+        "id_token=",
+        "id_token:",
+        "\"id_token\":",
+        "session_token=",
+        "session_token:",
+        "\"session_token\":",
     ] {
         sanitized = redact_after_marker(&sanitized, marker);
     }
-    redact_prefixed_token(&sanitized, "sk-")
+    let sanitized = redact_prefixed_token(&sanitized, "sk-");
+    redact_prefixed_token(&sanitized, "eyJ")
 }
 
 pub(crate) fn redact_json(raw: &str) -> String {
@@ -94,7 +109,7 @@ fn credential_key(key: &str) -> bool {
 fn redact_after_marker(text: &str, marker: &str) -> String {
     let mut remaining = text;
     let mut output = String::with_capacity(text.len());
-    while let Some(index) = remaining.find(marker) {
+    while let Some(index) = find_ascii_case_insensitive(remaining, marker) {
         let value_start = index + marker.len();
         output.push_str(&remaining[..value_start]);
         let whitespace = remaining[value_start..]
@@ -118,6 +133,12 @@ fn redact_after_marker(text: &str, marker: &str) -> String {
     }
     output.push_str(remaining);
     output
+}
+
+fn find_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
+    text.as_bytes()
+        .windows(needle.len())
+        .position(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn redact_prefixed_token(text: &str, prefix: &str) -> String {
@@ -145,20 +166,25 @@ mod tests {
     const QUOTED_CREDENTIAL_VALUE: &str = "another-sensitive-value";
     const JSON_CREDENTIAL_VALUE: &str = "third-sensitive-value";
     const NESTED_CREDENTIAL_VALUE: &str = "sensitive-refresh-value";
+    const AUTHORIZATION_VALUE: &str = "opaque-authorization-value";
+    const JWT_SHAPED_VALUE: &str = "eyJsensitive.jwt.value";
 
     /// INV-035: credential-shaped text never leaves the CLI adapter.
     #[test]
     fn inv_035_redacts_bearer_and_prefixed_credentials() {
         let fixture = format!(
-            "Authorization Bearer {CREDENTIAL_SHAPED_VALUE} and \
-             api_key=\"{QUOTED_CREDENTIAL_VALUE}\" with \
-             {{\"refresh_token\":\"{JSON_CREDENTIAL_VALUE}\"}}"
+            "Authorization BEARER {CREDENTIAL_SHAPED_VALUE} and \
+             API_KEY=\"{QUOTED_CREDENTIAL_VALUE}\" with \
+             {{\"REFRESH_TOKEN\":\"{JSON_CREDENTIAL_VALUE}\"}}, \
+             Authorization: {AUTHORIZATION_VALUE}, and {JWT_SHAPED_VALUE}"
         );
         let output = redact_text(&fixture);
 
         assert!(!output.contains(CREDENTIAL_SHAPED_VALUE));
         assert!(!output.contains(QUOTED_CREDENTIAL_VALUE));
         assert!(!output.contains(JSON_CREDENTIAL_VALUE));
+        assert!(!output.contains(AUTHORIZATION_VALUE));
+        assert!(!output.contains(JWT_SHAPED_VALUE));
         assert!(output.contains("[redacted]"));
     }
 
