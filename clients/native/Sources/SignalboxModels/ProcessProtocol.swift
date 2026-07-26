@@ -6,8 +6,10 @@ public enum SignalboxProcessProtocol {
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
   // docs/spec/process-protocol.md owns the version-five metadata projection bounds.
   public static let maximumMetadataTags = 256
+  public static let maximumMetadataAttributes = 256
   public static let maximumIndexedMetadataUTF8Bytes = 1_024
-  public static let maximumMetadataSummaryUTF8Bytes = 262_144
+  public static let maximumMetadataUTF8Bytes = 262_144
+  public static let maximumMetadataSummaryUTF8Bytes = maximumMetadataUTF8Bytes
 }
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {
@@ -1418,14 +1420,14 @@ private struct SignalboxUntaggedPayload: Decodable {
   }
 }
 
-private extension CodingUserInfoKey {
-  static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
+extension CodingUserInfoKey {
+  fileprivate static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
     rawValue: "org.signalbox.process-protocol.duplicate-object-paths"
   )!
 }
 
-private extension Decoder {
-  var containsDuplicateObjectMembers: Bool {
+extension Decoder {
+  fileprivate var containsDuplicateObjectMembers: Bool {
     guard
       let duplicateObjectPaths =
         userInfo[.signalboxDuplicateObjectPaths] as? Set<[String]>
@@ -1435,14 +1437,14 @@ private extension Decoder {
     return duplicateObjectPaths.contains(decodedObjectPath)
   }
 
-  func rejectDuplicateObjectMembers() throws {
+  fileprivate func rejectDuplicateObjectMembers() throws {
     guard containsDuplicateObjectMembers else {
       return
     }
     throw duplicateObjectMembersError()
   }
 
-  func duplicateObjectMembersError() -> DecodingError {
+  fileprivate func duplicateObjectMembersError() -> DecodingError {
     .dataCorrupted(
       .init(
         codingPath: codingPath,

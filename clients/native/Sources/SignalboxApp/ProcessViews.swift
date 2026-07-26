@@ -32,6 +32,8 @@ final class ProcessSessionListViewModel: ObservableObject {
     serviceGeneration &+= 1
     publicationGeneration &+= 1
     activeRefreshID = UUID()
+    sessions = []
+    errorMessage = nil
     isLoading = false
   }
 
@@ -182,6 +184,15 @@ struct ProcessSessionsScreen: View {
             applyRequestedSelection()
           }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .processServiceChanged)) { _ in
+          selectedSessionID = nil
+          coordinator.selectedProcessSessionID = nil
+          viewModel.replaceServiceProvider { coordinator.processService }
+          Task {
+            await viewModel.refresh()
+            applyRequestedSelection()
+          }
+        }
     }
   }
 
@@ -285,6 +296,7 @@ private struct ProcessSessionRow: View {
 final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var timeline: [SignalboxTimelineItem] = []
   @Published private(set) var pendingInputs: [SignalboxProcessPendingInput] = []
+  @Published private(set) var acceptedInputsAwaitingTranscript: [SignalboxProcessPendingInput] = []
   @Published private(set) var activity = SignalboxProcessActivity.unavailable
   @Published private(set) var phase: SignalboxSessionSynchronizationPhase = .stopped
   @Published private(set) var latestDiagnostic: String?
@@ -300,6 +312,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
+  private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -396,17 +409,21 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard serviceGeneration == generation else {
         return
       }
+      let acceptedInput = SignalboxProcessPendingInput(
+        id: submitted.acceptedInputID,
+        turnID: submitted.turnID,
+        acceptancePosition: submitted.acceptancePosition,
+        content: prepared.content
+      )
       pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.id == submitted.acceptedInputID }
       if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
-        pendingInputs.append(
-          SignalboxProcessPendingInput(
-            id: submitted.acceptedInputID,
-            turnID: submitted.turnID,
-            acceptancePosition: submitted.acceptancePosition,
-            content: prepared.content
-          )
-        )
-        pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        if terminalTurnIDs.contains(submitted.turnID) {
+          retainAcceptedInputAwaitingTranscript(acceptedInput)
+        } else {
+          pendingInputs.append(acceptedInput)
+          pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        }
       }
       unresolvedSubmission = nil
       if hasExactUTF8(composerText, prepared.content) {
@@ -450,7 +467,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         try normalizer.replaceAll(with: projection.records)
         timeline = normalizer.timelineItems
         pendingInputs = projection.pendingInputs
+        acceptedInputsAwaitingTranscript.removeAll {
+          projection.materializedAcceptedInputIDs.contains($0.id)
+        }
         materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
+        terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activity = projection.activity
         errorMessage = nil
       case .sideSnapshot(let snapshot, let trigger):
@@ -464,6 +485,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           activity = projection.activity
         }
         pendingInputs.removeAll {
+          projection.materializedAcceptedInputIDs.contains($0.id)
+        }
+        acceptedInputsAwaitingTranscript.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
         }
       case .event(let followed):
@@ -525,6 +549,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     serviceGeneration &+= 1
     timeline = []
     pendingInputs = []
+    acceptedInputsAwaitingTranscript = []
     activity = .unavailable
     phase = .stopped
     latestDiagnostic = nil
@@ -532,6 +557,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     errorMessage = nil
     unresolvedSubmission = nil
     materializedAcceptedInputIDs = []
+    terminalTurnIDs = []
     projector = SignalboxProcessTranscriptProjector()
     normalizer = SignalboxIncrementalEventNormalizer()
   }
@@ -540,16 +566,21 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     switch event {
     case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
       if !materializedAcceptedInputIDs.contains(acceptedInputID) {
-        let pending = SignalboxProcessPendingInput(
+        let acceptedInput = SignalboxProcessPendingInput(
           id: acceptedInputID,
           turnID: turnID,
           acceptancePosition: acceptancePosition,
           content: content
         )
+        if terminalTurnIDs.contains(turnID) {
+          pendingInputs.removeAll { $0.id == acceptedInputID }
+          retainAcceptedInputAwaitingTranscript(acceptedInput)
+          return
+        }
         if let index = pendingInputs.firstIndex(where: { $0.id == acceptedInputID }) {
-          pendingInputs[index] = pending
+          pendingInputs[index] = acceptedInput
         } else {
-          pendingInputs.append(pending)
+          pendingInputs.append(acceptedInput)
         }
         pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
         if !activityRepresentsActiveTurn {
@@ -602,13 +633,52 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     turnID: SignalboxCanonicalUUID,
     terminalActivity: SignalboxProcessActivity
   ) {
+    terminalTurnIDs.insert(turnID)
+    let acceptedInputs = pendingInputs.filter { $0.turnID == turnID }
     pendingInputs.removeAll { $0.turnID == turnID }
+    for acceptedInput in acceptedInputs {
+      retainAcceptedInputAwaitingTranscript(acceptedInput)
+    }
     activity =
       if pendingInputs.isEmpty {
         terminalActivity
       } else {
         .init(state: .queued, label: "Queued")
       }
+  }
+
+  private func retainAcceptedInputAwaitingTranscript(
+    _ acceptedInput: SignalboxProcessPendingInput
+  ) {
+    if let index = acceptedInputsAwaitingTranscript.firstIndex(where: {
+      $0.id == acceptedInput.id
+    }) {
+      acceptedInputsAwaitingTranscript[index] = acceptedInput
+    } else {
+      acceptedInputsAwaitingTranscript.append(acceptedInput)
+    }
+    acceptedInputsAwaitingTranscript.sort {
+      $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue
+    }
+  }
+
+  private func terminalTurnIDs(
+    in snapshot: SignalboxSynchronizationSnapshot
+  ) -> Set<SignalboxCanonicalUUID> {
+    Set(
+      snapshot.records.compactMap { record in
+        guard case .turn(let turn) = record else {
+          return nil
+        }
+        switch turn.state {
+        case .failed, .completed, .refused, .cancelled:
+          return turn.turnID
+        case .queued, .activeRunning, .activeAwaitingToolApproval,
+          .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
+          .reconciliationRequired, .toolReconciliationRequired, .unknown:
+          return nil
+        }
+      })
   }
 
   private var activityRepresentsActiveTurn: Bool {
@@ -670,6 +740,16 @@ struct ProcessSessionDetailScreen: View {
           ForEach(viewModel.timeline) { item in
             processTimelineView(item)
           }
+          ForEach(viewModel.acceptedInputsAwaitingTranscript) { acceptedInput in
+            VStack(alignment: .leading, spacing: 4) {
+              Text("Accepted input")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+              Text(acceptedInput.content)
+            }
+            .padding(12)
+            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+          }
           ForEach(viewModel.pendingInputs) { pending in
             VStack(alignment: .leading, spacing: 4) {
               Text("Pending input")
@@ -680,7 +760,9 @@ struct ProcessSessionDetailScreen: View {
             .padding(12)
             .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
           }
-          if viewModel.timeline.isEmpty && viewModel.pendingInputs.isEmpty {
+          if viewModel.timeline.isEmpty && viewModel.pendingInputs.isEmpty
+            && viewModel.acceptedInputsAwaitingTranscript.isEmpty
+          {
             EmptyStateView(
               systemImage: "text.bubble",
               title: "No transcript entries",

@@ -226,6 +226,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The metadata replacement receipt named a different session."
       )
     }
+    guard metadataIsAdmissible(receipt.metadata) else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The metadata replacement receipt violated the metadata contract."
+      )
+    }
     return SignalboxProcessSession(
       summary: SignalboxProcessSessionMetadataSummary(
         sessionID: session.id,
@@ -415,6 +420,28 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     return titleBytes + tagBytes <= SignalboxProcessProtocol.maximumMetadataSummaryUTF8Bytes
   }
 
+  private func metadataIsAdmissible(
+    _ metadata: SignalboxProcessSessionMetadata
+  ) -> Bool {
+    guard metadata.tags.count <= SignalboxProcessProtocol.maximumMetadataTags,
+      metadata.attributes.count <= SignalboxProcessProtocol.maximumMetadataAttributes,
+      tagsHaveUniqueUTF8(metadata.tags),
+      metadata.title.map(metadataStringIsAdmissible) ?? true,
+      metadata.tags.allSatisfy(indexedMetadataStringIsAdmissible),
+      metadata.attributes.keys.allSatisfy(indexedMetadataStringIsAdmissible),
+      metadata.attributes.values.allSatisfy(metadataValueIsAdmissible)
+    else {
+      return false
+    }
+    let titleBytes = metadata.title?.utf8.count ?? 0
+    let tagBytes = metadata.tags.reduce(0) { $0 + $1.utf8.count }
+    let attributeBytes = metadata.attributes.reduce(0) {
+      $0 + $1.key.utf8.count + $1.value.utf8.count
+    }
+    return titleBytes + tagBytes + attributeBytes
+      <= SignalboxProcessProtocol.maximumMetadataUTF8Bytes
+  }
+
   private func metadataStringIsAdmissible(_ value: String) -> Bool {
     !value.isEmpty && !value.unicodeScalars.contains("\0")
   }
@@ -424,10 +451,18 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       && value.utf8.count <= SignalboxProcessProtocol.maximumIndexedMetadataUTF8Bytes
   }
 
+  private func metadataValueIsAdmissible(_ value: String) -> Bool {
+    !value.unicodeScalars.contains("\0")
+  }
+
   private func tagsAreStrictlyIncreasingUTF8(_ tags: [String]) -> Bool {
     zip(tags, tags.dropFirst()).allSatisfy { earlier, later in
       earlier.utf8.lexicographicallyPrecedes(later.utf8)
     }
+  }
+
+  private func tagsHaveUniqueUTF8(_ tags: [String]) -> Bool {
+    Set(tags.map { Data($0.utf8) }).count == tags.count
   }
 
   private func validateMetadataPageCapacity(
@@ -451,6 +486,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       while let frame = try await nextFrame(from: exchange) {
         switch frame.message {
         case .sessionMetadata(let metadata):
+          guard metadataIsAdmissible(metadata.metadata) else {
+            throw SignalboxProcessServiceError.unexpectedMessage(
+              "The metadata read violated the metadata contract."
+            )
+          }
           return metadata
         case .unknown:
           continue

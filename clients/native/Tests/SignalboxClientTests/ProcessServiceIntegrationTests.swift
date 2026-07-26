@@ -143,12 +143,45 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
   func testSideProjectionDoesNotSelectAcceptedInputTextByTurnAlone() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithUserEntry()
-    let trigger = try ProcessProjectionFixture.completedTrigger()
+    let trigger = try ProcessProjectionFixture.refusedEvent()
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
     XCTAssertTrue(projection.records.isEmpty)
     XCTAssertTrue(projection.materializedAcceptedInputIDs.isEmpty)
+  }
+
+  func testSideProjectionRejectsMissingCompletionEvidence() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUserEntry()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
+  func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    _ = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(
+      projection.records.map(\.eventID.rawValue),
+      ProcessProjectionFixture.orderedPresentationIDs
+    )
+    XCTAssertEqual(
+      try ProcessProjectionFixture.messageRoles(in: projection),
+      ProcessProjectionFixture.orderedMessageRoles
+    )
   }
 
   func testProposedToolSideProjectionIncludesProducingAssistantText() throws {
@@ -220,7 +253,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(
       .sideSnapshot(
         snapshot: try ProcessProjectionFixture.snapshotWithUserEntry(),
-        trigger: try ProcessProjectionFixture.completedTrigger()
+        trigger: try ProcessProjectionFixture.refusedEvent()
       )
     )
 
@@ -313,6 +346,31 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.sessions, [archived])
     XCTAssertFalse(viewModel.isLoading)
+  }
+
+  @MainActor
+  func testReplacingListServiceClearsRowsAndInvalidatesOldArchive() async throws {
+    let backingService = makeService()
+    let fixtures = try await backingService.listSessions(includeArchived: true)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: fixtures)
+    let archived = try await backingService.setArchived(true, session: session)
+    let oldService = SuspendedArchiveProcessService(
+      staleSessions: [session],
+      replacement: archived
+    )
+    var currentService: (any SignalboxProcessServiceProtocol)? = oldService
+    let viewModel = ProcessSessionListViewModel { currentService }
+    await viewModel.refresh()
+    let mutation = Task { await viewModel.toggleArchive(session) }
+    await oldService.waitUntilMutationStarted()
+
+    currentService = RejectingProcessService()
+    viewModel.replaceServiceProvider { currentService }
+    await oldService.completeMutation()
+    await mutation.value
+
+    XCTAssertTrue(viewModel.sessions.isEmpty)
+    XCTAssertNil(viewModel.errorMessage)
   }
 
   @MainActor
@@ -573,7 +631,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(
       .sideSnapshot(
         snapshot: try ProcessProjectionFixture.snapshotWithUserEntry(),
-        trigger: try ProcessProjectionFixture.completedTrigger()
+        trigger: try ProcessProjectionFixture.refusedEvent()
       )
     )
     await service.completeSubmission()
@@ -608,6 +666,33 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(.event(try ProcessProjectionFixture.completedEvent()))
 
     XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertEqual(
+      viewModel.acceptedInputsAwaitingTranscript,
+      try ProcessSubmissionFixture.livePendingInput()
+    )
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.completedActivity)
+  }
+
+  @MainActor
+  func testLateReceiptKeepsTerminalInputOutOfPendingState() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = SuspendedSubmissionService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+    let send = Task { await viewModel.send() }
+    await service.waitUntilSubmitStarted()
+
+    viewModel.apply(.event(try ProcessProjectionFixture.submittedTurnCompletedEvent()))
+    await service.completeSubmission()
+    await send.value
+
+    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertEqual(
+      viewModel.acceptedInputsAwaitingTranscript,
+      try ProcessSubmissionFixture.singlePendingInput()
+    )
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.completedActivity)
   }
 
@@ -853,6 +938,44 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
 
     XCTAssertEqual(error, ProcessDriverFixture.mismatchedSubmissionSessionError)
+  }
+
+  func testMetadataReadRejectsDuplicateTagsBeforeReplacement() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: true)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let requester = StaticProcessRequester(
+      frames: [try ProcessDriverFixture.metadataRead(tagsJSON: #"["duplicate","duplicate"]"#)]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError {
+      _ = try await service.setArchived(true, session: session)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.invalidMetadataReadError)
+  }
+
+  func testMetadataReceiptRejectsInvalidAttributeKey() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: true)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let requester = SequencedProcessRequester(
+      pages: [
+        [try ProcessDriverFixture.metadataRead()],
+        [
+          try ProcessDriverFixture.metadataRead(
+            type: "session_metadata_replaced",
+            attributesJSON: #"{"":"value"}"#
+          )
+        ],
+      ]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError {
+      _ = try await service.setArchived(true, session: session)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.invalidMetadataReceiptError)
   }
 
   func testMutationCancellationIsNotRetriedAsAmbiguous() async throws {
@@ -2182,6 +2305,12 @@ private enum ProcessDriverFixture {
   static let mismatchedSubmissionSessionError = SignalboxProcessServiceError.unexpectedMessage(
     "The input-submission receipt named a different session."
   )
+  static let invalidMetadataReadError = SignalboxProcessServiceError.unexpectedMessage(
+    "The metadata read violated the metadata contract."
+  )
+  static let invalidMetadataReceiptError = SignalboxProcessServiceError.unexpectedMessage(
+    "The metadata replacement receipt violated the metadata contract."
+  )
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
@@ -2297,6 +2426,28 @@ private enum ProcessDriverFixture {
 
   static func metadataPageStart() throws -> SignalboxProcessServerFrame {
     try frame(#"{"type":"session_metadata_page_start"}"#)
+  }
+
+  static func metadataRead(
+    type: String = "session_metadata",
+    tagsJSON: String = "[]",
+    attributesJSON: String = "{}"
+  ) throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"\(type)",
+        "session_id":"\(session)",
+        "metadata":{
+          "title":"Fixture metadata session",
+          "tags":\(tagsJSON),
+          "attributes":\(attributesJSON),
+          "archived":false
+        },
+        "last_writer":null
+      }
+      """
+    )
   }
 
   static func metadataSummary(
@@ -2475,6 +2626,9 @@ private enum ProcessProjectionFixture {
   static let proposedAssistantEntry = "99999999-9999-4999-8999-999999999999"
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
   static let proposedToolRequest = "bbbbbbbb-1111-4111-8111-111111111111"
+  static let completedUserEntry = "aaaaaaaa-2222-4222-8222-222222222222"
+  static let completedAssistantEntry = "bbbbbbbb-2222-4222-8222-222222222222"
+  static let completedAssistantText = "Fixture terminal assistant response."
   static let closedToolID = "cccccccc-1111-4111-8111-111111111111"
   static let closedToolName = "closed_fixture_tool"
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
@@ -2510,6 +2664,8 @@ private enum ProcessProjectionFixture {
     message: "Fixture transport diagnostic."
   )
   static let neutralToolCardStatus = SignalboxToolCardStatus.completed
+  static let orderedPresentationIDs = [1, 2]
+  static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
@@ -2656,6 +2812,85 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCompletedTurnEntries() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedUserEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"1",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"3"
         }
         """,
       ]
@@ -2831,11 +3066,21 @@ private enum ProcessProjectionFixture {
   }
 
   static func completedEvent() throws -> SignalboxFollowedSessionEvent {
+    try completedEvent(turnID: ProcessDriverFixture.turn)
+  }
+
+  static func submittedTurnCompletedEvent() throws -> SignalboxFollowedSessionEvent {
+    try completedEvent(turnID: ProcessSubmissionFixture.acceptedTurnID)
+  }
+
+  private static func completedEvent(
+    turnID: String
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
         "type":"turn_completed",
-        "turn_id":"\(ProcessDriverFixture.turn)",
+        "turn_id":"\(turnID)",
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
         "completion_entry_id":"\(ProcessDriverFixture.completionEntry)",
         "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
@@ -2928,6 +3173,21 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureMessage
     }
     return message
+  }
+
+  static func messageRoles(
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> [SignalboxMessageRole] {
+    let messages = projection.records.compactMap { record -> SignalboxProcessMessageEvent? in
+      guard case .processMessage(let message) = record.event else {
+        return nil
+      }
+      return message
+    }
+    guard messages.count == orderedMessageRoles.count else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureMessage
+    }
+    return messages.map(\.role)
   }
 
   static func onlyTool(

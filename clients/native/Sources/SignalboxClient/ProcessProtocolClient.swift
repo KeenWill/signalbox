@@ -95,23 +95,35 @@ public actor SignalboxProcessClient: SignalboxProcessRequesting {
       throw SignalboxProcessClientError.oversizedFrame
     }
     let connection = connectionFactory.makeConnection()
-    do {
-      try await connection.start()
-    } catch {
-      await connection.close()
-      throw SignalboxProcessRequestOpenError.definitelyUnsent(error.localizedDescription)
+    return try await withTaskCancellationHandler {
+      do {
+        try await connection.start()
+      } catch is CancellationError {
+        await connection.close()
+        throw CancellationError()
+      } catch {
+        await connection.close()
+        throw SignalboxProcessRequestOpenError.definitelyUnsent(error.localizedDescription)
+      }
+      do {
+        try await connection.send(encoded)
+      } catch is CancellationError {
+        await connection.close()
+        throw CancellationError()
+      } catch {
+        await connection.close()
+        throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(error.localizedDescription)
+      }
+      return SignalboxPullProcessExchange(
+        connection: connection,
+        requestedVersion: version,
+        requestID: requestID
+      )
+    } onCancel: {
+      Task {
+        await connection.close()
+      }
     }
-    do {
-      try await connection.send(encoded)
-    } catch {
-      await connection.close()
-      throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(error.localizedDescription)
-    }
-    return SignalboxPullProcessExchange(
-      connection: connection,
-      requestedVersion: version,
-      requestID: requestID
-    )
   }
 
   private func claimRequestID() throws -> SignalboxRequestID {
@@ -271,17 +283,21 @@ private final class SignalboxLocalSocketConnection: SignalboxProcessConnection, 
   }
 
   func send(_ data: Data) async throws {
-    try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<Void, Error>) in
-      connection.send(
-        content: data,
-        completion: .contentProcessed { error in
-          if let error {
-            continuation.resume(throwing: error)
-          } else {
-            continuation.resume()
-          }
-        })
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
+        connection.send(
+          content: data,
+          completion: .contentProcessed { error in
+            if let error {
+              continuation.resume(throwing: error)
+            } else {
+              continuation.resume()
+            }
+          })
+      }
+    } onCancel: {
+      connection.cancel()
     }
   }
 

@@ -6,6 +6,7 @@ import Foundation
 
 public enum SignalboxProcessTranscriptProjectionError: LocalizedError, Equatable {
   case localIdentityExhausted
+  case missingTriggerEvidence
   case missingTextContent
   case orphanedToolResult(String)
 
@@ -13,6 +14,8 @@ public enum SignalboxProcessTranscriptProjectionError: LocalizedError, Equatable
     switch self {
     case .localIdentityExhausted:
       return "The native transcript presentation identity space was exhausted."
+    case .missingTriggerEvidence:
+      return "The side transcript snapshot omitted the durable evidence named by its trigger."
     case .missingTextContent:
       return "A text transcript entry ended without its required final content fragment."
     case .orphanedToolResult(let requestID):
@@ -57,7 +60,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private var presentationIDs: [PresentationIdentity: SignalboxEventID] = [:]
-  private var nextPresentationID = 1
   private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
   private var toolContextsByRequestID: [String: ToolContext] = [:]
 
@@ -79,6 +81,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     attributableTo trigger: SignalboxFollowedSessionEvent
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
+    guard candidate.containsRequiredEvidence(in: snapshot, for: trigger.event) else {
+      throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
+    }
     let projection = try candidate.project(
       snapshot,
       selection: .trigger(trigger.event)
@@ -113,12 +118,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           activeActivity = latestActivity
         }
         if case .queued(let acceptedInputID, let content) = turn.state {
-          pendingInputs.append(SignalboxProcessPendingInput(
-            id: acceptedInputID,
-            turnID: turn.turnID,
-            acceptancePosition: turn.acceptancePosition,
-            content: content
-          ))
+          pendingInputs.append(
+            SignalboxProcessPendingInput(
+              id: acceptedInputID,
+              turnID: turn.turnID,
+              acceptancePosition: turn.acceptancePosition,
+              content: content
+            ))
         }
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
           awaitingToolDecisionRequestID = requestID.rawValue
@@ -192,7 +198,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .semantic(
         sourceSessionID: message.sourceSessionID.rawValue,
         entryID: message.entryID.rawValue
-      )
+      ),
+      entryIndex: message.entryIndex
     )
     return SignalboxStoredEvent(
       eventID: eventID,
@@ -231,9 +238,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         turnID: turnID,
         modelCallID: modelCallID
       )
-      return try toolRecord(
+      let eventID = try claimPresentationID(
+        .toolRequest(request),
+        entryIndex: message.entryIndex
+      )
+      return toolRecord(
         event,
-        awaitsDecision: request == awaitingToolDecisionRequestID
+        awaitsDecision: request == awaitingToolDecisionRequestID,
+        eventID: eventID
       )
     case .toolExecutionResult(let requestID, _, let content):
       return try updateTool(
@@ -311,13 +323,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       status: status
     )
     toolsByRequestID[requestID] = updated
-    return try toolRecord(updated, awaitsDecision: false)
+    guard let eventID = presentationIDs[.toolRequest(requestID)] else {
+      throw SignalboxProcessTranscriptProjectionError.orphanedToolResult(requestID)
+    }
+    return toolRecord(updated, awaitsDecision: false, eventID: eventID)
   }
 
   private mutating func toolRecord(
     _ event: SignalboxProcessToolEvent,
-    awaitsDecision: Bool
-  ) throws -> SignalboxStoredEvent {
+    awaitsDecision: Bool,
+    eventID: SignalboxEventID
+  ) -> SignalboxStoredEvent {
     let status = awaitsDecision ? SignalboxProcessToolStatus.awaitingDecision : event.status
     let presented = SignalboxProcessToolEvent(
       toolRequestID: event.toolRequestID,
@@ -327,7 +343,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       status: status
     )
     return SignalboxStoredEvent(
-      eventID: try claimPresentationID(.toolRequest(event.toolRequestID.rawValue)),
+      eventID: eventID,
       event: .processTool(presented)
     )
   }
@@ -341,23 +357,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .semantic(
           sourceSessionID: message.sourceSessionID.rawValue,
           entryID: message.entryID.rawValue
-        )
+        ),
+        entryIndex: message.entryIndex
       ),
       event: event
     )
   }
 
   private mutating func claimPresentationID(
-    _ identity: PresentationIdentity
+    _ identity: PresentationIdentity,
+    entryIndex: SignalboxCanonicalUInt64
   ) throws -> SignalboxEventID {
     if let existing = presentationIDs[identity] {
       return existing
     }
-    guard nextPresentationID < Int.max else {
+    guard entryIndex.rawValue < UInt64(Int.max) else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
-    let claimed = SignalboxEventID(rawValue: nextPresentationID)
-    nextPresentationID += 1
+    let claimed = SignalboxEventID(rawValue: Int(entryIndex.rawValue) + 1)
     presentationIDs[identity] = claimed
     return claimed
   }
@@ -496,6 +513,78 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return false
     }
     return modelCallID.map { context.modelCallID == $0 } ?? true
+  }
+
+  private func containsRequiredEvidence(
+    in snapshot: SignalboxSynchronizationSnapshot,
+    for trigger: SignalboxProcessSessionEvent
+  ) -> Bool {
+    switch trigger {
+    case .toolBatchTransition(let turnID, let modelCallID, let state):
+      switch state {
+      case .proposed:
+        return snapshot.records.contains { record in
+          guard case .entry(let message) = record,
+            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+              message.entry
+          else {
+            return false
+          }
+          return entryTurnID == turnID && entryModelCallID == modelCallID
+        }
+      case .resultsProjected:
+        return snapshot.records.contains { record in
+          guard case .entry(let message) = record else {
+            return false
+          }
+          return toolEntry(message.entry, belongsTo: turnID, modelCallID: modelCallID)
+        }
+      case .recoveryRequired, .unknown:
+        return true
+      }
+    case .turnCompleted(let turnID, _, let completionEntryID, _):
+      return snapshot.records.contains {
+        guard case .entry(let message) = $0,
+          message.entryID == completionEntryID,
+          case .turnCompleted(let entryTurnID) = message.entry
+        else {
+          return false
+        }
+        return entryTurnID == turnID
+      }
+    case .turnFailed(let turnID, let failureEntryID, _):
+      return snapshot.records.contains {
+        guard case .entry(let message) = $0,
+          message.entryID == failureEntryID,
+          case .turnFailed(let entryTurnID) = message.entry
+        else {
+          return false
+        }
+        return entryTurnID == turnID
+      }
+    case .turnCancelled(let turnID, let cancellationEntryID, _):
+      return snapshot.records.contains {
+        guard case .entry(let message) = $0,
+          message.entryID == cancellationEntryID,
+          case .turnCancelled(let entryTurnID) = message.entry
+        else {
+          return false
+        }
+        return entryTurnID == turnID
+      }
+    case .turnToolReconciliationRequired(_, let toolAttemptID, _):
+      return snapshot.records.contains {
+        guard case .entry(let message) = $0,
+          case .toolExecutionResult(_, let entryAttemptID, _) = message.entry
+        else {
+          return false
+        }
+        return entryAttemptID == toolAttemptID
+      }
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
+      .turnReconciliationRequired, .unknown:
+      return true
+    }
   }
 
   private func importedRole(
