@@ -221,7 +221,12 @@ Representation rules, all enforced in the schema:
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
-  failure-entry correlation).
+  failure-entry correlation). Every invalid-interrupt rejection additionally
+  correlates the active phase its receipt claims: the stopping rejections
+  through the prior applied interrupt's stopped attempt, and the parked-approval
+  rejection directly against its named turn's recorded `awaiting_tool_approval`
+  wait, so a receipt naming a running or terminal turn cannot commit and
+  therefore never replays as authoritative.
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
