@@ -128,10 +128,14 @@ impl RunnerProtocolStore {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO runner_enrollment_audit
-                (enrollment_id, revision, state_kind)
-             VALUES ($1, 1, 'active')",
+                (enrollment_id, revision, runner_id,
+                 authentication_reference_id, allowed_class_count, state_kind)
+             VALUES ($1, 1, $2, $3, $4, 'active')",
         )
         .bind(enrollment.enrollment().into_uuid())
+        .bind(enrollment.runner().into_uuid())
+        .bind(enrollment.authentication().into_uuid())
+        .bind(count_decimal(classes.len())?)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -151,6 +155,15 @@ impl RunnerProtocolStore {
                 "INSERT INTO runner_enrollment_allowed_class
                     (enrollment_id, capability_class)
                  VALUES ($1, $2)",
+            )
+            .bind(enrollment.enrollment().into_uuid())
+            .bind(class.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO runner_enrollment_audit_allowed_class
+                    (enrollment_id, revision, capability_class)
+                 VALUES ($1, 1, $2)",
             )
             .bind(enrollment.enrollment().into_uuid())
             .bind(class.as_str())
@@ -188,15 +201,33 @@ impl RunnerProtocolStore {
         let current = load_enrollment_in(transaction.as_mut(), enrollment)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        let runner = current.runner();
+        let authentication = current.authentication();
+        let classes: Vec<_> = current.allowed_classes().cloned().collect();
         let revoked = current.revoke().map_err(RunnerProtocolStoreError::Domain)?;
         sqlx::query(
             "INSERT INTO runner_enrollment_audit
-                (enrollment_id, revision, state_kind)
-             VALUES ($1, 2, 'revoked')",
+                (enrollment_id, revision, runner_id,
+                 authentication_reference_id, allowed_class_count, state_kind)
+             VALUES ($1, 2, $2, $3, $4, 'revoked')",
         )
         .bind(enrollment.into_uuid())
+        .bind(runner.into_uuid())
+        .bind(authentication.into_uuid())
+        .bind(count_decimal(classes.len())?)
         .execute(&mut *transaction)
         .await?;
+        for class in classes {
+            sqlx::query(
+                "INSERT INTO runner_enrollment_audit_allowed_class
+                    (enrollment_id, revision, capability_class)
+                 VALUES ($1, 2, $2)",
+            )
+            .bind(enrollment.into_uuid())
+            .bind(class.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        }
         sqlx::query(
             "UPDATE runner_enrollment
                 SET revision = 2, state_kind = 'revoked'
@@ -642,6 +673,9 @@ async fn load_enrollment_in(
         "SELECT enrollment.enrollment_id, enrollment.runner_id,
                 enrollment.authentication_reference_id,
                 enrollment.allowed_class_count, enrollment.state_kind,
+                audit.runner_id AS audit_runner_id,
+                audit.authentication_reference_id AS audit_authentication_reference_id,
+                audit.allowed_class_count AS audit_allowed_class_count,
                 audit.state_kind AS audit_state_kind
            FROM runner_enrollment AS enrollment
            LEFT JOIN runner_enrollment_audit AS audit
@@ -664,10 +698,29 @@ async fn load_enrollment_in(
     .bind(enrollment.into_uuid())
     .fetch_all(&mut *connection)
     .await?;
+    let audit_class_rows = sqlx::query(
+        "SELECT audited.capability_class
+           FROM runner_enrollment AS enrollment
+           JOIN runner_enrollment_audit_allowed_class AS audited
+             ON audited.enrollment_id = enrollment.enrollment_id
+            AND audited.revision = enrollment.revision
+          WHERE enrollment.enrollment_id = $1
+          ORDER BY audited.capability_class",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
     if Decimal::from(class_rows.len()) != row.get::<Decimal, _>("allowed_class_count") {
         return Err(RunnerProtocolCorruption::IncompleteInventory.into());
     }
+    let audit_count = row
+        .try_get::<Option<Decimal>, _>("audit_allowed_class_count")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?;
+    if Decimal::from(audit_class_rows.len()) != audit_count {
+        return Err(RunnerProtocolCorruption::IncompleteInventory.into());
+    }
     let classes = decode_classes(&class_rows)?;
+    let audit_classes = decode_classes(&audit_class_rows)?;
     let state = decode_enrollment_state(row.get("state_kind"))?;
     let audit_state = row
         .try_get::<Option<String>, _>("audit_state_kind")?
@@ -677,11 +730,17 @@ async fn load_enrollment_in(
         enrollment,
         recorded_enrollment: runner_enrollment_id(row.get("enrollment_id")),
         runner: runner_id(row.get("runner_id")),
-        recorded_runner: runner_id(row.get("runner_id")),
+        recorded_runner: runner_id(
+            row.try_get::<Option<Uuid>, _>("audit_runner_id")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?,
+        ),
         authentication: runner_authentication_id(row.get("authentication_reference_id")),
-        recorded_authentication: runner_authentication_id(row.get("authentication_reference_id")),
-        allowed_classes: classes.clone(),
-        recorded_allowed_classes: classes,
+        recorded_authentication: runner_authentication_id(
+            row.try_get::<Option<Uuid>, _>("audit_authentication_reference_id")?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalAudit)?,
+        ),
+        allowed_classes: classes,
+        recorded_allowed_classes: audit_classes,
         state,
         recorded_state: audit_state,
     })
@@ -752,10 +811,7 @@ async fn insert_registration(
         .await?;
     }
     for profile in profiles {
-        let approvals: Vec<_> = profile
-            .approvals()
-            .filter(|(tool, _)| registration.tool(tool).is_some())
-            .collect();
+        let approvals: Vec<_> = profile.approvals().collect();
         sqlx::query(
             "INSERT INTO runner_registration_profile
                 (enrollment_id, registration_revision,
@@ -1075,6 +1131,67 @@ async fn insert_grant_if_new(
     .fetch_one(&mut **transaction)
     .await?;
     if exists {
+        let row = sqlx::query(
+            "SELECT grant_record.*,
+                    EXISTS (
+                        SELECT 1
+                          FROM runner_credential_grant_audit AS audit
+                         WHERE audit.session_id = grant_record.session_id
+                           AND audit.runner_id = grant_record.runner_id
+                           AND audit.grant_revision =
+                                grant_record.grant_revision
+                           AND audit.event_kind = 'revoked'
+                    ) AS revoked
+               FROM runner_credential_grant AS grant_record
+              WHERE grant_record.session_id = $1
+                AND grant_record.runner_id = $2
+                AND grant_record.grant_revision = $3",
+        )
+        .bind(grant.session().into_uuid())
+        .bind(grant.runner().into_uuid())
+        .bind(Decimal::from(grant.revision().get()))
+        .fetch_one(&mut **transaction)
+        .await?;
+        let tool_rows = sqlx::query(
+            "SELECT tool_name, approval_kind
+               FROM runner_credential_grant_tool
+              WHERE session_id = $1
+                AND runner_id = $2
+                AND grant_revision = $3
+              ORDER BY tool_name",
+        )
+        .bind(grant.session().into_uuid())
+        .bind(grant.runner().into_uuid())
+        .bind(Decimal::from(grant.revision().get()))
+        .fetch_all(&mut **transaction)
+        .await?;
+        require_count(&row, "tool_count", tool_rows.len())?;
+        let mut approvals = BTreeMap::new();
+        for tool_row in tool_rows {
+            approvals.insert(
+                tool_name(tool_row.get("tool_name"))?,
+                decode_approval(tool_row.get("approval_kind"))?,
+            );
+        }
+        let expected_approvals: BTreeMap<_, _> = grant
+            .approvals()
+            .map(|(tool, approval)| (tool.clone(), approval))
+            .collect();
+        let stored_state = if row.get::<bool, _>("revoked") {
+            CredentialProfileGrantState::Revoked
+        } else {
+            CredentialProfileGrantState::Active
+        };
+        if row.get::<String, _>("credential_profile_name") != grant.profile().as_str()
+            || runner_enrollment_id(row.get("registration_enrollment_id"))
+                != registration.registration.enrollment()
+            || decode_registration_revision(row.get("registration_revision"))?
+                != registration.revision
+            || approvals != expected_approvals
+            || stored_state != grant.state()
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         return Ok(());
     }
     let tools: Vec<_> = grant.approvals().collect();

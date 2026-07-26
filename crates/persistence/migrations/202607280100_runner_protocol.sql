@@ -20,12 +20,26 @@ CREATE INDEX tool_attempt_request_id_idx
 CREATE TABLE runner_enrollment_audit (
     enrollment_id uuid NOT NULL,
     revision numeric(20, 0) NOT NULL,
+    runner_id uuid NOT NULL,
+    authentication_reference_id uuid NOT NULL,
+    allowed_class_count numeric(20, 0) NOT NULL,
     state_kind text NOT NULL,
 
     CONSTRAINT runner_enrollment_audit_pk
         PRIMARY KEY (enrollment_id, revision),
     CONSTRAINT runner_enrollment_audit_revision_positive_u64
-        CHECK (revision BETWEEN 1 AND 18446744073709551615),
+        CHECK (
+            revision BETWEEN 1 AND 18446744073709551615
+            AND allowed_class_count BETWEEN 0 AND 18446744073709551615
+        ),
+    CONSTRAINT runner_enrollment_audit_identity_key
+        UNIQUE (
+            enrollment_id,
+            revision,
+            runner_id,
+            authentication_reference_id,
+            allowed_class_count
+        ),
     CONSTRAINT runner_enrollment_audit_state_closed
         CHECK (state_kind IN ('active', 'revoked')),
     CONSTRAINT runner_enrollment_audit_state_shape
@@ -59,6 +73,33 @@ CREATE TABLE runner_enrollment (
             OR (revision = 2 AND state_kind = 'revoked')
         ),
     CONSTRAINT runner_enrollment_audit_fk
+        FOREIGN KEY (
+            enrollment_id,
+            revision,
+            runner_id,
+            authentication_reference_id,
+            allowed_class_count
+        )
+        REFERENCES runner_enrollment_audit (
+            enrollment_id,
+            revision,
+            runner_id,
+            authentication_reference_id,
+            allowed_class_count
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE runner_enrollment_audit_allowed_class (
+    enrollment_id uuid NOT NULL,
+    revision numeric(20, 0) NOT NULL,
+    capability_class runner_catalog_name NOT NULL,
+
+    CONSTRAINT runner_enrollment_audit_allowed_class_pk
+        PRIMARY KEY (enrollment_id, revision, capability_class),
+    CONSTRAINT runner_enrollment_audit_allowed_class_audit_fk
         FOREIGN KEY (enrollment_id, revision)
         REFERENCES runner_enrollment_audit (enrollment_id, revision)
         ON UPDATE RESTRICT
@@ -134,6 +175,11 @@ BEFORE UPDATE OR DELETE ON runner_enrollment_allowed_class
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_enrollment_audit_allowed_class_is_append_only
+BEFORE UPDATE OR DELETE ON runner_enrollment_audit_allowed_class
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE FUNCTION require_runner_enrollment_complete()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -143,6 +189,8 @@ DECLARE
         COALESCE(NEW.enrollment_id, OLD.enrollment_id);
     declared_count numeric;
     actual_count bigint;
+    audit_count bigint;
+    mismatched_classes bigint;
 BEGIN
     SELECT allowed_class_count INTO declared_count
       FROM runner_enrollment
@@ -153,7 +201,44 @@ BEGIN
     SELECT count(*) INTO actual_count
       FROM runner_enrollment_allowed_class
      WHERE enrollment_id = checked_enrollment;
-    IF declared_count <> actual_count THEN
+    SELECT count(*) INTO audit_count
+      FROM runner_enrollment AS enrollment
+      JOIN runner_enrollment_audit_allowed_class AS audited
+        ON audited.enrollment_id = enrollment.enrollment_id
+       AND audited.revision = enrollment.revision
+     WHERE enrollment.enrollment_id = checked_enrollment;
+    SELECT count(*) INTO mismatched_classes
+      FROM (
+            (
+                SELECT capability_class
+                  FROM runner_enrollment_allowed_class
+                 WHERE enrollment_id = checked_enrollment
+                EXCEPT
+                SELECT audited.capability_class
+                  FROM runner_enrollment AS enrollment
+                  JOIN runner_enrollment_audit_allowed_class AS audited
+                    ON audited.enrollment_id = enrollment.enrollment_id
+                   AND audited.revision = enrollment.revision
+                 WHERE enrollment.enrollment_id = checked_enrollment
+            )
+            UNION ALL
+            (
+                SELECT audited.capability_class
+                  FROM runner_enrollment AS enrollment
+                  JOIN runner_enrollment_audit_allowed_class AS audited
+                    ON audited.enrollment_id = enrollment.enrollment_id
+                   AND audited.revision = enrollment.revision
+                 WHERE enrollment.enrollment_id = checked_enrollment
+                EXCEPT
+                SELECT capability_class
+                  FROM runner_enrollment_allowed_class
+                 WHERE enrollment_id = checked_enrollment
+            )
+      ) AS mismatch;
+    IF declared_count <> actual_count
+       OR declared_count <> audit_count
+       OR mismatched_classes <> 0
+    THEN
         RAISE EXCEPTION 'runner enrollment class inventory is incomplete'
             USING ERRCODE = '23514';
     END IF;
@@ -169,6 +254,12 @@ EXECUTE FUNCTION require_runner_enrollment_complete();
 
 CREATE CONSTRAINT TRIGGER runner_enrollment_class_rechecks_inventory
 AFTER INSERT OR UPDATE OR DELETE ON runner_enrollment_allowed_class
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_enrollment_complete();
+
+CREATE CONSTRAINT TRIGGER runner_enrollment_audit_class_rechecks_inventory
+AFTER INSERT OR UPDATE OR DELETE ON runner_enrollment_audit_allowed_class
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_enrollment_complete();
@@ -393,20 +484,7 @@ CREATE TABLE runner_registration_profile_approval (
         )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED,
-    CONSTRAINT runner_registration_profile_approval_tool_fk
-        FOREIGN KEY (
-            enrollment_id,
-            registration_revision,
-            tool_name
-        )
-        REFERENCES runner_registration_tool (
-            enrollment_id,
-            registration_revision,
-            tool_name
-        )
-        ON UPDATE RESTRICT
-        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE runner_registration_workspace (
@@ -1344,6 +1422,18 @@ BEGIN
     IF grant_row.tool_count <> actual_tools
        OR invalid_tools <> 0
        OR initial_audit <> 1
+       OR (
+            grant_row.prior_grant_revision IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM runner_credential_grant_audit AS prior_audit
+                 WHERE prior_audit.session_id = grant_row.session_id
+                   AND prior_audit.runner_id = grant_row.runner_id
+                   AND prior_audit.grant_revision =
+                        grant_row.prior_grant_revision
+                   AND prior_audit.event_kind = 'revoked'
+            )
+       )
        OR NOT EXISTS (
             SELECT 1
               FROM runner_session_placement_record AS placement
@@ -1589,8 +1679,12 @@ DECLARE
     enrollment_state text;
     attempted_tool text;
     attempted_effect text;
+    attempted_state text;
+    attempted_request uuid;
+    registered_effect text;
     prior runner_lease_generation%ROWTYPE;
     prior_state text;
+    prior_request uuid;
 BEGIN
     SELECT record.* INTO placement
       FROM runner_current_session_placement AS current_placement
@@ -1601,22 +1695,33 @@ BEGIN
     SELECT state_kind INTO enrollment_state
       FROM runner_enrollment
      WHERE enrollment_id = NEW.registration_enrollment_id;
-    SELECT request.tool_name, attempt.effect_class
-      INTO attempted_tool, attempted_effect
+    SELECT request.tool_name, attempt.effect_class, attempt.state_kind,
+           attempt.request_id
+      INTO attempted_tool, attempted_effect, attempted_state, attempted_request
       FROM tool_attempt AS attempt
       JOIN tool_request AS request
         ON request.request_id = attempt.request_id
      WHERE attempt.attempt_id = NEW.attempt_id
        AND attempt.session_id = NEW.session_id;
-    IF NOT FOUND
-       OR placement.state_kind <> 'pinned'
-       OR placement.event_ordinal <> NEW.placement_event_ordinal
-       OR placement.pinned_runner_id <> NEW.runner_id
-       OR placement.registration_enrollment_id <>
+    SELECT effect_class INTO registered_effect
+      FROM runner_registration_tool
+     WHERE enrollment_id = NEW.registration_enrollment_id
+       AND registration_revision = NEW.registration_revision
+       AND tool_name = NEW.tool_name;
+    IF registered_effect IS NULL
+       OR attempted_request IS NULL
+       OR placement.state_kind IS DISTINCT FROM 'pinned'
+       OR placement.event_ordinal IS DISTINCT FROM
+            NEW.placement_event_ordinal
+       OR placement.pinned_runner_id IS DISTINCT FROM NEW.runner_id
+       OR placement.registration_enrollment_id IS DISTINCT FROM
             NEW.registration_enrollment_id
-       OR placement.registration_revision <> NEW.registration_revision
-       OR enrollment_state <> 'active'
-       OR attempted_tool <> NEW.tool_name
+       OR placement.registration_revision IS DISTINCT FROM
+            NEW.registration_revision
+       OR enrollment_state IS DISTINCT FROM 'active'
+       OR attempted_tool IS DISTINCT FROM NEW.tool_name
+       OR attempted_state IS DISTINCT FROM 'in_flight'
+       OR registered_effect IS DISTINCT FROM NEW.effect_class
        OR (
             NEW.effect_class = 'pure'
             AND attempted_effect <> 'effect_free'
@@ -1627,6 +1732,24 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'runner lease offer is not canonically authorized'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS previous
+          JOIN runner_current_lease_event AS current_event
+            ON current_event.lease_id = previous.lease_id
+           AND current_event.generation = previous.generation
+          JOIN runner_lease_event AS event
+            ON event.lease_id = current_event.lease_id
+           AND event.generation = current_event.generation
+           AND event.event_ordinal = current_event.event_ordinal
+         WHERE previous.lease_id = NEW.lease_id
+           AND previous.generation < NEW.generation
+           AND previous.attempt_id = NEW.attempt_id
+           AND event.state_kind IN ('lost_claimed', 'completed')
+    ) THEN
+        RAISE EXCEPTION 'claimed physical attempt cannot be reused'
             USING ERRCODE = '23514';
     END IF;
     IF EXISTS (
@@ -1665,7 +1788,11 @@ BEGIN
            AND event.event_ordinal = current_event.event_ordinal
          WHERE current_event.lease_id = NEW.lease_id
            AND current_event.generation = NEW.predecessor_generation;
+        SELECT attempt.request_id INTO prior_request
+          FROM tool_attempt AS attempt
+         WHERE attempt.attempt_id = prior.attempt_id;
         IF NOT FOUND
+           OR prior_state IS NULL
            OR prior_state NOT IN ('lost_unclaimed', 'lost_claimed')
            OR ROW(
                 prior.session_id,
@@ -1693,6 +1820,7 @@ BEGIN
                 AND (
                     prior.effect_class = 'side_effecting'
                     OR prior.attempt_id = NEW.attempt_id
+                    OR prior_request IS DISTINCT FROM attempted_request
                 )
            )
         THEN

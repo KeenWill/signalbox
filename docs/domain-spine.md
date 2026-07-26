@@ -5359,6 +5359,10 @@ impl ValidatedRunnerRegistration {
     ) -> Option<&CredentialProfilePolicy>;
     pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool;
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName>;
+    pub fn reconstitute(
+        enrollment: &RunnerEnrollment,
+        input: ValidatedRunnerRegistrationReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError>;
     // Additional accessors expose exact class, tool, profile, and workspace
     // inventories; reconstitution requires canonical enrollment.
 }
@@ -5496,7 +5500,7 @@ impl SessionRunnerPlacement {
         tools: impl IntoIterator<Item = ToolName>,
     ) -> Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
     pub fn reconstitute(
-        self,
+        input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError>;

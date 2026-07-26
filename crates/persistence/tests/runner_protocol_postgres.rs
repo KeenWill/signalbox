@@ -164,14 +164,26 @@ fn catalog() -> RunnerCatalog {
             selector: RunnerSelector::CapabilityClass(class()),
         },
     );
+    let catalog_only = RunnerToolDeclaration::new(
+        tool("catalog_only"),
+        model_definition(),
+        ToolPermissionDefault::Confirm,
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::RunnerOnly {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
     let policy = CredentialProfilePolicy::try_new(
         profile(),
-        [(tool("inspect"), CredentialToolApproval::Automatic)],
+        [
+            (tool("inspect"), CredentialToolApproval::Automatic),
+            (tool("catalog_only"), CredentialToolApproval::SessionPolicy),
+        ],
     )
     .expect("the fixture profile references its declared tool");
     RunnerCatalog::try_new(
         [class()],
-        [inspect],
+        [inspect, catalog_only],
         [policy],
         [WorkspaceCapability::WorktreePerSession],
     )
@@ -235,7 +247,7 @@ async fn insert_physical_attempt(
             (attempt_id, request_id, session_id, turn_id,
              issuing_turn_attempt_id, effect_class, dispatch_generation,
              state_kind)
-         VALUES ($1, $2, $3, $4, $5, 'effect_free', 1, 'prepared')",
+         VALUES ($1, $2, $3, $4, $5, 'effect_free', 1, 'in_flight')",
     )
     .bind(uuid(facts.attempt))
     .bind(uuid(facts.request))
@@ -285,6 +297,14 @@ fn assert_check_violation(error: sqlx::Error) {
     );
 }
 
+#[track_caller]
+fn assert_store_check_violation(error: RunnerProtocolStoreError) {
+    let RunnerProtocolStoreError::Database(error) = error else {
+        panic!("PostgreSQL must reject the invalid durable evidence")
+    };
+    assert_check_violation(error);
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
@@ -309,9 +329,17 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         .load_registration(expected_enrollment.enrollment(), stored.revision())
         .await?
         .expect("the validated registration is present");
+    store
+        .revoke_enrollment(expected_enrollment.enrollment())
+        .await?;
+    let historical_registration = store
+        .load_registration(expected_enrollment.enrollment(), stored.revision())
+        .await?
+        .expect("revocation preserves historical validated registration");
 
     assert_eq!(loaded_enrollment, expected_enrollment);
     assert_eq!(loaded_registration, stored);
+    assert_eq!(historical_registration, stored);
     drop(pool);
     Ok(())
 }
@@ -400,6 +428,46 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
 
     assert_eq!(loaded.placement(), &pin.placement);
     assert_eq!(loaded.grant(), pin.grant.as_ref());
+    let lost = pin
+        .placement
+        .clone()
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    store
+        .store_placement(&lost, Some(&registration), pin.grant.as_ref())
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the credential-bearing pin has its grant");
+    let revoked = store
+        .revoke_grant(
+            pin.placement.session(),
+            original_grant.runner(),
+            original_grant.revision(),
+        )
+        .await?
+        .expect("the active grant revokes exactly once");
+    let replacement = lost
+        .replace_lost_runner(
+            pin.placement.request().clone(),
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+                .expect("the replacement directory is valid"),
+            None,
+            Some(revoked),
+        )
+        .expect("the domain records a successor grant revision");
+    let revoked_predecessor = store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            replacement.grant.as_ref(),
+        )
+        .await
+        .expect_err("a revoked predecessor cannot authorize its replacement");
+
+    assert_store_check_violation(revoked_predecessor);
     drop(pool);
     Ok(())
 }
@@ -550,6 +618,187 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     .expect_err("claimed retry cannot reuse its physical attempt identity");
 
     assert_check_violation(error);
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET effect_class = 'external_effect'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let effect_mismatch = sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         SELECT $2, 1, $3, session_id, runner_id,
+                tool_name, 'idempotent', placement_event_ordinal,
+                registration_enrollment_id, registration_revision,
+                credential_profile_name, credential_grant_revision,
+                credential_approval_kind, NULL
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(uuid(LEASE))
+    .bind(uuid(LEASE + 1))
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await
+    .expect_err("lease effect must equal the validated registration declaration");
+
+    assert_check_violation(effect_mismatch);
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET effect_class = 'effect_free',
+                state_kind = 'prepared'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let non_in_flight = sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         SELECT $2, 1, $3, session_id, runner_id,
+                tool_name, effect_class, placement_event_ordinal,
+                registration_enrollment_id, registration_revision,
+                credential_profile_name, credential_grant_revision,
+                credential_approval_kind, NULL
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(uuid(LEASE))
+    .bind(uuid(LEASE + 2))
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await
+    .expect_err("only an in-flight physical attempt may receive a lease");
+
+    assert_check_violation(non_in_flight);
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'in_flight'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         SELECT lease_id, 2, $2, session_id, runner_id,
+                tool_name, effect_class, placement_event_ordinal,
+                registration_enrollment_id, registration_revision,
+                credential_profile_name, credential_grant_revision,
+                credential_approval_kind, 1
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 1",
+    )
+    .bind(uuid(LEASE))
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 2, 1, 'offered')",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 2, 2, 'claimed')",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, 2, 3, 'lost_claimed')",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_lease_event
+            (lease_id, generation, event_ordinal)
+         VALUES ($1, 2, 3)",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await?;
+    terminalize_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'in_flight',
+                terminal_disposition_kind = NULL,
+                error_kind = NULL
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let nonadjacent_reuse = sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         SELECT lease_id, 3, $2, session_id, runner_id,
+                tool_name, effect_class, placement_event_ordinal,
+                registration_enrollment_id, registration_revision,
+                credential_profile_name, credential_grant_revision,
+                credential_approval_kind, 2
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = 2",
+    )
+    .bind(uuid(LEASE))
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await
+    .expect_err("no later generation may reuse any previously claimed attempt");
+
+    assert_check_violation(nonadjacent_reuse);
     drop(pool);
     Ok(())
 }
@@ -590,6 +839,39 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<
         .load_registration(expected_enrollment.enrollment(), stored.revision())
         .await
         .expect_err("cross-wired canonical identity fails closed");
+
+    assert!(matches!(error, RunnerProtocolStoreError::Domain(_)));
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv001_reconstitution_rejects_cross_wired_enrollment() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    sqlx::query("ALTER TABLE runner_enrollment DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_enrollment
+            SET runner_id = $2
+          WHERE enrollment_id = $1",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(uuid(FOREIGN_RUNNER))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_enrollment ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let error = store
+        .load_enrollment(expected_enrollment.enrollment())
+        .await
+        .expect_err("cross-wired enrollment identity fails independent audit evidence");
 
     assert!(matches!(error, RunnerProtocolStoreError::Domain(_)));
     drop(pool);

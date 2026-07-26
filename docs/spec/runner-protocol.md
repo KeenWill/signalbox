@@ -38,12 +38,14 @@ validated registration unable to authorize a later lease. A lease offer rechecks
 the active enrollment and its exact enrollment, runner, and
 authentication-reference correlations; a lease already offered is unaffected.
 
-The relational projection stores the typed enrollment, its exact allowed-class
-inventory, and append-only active-or-revoked audit evidence. Runner identity and
-authentication-reference identity each remain one-to-one with the logical
-enrollment. Registration insertion locks and reads that canonical enrollment;
-revocation and re-registration therefore cannot race to admit availability under
-revoked authority.
+The relational projection stores the typed enrollment and append-only
+active-or-revoked audit evidence. The current row and its current audit revision
+independently record the runner, authentication reference, allowed-class count,
+and exact allowed-class inventory; reconstitution requires those records to
+agree. Runner identity and authentication-reference identity each remain
+one-to-one with the logical enrollment. Registration insertion locks and reads
+that canonical enrollment; revocation and re-registration therefore cannot race
+to admit availability under revoked authority.
 
 A registration carries availability claims only:
 
@@ -130,7 +132,8 @@ surface nor replace confirmation with automatic approval (INV-042).
 
 Every successful advertisement is retained as one append-only validation
 revision: exact advertised classes, tool declarations and selectors,
-credential-profile names and applicable pair policies, and workspace
+credential-profile names and their complete daemon policy snapshots (including
+pairs for catalog tools not advertised by that runner), and workspace
 capabilities. Deferred inventory checks reject partial revisions at commit.
 Loads join the canonical enrollment and every normalized satellite, then invoke
 domain reconstitution; a missing or cross-wired enrollment, selector, policy

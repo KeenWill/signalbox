@@ -676,11 +676,41 @@ impl ValidatedRunnerRegistration {
             input.profiles.iter().map(|profile| profile.name.clone()),
             input.workspaces.clone(),
         );
-        let catalog =
-            RunnerCatalog::try_new(input.classes, input.tools, input.profiles, input.workspaces)?;
-        enrollment
+        let available_tools: BTreeSet<_> =
+            input.tools.iter().map(|tool| tool.name.clone()).collect();
+        let validation_profiles = input
+            .profiles
+            .iter()
+            .map(|profile| {
+                CredentialProfilePolicy::try_new(
+                    profile.name.clone(),
+                    profile
+                        .approvals()
+                        .filter(|(tool, _)| available_tools.contains(tool))
+                        .map(|(tool, approval)| (tool.clone(), approval)),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let profiles = input
+            .profiles
+            .iter()
+            .map(|profile| (profile.name.clone(), profile.clone()))
+            .collect();
+        let catalog = RunnerCatalog::try_new(
+            input.classes,
+            input.tools,
+            validation_profiles,
+            input.workspaces,
+        )?;
+        let historical_authority = RunnerEnrollment {
+            state: RunnerEnrollmentState::Active,
+            ..enrollment.clone()
+        };
+        let mut registration = historical_authority
             .register(advertisement, &catalog)
-            .map_err(|_| RunnerDomainError::CorruptStoredFacts)
+            .map_err(|_| RunnerDomainError::CorruptStoredFacts)?;
+        registration.profiles = profiles;
+        Ok(registration)
     }
 }
 
