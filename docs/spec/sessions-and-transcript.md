@@ -680,7 +680,7 @@ open edges of [model-call-execution](model-call-execution.md).
   backfill that design relies on still exists.
 - `CreateSession` actor attribution remains implicit pending an explicit owner
   amendment choice.
-- `Recovery`, `Model`, and `Tool` actor variants have no constructing boundary;
+- `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
 - The 1 MiB content bound is a provisional owner floor; the resource-governance
   limit question stays open, and non-text content kinds remain unconstructible

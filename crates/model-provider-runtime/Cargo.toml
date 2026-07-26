@@ -12,8 +12,11 @@ signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
 serde_json = { version = "1.0.140", features = ["raw_value"] }
+tracing = { version = "0.1.41", default-features = false }
 
 [dev-dependencies]
+expect-test = "1.5.1"
+signalbox-expect-table = { path = "../expect-table" }
 uuid = { version = "1.24.0", default-features = false }
 
 [lints]

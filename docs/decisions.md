@@ -35,6 +35,57 @@ together. Removing the comparison would weaken INV-012.
 `202607280202_metadata_command_issuer.sql`, and metadata receipt loading and
 PostgreSQL proofs.
 
+## 2026-07-26 — Normalize an alias to its dated snapshot and keep substitution distinct
+
+**Context.** A live shakedown against PostgreSQL and a real provider
+fail-stopped the daemon. The deployment configured a model by its undated alias;
+the provider's response echoed the canonical dated identity of that same family.
+The runtime bridge classified every reported-versus-configured difference as one
+unrepresentable mismatch, failed the adapter stage closed after the physical
+call had already committed, and left the session permanently wedged. The same
+comparison also has to survive a genuinely different case: the newest models can
+decline a request and be served by another model entirely, which the provider
+signals distinctly with a `fallback` content block and a fallback iteration
+entry, not merely a different model string.
+
+**Decision.** The two cases are separated. A reported identity equal to the
+configured spelling, or equal to it followed by `-` and a dated snapshot
+qualifier (`YYYYMMDD` or `YYYY-MM-DD`), is the same logical target made
+concrete: classification proceeds and the concrete identity is recorded as
+sanitized evidence of what served. Any other reported identity is a substitution
+— a separate, recorded outcome that still fails closed, because the durable
+provenance row it would have to write does not exist. The relation is derived
+from the configured target's own family, so a new model needs no code change,
+and a full date shape is required so a version extension of the same family name
+is not read as a snapshot. The Anthropic adapter additionally recognizes the
+`fallback` block, reports the continuing model, and refuses the response as
+completion material. Separately, every classified outcome and fail-closed defect
+now carries a stable sanitized cause code beside the operator failure class;
+definitive provider errors carry the runtime's own `ProviderErrorKind` verbatim.
+
+**Rejected alternatives.** Accepting any reported identity normalizes a genuine
+substitution into "the configured target was served" and destroys the evidence
+that matters most. Enumerating dated identities in configuration defeats undated
+aliases and needs a change per model release. Matching any trailing segment
+after the configured spelling would read `claude-opus-4-5` as a snapshot of
+`claude-opus-4`. Emitting diagnostics from the adapter crates would break both
+their single-dependency manifest rule and this substrate's no-logging law, so
+the bridge — which already holds every typed fact — emits them instead.
+
+The fallback marker crosses the runtime boundary only as the reported identity
+it names; the substitution classification is carried by that identity, and a
+marker naming the configured target itself remains ambiguity rather than
+substitution. Carrying the marker as typed evidence in its own right would add a
+provider-neutral vocabulary variant both adapters must construct and redact, and
+is routed through the still-open provider provenance schema.
+
+**Affects.** `crates/model-provider-runtime`, the Anthropic adapter's response
+and stream decoders, the provider-target identity and operator-diagnostics laws
+in [model-call-execution](spec/model-call-execution.md), the adapter contract in
+[runtime-substrate](spec/runtime-substrate.md), and the closed
+model-identifier-normalization half of the model fallback and provenance
+question.
+
 ## 2026-07-26 — Add sccache as the devenv shared compiler cache
 
 **Context.** Every checkout and worktree cold-builds the full dependency graph,
