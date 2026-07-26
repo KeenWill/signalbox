@@ -245,7 +245,14 @@ RUST_TEST_DECLARATION = re.compile(
     r"|^[ \t]*(?:\n|$)"
     r")+)"
     r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
-    r"(?:async[ \t]+)?fn[ \t]+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    r"(?:(?:const|async|unsafe)[ \t]+)*"
+    r'(?:extern(?:[ \t]+"[^"\n]*")?[ \t]+)?'
+    r"fn[ \t]+(?P<name>(?:r#)?[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+RUST_NON_DOC_COMMENT = re.compile(
+    r"^[ \t]*//(?!/)[^\n]*(?:\n|$)"
+    r"|^[ \t]*/\*(?!\*)(?:[^*]|\*(?!/))*\*/[ \t]*(?:\n|$)",
     re.MULTILINE,
 )
 RUST_DOC_COMMENT = re.compile(
@@ -1350,11 +1357,16 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
     """Return distinct INV tags and declaration lines from Rust tests."""
     found: dict[str, int] = {}
     for declaration in RUST_TEST_DECLARATION.finditer(text):
-        prefix = declaration.group("prefix")
-        if RUST_TEST_ATTRIBUTE.search(prefix) is None:
+        raw_prefix = declaration.group("prefix")
+        prefix_buffer = list(raw_prefix)
+        for comment in RUST_NON_DOC_COMMENT.finditer(raw_prefix):
+            mask_range(prefix_buffer, comment.start(), comment.end())
+        metadata_prefix = "".join(prefix_buffer)
+        if RUST_TEST_ATTRIBUTE.search(metadata_prefix) is None:
             continue
         doc_comments = "\n".join(
-            comment.group(0) for comment in RUST_DOC_COMMENT.finditer(prefix)
+            comment.group(0)
+            for comment in RUST_DOC_COMMENT.finditer(metadata_prefix)
         )
         material = f"{doc_comments}\n{declaration.group('name')}"
         declaration_line = line_number(text, declaration.start("name"))
@@ -1403,12 +1415,37 @@ def check_invariant_citations(
             continue
         invariant = cells[0]
         enforcement = cells[4]
-        tagged_claim = re.search(
+        tagged_marker = re.compile(
             rf"(?i)(?<![A-Za-z0-9]){re.escape(invariant)}-tagged(?![A-Za-z0-9])",
-            enforcement,
-        ) is not None
+        )
         citation_enforcement = mask_inline_code(enforcement)
-        for link in extract_resolved_links(citation_enforcement, definitions):
+        resolved_links = sorted(
+            extract_resolved_links(citation_enforcement, definitions),
+            key=lambda link: link.offset,
+        )
+        tagged_destinations: set[str] = set()
+        tagged_active = False
+        preceding_offset = 0
+        for link in resolved_links:
+            intervening = citation_enforcement[preceding_offset : link.offset]
+            last_marker = max(
+                (match.start() for match in tagged_marker.finditer(intervening)),
+                default=-1,
+            )
+            last_boundary = max(
+                (
+                    match.start()
+                    for match in re.finditer(r"[.;](?=[ \t]|$)", intervening)
+                ),
+                default=-1,
+            )
+            if last_marker >= 0 or last_boundary >= 0:
+                tagged_active = last_marker > last_boundary
+            if tagged_active:
+                tagged_destinations.add(link.destination)
+            preceding_offset = link.offset + 1
+
+        for link in resolved_links:
             resolved = resolve_relative_target(root, source, link.destination)
             if resolved is None:
                 continue
@@ -1446,7 +1483,10 @@ def check_invariant_citations(
                 declared_tags = {
                     tag for tag, _ in rust_test_invariant_tags(target_text)
                 }
-                if tagged_claim and invariant not in declared_tags:
+                if (
+                    link.destination in tagged_destinations
+                    and invariant not in declared_tags
+                ):
                     violations.append(
                         Violation(
                             INVARIANTS.as_posix(),

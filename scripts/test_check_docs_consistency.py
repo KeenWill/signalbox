@@ -288,6 +288,94 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_ordinary_comment_cannot_supply_test_attribute(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "/// INV-001 is production context, not a test binding.\n"
+            "// #[test]\n"
+            "fn production_context() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_ordinary_block_comment_cannot_supply_doc_tag(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "/*\n"
+            "/// INV-001 is ordinary block-comment text.\n"
+            "*/\n"
+            "#[test]\n"
+            "fn named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reverse_discovers_invariant_tag_on_const_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            "const fn s01_inv_001_const_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_on_extern_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            'extern "C" fn s01_inv_001_extern_test() {}\n',
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_reverse_discovers_invariant_tag_on_raw_identifier_test(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            "fn r#s01_inv_001_raw_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_tagged_claim_applies_only_to_following_link_group(self) -> None:
+        (self.root / "src/named.rs").write_text(
+            "#[test]\nfn named_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/tagged.rs").write_text(
+            "#[test]\nfn s01_inv_001_tagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | test `named_test` in "
+            "[`src/named.rs`](../src/named.rs); INV-001-tagged tests in "
+            "[`src/tagged.rs`](../src/tagged.rs). |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_non_test_invariant_mentions_do_not_require_registration(self) -> None:
         (self.root / "src/context.rs").write_text(
             "/// INV-001 is production context, not a test binding.\n"
