@@ -530,6 +530,13 @@ impl ReviewWorkflowStore {
         event: ReviewFindingEvent,
     ) -> Result<Option<ReviewFinding>, ReviewWorkflowStoreError> {
         let encoded = encode_finding_event(event.kind());
+        let publication_link = match event.kind() {
+            ReviewFindingEventKind::BlockedWithReason {
+                link: Some(pending),
+                ..
+            } => Some(pending.link()),
+            _ => None,
+        };
         let mut locked_findings = vec![finding.into_uuid()];
         if let Some(referenced) = encoded.referenced_finding {
             locked_findings.push(referenced.into_uuid());
@@ -537,6 +544,14 @@ impl ReviewWorkflowStore {
         locked_findings.sort_unstable();
         locked_findings.dedup();
         let mut transaction = self.pool.begin().await?;
+        if let Some(link) = publication_link {
+            // Publication reconciliation locks the reservation before any
+            // finding, matching the attachment path's global lock order.
+            sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+                .bind(link.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+        }
         sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
             .bind(&locked_findings)
             .fetch_all(&mut *transaction)
@@ -1880,16 +1895,29 @@ async fn load_pass_on_connection(
         "review_pass",
     )?;
     let run_reference = pass.reference().run();
-    let run = ReviewRunEvidence::new(
+    let workflow = decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?;
+    let state = decode_run_state(
         run_reference,
-        decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
-        policy,
-        decode_run_state(
-            run_reference,
-            &row.try_get::<String, _>("run_state_kind")?,
-            row.try_get("run_state_pass_id")?,
-        )?,
+        &row.try_get::<String, _>("run_state_kind")?,
+        row.try_get("run_state_pass_id")?,
     );
+    let run = ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
+        run_reference,
+        workflow,
+        policy,
+        state?,
+        Some(ReviewPassEvidence::from_pass(&pass, policy)),
+    ))
+    .map_err(|error| {
+        corruption(
+            "review_run",
+            format!(
+                "canonical run contradicts its pass projection: {:?}",
+                error.failure()
+            ),
+        )
+    })?
+    .evidence();
     Ok(Some(LoadedReviewPass {
         pass,
         policy,

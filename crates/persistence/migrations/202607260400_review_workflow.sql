@@ -2654,6 +2654,49 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF NEW.result_kind = 'finding_event'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_finding_event AS event
+             JOIN review_finding AS finding
+               ON finding.finding_id = event.finding_id
+              AND finding.run_id = event.finding_run_id
+              AND finding.target_id = event.target_id
+             LEFT JOIN review_finding AS referenced
+               ON referenced.finding_id = event.referenced_finding_id
+              AND referenced.run_id = event.finding_run_id
+              AND referenced.target_id = event.target_id
+            WHERE event.finding_id = NEW.result_finding_id
+              AND event.finding_run_id = NEW.result_finding_run_id
+              AND finding.producing_pass_id =
+                    NEW.result_finding_pass_id
+              AND event.target_id = NEW.target_id
+              AND event.event_pass_id = NEW.pass_id
+              AND event.event_pass_run_id = NEW.run_id
+              AND event.event_ordinal = NEW.result_event_ordinal
+              AND event.event_kind = NEW.result_event_kind
+              AND event.reason IS NOT DISTINCT FROM NEW.result_reason
+              AND event.referenced_finding_id IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_id
+              AND referenced.run_id IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_run_id
+              AND referenced.producing_pass_id IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_pass_id
+              AND event.referenced_finding_status IS NOT DISTINCT FROM
+                    NEW.result_referenced_finding_status
+              AND event.external_link_id IS NOT DISTINCT FROM
+                    NEW.result_external_link_id
+              AND event.external_link_association_kind IS NOT DISTINCT FROM
+                    CASE
+                        WHEN NEW.result_external_link_id IS NULL THEN NULL
+                        ELSE 'finding'
+                    END
+       )
+    THEN
+        RAISE EXCEPTION
+            'finding-event result omitted its exact child row'
+            USING ERRCODE = '23514';
+    END IF;
     IF NEW.result_kind = 'external_link_attachment'
        AND NOT EXISTS (
            SELECT 1
