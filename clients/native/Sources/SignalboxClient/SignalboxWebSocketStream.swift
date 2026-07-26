@@ -146,7 +146,11 @@ public final class SignalboxWebSocketStream: Sendable {
     }
 
     public func messages() -> AsyncThrowingStream<SignalboxServerMessage, Error> {
-        AsyncThrowingStream { continuation in
+        // Event mutations, deletions, and status changes are independently
+        // meaningful, so dropping an arbitrary frame would corrupt the local
+        // snapshot. Keep this lossless policy explicit; the consumer now
+        // applies event frames with incremental normalization.
+        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             let transport = transportFactory()
             let watchdog = SignalboxHeartbeatWatchdog(
                 timeout: heartbeatTimeout,
