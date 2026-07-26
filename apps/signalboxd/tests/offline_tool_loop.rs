@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use signalbox_application::{
@@ -48,7 +49,10 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalboxd::{
-    ActivatedTurnExecution, PostgresProviderModelExecution, PostgresProviderToolLoopExecution,
+    ActivatedTurnExecution, DaemonTools, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, SessionStatusWrite,
+    SessionStatusWriteOutcome, SessionStatusWriter, WebFetchBodyCompleteness, WebFetchRequest,
+    WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -99,6 +103,14 @@ struct ToolLoopFixture {
     runtime_models: RuntimeModelCatalog,
     credential_reference: ModelCallCredentialReference,
     tool_dispatch_gate: InProcessToolDispatchGate,
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct SessionMetadataRootFacts {
+    title: String,
+    archived: bool,
+    actor_kind: String,
+    actor_tool_request_id: Option<Uuid>,
 }
 
 impl ToolLoopFixture {
@@ -486,12 +498,30 @@ fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) 
     })
 }
 
-fn expected_tool_result(request: ToolRequestId, content: String, is_error: bool) -> MessagePart {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedToolResultDisposition {
+    Successful,
+    Failed,
+}
+
+fn expected_tool_result(
+    request: ToolRequestId,
+    content: String,
+    disposition: ExpectedToolResultDisposition,
+) -> MessagePart {
     MessagePart::ToolResult(ToolResultRecord {
         tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
         content,
-        is_error,
+        is_error: matches!(disposition, ExpectedToolResultDisposition::Failed),
     })
+}
+
+fn expected_successful_tool_result(request: ToolRequestId, content: String) -> MessagePart {
+    expected_tool_result(request, content, ExpectedToolResultDisposition::Successful)
+}
+
+fn expected_failed_tool_result(request: ToolRequestId, content: String) -> MessagePart {
+    expected_tool_result(request, content, ExpectedToolResultDisposition::Failed)
 }
 
 #[track_caller]
@@ -653,6 +683,79 @@ impl ClassifyOperatorFailure for FixtureExecutorError {
     }
 }
 
+#[derive(Clone, Debug)]
+struct OfflineWebTransport {
+    response: Result<WebFetchResponse, WebFetchTransportFailure>,
+    requests: Arc<Mutex<Vec<WebFetchRequest>>>,
+}
+
+impl OfflineWebTransport {
+    fn responding(response: WebFetchResponse) -> Self {
+        Self {
+            response: Ok(response),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn unused() -> Self {
+        Self {
+            response: Err(WebFetchTransportFailure::RequestFailed),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<WebFetchRequest> {
+        self.requests
+            .lock()
+            .expect("fixture web-request lock is available")
+            .clone()
+    }
+}
+
+impl WebFetchTransport for OfflineWebTransport {
+    async fn fetch(
+        &mut self,
+        request: WebFetchRequest,
+    ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
+        self.requests
+            .lock()
+            .expect("fixture web-request lock is available")
+            .push(request);
+        self.response.clone()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnusedSessionStatusWriterError;
+
+impl fmt::Display for UnusedSessionStatusWriterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unused session status writer was invoked")
+    }
+}
+
+impl Error for UnusedSessionStatusWriterError {}
+
+impl ClassifyOperatorFailure for UnusedSessionStatusWriterError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        OperatorFailureClass::CallerOrHubBug
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnusedSessionStatusWriter;
+
+impl SessionStatusWriter for UnusedSessionStatusWriter {
+    type Error = UnusedSessionStatusWriterError;
+
+    async fn write(
+        &mut self,
+        _update: SessionStatusWrite,
+    ) -> Result<SessionStatusWriteOutcome, Self::Error> {
+        Err(UnusedSessionStatusWriterError)
+    }
+}
+
 impl ToolExecutor for RecordingExecutor {
     type Error = FixtureExecutorError;
 
@@ -773,7 +876,7 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(requests[0], "confirmed", r#"{"value":"one"}"#),
-            expected_tool_result(requests[0], String::from("completed:confirmed"), false),
+            expected_successful_tool_result(requests[0], String::from("completed:confirmed")),
         ]
     );
     let operations = runtime.received_operations();
@@ -866,6 +969,222 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
     Ok(())
 }
 
+/// The compiled echo declaration, typed decoder, daemon dispatcher, durable
+/// tool loop, and continuation projection complete without network access.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let web = OfflineWebTransport::unused();
+    let echoed_text = "offline echo";
+    let arguments = serde_json::json!({"text": echoed_text}).to_string();
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        UnusedSessionStatusWriter,
+    )?
+    .into_parts();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("echo", arguments.as_str())]),
+            completion_script("echo observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "echo", &arguments),
+            expected_successful_tool_result(request, arguments),
+        ]
+    );
+    assert!(
+        web.requests().is_empty(),
+        "echo must not enter the web transport"
+    );
+    Ok(())
+}
+
+/// The compiled web-fetch declaration and daemon dispatcher use only the
+/// injected bounded transport while the durable tool loop remains fully
+/// offline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let expected_status = 200;
+    let expected_content_type = "text/plain";
+    let expected_body = "offline body";
+    let response = WebFetchResponse::new(
+        expected_status,
+        Some(String::from(expected_content_type)),
+        expected_body.as_bytes().to_vec(),
+        WebFetchBodyCompleteness::Complete,
+    )
+    .expect("fixture response is bounded");
+    let web = OfflineWebTransport::responding(response);
+    let expected_url = "https://example.com/offline";
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        UnusedSessionStatusWriter,
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({"url": expected_url}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("web_fetch", arguments.as_str())]),
+            completion_script("fetch observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    let fetched = web.requests();
+    let [physical_request] = fetched.as_slice() else {
+        panic!("one physical fetch crosses the injected transport")
+    };
+
+    let expected_result = serde_json::json!({
+        "body": expected_body,
+        "content_type": expected_content_type,
+        "status": expected_status,
+        "truncated": false,
+        "url": expected_url,
+    })
+    .to_string();
+
+    assert_eq!(physical_request.url().as_str(), expected_url);
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "web_fetch", &arguments),
+            expected_successful_tool_result(request, expected_result),
+        ]
+    );
+    Ok(())
+}
+
+/// The confirmed session-status tool replaces the existing metadata snapshot
+/// through the application service and attributes the durable write to the
+/// exact tool request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tier_zero_session_status_updates_metadata_offline() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let web = OfflineWebTransport::unused();
+    let expected_title = "Tool batch";
+    let expected_tag = "tooling";
+    let expected_attribute_key = "phase";
+    let expected_attribute_value = "review";
+    let expected_archived = false;
+    let arguments = serde_json::json!({
+        "archived": expected_archived,
+        "attributes": {(expected_attribute_key): expected_attribute_value},
+        "tags": [expected_tag],
+        "title": expected_title,
+    })
+    .to_string();
+    let (tool_catalog, tool_executor) = DaemonTools::try_new(
+        || SystemTime::UNIX_EPOCH,
+        web.clone(),
+        PostgresSessionStatusWriter::new(fixture.pool.clone()),
+    )?
+    .into_parts();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("session_status_update", arguments.as_str())]),
+            completion_script("status observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    fixture
+        .decide(request, ToolApprovalDecision::Approve)
+        .await?;
+    execution.resume_active(fixture.session).await?;
+    let root: SessionMetadataRootFacts = sqlx::query_as(
+        "SELECT title, archived, actor_kind, actor_tool_request_id
+           FROM session_metadata
+          WHERE session_id = $1",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT tag
+           FROM session_metadata_tag
+          WHERE session_id = $1
+          ORDER BY tag",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    let attributes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT attribute_key, attribute_value
+           FROM session_metadata_attribute
+          WHERE session_id = $1
+          ORDER BY attribute_key",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    let result = serde_json::json!({
+        "archived": expected_archived,
+        "attributes": {(expected_attribute_key): expected_attribute_value},
+        "session_id": fixture.session.into_uuid().to_string(),
+        "tags": [expected_tag],
+        "title": expected_title,
+    })
+    .to_string();
+
+    assert_eq!(
+        root,
+        SessionMetadataRootFacts {
+            title: String::from(expected_title),
+            archived: expected_archived,
+            actor_kind: String::from("tool"),
+            actor_tool_request_id: Some(request.into_uuid()),
+        }
+    );
+    assert_eq!(tags, vec![String::from(expected_tag)]);
+    assert_eq!(
+        attributes,
+        vec![(
+            String::from(expected_attribute_key),
+            String::from(expected_attribute_value),
+        )]
+    );
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "session_status_update", &arguments),
+            expected_successful_tool_result(request, result),
+        ]
+    );
+    assert!(
+        web.requests().is_empty(),
+        "session status must not enter the web transport"
+    );
+    Ok(())
+}
+
 /// S10 / S11 / INV-019 / INV-020 / INV-027: owner denial creates no physical
 /// attempt, projects one error result to the continuation call, and allows the
 /// same turn to complete from the model's response.
@@ -902,7 +1221,7 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
         continuation_tool_exchange(&runtime)?,
         vec![
             expected_tool_call(request, "confirmed", "{}"),
-            expected_tool_result(
+            expected_failed_tool_result(
                 request,
                 serde_json::json!({
                     "error": {
@@ -911,7 +1230,6 @@ async fn s10_s11_inv020_inv027_denial_continues_without_execution() -> Result<()
                     }
                 })
                 .to_string(),
-                true,
             ),
         ]
     );
@@ -1211,7 +1529,7 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         continuation_tool_exchange(&restarted_runtime)?,
         vec![
             expected_tool_call(request, "confirmed", "{}"),
-            expected_tool_result(request, String::from("completed:confirmed"), false),
+            expected_successful_tool_result(request, String::from("completed:confirmed")),
         ],
         "the fresh composition must reach the correlated continuation call"
     );
@@ -1316,8 +1634,8 @@ async fn s10_inv019_inv020_inv021_mixed_batch_executes_in_proposal_order()
         vec![
             expected_tool_call(requests[0], "automatic", "{}"),
             expected_tool_call(requests[1], "confirmed", "{}"),
-            expected_tool_result(requests[0], String::from("completed:automatic"), false),
-            expected_tool_result(requests[1], String::from("completed:confirmed"), false),
+            expected_successful_tool_result(requests[0], String::from("completed:automatic")),
+            expected_successful_tool_result(requests[1], String::from("completed:confirmed")),
         ],
         "continuation history retains paired calls and proposal-ordered results"
     );

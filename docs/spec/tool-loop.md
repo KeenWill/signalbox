@@ -1,17 +1,21 @@
 # Tool loop
 
 This page specifies the implemented daemon-owned tool subsystem as verified
-against the implementing stack through PR #260 (`agent/runner-protocol-domain`).
-It owns logical tool requests, approval policy and decisions, physical tool
-attempts, result admission, intra-turn continuation, crash classification, the
-compiled registry, and the first daemon-local tool. Turn and attempt lifecycle
-law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entry vocabulary in
-[sessions-and-transcript](sessions-and-transcript.md); model-call staging and
-provider translation in [model-call-execution](model-call-execution.md);
-durable-command identity in [identity-and-commands](identity-and-commands.md);
-and relational mechanics in [persistence-protocol](persistence-protocol.md).
-Invariant tags cite [the invariant catalog](../invariants.md).
+against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
+`signalboxd` name this page states for the catalog-wiring composition root was
+verified through PR #258 (`agent/signalboxd-rename`), the Tier 0 catalog
+extension through PR #265 (`agent/tool-batch-tier0`), and runner-protocol batch
+reconstitution through PR #260 (`agent/runner-protocol-domain`). It owns logical
+tool requests, approval policy and decisions, physical tool attempts, result
+admission, intra-turn continuation, crash classification, the compiled registry,
+and the daemon-local catalog. Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
+model-call staging and provider translation in
+[model-call-execution](model-call-execution.md); durable-command identity in
+[identity-and-commands](identity-and-commands.md); and relational mechanics in
+[persistence-protocol](persistence-protocol.md). Invariant tags cite
+[the invariant catalog](../invariants.md).
 
 ## Intra-turn rounds and request batches
 
@@ -472,6 +476,51 @@ known-failure evidence with detail
 `current time is outside the supported range`. IANA lookup and offset conversion
 use the focused `jiff` dependency; Signalbox owns only the port and result
 contract, not a time-zone database implementation.
+
+The same process-lifetime compiled catalog also declares the Tier 0 daemon
+tools:
+
+- `echo` requires exactly one `text` string and returns the same canonical
+  compact `{"text": ...}` object. Its permission default is `Auto` and its
+  effect class is `EffectFree`: execution observes no external state.
+- `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
+  User information, fragments, and direct non-public IP destinations are
+  invalid. Before dispatch, a domain must resolve to between one and 32
+  addresses and every address must be public; the admitted addresses are pinned
+  into the request client so connection setup cannot substitute a later DNS
+  answer. Its permission default is `Auto`; its effect class is `ExternalEffect`
+  because the remote server can observe a GET. One dispatch performs at most one
+  credential-free request: ambient proxies, redirects, protocol retries, and
+  idle reuse are disabled, TLS uses rustls with a TLS 1.2 floor, and a 15-second
+  timeout bounds resolution and the exchange. The executor retains at most 64
+  KiB of response bytes and at most 1,024 bytes of a valid content-type header.
+  Success is compact JSON containing the exact requested `url`, numeric
+  `status`, optional `content_type`, a lossy UTF-8 `body`, and `truncated`.
+  Resolution, client-setup, and definite connection-establishment failure before
+  request dispatch returns a fixed sanitized known failure; timeout, transport,
+  or body loss after dispatch begins is commit-ambiguous. Truncation stops body
+  consumption and never follows or issues another request.
+- `session_status_update` requires one complete existing session-metadata shape:
+  nullable `title`, complete `tags`, complete string-to-string `attributes`, and
+  `archived`. Partial patches are invalid. The invocation's session is the
+  target; no session identity is accepted from model arguments. Its permission
+  default is `Confirm` and its effect class is `ExternalEffect`. Execution
+  derives a durable command identity from the physical tool attempt, attributes
+  the command and last-writer stamp to the exact `ToolRequestId`, and calls the
+  existing metadata replacement application service. Argument validation admits
+  the exact compact success receipt under the independent result-text bound
+  before the write can begin. Success requires the writer's applied snapshot to
+  match the admitted session and replacement, then returns that session identity
+  and snapshot content as compact JSON; mismatch is a daemon defect,
+  missing-session rejection is a fixed known failure, and ambiguous commit
+  acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
+  mechanics remain owned by
+  [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
+
+The merged catalog sorts declarations by checked tool name and rejects
+duplicates during construction. Its executor dispatches only those same four
+names; disagreement between the advertised catalog and executor is classified as
+a daemon defect.
 
 ## Persistence boundaries
 

@@ -25,10 +25,14 @@ use tokio::sync::watch;
 
 mod configuration;
 mod current_time;
+mod daemon_tools;
+mod echo;
 mod fenced_database;
 mod local_socket;
 mod process_runtime;
+mod session_status;
 mod single_hub;
+mod web_fetch;
 
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
@@ -38,10 +42,25 @@ pub use current_time::{
     CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
     CurrentTimeToolConstructionError, SystemCurrentTimeClock,
 };
+pub use daemon_tools::{
+    DaemonToolCatalog, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
+    DaemonToolsConstructionError,
+};
+pub use echo::{EchoExecutor, EchoExecutorError, EchoTool, EchoToolConstructionError};
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessRuntime, ProcessRuntimeError};
+pub use session_status::{
+    PostgresSessionStatusWriter, PostgresSessionStatusWriterError, SessionStatusExecutor,
+    SessionStatusExecutorError, SessionStatusTool, SessionStatusToolConstructionError,
+    SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter,
+};
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
+pub use web_fetch::{
+    ReqwestWebFetchConstructionError, ReqwestWebFetchTransport, WebFetchBodyCompleteness,
+    WebFetchExecutor, WebFetchExecutorError, WebFetchRequest, WebFetchResponse, WebFetchTool,
+    WebFetchToolConstructionError, WebFetchTransport, WebFetchTransportFailure,
+};
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {
