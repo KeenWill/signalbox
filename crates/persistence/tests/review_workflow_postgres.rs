@@ -4513,6 +4513,12 @@ async fn inv041_external_link_load_rejects_missing_attachment_run() -> Result<()
     .execute(&pool)
     .await?;
     sqlx::query(
+        "ALTER TABLE review_external_object_identity
+         DISABLE TRIGGER review_external_identity_attachment_is_required",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO review_external_object_identity
             (provider_key, object_kind, external_object_key, logical_target_id)
          VALUES (
