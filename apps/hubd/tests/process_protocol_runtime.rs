@@ -568,12 +568,12 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
     runtime.stop().await
 }
 
-/// S30 / INV-008 / INV-012 / INV-040: version six maps one complete replacement
+/// S30 / INV-008 / INV-012 / INV-042: version six maps one complete replacement
 /// request through the durable command boundary and validates catalog input
 /// before claiming a new command identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s30_inv008_inv012_inv040_process_runtime_replaces_session_model_defaults()
+async fn s30_inv008_inv012_inv042_process_runtime_replaces_session_model_defaults()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;

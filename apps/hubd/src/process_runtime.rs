@@ -3507,10 +3507,10 @@ mod tests {
         );
     }
 
-    /// INV-033 / INV-040: each retained protocol is gated by the first version
+    /// INV-033 / INV-042: each retained protocol is gated by the first version
     /// that can represent the selected session's durable history.
     #[test]
-    fn inv033_inv040_legacy_session_compatibility_requires_first_representable_version() {
+    fn inv033_inv042_legacy_session_compatibility_requires_first_representable_version() {
         assert_eq!(
             required_protocol_version_for_selected_session(
                 ProtocolVersion::One,

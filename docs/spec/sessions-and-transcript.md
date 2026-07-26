@@ -215,7 +215,7 @@ freezes the epoch current in that acceptance transaction; replacing defaults
 later never rebinds that origin, whether the turn is still queued, active, or
 terminal. An installed epoch therefore affects only origin input accepted
 afterward and never rewrites creation provenance or earlier work (INV-008,
-INV-040). Configuration-free steering inherits from its source turn rather than
+INV-042). Configuration-free steering inherits from its source turn rather than
 reading defaults.
 
 The model selection in a replacement may name a configured direct selection or
@@ -224,7 +224,7 @@ command impose no same-provider restriction. The successor turn resolves and
 pins its target and non-secret credential reference at its own model-call
 boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
-mid-call (INV-040).
+mid-call (INV-042).
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -262,7 +262,7 @@ immediately before that turn's origin entry. The entry names the turn, its
 frozen defaults epoch, and its exact direct selection. It is absent for the
 first turn and for equal-selection successors. Thus the frontier records the
 model identity actually crossed by executed conversation history rather than
-unused or redundant replacement epochs (INV-040). The exact provider-message
+unused or redundant replacement epochs (INV-042). The exact provider-message
 projection is recorded by the
 [model-identity injection decision](../decisions.md#2026-07-25--render-model-identity-boundaries-as-injected-user-role-events).
 Started frontiers committed before this boundary existed retain their exact
@@ -518,7 +518,7 @@ whose predecessor is that immutable seed frontier and whose appended member is
 the ordinary `OriginAcceptedInput`. Every later native frontier retains its
 predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
-(INV-039, INV-040).
+(INV-039, INV-042).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
 before an initial or continuation call is prepared, the transaction appends one

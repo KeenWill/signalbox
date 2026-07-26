@@ -54,7 +54,7 @@ impl <Identity> {
 }
 ```
 
-The eleven identities defined in `lib.rs`:
+The sixteen identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -68,6 +68,11 @@ pub struct ModelCallId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
+pub struct ReviewTargetId(/* private */);
+pub struct ReviewRunId(/* private */);
+pub struct ReviewPassId(/* private */);
+pub struct ReviewFindingId(/* private */);
+pub struct ReviewExternalLinkId(/* private */);
 ```
 
 Five more identities with the same shape are defined in their owning modules and
@@ -5214,11 +5219,772 @@ pub trait ToolExecutionTransaction {
 }
 ```
 
+## domain: review_workflow
+
+```rust
+pub struct ReviewKey(/* private String */);
+pub struct ReviewText(/* private String */);
+impl ReviewKey {
+    pub fn try_new(value: String) -> Result<Self, ReviewValueError>;
+    // accessors: as_str(), into_string()
+}
+impl ReviewText {
+    pub fn try_new(value: String) -> Result<Self, ReviewValueError>;
+    // accessors: as_str(), into_string()
+}
+
+pub enum ReviewValueFailure {
+    Empty,
+    ContainsNull,
+    TooLong { maximum_bytes: usize },
+}
+pub struct ReviewValueError { /* rejected value and failure */ }
+impl ReviewValueError {
+    // accessors: failure(), value(), into_parts()
+}
+
+pub struct ReviewChangeRequestNumber(/* private NonZeroU64 */);
+pub struct ReviewEventOrdinal(/* private NonZeroU32 */);
+pub struct ReviewPositiveNumberError;
+impl ReviewChangeRequestNumber {
+    pub const fn try_new(value: u64) -> Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u64;
+}
+impl ReviewEventOrdinal {
+    pub const fn one() -> Self;
+    pub const fn try_new(value: u32) -> Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u32;
+}
+
+pub struct ReviewConfidence(/* private u16 */);
+pub struct ReviewConfidenceError { /* rejected basis points */ }
+impl ReviewConfidence {
+    pub const fn try_from_basis_points(
+        basis_points: u16,
+    ) -> Result<Self, ReviewConfidenceError>;
+    pub const fn basis_points(self) -> u16;
+}
+impl ReviewConfidenceError {
+    pub const fn basis_points(self) -> u16;
+}
+
+pub struct ReviewPolicyVersion(/* private NonZeroU32 */);
+pub struct ReviewPolicy { /* version and two confidence thresholds */ }
+pub struct ReviewPolicyError { /* rejected complete policy */ }
+impl ReviewPolicyVersion {
+    pub const fn one() -> Self;
+    pub const fn try_new(value: u32) -> Result<Self, ReviewPositiveNumberError>;
+    pub const fn get(self) -> u32;
+}
+impl ReviewPolicy {
+    pub const fn try_new(
+        version: ReviewPolicyVersion,
+        minimum_judge_confidence: ReviewConfidence,
+        minimum_publication_confidence: ReviewConfidence,
+    ) -> Result<Self, ReviewPolicyError>;
+    pub const fn version_one() -> Self;
+    // accessors: version(), minimum_judge_confidence(),
+    // minimum_publication_confidence()
+}
+impl ReviewPolicyError {
+    pub const fn into_parts(
+        self,
+    ) -> (ReviewPolicyVersion, ReviewConfidence, ReviewConfidence);
+}
+
+pub enum ReviewTargetSubject {
+    ChangeRequest(ReviewChangeRequestNumber),
+    Commit,
+}
+pub struct ReviewTargetParentRef { /* target + canonical scope and head */ }
+impl ReviewTargetParentRef {
+    // accessors: target(), provider(), repository(), head_revision()
+}
+pub struct ReviewTarget { /* immutable snapshot */ }
+pub enum ReviewTargetError {
+    MissingChangeRequestBase { target: ReviewTargetId },
+    SelfParent { target: ReviewTargetId },
+    CyclicParent { target: ReviewTargetId },
+    ForeignParent { target: ReviewTargetId },
+    MissingParentBase { target: ReviewTargetId },
+    DisconnectedParent { target: ReviewTargetId },
+    RepeatedChangeRequest { target: ReviewTargetId },
+    ParentIdentityMismatch { target: ReviewTargetId },
+}
+impl ReviewTarget {
+    pub fn try_new(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<&ReviewTarget>,
+    ) -> Result<Self, ReviewTargetError>;
+    pub fn try_reconstitute(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<ReviewTargetId>,
+        stack_parent_evidence: Option<&ReviewTarget>,
+    ) -> Result<Self, ReviewTargetError>;
+    // accessors: id(), provider(), repository(), subject(), head_revision(),
+    // base_revision(), stack_parent(), ancestry()
+}
+
+pub struct ReviewRunRef { /* target + run */ }
+pub struct ReviewPassRef { /* run ref + pass */ }
+pub struct ReviewFindingRef { /* producing pass ref + finding */ }
+impl ReviewRunRef {
+    pub const fn new(target: ReviewTargetId, run: ReviewRunId) -> Self;
+    // accessors: target(), run()
+}
+impl ReviewPassRef {
+    pub const fn new(run: ReviewRunRef, pass: ReviewPassId) -> Self;
+    // accessors: run(), pass(), target()
+}
+impl ReviewFindingRef {
+    pub const fn new(pass: ReviewPassRef, finding: ReviewFindingId) -> Self;
+    // accessors: pass(), run(), finding(), target()
+}
+pub enum ReviewFindingStatus {
+    Open,
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+pub enum ReviewFindingEventType {
+    Accepted,
+    Rejected,
+    Duplicate,
+    Superseded,
+    Stale,
+    Posted,
+    Fixed,
+    BlockedWithReason,
+}
+pub enum ReviewFindingEventResultKind {
+    Accepted,
+    Rejected { reason: ReviewText },
+    Duplicate { canonical: ReviewReferencedFindingEvidence },
+    Superseded { successor: ReviewReferencedFindingEvidence },
+    Stale,
+    Posted { link: ReviewExternalLinkId },
+    Fixed,
+    BlockedWithReason {
+        reason: ReviewText,
+        link: Option<ReviewExternalLinkId>,
+    },
+}
+impl ReviewFindingEventResultKind {
+    pub const fn event_type(&self) -> ReviewFindingEventType;
+}
+pub struct ReviewFindingEventResult { /* finding + ordinal + complete payload */ }
+impl ReviewFindingEventResult {
+    pub fn new(
+        finding: ReviewFindingRef,
+        ordinal: ReviewEventOrdinal,
+        kind: ReviewFindingEventResultKind,
+    ) -> Self;
+    // accessors: finding(), ordinal(), event_type(), kind()
+}
+pub struct ReviewProducedFindings { /* canonical bounded identity inventory */ }
+impl ReviewProducedFindings {
+    pub fn try_new(
+        findings: Vec<ReviewFindingRef>,
+    ) -> Result<Self, ReviewProducedFindingsError>;
+    // accessors: findings(), contains()
+}
+pub enum ReviewProducedFindingsError {
+    TooMany { actual: usize, maximum: usize },
+    Duplicate { finding: ReviewFindingRef },
+}
+pub struct ReviewExternalLinkAttachmentResult {
+    /* reservation + object key + optional posted event */
+}
+impl ReviewExternalLinkAttachmentResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        external_object: ReviewKey,
+        finding_event: Option<ReviewFindingEventResult>,
+    ) -> Self;
+    // accessors: link(), external_object(), finding_event()
+}
+pub struct ReviewExternalLinkObservationResult {
+    /* reservation + ordinal + state */
+}
+impl ReviewExternalLinkObservationResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        ordinal: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    // accessors: link(), ordinal(), state()
+}
+pub struct ReviewExternalLinkNoChangeResult { /* reservation + observation frontier + state */ }
+impl ReviewExternalLinkNoChangeResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        observed_through: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    // accessors: link(), observed_through(), state()
+}
+pub struct ReviewExternalLinkPublicationBlockedResult {
+    /* pending reservation + reason */
+}
+impl ReviewExternalLinkPublicationBlockedResult {
+    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self;
+    // accessors: link(), reason()
+}
+pub enum ReviewPassResult {
+    ProducedFindings(ReviewProducedFindings),
+    FindingEvent(ReviewFindingEventResult),
+    ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
+    ExternalLinkObservation(ReviewExternalLinkObservationResult),
+    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
+    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
+}
+pub struct ReviewReferencedFindingEvidence { /* reference + frozen status */ }
+impl ReviewReferencedFindingEvidence {
+    pub fn from_finding(finding: &ReviewFinding) -> Self;
+    pub const fn try_reconstitute(
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+    ) -> Option<Self>;
+    // accessors: reference(), status(), producing_pass()
+}
+
+pub enum ReviewWorkflowKind {
+    ImportExternalContext,
+    ReadOnlyReview,
+    JudgeFindings,
+    DedupeFindings,
+    PublishReview,
+    FixFindings,
+    PropagateStack,
+}
+pub enum ReviewRunState {
+    Queued,
+    Running { active_pass: ReviewPassRef },
+    Succeeded { concluding_pass: ReviewPassRef },
+    Failed { failed_pass: ReviewPassRef },
+    Blocked { blocking_pass: ReviewPassRef },
+    Cancelled { last_pass: Option<ReviewPassRef> },
+}
+pub struct ReviewRunEvidence { /* canonical run reference + workflow + policy + state */ }
+impl ReviewRunEvidence {
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+        state: ReviewRunState,
+    ) -> Self;
+    // accessors: reference(), workflow(), policy(), state()
+}
+pub struct ReviewPassEvidence { /* validated pass + canonical run policy */ }
+impl ReviewPassEvidence {
+    pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self;
+    pub fn project_result(&self, result: ReviewPassResult) -> Option<Self>;
+    // accessors: reference(), kind(), policy(), state()
+}
+pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
+impl ReviewRunReconstitutionInput {
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+        state: ReviewRunState,
+        pass_evidence: Option<ReviewPassEvidence>,
+    ) -> Self;
+    // accessors: reference(), workflow(), policy(), state(), pass_evidence()
+}
+pub struct ReviewRun { /* reference + kind + policy + state + recorded pass */ }
+pub enum ReviewRunEvidenceFailure {
+    ForeignPass,
+    MissingPassEvidence,
+    UnexpectedPassEvidence,
+    PassMismatch,
+    PassKindMismatch,
+    PassPolicyMismatch,
+    PassStateMismatch,
+}
+pub struct ReviewRunReconstitutionError { /* input + failure */ }
+impl ReviewRunReconstitutionError {
+    // accessors: failure(), input(), into_input()
+}
+pub enum ReviewRunTransitionFailure {
+    Evidence(ReviewRunEvidenceFailure),
+    InvalidTransition,
+}
+pub struct ReviewRunTransitionError { /* unchanged run + requested state + evidence + failure */ }
+impl ReviewRun {
+    pub const fn new(
+        reference: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        policy: ReviewPolicy,
+    ) -> Self;
+    pub fn try_reconstitute(
+        input: ReviewRunReconstitutionInput,
+    ) -> Result<Self, ReviewRunReconstitutionError>;
+    pub fn transition(
+        self,
+        next: ReviewRunState,
+        pass_evidence: Option<ReviewPassEvidence>,
+    ) -> Result<Self, ReviewRunTransitionError>;
+    // accessors: reference(), workflow(), policy(), state(), recorded_pass(),
+    // evidence()
+}
+impl ReviewRunTransitionError {
+    // accessors: failure(), states(), pass_evidence(), current(), into_current()
+}
+
+pub enum ReviewPassKind {
+    ImportExternalContext,
+    ReadOnlyReview,
+    Judge,
+    Dedupe,
+    Publish,
+    Fix,
+    PropagateStack,
+}
+pub enum ReviewPassState {
+    Queued,
+    Running { turn: TurnId },
+    Succeeded {
+        turn: TurnId,
+        output_frontier: ContextFrontierId,
+        result: Option<ReviewPassResult>,
+    },
+    Failed { turn: TurnId },
+    Blocked {
+        turn: TurnId,
+        result: Option<ReviewPassResult>,
+    },
+    Cancelled { turn: Option<TurnId> },
+}
+pub enum ReviewPassTurnOutcome {
+    Active,
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    ReconciliationRequired,
+}
+pub struct ReviewPassTurnEvidence { /* canonical turn ownership + outcome */ }
+impl ReviewPassTurnEvidence {
+    pub const fn new(
+        turn: TurnId,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        outcome: ReviewPassTurnOutcome,
+        terminal_frontier: Option<ContextFrontierId>,
+    ) -> Self;
+    // accessors: turn(), session(), accepted_input(), outcome(),
+    // terminal_frontier()
+}
+pub struct ReviewPassAcceptedInputEvidence {
+    /* canonical accepted input + session + optional origin turn */
+}
+impl ReviewPassAcceptedInputEvidence {
+    pub const fn new(
+        accepted_input: AcceptedInputId,
+        session: SessionId,
+        origin_turn: Option<TurnId>,
+    ) -> Self;
+    // accessors: accepted_input(), session(), origin_turn()
+}
+pub struct ReviewPassReconstitutionInput { /* pass row + canonical evidence */ }
+impl ReviewPassReconstitutionInput {
+    pub const fn new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        workflow_run: ReviewRunRef,
+        workflow: ReviewWorkflowKind,
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
+        state: ReviewPassState,
+        turn_evidence: Option<ReviewPassTurnEvidence>,
+    ) -> Self;
+    // accessors: reference(), kind(), workflow_run(), workflow(), session(),
+    // accepted_input(), accepted_input_evidence(), state(), turn_evidence()
+}
+pub struct ReviewPass { /* reference + session input + origin turn + state */ }
+pub enum ReviewPassConstructionFailure {
+    ForeignRun,
+    RunWorkflowMismatch,
+    RunNotQueued,
+    RunAlreadyHasPass,
+    AcceptedInputSessionMismatch,
+    AcceptedInputHasNoOriginTurn,
+}
+pub struct ReviewPassConstructionError { /* rejected construction facts */ }
+impl ReviewPassConstructionError {
+    // accessors: reference(), kind(), workflow(), run_evidence(), sessions(),
+    // accepted_input(), origin_turn(), failure()
+}
+pub enum ReviewPassReconstitutionFailure {
+    ForeignWorkflowRun,
+    RunWorkflowMismatch,
+    AcceptedInputEvidenceMismatch,
+    AcceptedInputSessionMismatch,
+    AcceptedInputHasNoOriginTurn,
+    MissingTurnEvidence,
+    UnexpectedTurnEvidence,
+    TurnMismatch,
+    TurnOriginMismatch,
+    TurnSessionMismatch,
+    TurnAcceptedInputMismatch,
+    TurnOutcomeMismatch,
+    TurnFrontierShapeMismatch,
+    OutputFrontierMismatch,
+    IncompatibleResult,
+    ForeignResultTarget,
+}
+pub struct ReviewPassReconstitutionError { /* input + failure */ }
+impl ReviewPassReconstitutionError {
+    // accessors: failure(), input(), into_input()
+}
+pub enum ReviewPassTransitionFailure {
+    Evidence(ReviewPassReconstitutionFailure),
+    InvalidTransition,
+    TurnChanged,
+    TurnNotActive,
+    IncompatibleResult,
+    ResultAlreadyBound,
+}
+pub struct ReviewPassTransitionError { /* unchanged pass + requested state + evidence + failure */ }
+impl ReviewPass {
+    pub fn try_new(
+        reference: ReviewPassRef,
+        kind: ReviewPassKind,
+        run: &mut ReviewRun,
+        session: SessionId,
+        accepted_input: ReviewPassAcceptedInputEvidence,
+    ) -> Result<Self, ReviewPassConstructionError>;
+    pub fn try_reconstitute(
+        input: ReviewPassReconstitutionInput,
+    ) -> Result<Self, ReviewPassReconstitutionError>;
+    pub fn transition(
+        self,
+        next: ReviewPassState,
+        turn_evidence: Option<ReviewPassTurnEvidence>,
+    ) -> Result<Self, ReviewPassTransitionError>;
+    pub fn bind_result(
+        self,
+        result: ReviewPassResult,
+    ) -> Result<Self, ReviewPassTransitionError>;
+    // accessors: reference(), kind(), session(), accepted_input(), origin_turn(),
+    // state()
+}
+impl ReviewPassTransitionError {
+    // accessors: failure(), states(), turn_evidence(), current(), into_current()
+}
+
+pub enum ReviewFindingDiffSide {
+    Left,
+    Right,
+}
+pub struct ReviewLineRange { /* positive closed range */ }
+pub enum ReviewLineRangeError {
+    ZeroEndpoint,
+    EndBeforeStart,
+}
+impl ReviewLineRange {
+    pub const fn try_new(start: u32, end: u32) -> Result<Self, ReviewLineRangeError>;
+    // accessors: start(), end()
+}
+pub struct ReviewFindingLocation { /* path + optional range + side */ }
+impl ReviewFindingLocation {
+    pub const fn new(
+        file_path: ReviewKey,
+        line_range: Option<ReviewLineRange>,
+        diff_side: Option<ReviewFindingDiffSide>,
+    ) -> Self;
+    // accessors: file_path(), line_range(), diff_side()
+}
+
+pub enum ReviewFindingSeverity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+pub struct ReviewFindingContent { /* immutable checked content */ }
+impl ReviewFindingContent {
+    pub const fn new(
+        location: ReviewFindingLocation,
+        title: ReviewText,
+        body: ReviewText,
+        severity: ReviewFindingSeverity,
+        confidence: ReviewConfidence,
+        category: ReviewKey,
+        recommended_fix: Option<ReviewText>,
+    ) -> Self;
+    // accessors: location(), title(), body(), severity(), confidence(),
+    // category(), recommended_fix()
+}
+
+pub struct ReviewFindingProposal { /* reference + producing pass + content */ }
+impl ReviewFindingProposal {
+    pub fn try_new(
+        reference: ReviewFindingRef,
+        producing_pass: ReviewPassEvidence,
+        producing_run: ReviewRunEvidence,
+        target: &ReviewTarget,
+        content: ReviewFindingContent,
+    ) -> Result<Self, ReviewFindingTransitionError>;
+    // accessors: reference(), producing_pass(), content()
+}
+pub struct ReviewFindingExternalLinkRef { /* finding + link + attachment pass */ }
+pub enum ReviewFindingExternalLinkFailure {
+    ForeignAssociation,
+    IncompatibleObjectKind,
+    NotAttached,
+    AlreadyAttached,
+}
+pub struct ReviewFindingExternalLinkError { /* canonical association + failure */ }
+impl ReviewFindingExternalLinkError {
+    // accessors: finding(), link(), association(), failure()
+}
+impl ReviewFindingExternalLinkRef {
+    pub fn try_new(
+        finding: ReviewFindingRef,
+        link: &ReviewExternalLink,
+    ) -> Result<Self, ReviewFindingExternalLinkError>;
+    // accessors: finding(), link(), attachment_pass()
+}
+pub struct ReviewFindingPendingExternalLinkRef { /* finding + pending link */ }
+impl ReviewFindingPendingExternalLinkRef {
+    pub fn try_new(
+        finding: ReviewFindingRef,
+        link: &ReviewExternalLink,
+    ) -> Result<Self, ReviewFindingExternalLinkError>;
+    // accessors: finding(), link()
+}
+
+pub enum ReviewFindingEventKind {
+    Accepted,
+    Rejected { reason: ReviewText },
+    Duplicate { canonical: ReviewReferencedFindingEvidence },
+    Superseded { successor: ReviewReferencedFindingEvidence },
+    Stale,
+    Posted { link: Box<ReviewFindingExternalLinkRef> },
+    Fixed,
+    BlockedWithReason {
+        reason: ReviewText,
+        link: Option<Box<ReviewFindingPendingExternalLinkRef>>,
+    },
+}
+impl ReviewFindingEventKind {
+    pub const fn event_type(&self) -> ReviewFindingEventType;
+}
+pub struct ReviewFindingEvent { /* finding + ordinal + pass + run + kind */ }
+impl ReviewFindingEvent {
+    pub const fn new(
+        finding: ReviewFindingRef,
+        ordinal: ReviewEventOrdinal,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        kind: ReviewFindingEventKind,
+    ) -> Self;
+    // accessors: finding(), ordinal(), pass(), pass_evidence(), run_evidence(),
+    // kind()
+}
+pub struct ReviewFinding { /* proposal + history + derived status + replay indexes */ }
+impl ReviewFinding {
+    pub const fn new(proposal: ReviewFindingProposal) -> Self;
+    pub fn try_reconstitute(
+        proposal: ReviewFindingProposal,
+        events: Vec<ReviewFindingEvent>,
+    ) -> Result<Self, ReviewFindingTransitionError>;
+    pub fn apply(self, event: ReviewFindingEvent)
+        -> Result<Self, ReviewFindingTransitionError>;
+    // accessors: proposal(), events(), status()
+}
+pub enum ReviewFindingTransitionFailure {
+    ForeignTarget,
+    MissingDiffBase,
+    ForeignProducingPass,
+    ForeignProducingRun,
+    IncompatibleProducingRunEvidence,
+    IncompatibleProducingPassEvidence,
+    ForeignEventFinding,
+    ForeignEventPass,
+    EventPassEvidenceMismatch,
+    IncompatibleEventRunEvidence,
+    EventPolicyMismatch,
+    ConflictingPassEvidence,
+    ConflictingRunEvidence,
+    IncompatibleEventPassEvidence,
+    BelowJudgmentThreshold,
+    BelowPublicationThreshold,
+    ForeignReferencedFinding,
+    IneligibleReferencedFinding,
+    SelfReference,
+    ForeignExternalLink,
+    PublicationPassMismatch,
+    ReusedPublicationLink,
+    NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
+    InvalidTransition { current: ReviewFindingStatus },
+}
+pub struct ReviewFindingTransitionError { /* optional unchanged finding + rejected event + failure */ }
+impl ReviewFindingTransitionError {
+    // accessors: failure(), current(), event(), into_parts()
+}
+
+pub enum ReviewExternalLinkAssociation {
+    Target(ReviewTargetId),
+    Run(ReviewRunRef),
+    Finding(ReviewFindingRef),
+}
+impl ReviewExternalLinkAssociation {
+    pub const fn target(self) -> ReviewTargetId;
+}
+pub enum ReviewExternalObjectKind {
+    ChangeRequest,
+    Commit,
+    Review,
+    ReviewThread,
+    ReviewComment,
+    ChangeRequestComment,
+}
+pub struct ReviewExternalLinkAttachment { /* link + stored pass + pass/run evidence + object key */ }
+impl ReviewExternalLinkAttachment {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        external_object: ReviewKey,
+    ) -> Self;
+    // accessors: link(), pass(), pass_evidence(), run_evidence(),
+    // external_object()
+}
+pub enum ReviewExternalObjectState {
+    Current,
+    Outdated,
+    Resolved,
+}
+pub struct ReviewExternalLinkObservation { /* link + ordinal + stored pass + pass/run evidence + state */ }
+impl ReviewExternalLinkObservation {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        ordinal: ReviewEventOrdinal,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    // accessors: link(), ordinal(), pass(), pass_evidence(), run_evidence(),
+    // state()
+}
+pub struct ReviewExternalLinkClaim { /* pass + run */ }
+impl ReviewExternalLinkClaim {
+    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
+    // accessors: pass(), pass_evidence(), run_evidence()
+}
+pub struct ReviewExternalLink { /* reservation + attachment + observations + consumed claims */ }
+impl ReviewExternalLink {
+    pub fn try_reserve(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        target: &ReviewTarget,
+    ) -> Result<Self, ReviewExternalLinkTransitionFailure>;
+    pub fn try_reconstitute(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        attachment: Option<ReviewExternalLinkAttachment>,
+        observations: Vec<ReviewExternalLinkObservation>,
+        claims: Vec<ReviewExternalLinkClaim>,
+        target: &ReviewTarget,
+    ) -> Result<Self, ReviewExternalLinkTransitionFailure>;
+    pub fn attach(self, attachment: ReviewExternalLinkAttachment)
+        -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn observe(self, observation: ReviewExternalLinkObservation)
+        -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn confirm_unchanged(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn block_publication(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    // accessors: id(), association(), provider(), object_kind(), attachment(),
+    // observations(), claims()
+}
+pub struct ReviewExternalObjectClaim {
+    /* target + provider + repository + subject + canonical object */
+}
+impl ReviewExternalObjectClaim {
+    pub fn try_new(
+        link: &ReviewExternalLink,
+        target: &ReviewTarget,
+    ) -> Result<Self, ReviewExternalObjectClaimError>;
+    pub fn validate_reassociation(
+        &self,
+        candidate: &Self,
+    ) -> Result<(), ReviewExternalObjectClaimError>;
+    // accessors: target(), external_object()
+}
+pub enum ReviewExternalObjectClaimError {
+    ForeignTarget,
+    ProviderMismatch,
+    NotAttached,
+    DifferentObject,
+    SameTarget,
+    UnrelatedTarget,
+}
+pub struct ReviewExternalLinkTransitionError { /* unchanged link + failure */ }
+impl ReviewExternalLinkTransitionError {
+    // accessors: current(), failure(), into_parts()
+}
+pub enum ReviewExternalLinkTransitionFailure {
+    ForeignAssociationTarget,
+    ProviderMismatch,
+    AlreadyAttached,
+    ForeignAttachmentLink,
+    ForeignObservationLink,
+    ForeignPass,
+    IncompatibleAttachmentPass,
+    AttachmentPassEvidenceMismatch,
+    IncompatibleAttachmentRunEvidence,
+    IncompatibleObservationPass,
+    ObservationPassEvidenceMismatch,
+    IncompatibleObservationRunEvidence,
+    IncompatiblePublicationBlockPass,
+    IncompatiblePublicationBlockRunEvidence,
+    UnchangedObservation,
+    ConflictingPassEvidence,
+    ConflictingRunEvidence,
+    NotAttached,
+    NoncontiguousOrdinal { expected: Option<ReviewEventOrdinal> },
+}
+```
+
 ## Inventory
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 11                   |
+| domain: lib.rs identities                          | 16                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 29                   |
 | domain: session                                    | 21                   |
@@ -5243,8 +6009,9 @@ pub trait ToolExecutionTransaction {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
+| domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **365 (+1 free fn)** |
+| **signalbox-domain total**                         | **451 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

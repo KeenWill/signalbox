@@ -1,5 +1,5 @@
-import SignalboxClient
-import SignalboxModels
+import Foundation
+@testable import SignalboxNative
 import XCTest
 
 final class SignalboxAPIClientTests: XCTestCase {
