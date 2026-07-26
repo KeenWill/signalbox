@@ -252,7 +252,7 @@ impl fmt::Display for HubModelConfigurationError {
 impl Error for HubModelConfigurationError {}
 
 /// Credential source that rereads one deployment-owned secret file for every
-/// request preparation so rotation is visible without restarting hubd.
+/// request preparation so rotation is visible without restarting signalboxd.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     path: Arc<PathBuf>,
@@ -444,5 +444,25 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             b"rotated-test-value"
         );
         std::fs::remove_file(path).expect("fixture file is removable");
+    }
+}
+
+#[cfg(test)]
+mod checked_in_example {
+    use std::path::{Path, PathBuf};
+
+    use super::HubModelConfiguration;
+
+    fn example_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml")
+    }
+
+    /// The checked-in operator example is the one configuration document a
+    /// deployment is invited to copy, so it must satisfy the same fail-closed
+    /// loader every real catalog does.
+    #[test]
+    fn the_example_catalog_parses_and_validates() {
+        HubModelConfiguration::read(&example_path())
+            .expect("the checked-in example catalog is a valid version 1 document");
     }
 }

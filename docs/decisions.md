@@ -10,6 +10,141 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Normalize an alias to its dated snapshot and keep substitution distinct
+
+**Context.** A live shakedown against PostgreSQL and a real provider
+fail-stopped the daemon. The deployment configured a model by its undated alias;
+the provider's response echoed the canonical dated identity of that same family.
+The runtime bridge classified every reported-versus-configured difference as one
+unrepresentable mismatch, failed the adapter stage closed after the physical
+call had already committed, and left the session permanently wedged. The same
+comparison also has to survive a genuinely different case: the newest models can
+decline a request and be served by another model entirely, which the provider
+signals distinctly with a `fallback` content block and a fallback iteration
+entry, not merely a different model string.
+
+**Decision.** The two cases are separated. A reported identity equal to the
+configured spelling, or equal to it followed by `-` and a dated snapshot
+qualifier (`YYYYMMDD` or `YYYY-MM-DD`), is the same logical target made
+concrete: classification proceeds and the concrete identity is recorded as
+sanitized evidence of what served. Any other reported identity is a substitution
+— a separate, recorded outcome that still fails closed, because the durable
+provenance row it would have to write does not exist. The relation is derived
+from the configured target's own family, so a new model needs no code change,
+and a full date shape is required so a version extension of the same family name
+is not read as a snapshot. The Anthropic adapter additionally recognizes the
+`fallback` block, reports the continuing model, and refuses the response as
+completion material. Separately, every classified outcome and fail-closed defect
+now carries a stable sanitized cause code beside the operator failure class;
+definitive provider errors carry the runtime's own `ProviderErrorKind` verbatim.
+
+**Rejected alternatives.** Accepting any reported identity normalizes a genuine
+substitution into "the configured target was served" and destroys the evidence
+that matters most. Enumerating dated identities in configuration defeats undated
+aliases and needs a change per model release. Matching any trailing segment
+after the configured spelling would read `claude-opus-4-5` as a snapshot of
+`claude-opus-4`. Emitting diagnostics from the adapter crates would break both
+their single-dependency manifest rule and this substrate's no-logging law, so
+the bridge — which already holds every typed fact — emits them instead.
+
+The fallback marker crosses the runtime boundary only as the reported identity
+it names; the substitution classification is carried by that identity, and a
+marker naming the configured target itself remains ambiguity rather than
+substitution. Carrying the marker as typed evidence in its own right would add a
+provider-neutral vocabulary variant both adapters must construct and redact, and
+is routed through the still-open provider provenance schema.
+
+**Affects.** `crates/model-provider-runtime`, the Anthropic adapter's response
+and stream decoders, the provider-target identity and operator-diagnostics laws
+in [model-call-execution](spec/model-call-execution.md), the adapter contract in
+[runtime-substrate](spec/runtime-substrate.md), and the closed
+model-identifier-normalization half of the model fallback and provenance
+question.
+
+## 2026-07-26 — Add sccache as the devenv shared compiler cache
+
+**Context.** Every checkout and worktree cold-builds the full dependency graph,
+which takes tens of minutes on the primary development machine, and concurrent
+agent worktrees repeat identical dependency compilation. Continuous integration
+already caches its target directory; local builds share nothing across
+worktrees.
+
+**Decision.** The developer environment provides sccache and sets
+`RUSTC_WRAPPER` inside the devenv shell. Dependency compilation is cached once
+per machine, in sccache's per-user default cache directory (`SCCACHE_DIR`
+overrides), and reused across checkouts and worktrees; workspace crates keep
+incremental compilation and pass through uncached. No machine-specific path is
+committed. Continuous integration does not enter the devenv environment and
+keeps its existing target-directory cache.
+
+**Rejected alternatives.** A committed `.cargo/config.toml` imposes the wrapper
+on every consumer, including CI and machines without sccache installed. A shared
+`CARGO_TARGET_DIR` across worktrees serializes concurrent builds on the
+target-directory lock and collides on profiles and features. Adding sccache to
+CI duplicates the existing target-directory cache and, without a shared remote
+backend, every job would start against a cold cache.
+
+**Affects.** `devenv.nix`, the build-tooling guidance in `AGENTS.md`, and build
+behavior inside the devenv shell only; no Cargo dependency, workspace
+configuration, or CI behavior changes.
+
+## 2026-07-26 — Renumber the review-workflow migration after main advanced
+
+**Context.** The review-workflow foundation reserved the `2026072602xx` block
+when its specification stack opened. Before the persistence pull request merged,
+its ultimate `main` parent acquired migrations `202607270001` and
+`202607280001`. Retaining the lower reserved version would make a database
+upgraded through that parent apply a newly introduced migration out of ledger
+order.
+
+**Decision.** The merged review-workflow persistence artifact is
+`202607280002_review_workflow.sql`, strictly after the highest migration on its
+ultimate `main` parent. References to `2026072602xx` in earlier decision entries
+record the stack's original reservation; this entry records the required
+renumber, and the
+[persistence protocol](spec/persistence-protocol.md#migrations) owns the current
+implemented inventory.
+
+**Rejected alternatives.** Keeping `2026072602xx` preserves the initial
+reservation but violates strictly increasing migration history. Renumbering or
+editing migrations already on `main` violates forward-only migration discipline.
+Rewriting the earlier decisions would erase the sequence that explains why the
+reservation and merged filename differ.
+
+**Affects.** The review-workflow migration filename, the provenance of PR #227,
+and interpretation of the earlier review-workflow decision entries' affected
+slice.
+
+## 2026-07-26 — Make runner lease authority single-use and tool-bound
+
+**Context.** An authorized physical attempt identifies its request, session,
+turn, and attempt but does not itself expose the approved request's selected
+tool. A cloneable authorization or lease also permits two independent domain
+transitions to present the same capability. Placement reconstitution must prove
+the complete pinned catalog snapshot without mistaking a later narrowed
+registration for the historical facts that created the pin.
+
+**Decision.** Runner dispatch consumes one non-cloneable
+`RunnerToolAttemptAuthorization` that binds an `ApprovedToolRequest`, including
+its selected tool, to the exact non-cloneable `AuthorizedToolAttempt`.
+`RunnerLease` is likewise non-cloneable, and loss retains a private checked
+source snapshot rather than duplicating the lease aggregate. Initial dispatch
+creates the pin, any requested grant, and generation-one lease together;
+subsequent dispatch requires the current pin and grant. Placement reconstitution
+recomputes and exactly compares the pin from its historical validated
+registration snapshot; current re-registration is reconciled separately.
+
+**Rejected alternatives.** Comparing only the attempt's request identity cannot
+prove the selected tool. Cloning a capability and relying on callers to consume
+only one copy does not enforce single use. Validating only that stored required
+tools remain individually runner-only accepts an incomplete inventory.
+Reconstituting from current availability conflates historical integrity with
+forward narrowing.
+
+**Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
+`RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
+the [runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-26 — Select bounded native-client operational policies
 
 **Context.** The native synchronization and application layers require concrete
@@ -104,6 +239,57 @@ would publish state the server never described.
 **Affects.** The native synchronization policy, snapshot accumulator, scripted
 transport tests, and application composition that selects the capacity.
 
+## 2026-07-25 — Grandfather pre-boundary started frontiers
+
+**Context.** Before durable model-identity boundaries existed, per-input model
+replacement could start adjacent turns with different frozen direct selections.
+Those immutable historical frontiers contain no boundary entry. The new law must
+apply to work that can still start without fabricating or rewriting
+already-executed history.
+
+**Decision.** Give each turn lifecycle an immutable boundary-requirement bit.
+The migration marks existing active and terminal turns false, existing queued
+turns true, and defaults every new turn to true. Reconstitution permits a
+marker-free changed-model start only when that durable bit is false and rejects
+a boundary entry on such a grandfathered start.
+
+**Rejected alternatives.** Rewriting immutable prefix frontiers would invent
+historical conversation events and alter every descendant snapshot. Treating all
+pre-migration turns alike would let queued work start after deployment without
+the newly implemented boundary.
+
+**Affects.** Turn-lifecycle storage, scheduling reconstitution, the
+model-identity boundary constraint, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
+## 2026-07-25 — Render model-identity boundaries as injected user-role events
+
+**Context.** The recorded mid-session model-selection direction fixes
+forward-only defaults replacement and requires the new model to learn its
+identity through the conversation frontier. The existing provider-neutral
+runtime message algebra has user and assistant roles but no system-event role.
+The remaining implementation choice was the exact durable boundary and its
+provider-visible projection.
+
+**Decision.** When a started turn's frozen direct selection differs from its
+immediate predecessor's, one durable `ModelIdentityChanged` semantic entry sits
+immediately before that turn's origin. It names the turn, defaults epoch, and
+direct selection. The application preserves that distinct entry kind; the
+provider bridge projects it as a user-role message with the fixed
+`Signalbox session event:` prefix and exact selected-model UUID and epoch. No
+entry is created for the first turn, an equal-selection successor, or a defaults
+epoch no turn ever binds.
+
+**Rejected alternatives.** An assistant-role message would fabricate model
+authorship. A silent switch would leave the new model unaware of context
+identity. Recording every replacement would put unused configuration history in
+the conversation frontier. Adding a new provider-runtime role would broaden the
+runtime contract beyond this boundary.
+
+**Affects.** Semantic transcript entries, turn-start frontier construction,
+provider-neutral conversation rendering, protocol version six, and
+[sessions and transcript](spec/sessions-and-transcript.md).
+
 ## 2026-07-25 — Scoped verification references on specification pages
 
 **Context.** Every `docs/spec/` page names the pull request its claims were last
@@ -141,6 +327,202 @@ owner a page author would read.
 **Affects.** [The specification index](spec/README.md),
 `scripts/check_docs_consistency.py`, and the verification reference on every
 `docs/spec/` page.
+
+## 2026-07-25 — Keep runner credentials local and daemon policy authoritative
+
+**Context.** Sessions need to select machine-local credentials without sending
+their values through a daemon-controlled runner channel. Tool-only approval
+cannot distinguish a read-only credential from an administrator credential for
+the same operation. Profile rotation and revocation also need inspectable
+forward behavior without altering work already executing.
+
+**Decision.** A runner holds named credential profiles provisioned out of band;
+credential values have no runner-protocol control representation. The daemon
+owns profile-name validation, session selection, durable grant and audit facts,
+and approval posture for exact `(tool, credential profile)` pairs. After the
+dangerous session blanket, `Automatic` authorizes only its exact catalog pair;
+`SessionPolicy` or absence requires confirmation and cannot be overridden by a
+tool-only automatic default. Session creation records the profile request, and
+pinning snapshots it with the now-exact runner and advertised tool inventory.
+Replacement is a checked forward-only complete snapshot that emits typed change
+facts for later frontier injection. Runner replacement consumes a prior
+pinned-profile grant and creates a checked successor revision rather than
+recreating revision one. Revocation gates later lease creation but does not
+cancel or rewrite an already offered lease; its prior revision remains terminal.
+Arbitrary tool output is a separate result-egress boundary and carries no
+no-disclosure claim in this slice.
+
+**Rejected alternatives.** Sending values from the daemon creates a second
+credential-distribution system. Letting a runner advertise approval posture
+permits self-widening. Tool-only approval ignores credential scope. Mutating an
+active snapshot hides which profile authorized earlier work. Yank-on-revocation
+cannot honestly establish whether an in-flight external effect occurred.
+
+**Affects.** `CredentialProfileName`, runner catalog policy,
+`CredentialProfileGrant`, session placement, approval resolution, INV-035 and
+INV-045, the [runner-protocol specification](spec/runner-protocol.md), and later
+application, persistence, and transport stacks.
+
+## 2026-07-25 — Pin a session after first runner execution
+
+**Context.** A session may select either a capability class or exact runner and
+may request a working directory or repository workspace. After execution,
+workspace and ambient process state make another runner with the same declared
+class non-equivalent. Silent rescheduling would change both the execution
+boundary and the model's available tools without extending conversation context.
+
+**Decision.** Session placement begins with a class-or-identity selector,
+working-directory selection, optional credential profile, and workspace
+requirement. The first eligible execution consumes its exact authorized
+tool-attempt fence and atomically pins the exact runner, its validated
+capability snapshot, and the initial runner lease; mere attachment cannot pin.
+Ordinary dispatch cannot move the session. Runner loss is explicit and disables
+future leasing. Owner-directed replacement checks one complete new placement,
+advances a positive revision, and emits complete before-and-after change facts
+for mandatory later frontier injection. A repository workspace requires the
+runner-advertised `WorktreePerSession` capability; its provisioned path is
+runner-owned and a replacement cannot inherit it across runners.
+
+**Rejected alternatives.** Re-evaluating a class before every call permits
+silent migration. Pinning only a working-directory string treats paths on
+different runners as the same workspace. Automatic failover hides changed tools,
+credentials, and filesystem state. Daemon-owned cleanup crosses the placement
+boundary and cannot clean a disconnected runner reliably.
+
+**Affects.** `SessionRunnerPlacement`, workspace requirement and provisioning
+types, runner replacement change facts, INV-044, S30 and S32, the
+[runner-protocol specification](spec/runner-protocol.md), and later context
+assembly and runner-workspace stacks.
+
+## 2026-07-25 — Make effect class control runner re-leasing
+
+**Context.** Runner dispatch adds a loss boundary after work has been offered or
+claimed. The current two-way effect metadata distinguishes no-effect from
+possibly external effect, but cannot express state-changing work that is safe to
+repeat. Treating every disconnect alike either strands safe work or silently
+duplicates unsafe work.
+
+**Decision.** Every tool declaration has exactly one required effect class:
+`Pure`, `Idempotent`, or `SideEffecting`; pure implies idempotent. Tool
+placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
+or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
+the combined case and daemon fallback retained if that runner later omits the
+combined tool. Runner leases consume the tool loop's exact authorized
+physical-attempt dispatch correlation and bind it to an exact pinned runner,
+tool, and positive lease-lineage generation; active enrollment, current
+placement, registration, and grant jointly authorize the lease, and effect is
+derived from the validated declaration. Loss before claim may advance every
+class while retaining the never-executed attempt. Loss after claim produces
+re-lease authority only for pure or idempotent work and requires a fresh
+authorized physical attempt identity; the lease-lineage generation advances
+while that new physical attempt's own dispatch generation starts at its required
+first value. Side-effecting loss produces exact crash-classification authority
+and cannot produce re-lease authority. Undeclared advertised tools are rejected;
+an untrusted pre-validation boundary classifies an absent effect declaration as
+side-effecting.
+
+The later runner transport uses one runner-initiated held outbound streaming
+connection and runners accept no inbound connection. The channel carries offers,
+claims, and results but is never their authority: registration and lease
+aggregates are independent of connection state, and later persistence must
+reconstitute them before reconnect synchronization. The later transport must
+durably commit and acknowledge an exact claim before that acknowledgement
+becomes the runner's execution capability; absence of a claim frame alone never
+proves that an offered operation did not execute.
+
+**Rejected alternatives.** A default effect class hides missing policy. Treating
+all state-changing work as ambiguous throws away idempotency. Re-leasing side
+effects on disconnect risks duplication. One boolean `runner_allowed` cannot
+state daemon fallback or its selector. Per-call model-selected placement permits
+a call to widen the registry. Treating the stream as truth loses claims on
+reconnect.
+
+**Affects.** `RunnerToolEffectClass`, `ToolAdmissibleLoci`, runner leases,
+INV-004, INV-021, INV-025, INV-026, INV-043, S16 and S31, the
+[tool-loop](spec/tool-loop.md) and [runner-protocol](spec/runner-protocol.md)
+specifications, and later store and wire stacks.
+
+## 2026-07-25 — Give logical enrollments daemon-validated advertisements
+
+**Context.** Runners range from long-lived owner-machine processes to ephemeral
+processes created shortly before registration. Hardware fingerprints cannot
+provide stable identity for both. A runner must advertise current tools,
+credential-profile names, and workspace capabilities, but trusting those claims
+as policy would let re-registration widen authorization or weaken approval.
+
+**Decision.** A runner identity is logical and enrollment-issued, never derived
+from hardware or network properties. Enrollment binds distinct enrollment,
+runner, and opaque authentication-reference identities plus owner-allowed
+capability classes, and has terminal revocation. Registration carries
+availability names only. The complete advertisement is validated against the
+active enrollment and one daemon-side owner-editable catalog parsed into typed
+domain, including its allowed capability classes. Unknown or disallowed claims
+reject registration. The validated result attaches daemon declarations for
+model-facing description and argument schema, permission, placement, effect,
+credential-pair approval, and workspace capability. The runner declaration is
+authoritative for runner dispatch, including runner-only tools; a later adapter
+must compile its schema and reject any shared daemon-local definition whose
+description, schema, permission, or mapped effect disagrees. Re-registration can
+change availability but carries no field capable of changing policy. It cannot
+widen an established session snapshot; narrowing a runner-required capability
+disables lease creation and is reconciled as explicit runner loss, while
+omission of a combined-locus tool retains placement and daemon fallback.
+Enrollment revocation also disables later lease creation through a registration
+it previously validated.
+
+Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
+letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
+Working-directory and repository keys retain exact nonempty, U+0000-free UTF-8
+up to 4,096 bytes without host-platform parsing in the domain. Catalog file
+syntax, authentication exchange, rotation, and durable registration storage are
+later boundaries.
+
+**Rejected alternatives.** Hardware fingerprints exclude ephemeral runners and
+silently change identity when machines are replaced. Hostnames and network
+addresses are neither stable nor authentication. Trusting full declarations from
+advertisements lets runners self-authorize. Silently dropping unknown claims
+makes a registration appear healthier than the runner's actual configuration.
+Embedding TOML or host path semantics in domain values crosses representation
+boundaries.
+
+**Affects.** Runner identities, enrollment, advertised and validated catalogs,
+INV-001 and INV-042, S30, the
+[runner-protocol specification](spec/runner-protocol.md), and later
+configuration, authentication, persistence, and transport stacks.
+
+## 2026-07-25 — Ship the server daemon as signalboxd
+
+**Context.** The recorded de-hub naming direction settled the server's name: the
+daemon ships as `signalboxd`, and future runner processes are a separate
+`signalbox-runner` binary. The crate still built as `signalbox-hubd` in
+`apps/hubd`, and the living documents still named the server process "the hub".
+This entry records that rename's execution.
+
+**Decision.** Rename the crate directory to `apps/signalboxd` and the package
+and binary target to `signalboxd`; rename `config/hubd.example.toml` to
+`config/signalboxd.example.toml`; update the CI integration-matrix label and
+package flags; and move the living surface — specification pages, architecture,
+vision, glossary, scenarios, invariant text, README, and config comments — to
+`signalboxd`/"the daemon" vocabulary, with "hub-local" tool placement becoming
+"daemon-local". Historical decision entries are append-only and keep their hubd
+vocabulary. Hub-named code identifiers (`SingleHubGuard`, `run_hub`, the
+persistence `hub_fence` module) and migration-committed SQL names stay for the
+recorded follow-on vocabulary pass, so cited code homes keep matching source.
+The native client's stored keychain-account and defaults-key literals
+(`hub-api-key`, `hub-url`) stay permanently on PR #238's recorded ground:
+renaming a stored-state identifier orphans already-saved settings and buys
+nothing, so only the Swift constants naming them carry the new vocabulary.
+
+**Rejected alternatives.** Keeping the package name `signalbox-hubd` with only a
+binary-target rename would preserve dependency-graph continuity but leave the
+legacy name on the Cargo surface every reference spells. Renaming code
+identifiers in the same pass would mix a mechanical move with the broad
+vocabulary sweep the backlog scopes separately.
+
+**Affects.** `apps/signalboxd`, `apps/client` imports, the workspace member list
+and `Cargo.lock`, `.github/workflows/rust.yml`,
+`config/signalboxd.example.toml`, and the living documents naming the server
+process.
 
 ## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
 

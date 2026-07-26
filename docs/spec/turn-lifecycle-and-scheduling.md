@@ -4,12 +4,15 @@ This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the
 parked-approval interrupt delivery outcome was verified through PR #254
-(`agent/fix-parked-approval-interrupt`). Code homes:
-`crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
+(`agent/fix-parked-approval-interrupt`), and model-identity turn-start
+boundaries were verified through PR #272 (`agent/mid-session-model`). Code
+homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
-`lock_inventory}.rs` and its migrations, and `apps/hubd/src/main.rs`.
+`lock_inventory}.rs` and its migrations, and `apps/signalboxd/src/main.rs`. The
+`signalboxd` composition-root name and that `apps/signalboxd` code home were
+verified through PR #258 (`agent/signalboxd-rename`).
 [docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
 reference its rows without restating them. Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). Sibling
@@ -154,11 +157,13 @@ queued turn, and constructs atomically-committable state:
 - lineage `FirstInSession` iff the session has no earlier turn, else
   `After { immediate_predecessor }` naming the exact terminal turn ordered
   immediately before it;
-- the starting context frontier: the predecessor's terminal frontier with the
-  fresh origin semantic entry appended (prefix-preserving); for a
-  first-in-session turn, the exact frontier identity stored by the session's
-  `ImportedSessionSeed` followed by the origin entry when ancestry is
-  `ImportedConversation`, or only the origin entry when ancestry is `None`;
+- the starting context frontier: the predecessor's terminal frontier followed by
+  a `ModelIdentityChanged` entry exactly when this turn's acceptance-frozen
+  direct model differs from the predecessor's, then the fresh origin semantic
+  entry (prefix-preserving); for a first-in-session turn, the exact frontier
+  identity stored by the session's `ImportedSessionSeed` followed by the origin
+  entry when ancestry is `ImportedConversation`, or only the origin entry when
+  ancestry is `None`;
 - the opaque `AcceptedInputTurnStart` binding lineage and frontier, whose
   constructor is private to validated eligibility (INV-009 — a raw identifier or
   list supplied by a caller is not start authority); and
@@ -192,23 +197,24 @@ remain shared.
 2. Load the current session and the complete scheduling projection under that
    lock, through the checked domain seams.
 3. Let the domain prepare the activation (previous section). The application
-   layer supplies three fresh UUIDv7 identity candidates (origin entry, starting
-   frontier, initial attempt) per pass and never selects a target turn.
-4. Commit atomically: insert the origin semantic entry, the starting snapshot
-   with complete materialized membership, and the prepared attempt row, then run
-   the guarded lifecycle `UPDATE` that binds the exact lineage, frontier, and
-   attempt and flips `queued` to `active`. The update re-asserts queued state,
-   no active turn, every earlier turn under the interrupt-aware total order
-   terminal, and the exact derived predecessor. An `interrupt_immediately_after`
-   origin proves its named predecessor and may precede ordinary queued inputs
-   with lower raw acceptance positions. Commit only when the update affects
-   exactly one row; zero rows after in-lock validation is fail-closed
-   corruption, and identity-key conflicts map to typed identity-collision errors
-   after full rollback.
+   layer supplies four fresh UUIDv7 identity candidates (optional model-identity
+   entry, origin entry, starting frontier, initial attempt) per pass and never
+   selects a target turn.
+4. Commit atomically: insert the optional model-identity entry and origin
+   semantic entry, the starting snapshot with complete materialized membership,
+   and the prepared attempt row, then run the guarded lifecycle `UPDATE` that
+   binds the exact lineage, frontier, and attempt and flips `queued` to
+   `active`. The update re-asserts queued state, no active turn, every earlier
+   turn under the interrupt-aware total order terminal, and the exact derived
+   predecessor. An `interrupt_immediately_after` origin proves its named
+   predecessor and may precede ordinary queued inputs with lower raw acceptance
+   positions. Commit only when the update affects exactly one row; zero rows
+   after in-lock validation is fail-closed corruption, and identity-key
+   conflicts map to typed identity-collision errors after full rollback.
 
-The committed origin entry, snapshot, start, active slot, and attempt are one
-transaction: no durable state exists in which a start references a missing or
-partial snapshot.
+The committed turn-start entries, snapshot, start, active slot, and attempt are
+one transaction: no durable state exists in which a start references a missing
+or partial snapshot (INV-040).
 
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE
@@ -254,9 +260,9 @@ failure after active-turn execution begins trips fatal recovery supervision. A
 parked approval returns from the pass immediately and therefore retains no
 scheduler worker capacity. Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
-hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
+signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
-activates and then drives the turn's model call. hubd depends on
+activates and then drives the turn's model call. signalboxd depends on
 `model-runtime`/`model-runtime-anthropic` through the `model-provider-runtime`
 bridge; application and persistence still declare no runtime-crate dependency.
 The same execution composition drives approval, tool attempts, and continuation
@@ -264,12 +270,13 @@ through the ports owned by [tool-loop](tool-loop.md).
 
 ## Startup scan and recovery
 
-After configuration and database connection, hubd acquires the dedicated
-single-hub advisory guard specified by [process-protocol](process-protocol.md),
-then orders startup strictly: embedded migrations, the startup scan to
-completion, process-socket bind, and only then request admission, outbox
-dispatch, and scheduling. Why: any lifecycle writer or client read before the
-scan could observe or alter a live-looking prior-process attempt (INV-034).
+After configuration and database connection, signalboxd acquires the dedicated
+single-daemon advisory guard specified by
+[process-protocol](process-protocol.md), then orders startup strictly: embedded
+migrations, the startup scan to completion, process-socket bind, and only then
+request admission, outbox dispatch, and scheduling. Why: any lifecycle writer or
+client read before the scan could observe or alter a live-looking prior-process
+attempt (INV-034).
 
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
@@ -336,10 +343,10 @@ slot without discarding stop intent. Identity collisions are retried with fresh
 candidates; infrastructure and fail-closed corruption stop startup visibly. The
 scan is idempotent — a rerun inventories only work still active, and a stale
 observation rolls back as `NoActiveTurn`. There is no process-incarnation column
-and no lease: under the single-hub deployment contract, every nonterminal
+and no lease: under the single-daemon deployment contract, every nonterminal
 attempt observed at startup is a prior-process abandonment (INV-010). The
 advisory guard is acquired before this scan and held on its dedicated connection
-for the complete process lifetime, so a second hub cannot run the premise
+for the complete process lifetime, so a second daemon cannot run the premise
 concurrently.
 
 ## Occupied-slot input handling
@@ -493,20 +500,20 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 (general reconstitution boundary:
 [persistence-protocol](persistence-protocol.md)).
 
-## Hub runtime: startup order and shutdown
+## Daemon runtime: startup order and shutdown
 
-hubd is the composition root. It reads exactly `DATABASE_URL`,
+signalboxd is the composition root. It reads exactly `DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
 selections, and aliases), `ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`
 from the process environment (the provisional configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
-connects, acquires the single-hub guard, fences the prior pool incarnation,
+connects, acquires the single-daemon guard, fences the prior pool incarnation,
 migrates, completes recovery scan, binds the process socket, then concurrently
 admits protocol requests, dispatches the outbox, and schedules eligible work. On
 a database without the fence migration, the guarded first migration creates the
-fence row before the hub initializes its first fenced pool. No request, dispatch
-cursor advance, or scheduler pass occurs before recovery completes. Any phase
-failure is a failed startup with a classified, key-bearing log line and a
+fence row before the daemon initializes its first fenced pool. No request,
+dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
+phase failure is a failed startup with a classified, key-bearing log line and a
 failure exit code.
 
 The dedicated guard connection is checked once per second while the runtime is
@@ -525,7 +532,7 @@ admitting passes. Finite request handlers, the current dispatcher transaction,
 and in-flight scheduler passes share the bounded 30-second grace window to let
 authoritative transactions commit or abort. A clean exit closes the fenced pool,
 waits on the guard session's exclusive current-generation fence so even detached
-pool sessions have ended, removes only this hub's identity-pinned and
+pool sessions have ended, removes only this daemon's identity-pinned and
 revalidated socket, and releases the advisory locks by closing its dedicated
 guard connection. Window expiry abandons remaining tasks, warns, and skips the
 unbounded pool drain; process exit releases its sessions. Why signal-driven

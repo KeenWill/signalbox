@@ -16,40 +16,40 @@ resource controls.
 
 ## Target user and deployment
 
-The target user is one technically capable owner operating an always-on hub in
-Kubernetes with Postgres as the canonical store. Terminal, web, macOS, and iOS
-clients connect remotely. Runners may live on workstations, personal servers,
-restricted accounts, containers, or remote sandboxes. Development and test
-environments use the same Postgres semantics, normally through ephemeral
+The target user is one technically capable owner operating an always-on daemon
+in Kubernetes with Postgres as the canonical store. Terminal, web, macOS, and
+iOS clients connect remotely. Runners may live on workstations, personal
+servers, restricted accounts, containers, or remote sandboxes. Development and
+test environments use the same Postgres semantics, normally through ephemeral
 containerized instances.
 
 Multi-user tenancy, organization administration, and collaborative authorization
 are not first-version goals.
 
-## Why a central hub
+## Why a central daemon
 
-The hub gives every client one authoritative view of sessions, accepted input,
-logical work, approvals, scheduling, model resolution, and final outcomes. It
-initially owns provider credentials and calls so credentials and model
-provenance do not fragment across clients or runners. Central ownership also
-makes crash recovery a product property: acknowledged work is represented
+The daemon gives every client one authoritative view of sessions, accepted
+input, logical work, approvals, scheduling, model resolution, and final
+outcomes. It initially owns provider credentials and calls so credentials and
+model provenance do not fragment across clients or runners. Central ownership
+also makes crash recovery a product property: acknowledged work is represented
 durably even when a client disconnects.
 
-The initial hub may be a modular monolith. This boundary does not require
+The initial daemon may be a modular monolith. This boundary does not require
 microservices and does not prevent provider execution from moving behind a
 dedicated service after a recorded decision in [the decision log](decisions.md).
 
 ## Why runners are separate
 
-Tools need capabilities and locality that the hub should not assume: a
+Tools need capabilities and locality that the daemon should not assume: a
 checked-out workspace, a user's desktop applications, special hardware, or a
 deliberately restricted sandbox. A runner connects outbound, declares
-capabilities and its execution boundary, and performs work selected by the hub.
-Deployments are expected to configure and report those properties truthfully,
-but a declaration is not proof; scheduling and presentation may rely only on
-execution properties supported by the available deployment and verification
-evidence. The runner does not become the source of truth for conversation or
-policy.
+capabilities and its execution boundary, and performs work selected by the
+daemon. Deployments are expected to configure and report those properties
+truthfully, but a declaration is not proof; scheduling and presentation may rely
+only on execution properties supported by the available deployment and
+verification evidence. The runner does not become the source of truth for
+conversation or policy.
 
 Separation makes execution identity explicit. One deployment may intentionally
 run as the human user; another may run as an unprivileged account or inside a
@@ -95,7 +95,7 @@ coherent behavior without pre-building speculative package structures.
   token.
 - A distributed broker or workflow engine selected in advance of demonstrated
   need.
-- Independently deployed hub microservices.
+- Independently deployed daemon microservices.
 - Multi-user privilege switching inside one runner process.
 - Guaranteed strong isolation for every runner deployment.
 - Automatic model fallback until its policy is decided.

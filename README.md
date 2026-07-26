@@ -2,7 +2,7 @@
 
 Signalbox is a personal, self-hosted platform for durable LLM-assisted work —
 your own always-on agent and chat hub rather than an account on someone else's
-product. One central hub owns your sessions and keeps them alive across
+product. One central daemon owns your sessions and keeps them alive across
 restarts, disconnects, and device switches; terminal, web, macOS, and iOS
 clients connect to it from anywhere, and runners you operate execute tools on
 your own machines.
@@ -28,7 +28,7 @@ these capabilities directionally — accepted records decide them — and severa
 
 > **Status:** early implementation phase; APIs, protocols, and storage details
 > are not yet stable. The initial domain and persistence slices now support a
-> local hub process protocol, terminal client, scheduler, and offline and
+> local daemon process protocol, terminal client, scheduler, and offline and
 > Anthropic model-call paths. Remote runners and graphical clients remain future
 > milestones.
 
@@ -37,7 +37,7 @@ these capabilities directionally — accepted records decide them — and severa
     \            |            /
      +-----------+-----------+
                  |
-          [ Central hub ] ---- [ Postgres ]
+          [ Central daemon ] ---- [ Postgres ]
             |         |
     provider adapters | scheduler / tool policy
                       |
@@ -46,7 +46,7 @@ these capabilities directionally — accepted records decide them — and severa
        [ambient runner]  [restricted runner]
 ```
 
-The hub is the source of truth; a client device and an execution machine need
+The daemon is the source of truth; a client device and an execution machine need
 not be the same machine. See [Architecture](docs/architecture.md) for the
 boundaries and important qualifications behind this sketch.
 
@@ -79,17 +79,18 @@ can instead allow the committed `.envrc`. The Postgres integration suite still
 needs a running Docker daemon. See [AGENTS.md](AGENTS.md) for the authoritative
 tooling, formatting, and validation workflow.
 
-The workspace contains the dependency chain `apps/hubd` → `crates/application` →
-`crates/domain`, with `crates/persistence` depending on both
-`crates/application` and `crates/domain`, and the dev-only `crates/expect-table`
-consumed by the domain crate's tests. Before finishing any change, run the
-repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
-list of required commands and their setup notes — from the repository root.
+The workspace contains the dependency chain `apps/signalboxd` →
+`crates/application` → `crates/domain`, with `crates/persistence` depending on
+both `crates/application` and `crates/domain`, and the dev-only
+`crates/expect-table` consumed by the domain crate's tests. Before finishing any
+change, run the repository-wide validation sequence in [AGENTS.md](AGENTS.md) —
+the canonical list of required commands and their setup notes — from the
+repository root.
 
 ### Terminal client
 
 The `signalbox` binary is the supported local terminal surface for the
-[process protocol](docs/spec/process-protocol.md). Point it at the hub socket
+[process protocol](docs/spec/process-protocol.md). Point it at the daemon socket
 with `--socket` or `SIGNALBOX_SOCKET_PATH`; `signalbox --help` lists the closed
 command surface. For example:
 
@@ -112,9 +113,9 @@ The companion ignored real-Anthropic path makes a live provider request and may
 incur cost. It runs only when all three opt-in values are supplied:
 
 ```console
-SIGNALBOX_E2E_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_E2E_CONFIG_FILE=config/signalboxd.example.toml \
 SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
-SIGNALBOX_E2E_SELECTION_ID=10000000-0000-4000-8000-000000000001 \
+SIGNALBOX_E2E_SELECTION_ID=a5fec003-0edd-4118-96d1-18af31157bd3 \
   cargo test -p signalbox-client --test end_to_end \
     terminal_client_completes_the_real_anthropic_path \
     -- --ignored --nocapture
@@ -131,7 +132,7 @@ semantic transcript:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-  cargo run -p signalbox-hubd --bin signalbox-debug -- \
+  cargo run -p signalboxd --bin signalbox-debug -- \
   "hello" "scripted assistant reply"
 ```
 
@@ -139,15 +140,15 @@ The debug database connection explicitly disables TLS and must not be used as
 production connection configuration.
 
 The same harness can run the production runtime bridge against Anthropic. Copy
-and review [`config/hubd.example.toml`](config/hubd.example.toml), put only the
-API-key bytes in a mode-`0600` file, then run:
+and review [`config/signalboxd.example.toml`](config/signalboxd.example.toml),
+put only the API-key bytes in a mode-`0600` file, then run:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-SIGNALBOX_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_CONFIG_FILE=config/signalboxd.example.toml \
 ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
-  cargo run -p signalbox-hubd --bin signalbox-debug -- \
-  --anthropic 10000000-0000-4000-8000-000000000001 \
+  cargo run -p signalboxd --bin signalbox-debug -- \
+  --anthropic a5fec003-0edd-4118-96d1-18af31157bd3 \
   "Reply with exactly: signalbox smoke ok"
 ```
 
