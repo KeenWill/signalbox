@@ -5984,6 +5984,7 @@ mod tests {
         );
         let mut next_entry = 84_u128;
         let prepared = command
+            .clone()
             .prepare(
                 &conversation,
                 session_id(session_value),
@@ -5995,6 +5996,7 @@ mod tests {
                 },
             )
             .expect("matching imported history prepares a seed");
+        let command_defaults = command.initial_configuration_defaults().clone();
         let seed = prepared.imported_seed();
         let snapshot = prepared.seed_snapshot();
         ImportedSessionReconstitutionInput::new(
@@ -6005,7 +6007,7 @@ mod tests {
             SessionConfigurationDefaultsVersion::first(),
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
-            command.initial_configuration_defaults(),
+            command_defaults,
             conversation,
             vec![crate::ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),

@@ -42,8 +42,9 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationImportFormat,
     ConversationImportSource, ErrorCode, ImportedContentKind, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
-    RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    RequestId, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
+    SystemPromptText, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
@@ -376,6 +377,7 @@ async fn create_alias_session(
                 initial_model_selection: ModelSelection::Alias {
                     alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 },
+                system_prompt: SystemPromptMember::absent(),
             },
         )
         .await?;
@@ -673,6 +675,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
             selection_id: replacement_selection,
         },
         dangerous_tool_auto_approval: false,
+        system_prompt: SystemPromptMember::absent(),
     };
 
     connection
@@ -687,6 +690,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            system_prompt: SystemPromptMember::absent(),
         }
     );
 
@@ -702,6 +706,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            system_prompt: SystemPromptMember::absent(),
         }
     );
 
@@ -718,6 +723,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(999)),
                 },
                 dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::absent(),
             },
         )
         .await?;
@@ -783,6 +789,7 @@ async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
                 },
                 dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::absent(),
             },
         )
         .await?;

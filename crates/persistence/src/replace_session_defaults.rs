@@ -28,7 +28,7 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
-const STORAGE_VERSION: i16 = 2;
+const STORAGE_VERSION: i16 = 3;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -36,7 +36,7 @@ const CURRENT_VERSION_MISMATCH: &str = "current_version_mismatch";
 const VERSION_EXHAUSTED: &str = "version_exhausted";
 
 /// The committed outcome of handling one defaults-replacement command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplaceSessionDefaultsHandlingOutcome {
     /// First handling or equal replay returns the recorded application.
     Applied(ReplaceSessionDefaultsAppliedResult),
@@ -280,7 +280,7 @@ impl ReplaceSessionDefaultsRepository {
             return Ok(outcome);
         }
 
-        let prepared = prepare_against_current(&mut transaction, command).await?;
+        let prepared = prepare_against_current(&mut transaction, command.clone()).await?;
         let prepared = match prepared.result() {
             ReplaceSessionDefaultsResult::Applied(applied) => {
                 let updated = sqlx::query(
@@ -300,7 +300,7 @@ impl ReplaceSessionDefaultsRepository {
 
                 if updated == 1 {
                     insert_defaults_version(&mut transaction, applied).await?;
-                    prepared
+                    prepared.clone()
                 } else if updated == 0 {
                     let rederived = prepare_against_current(&mut transaction, command).await?;
                     if matches!(rederived.result(), ReplaceSessionDefaultsResult::Applied(_)) {
@@ -319,11 +319,11 @@ impl ReplaceSessionDefaultsRepository {
                     .into());
                 }
             }
-            ReplaceSessionDefaultsResult::Rejected(_) => prepared,
+            ReplaceSessionDefaultsResult::Rejected(_) => prepared.clone(),
         };
 
-        insert_typed_record(&mut transaction, prepared).await?;
         let outcome = result_outcome(prepared.result());
+        insert_typed_record(&mut transaction, prepared).await?;
         transaction
             .commit()
             .await
@@ -411,8 +411,8 @@ fn existing_outcome(
     }
 }
 
-fn result_outcome(result: ReplaceSessionDefaultsResult) -> ReplaceSessionDefaultsHandlingOutcome {
-    match result {
+fn result_outcome(result: &ReplaceSessionDefaultsResult) -> ReplaceSessionDefaultsHandlingOutcome {
+    match result.clone() {
         ReplaceSessionDefaultsResult::Applied(result) => {
             ReplaceSessionDefaultsHandlingOutcome::Applied(result)
         }
@@ -424,7 +424,7 @@ fn result_outcome(result: ReplaceSessionDefaultsResult) -> ReplaceSessionDefault
 
 async fn insert_defaults_version(
     connection: &mut PgConnection,
-    applied: ReplaceSessionDefaultsAppliedResult,
+    applied: &ReplaceSessionDefaultsAppliedResult,
 ) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
     let installed = applied.installed();
     let selection = encode_selection(installed.defaults().model());
@@ -432,8 +432,8 @@ async fn insert_defaults_version(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             dangerous_tool_auto_approval, system_prompt)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(session_id_to_uuid(applied.session()))
     .bind(defaults_version_to_numeric(installed.version()))
@@ -443,6 +443,12 @@ async fn insert_defaults_version(
     .bind(dangerous_tool_auto_approval_to_str(
         installed.defaults().dangerous_tool_auto_approval(),
     ))
+    .bind(
+        installed
+            .defaults()
+            .system_prompt()
+            .map(signalbox_domain::SessionSystemPrompt::as_str),
+    )
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -461,11 +467,12 @@ async fn insert_typed_record(
             (command_id, command_kind, storage_version, session_id,
              expected_current_version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, result_kind, rejection_kind, result_session_id,
+             dangerous_tool_auto_approval, system_prompt, result_kind,
+             rejection_kind, result_session_id,
              result_installed_version, result_expected_version,
              result_current_version)
          VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(REPLACE_SESSION_DEFAULTS_KIND)
@@ -480,6 +487,12 @@ async fn insert_typed_record(
     .bind(dangerous_tool_auto_approval_to_str(
         command.replacement().dangerous_tool_auto_approval(),
     ))
+    .bind(
+        command
+            .replacement()
+            .system_prompt()
+            .map(signalbox_domain::SessionSystemPrompt::as_str),
+    )
     .bind(encoded_result.result_kind)
     .bind(encoded_result.rejection_kind)
     .bind(session_id_to_uuid(encoded_result.session))
@@ -521,8 +534,8 @@ struct EncodedResult {
     current_version: Option<Decimal>,
 }
 
-fn encode_result(result: ReplaceSessionDefaultsResult) -> EncodedResult {
-    match result {
+fn encode_result(result: &ReplaceSessionDefaultsResult) -> EncodedResult {
+    match result.clone() {
         ReplaceSessionDefaultsResult::Applied(result) => EncodedResult {
             result_kind: APPLIED,
             rejection_kind: None,
@@ -581,6 +594,7 @@ async fn load_from_connection(
             typed.direct_model_selection_id AS command_direct_id,
             typed.model_alias_id AS command_alias_id,
             typed.dangerous_tool_auto_approval AS command_tool_auto_approval,
+            typed.system_prompt AS command_system_prompt,
             typed.result_kind,
             typed.rejection_kind,
             typed.result_session_id,
@@ -592,7 +606,8 @@ async fn load_from_connection(
             installed.model_selection_kind AS installed_model_kind,
             installed.direct_model_selection_id AS installed_direct_id,
             installed.model_alias_id AS installed_alias_id,
-            installed.dangerous_tool_auto_approval AS installed_tool_auto_approval
+            installed.dangerous_tool_auto_approval AS installed_tool_auto_approval,
+            installed.system_prompt AS installed_system_prompt
          FROM durable_command AS command
          LEFT JOIN replace_session_defaults_command AS typed
            ON typed.command_id = command.command_id
@@ -632,6 +647,7 @@ fn decode_complete(
             row.try_get("command_direct_id")?,
             row.try_get("command_alias_id")?,
             required(&row, "command_tool_auto_approval")?,
+            row.try_get("command_system_prompt")?,
             typed_version,
             "command model selection",
         )?,
@@ -662,6 +678,7 @@ fn decode_complete(
                 row.try_get("installed_direct_id")?,
                 row.try_get("installed_alias_id")?,
                 required(&row, "installed_tool_auto_approval")?,
+                row.try_get("installed_system_prompt")?,
                 typed_version,
                 "installed model selection",
             )?;
@@ -791,7 +808,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ReplaceSessionDefaultsRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1 | 2) {
+    if matches!(actual, 1 | 2 | 3) {
         Ok(actual)
     } else {
         Err(ReplaceSessionDefaultsCorruption::Unsupported {
@@ -829,6 +846,7 @@ fn decode_selection(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
     storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ReplaceSessionDefaultsRepositoryError> {
@@ -863,12 +881,24 @@ fn decode_selection(
         )
         .into());
     }
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    if storage_version <= 2 && system_prompt.is_some() {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "pre-version-three system prompt",
+        )
+        .into());
+    }
+    let system_prompt = system_prompt
+        .map(|value| {
+            signalbox_domain::SessionSystemPrompt::try_new(value).map_err(|_| {
+                ReplaceSessionDefaultsCorruption::Inconsistent("system prompt admission")
+            })
+        })
+        .transpose()?;
+    Ok(SessionConfigurationDefaults::complete(
+        model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+    ))
 }
 
 async fn inspect_registry(

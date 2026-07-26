@@ -36,6 +36,13 @@ pub const CONVERSATION_IMPORT_PROTOCOL_VERSION: u64 = 5;
 /// The forward-only session-defaults replacement protocol version.
 pub const MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION: u64 = 6;
 
+/// The session system-prompt protocol version.
+///
+/// Versions seven and eight are reserved by the in-flight turn-reconciliation
+/// and turn-control stacks and are not admitted by this implementation; a
+/// frame naming either receives the ordinary unsupported-version error.
+pub const SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION: u64 = 9;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -51,6 +58,9 @@ pub enum ProtocolVersion {
     Five,
     /// Forward-only session-defaults replacement vocabulary.
     Six,
+    /// Session system-prompt vocabulary. Versions seven and eight remain
+    /// reserved by in-flight stacks and have no variant here.
+    Nine,
 }
 
 impl ProtocolVersion {
@@ -63,6 +73,7 @@ impl ProtocolVersion {
             Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
             Self::Five => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::Nine => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
         }
     }
 
@@ -74,6 +85,7 @@ impl ProtocolVersion {
             SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
             CONVERSATION_IMPORT_PROTOCOL_VERSION => Some(Self::Five),
             MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
+            SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION => Some(Self::Nine),
             _ => None,
         }
     }
@@ -125,6 +137,9 @@ pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
 
 /// Maximum exact required tags in one metadata-list filter.
 pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
+
+/// Maximum UTF-8 bytes in one session system prompt.
+pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -351,6 +366,105 @@ impl From<ContentFragment> for String {
     }
 }
 
+/// One exact bounded session system prompt on the wire.
+///
+/// A present prompt is nonempty, rejects U+0000, and carries at most
+/// [`MAX_SYSTEM_PROMPT_UTF8_BYTES`] UTF-8 bytes; absence is JSON null on the
+/// owning member, never empty text.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SystemPromptText(String);
+
+impl SystemPromptText {
+    /// Applies the nonempty, U+0000-free, bounded-bytes admission rules.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        if value.is_empty() || value.len() > MAX_SYSTEM_PROMPT_UTF8_BYTES || value.contains('\0') {
+            Err(CanonicalValueError::SystemPrompt)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the exact admitted prompt text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Transfers ownership of the exact admitted prompt text.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for SystemPromptText {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<SystemPromptText> for String {
+    fn from(value: SystemPromptText) -> Self {
+        value.0
+    }
+}
+
+/// Presence-checked optional system-prompt member.
+///
+/// Version nine requires the member: JSON null states explicitly that the
+/// complete defaults carry no prompt, and a string carries the exact bounded
+/// prompt. Versions one through six omit the member entirely; frame
+/// validation rejects a present member below version nine and an absent
+/// member at version nine.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SystemPromptMember(Option<Option<SystemPromptText>>);
+
+impl SystemPromptMember {
+    /// Omits the member for a frame below version nine.
+    pub const fn absent() -> Self {
+        Self(None)
+    }
+
+    /// Carries the explicit version-nine null-or-text member.
+    pub const fn present(value: Option<SystemPromptText>) -> Self {
+        Self(Some(value))
+    }
+
+    /// Returns the explicit member when it was present.
+    pub const fn value(&self) -> Option<&Option<SystemPromptText>> {
+        self.0.as_ref()
+    }
+
+    const fn is_absent(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl Serialize for SystemPromptMember {
+    fn serialize<SerializerT>(
+        &self,
+        serializer: SerializerT,
+    ) -> Result<SerializerT::Ok, SerializerT::Error>
+    where
+        SerializerT: Serializer,
+    {
+        match &self.0 {
+            Some(Some(text)) => text.serialize(serializer),
+            Some(None) | None => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemPromptMember {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        Option::<SystemPromptText>::deserialize(deserializer).map(Self::present)
+    }
+}
+
 /// Iterates exact text as bounded fragments split only at UTF-8 boundaries.
 pub fn content_fragments(value: &str) -> ContentFragments<'_> {
     ContentFragments {
@@ -403,6 +517,9 @@ pub enum CanonicalValueError {
     Content,
     /// Session metadata violated its exact string, set, map, or page bound.
     Metadata,
+    /// A session system prompt was empty, contained U+0000, or exceeded its
+    /// UTF-8 byte bound.
+    SystemPrompt,
 }
 
 impl fmt::Display for CanonicalValueError {
@@ -414,6 +531,7 @@ impl fmt::Display for CanonicalValueError {
             Self::RequestId => "client request identity must be nonzero",
             Self::Content => "content fragment exceeds the version-one UTF-8 byte bound",
             Self::Metadata => "session metadata value is invalid",
+            Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
         })
     }
 }
@@ -852,6 +970,10 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Initial session model-selection defaults.
         initial_model_selection: ModelSelection,
+        /// Optional initial system prompt; required null-or-text member at
+        /// version nine, absent below it.
+        #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
+        system_prompt: SystemPromptMember,
     },
     /// List current sessions.
     ListSessions {},
@@ -918,6 +1040,18 @@ pub enum ClientRequest {
         model_selection: ModelSelection,
         /// Complete replacement dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
+        /// Complete replacement system prompt; required null-or-text member
+        /// at version nine, absent below it.
+        #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
+        system_prompt: SystemPromptMember,
+    },
+    /// Read one session's complete current or named immutable defaults epoch.
+    ReadSessionDefaults {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Exact immutable epoch to read, or null for the current epoch.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        defaults_version: Option<CanonicalU64>,
     },
     /// Import one complete external conversation snapshot.
     ImportConversation {
@@ -936,6 +1070,7 @@ impl ClientRequest {
             | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
             Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
             | Self::SubmitInput { .. }
@@ -1035,8 +1170,35 @@ impl ClientFrame {
         if self.version.as_u64() < self.request.minimum_protocol_version() {
             return Err(FrameValidationError::RequestRequiresNewerVersion);
         }
+        if let ClientRequest::CreateSession { system_prompt, .. }
+        | ClientRequest::ReplaceSessionDefaults { system_prompt, .. } = &self.request
+        {
+            validate_system_prompt_member(
+                self.version,
+                system_prompt,
+                FrameValidationError::RequestRequiresNewerVersion,
+            )?;
+        }
         self.request.validate()
     }
+}
+
+/// Requires the presence-checked system-prompt member exactly at version nine
+/// and above: an absent member there is a missing required field, while a
+/// present member below version nine belongs to a newer closed vocabulary.
+fn validate_system_prompt_member(
+    version: ProtocolVersion,
+    member: &SystemPromptMember,
+    requires_newer: FrameValidationError,
+) -> Result<(), FrameValidationError> {
+    if version.as_u64() >= SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION {
+        if member.is_absent() {
+            return Err(FrameValidationError::SystemPromptShape);
+        }
+    } else if !member.is_absent() {
+        return Err(requires_newer);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -2024,6 +2186,24 @@ pub enum ServerMessage {
         model_selection: ModelSelection,
         /// Complete committed dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
+        /// Complete committed system prompt; required null-or-text member at
+        /// version nine, absent below it.
+        #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
+        system_prompt: SystemPromptMember,
+    },
+    /// One complete current or named immutable session-defaults epoch.
+    SessionDefaults {
+        /// Selected session.
+        session_id: CanonicalUuid,
+        /// The read immutable defaults epoch.
+        defaults_version: CanonicalU64,
+        /// Complete model selection on that epoch.
+        model_selection: ModelSelection,
+        /// Complete dangerous-tool blanket-auto posture on that epoch.
+        dangerous_tool_auto_approval: bool,
+        /// Exact optional system prompt on that epoch.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        system_prompt: Option<SystemPromptText>,
     },
     /// One new immutable imported conversation was inserted.
     ConversationImportInserted {
@@ -2135,6 +2315,7 @@ impl ServerMessage {
                 CONVERSATION_IMPORT_PROTOCOL_VERSION
             }
             Self::SessionDefaultsReplaced { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::SessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
@@ -2264,6 +2445,13 @@ impl ServerFrame {
         if let ServerMessage::TranscriptTurn { state, .. } = &self.message {
             state.validate()?;
         }
+        if let ServerMessage::SessionDefaultsReplaced { system_prompt, .. } = &self.message {
+            validate_system_prompt_member(
+                self.version,
+                system_prompt,
+                FrameValidationError::MessageRequiresNewerVersion,
+            )?;
+        }
         self.message.validate()?;
         match &self.message {
             ServerMessage::Error { code, detail, .. } => {
@@ -2333,6 +2521,8 @@ pub enum FrameValidationError {
     TurnStateShape,
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
+    /// A version-nine frame omitted its required system-prompt member.
+    SystemPromptShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -2347,6 +2537,7 @@ impl fmt::Display for FrameValidationError {
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
             Self::MetadataShape => "session metadata frame shape is inconsistent",
+            Self::SystemPromptShape => "version-nine frame omits its required system-prompt member",
         })
     }
 }
@@ -2400,7 +2591,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, and 6",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, and 9",
             ),
         }
     }
@@ -2609,7 +2800,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6") {
+    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6" | "9") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -2718,6 +2909,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "4" => Some(ProtocolVersion::Four),
         "5" => Some(ProtocolVersion::Five),
         "6" => Some(ProtocolVersion::Six),
+        "9" => Some(ProtocolVersion::Nine),
         _ => None,
     }
 }
@@ -2765,12 +2957,13 @@ mod tests {
         ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
         MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
-        ProtocolVersion, RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION,
-        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallDisposition,
+        ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail,
+        RequestId, SESSION_METADATA_PROTOCOL_VERSION, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
+        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
+        SystemPromptText, ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -2852,7 +3045,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, and 6")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, and 9")
         );
     }
 
@@ -3562,6 +3755,7 @@ mod tests {
             ClientRequest::CreateSession {
                 command_id: command(4)?,
                 initial_model_selection: model,
+                system_prompt: SystemPromptMember::absent(),
             },
         )?;
         assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
@@ -3714,6 +3908,7 @@ mod tests {
                 selection_id: uuid(4),
             },
             dangerous_tool_auto_approval: true,
+            system_prompt: SystemPromptMember::absent(),
         };
         assert_eq!(
             ClientFrame::try_new_for_version(
@@ -3744,6 +3939,7 @@ mod tests {
                 selection_id: uuid(4),
             },
             dangerous_tool_auto_approval: true,
+            system_prompt: SystemPromptMember::absent(),
         };
         assert_eq!(
             ServerFrame::try_new_for_version(
@@ -3803,6 +3999,253 @@ mod tests {
             r#"{"type":"error","code":"rejected","message":"defaults version exhausted","detail":{"type":"defaults_version_exhausted","session_id":"00000000-0000-0000-0000-000000000002","current":"18446744073709551615"}}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn inv033_inv046_version_nine_adds_the_bounded_session_system_prompt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Versions seven and eight remain reserved by in-flight stacks.
+        assert_unsupported_version("8");
+
+        // The member is not admitted below version nine.
+        assert_client_malformed(
+            r#"{"version":6,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":"exact prompt text"}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":6,"request_id":"2","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true,"system_prompt":null}}"#,
+        );
+        // A version-nine frame must carry the member explicitly.
+        assert_client_malformed(
+            r#"{"version":9,"request_id":"3","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"}}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":9,"request_id":"4","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
+        );
+        // The defaults read is not admitted below version nine, and its
+        // version member is required nullable.
+        assert_client_malformed(
+            r#"{"version":6,"request_id":"5","request":{"type":"read_session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":9,"request_id":"5","request":{"type":"read_session_defaults","session_id":"00000000-0000-0000-0000-000000000002"}}"#,
+        );
+        // A present prompt is nonempty and rejects U+0000.
+        assert_client_malformed(
+            r#"{"version":9,"request_id":"6","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":""}}"#,
+        );
+        assert_client_malformed(
+            "{\"version\":9,\"request_id\":\"7\",\"request\":{\"type\":\"create_session\",\"command_id\":\"00000000-0000-0000-0000-000000000001\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\"system_prompt\":\"a\\u0000b\"}}",
+        );
+
+        let request_id = request(8)?;
+        let create = ClientRequest::CreateSession {
+            command_id: command(1)?,
+            initial_model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
+                "exact prompt text".to_owned(),
+            )?)),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Six, request_id, create.clone()),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Nine, request_id, create)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":9,\"request_id\":\"8\",\"request\":{\"type\":\"create_session\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
+             \"initial_model_selection\":{\"kind\":\"direct\",\
+             \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"system_prompt\":\"exact prompt text\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let promptless_create = ClientRequest::CreateSession {
+            command_id: command(1)?,
+            initial_model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            system_prompt: SystemPromptMember::present(None),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Nine,
+                request_id,
+                promptless_create.clone()
+            ),
+            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request_id, promptless_create),
+        );
+        let decoded_null = decode_client_line(&line(
+            r#"{"version":9,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":null}}"#,
+        ))?;
+        let ClientRequest::CreateSession { system_prompt, .. } = decoded_null.request() else {
+            panic!("decoded frame must be a create request");
+        };
+        assert_eq!(system_prompt.value(), Some(&None));
+
+        let replace = ClientRequest::ReplaceSessionDefaults {
+            command_id: command(1)?,
+            session_id: uuid(2),
+            expected_defaults_version: CanonicalU64::new(3),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            dangerous_tool_auto_approval: false,
+            system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
+                "exact prompt text".to_owned(),
+            )?)),
+        };
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Nine, request(9)?, replace)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":9,\"request_id\":\"9\",\"request\":{\"type\":\"replace_session_defaults\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
+             \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
+             \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"dangerous_tool_auto_approval\":false,\
+             \"system_prompt\":\"exact prompt text\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let read_current = ClientRequest::ReadSessionDefaults {
+            session_id: uuid(2),
+            defaults_version: None,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Six,
+                request(10)?,
+                read_current.clone()
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request(10)?, read_current)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":9,\"request_id\":\"10\",\"request\":{\"type\":\"read_session_defaults\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
+             \"defaults_version\":null}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let read_named = ClientRequest::ReadSessionDefaults {
+            session_id: uuid(2),
+            defaults_version: Some(CanonicalU64::new(3)),
+        };
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Nine, request(11)?, read_named)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":9,\"request_id\":\"11\",\"request\":{\"type\":\"read_session_defaults\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
+             \"defaults_version\":\"3\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let receipt = ServerMessage::SessionDefaultsReplaced {
+            session_id: uuid(2),
+            defaults_version: CanonicalU64::new(4),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            dangerous_tool_auto_approval: true,
+            system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
+                "exact prompt text".to_owned(),
+            )?)),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::Six, request(12)?, receipt.clone()),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::Nine, request(12)?, receipt)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":9,\"request_id\":\"12\",\"message\":{\"type\":\"session_defaults_replaced\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
+             \"defaults_version\":\"4\",\"model_selection\":{\"kind\":\"direct\",\
+             \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"dangerous_tool_auto_approval\":true,\
+             \"system_prompt\":\"exact prompt text\"}}\n"
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        // A version-nine receipt without the member is rejected.
+        assert_server_malformed(
+            r#"{"version":9,"request_id":"12","message":{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
+        );
+
+        let defaults_read = ServerMessage::SessionDefaults {
+            session_id: uuid(2),
+            defaults_version: CanonicalU64::new(4),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            dangerous_tool_auto_approval: false,
+            system_prompt: Some(SystemPromptText::try_new("exact prompt text".to_owned())?),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Six,
+                request(13)?,
+                defaults_read.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(13)?,
+            defaults_read,
+            r#"{"type":"session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"system_prompt":"exact prompt text"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(14)?,
+            ServerMessage::SessionDefaults {
+                session_id: uuid(2),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: uuid(4),
+                },
+                dangerous_tool_auto_approval: false,
+                system_prompt: None,
+            },
+            r#"{"type":"session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"system_prompt":null}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-033: the wire prompt admits exactly the 1,048,576-byte bound,
+    /// splitting at a multibyte scalar so the byte measure is what binds.
+    #[test]
+    fn inv033_system_prompt_text_binds_at_the_exact_utf8_byte_bound() {
+        let exact = "y".repeat(MAX_SYSTEM_PROMPT_UTF8_BYTES - '√'.len_utf8()) + "√";
+        assert_eq!(exact.len(), MAX_SYSTEM_PROMPT_UTF8_BYTES);
+        let admitted = SystemPromptText::try_new(exact.clone()).expect("exact cap is admitted");
+        assert_eq!(admitted.as_str(), exact);
+
+        let oversized = exact + "y";
+        assert!(SystemPromptText::try_new(oversized).is_err());
+        assert!(SystemPromptText::try_new(String::new()).is_err());
+        assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
+    }
+
+    /// INV-033: version nine is admitted while reserved versions seven and
+    /// eight stay outside the closed set.
+    #[test]
+    fn inv033_reserved_versions_seven_and_eight_are_not_admitted() {
+        assert_eq!(
+            ProtocolVersion::Nine.as_u64(),
+            SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
+        );
+        assert_eq!(ProtocolVersion::from_u64(7), None);
+        assert_eq!(ProtocolVersion::from_u64(8), None);
+        assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
     }
 
     #[test]

@@ -226,7 +226,7 @@ impl SessionCreationProvenance {
 /// session identity minting, owner authority, command deduplication and
 /// replay, atomic validation of the provenance pair before acknowledgement,
 /// persistence, and acknowledgement.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CreateSession {
     command_id: DurableCommandId,
     provenance: SessionCreationProvenance,
@@ -259,9 +259,9 @@ impl CreateSession {
         self.provenance
     }
 
-    /// Returns the complete unversioned initial defaults payload.
-    pub const fn initial_configuration_defaults(&self) -> SessionConfigurationDefaults {
-        self.initial_configuration_defaults
+    /// Borrows the complete unversioned initial defaults payload.
+    pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
+        &self.initial_configuration_defaults
     }
 
     /// Establishes the first immutable defaults version this creation
@@ -291,8 +291,10 @@ impl CreateSession {
     /// A later explicit replacement installs the next version without
     /// rewriting creation cause, transcript ancestry, or already accepted
     /// work.
-    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
-        VersionedSessionConfigurationDefaults::establish(self.initial_configuration_defaults)
+    pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
+        VersionedSessionConfigurationDefaults::establish(
+            self.initial_configuration_defaults.clone(),
+        )
     }
 }
 
@@ -322,7 +324,7 @@ impl std::hash::Hash for CreateSession {
 /// This value selects one imported conversation and addressable entry
 /// boundary at session-creation time. Import itself never constructs this
 /// command or chooses its relationship.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CreateSessionFromImportedFrontier {
     command_id: DurableCommandId,
     imported_frontier: ImportedTranscriptFrontier,
@@ -366,14 +368,16 @@ impl CreateSessionFromImportedFrontier {
         self.relationship
     }
 
-    /// Returns the complete unversioned initial defaults payload.
-    pub const fn initial_configuration_defaults(&self) -> SessionConfigurationDefaults {
-        self.initial_configuration_defaults
+    /// Borrows the complete unversioned initial defaults payload.
+    pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
+        &self.initial_configuration_defaults
     }
 
     /// Establishes defaults version one for the session this command creates.
-    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
-        VersionedSessionConfigurationDefaults::establish(self.initial_configuration_defaults)
+    pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
+        VersionedSessionConfigurationDefaults::establish(
+            self.initial_configuration_defaults.clone(),
+        )
     }
 }
 
@@ -437,7 +441,7 @@ impl ImportedSessionSeed {
 /// This pure value does not claim that a transaction committed. It is carried
 /// by [`PreparedCreateSession`] before persistence and by
 /// [`ReconstitutedSessionCreation`] only after complete durable facts validate.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct InitialSession {
     id: SessionId,
     provenance: SessionCreationProvenance,
@@ -560,7 +564,7 @@ impl Session {
 /// can reject a cross-wired requested session, pointer, or defaults record.
 /// These are checked domain values rather than SQL rows, nullable
 /// discriminators, or framework types.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionReconstitutionInput {
     requested_session: SessionId,
     stored_session: SessionId,
@@ -633,42 +637,35 @@ impl SessionReconstitutionInput {
         self.defaults_version
     }
 
-    /// Returns the complete value on the selected defaults record.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Borrows the complete value on the selected defaults record.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
     }
 
     /// Reconstructs one complete current session without performing I/O,
     /// replay, identity generation, or lifecycle effects.
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError> {
-        let fail = |failure| SessionReconstitutionError {
-            input: Box::new(self),
-            failure,
-        };
-
-        if self.requested_session != self.stored_session {
-            return Err(fail(SessionReconstitutionFailure::RequestedSessionMismatch));
-        }
-        if self.current_defaults_session != self.stored_session {
-            return Err(fail(
-                SessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
-            ));
-        }
-        if self.defaults_session != self.stored_session {
-            return Err(fail(SessionReconstitutionFailure::DefaultsSessionMismatch));
-        }
-        if self.current_defaults_version != self.defaults_version {
-            return Err(fail(
-                SessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
-            ));
-        }
-        if matches!(
+        let failure = if self.requested_session != self.stored_session {
+            Some(SessionReconstitutionFailure::RequestedSessionMismatch)
+        } else if self.current_defaults_session != self.stored_session {
+            Some(SessionReconstitutionFailure::CurrentDefaultsSessionMismatch)
+        } else if self.defaults_session != self.stored_session {
+            Some(SessionReconstitutionFailure::DefaultsSessionMismatch)
+        } else if self.current_defaults_version != self.defaults_version {
+            Some(SessionReconstitutionFailure::CurrentDefaultsVersionMismatch)
+        } else if matches!(
             self.provenance.ancestry(),
             TranscriptAncestry::ImportedConversation { .. }
         ) {
-            return Err(fail(
-                SessionReconstitutionFailure::ImportedSessionSeedUnavailable,
-            ));
+            Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            return Err(SessionReconstitutionError {
+                input: Box::new(self),
+                failure,
+            });
         }
 
         Ok(Session {
@@ -755,7 +752,7 @@ impl CreateSessionAppliedResult {
 /// minted by application orchestration. Private fields prevent independently
 /// cross-wiring the command, initial state, and applied result. This value is
 /// not evidence of a database commit or command claim.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PreparedCreateSession {
     command: CreateSession,
     session: InitialSession,
@@ -779,7 +776,7 @@ impl PreparedCreateSession {
     }
 
     /// Consumes the sealed candidate into its correlated transaction inputs.
-    pub const fn into_parts(self) -> (CreateSession, InitialSession, CreateSessionAppliedResult) {
+    pub fn into_parts(self) -> (CreateSession, InitialSession, CreateSessionAppliedResult) {
         (self.command, self.session, self.applied_result)
     }
 }
@@ -870,7 +867,7 @@ impl CreateSession {
 /// result session and the defaults row's owning session are each supplied
 /// separately from the session record identity so the domain can reject a
 /// cross-wired applied result or a defaults row belonging to another session.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CreateSessionReconstitutionInput {
     command: CreateSession,
     result_session: SessionId,
@@ -934,30 +931,40 @@ impl CreateSessionReconstitutionInput {
         self.defaults_version
     }
 
-    /// Returns the stored initial defaults value.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Borrows the stored initial defaults value.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
     }
 
     /// Reconstructs the complete canonical creation without replaying effects.
     pub fn reconstitute(
         self,
     ) -> Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError> {
-        let fail = |failure| CreateSessionReconstitutionError {
-            input: Box::new(self),
-            failure,
-        };
+        fn fail(
+            input: CreateSessionReconstitutionInput,
+            failure: CreateSessionReconstitutionFailure,
+        ) -> CreateSessionReconstitutionError {
+            CreateSessionReconstitutionError {
+                input: Box::new(input),
+                failure,
+            }
+        }
 
         if self.session != self.result_session {
             return Err(fail(
+                self,
                 CreateSessionReconstitutionFailure::SessionResultMismatch,
             ));
         }
         if self.command.provenance() != self.provenance {
-            return Err(fail(CreateSessionReconstitutionFailure::ProvenanceMismatch));
+            return Err(fail(
+                self,
+                CreateSessionReconstitutionFailure::ProvenanceMismatch,
+            ));
         }
         if self.defaults_session != self.session {
             return Err(fail(
+                self,
                 CreateSessionReconstitutionFailure::DefaultsSessionMismatch,
             ));
         }
@@ -969,17 +976,22 @@ impl CreateSessionReconstitutionInput {
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
                 return Err(fail(
+                    self,
                     CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
                 ));
             }
         }
         if self.defaults_version != crate::SessionConfigurationDefaultsVersion::first() {
             return Err(fail(
+                self,
                 CreateSessionReconstitutionFailure::DefaultsVersionIsNotFirst,
             ));
         }
-        if self.command.initial_configuration_defaults() != self.defaults {
-            return Err(fail(CreateSessionReconstitutionFailure::DefaultsMismatch));
+        if *self.command.initial_configuration_defaults() != self.defaults {
+            return Err(fail(
+                self,
+                CreateSessionReconstitutionFailure::DefaultsMismatch,
+            ));
         }
 
         Ok(ReconstitutedSessionCreation {
@@ -1048,7 +1060,7 @@ impl CreateSessionReconstitutionError {
 ///
 /// This is distinct from [`PreparedCreateSession`]: it authorizes no insert,
 /// effect, identity generation, or command claim.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ReconstitutedSessionCreation {
     command: CreateSession,
     session: InitialSession,
@@ -1253,6 +1265,7 @@ mod tests {
         );
 
         let error = input
+            .clone()
             .reconstitute()
             .expect_err("imported ancestry without its exact seed must fail closed");
 
@@ -1373,7 +1386,7 @@ mod tests {
     /// mirroring [`SessionReconstitutionInput::new`] field for field so a
     /// test perturbs exactly the named facts it cares about
     /// (`docs/agents/testing-style.md`, rules 4 and 5).
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct CurrentSessionFacts {
         requested_session: crate::SessionId,
         stored_session: crate::SessionId,
@@ -1423,6 +1436,7 @@ mod tests {
     ) -> SessionReconstitutionFailure {
         let input = facts.input();
         let error = input
+            .clone()
             .reconstitute()
             .expect_err("cross-wired current-session facts must fail closed");
         let failure = error.failure();
@@ -1445,7 +1459,7 @@ mod tests {
 
         let requested_other_session = current_session_reconstitution_failure(CurrentSessionFacts {
             requested_session: session_id(2),
-            ..matching
+            ..matching.clone()
         });
         assert_eq!(
             requested_other_session,
@@ -1454,7 +1468,7 @@ mod tests {
 
         let pointer_owned_elsewhere = current_session_reconstitution_failure(CurrentSessionFacts {
             current_defaults_session: session_id(2),
-            ..matching
+            ..matching.clone()
         });
         assert_eq!(
             pointer_owned_elsewhere,
@@ -1464,7 +1478,7 @@ mod tests {
         let defaults_owned_elsewhere =
             current_session_reconstitution_failure(CurrentSessionFacts {
                 defaults_session: session_id(2),
-                ..matching
+                ..matching.clone()
             });
         assert_eq!(
             defaults_owned_elsewhere,
@@ -1474,7 +1488,7 @@ mod tests {
         let pointer_and_record_versions_torn =
             current_session_reconstitution_failure(CurrentSessionFacts {
                 current_defaults_version: second_version,
-                ..matching
+                ..matching.clone()
             });
         assert_eq!(
             pointer_and_record_versions_torn,
@@ -1521,7 +1535,7 @@ mod tests {
 
         assert_eq!(create.command_id(), command_id(1));
         assert_eq!(create.provenance(), provenance);
-        assert_eq!(create.initial_configuration_defaults(), defaults(2));
+        assert_eq!(create.initial_configuration_defaults(), &defaults(2));
     }
 
     /// S01: session creation establishes exactly version one of the carried
@@ -1659,7 +1673,7 @@ mod tests {
         assert_eq!(create.imported_conversation(), conversation);
         assert_eq!(create.imported_frontier(), frontier);
         assert_eq!(create.relationship(), ImportedSessionRelationship::Resume);
-        assert_eq!(create.initial_configuration_defaults(), defaults(4));
+        assert_eq!(create.initial_configuration_defaults(), &defaults(4));
         assert_eq!(
             create.establish_initial_defaults().version(),
             SessionConfigurationDefaultsVersion::first()
@@ -1674,6 +1688,7 @@ mod tests {
         let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
 
         let prepared = create
+            .clone()
             .prepare(session_id(3))
             .expect("the empty owner-initiated baseline is preparable");
 
@@ -1738,7 +1753,7 @@ mod tests {
     fn s01_inv003_inv008_inv012_matching_creation_reconstitutes_whole() {
         let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
         let input = CreateSessionReconstitutionInput::new(
-            create,
+            create.clone(),
             session_id(3),
             session_id(3),
             owner_initiated_empty(),
@@ -1773,7 +1788,7 @@ mod tests {
     /// [`CreateSessionReconstitutionInput::new`] field for field so a test
     /// perturbs exactly the named facts it cares about
     /// (`docs/agents/testing-style.md`, rules 4 and 5).
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct CreationFacts {
         command: CreateSession,
         result_session: crate::SessionId,
@@ -1790,13 +1805,13 @@ mod tests {
         /// repeat the command payload, and creation established version one.
         fn matching(command: CreateSession, session: crate::SessionId) -> Self {
             Self {
-                command,
                 result_session: session,
                 session,
                 provenance: command.provenance(),
                 defaults_session: session,
                 defaults_version: SessionConfigurationDefaultsVersion::first(),
-                defaults: command.initial_configuration_defaults(),
+                defaults: command.initial_configuration_defaults().clone(),
+                command,
             }
         }
 
@@ -1818,6 +1833,7 @@ mod tests {
     #[track_caller]
     fn creation_reconstitution_failure(facts: CreationFacts) -> CreateSessionReconstitutionFailure {
         let error = facts
+            .clone()
             .input()
             .reconstitute()
             .expect_err("cross-wired durable facts must fail closed");
@@ -1841,7 +1857,7 @@ mod tests {
         assert_eq!(input.provenance(), facts.provenance);
         assert_eq!(input.defaults_session(), facts.defaults_session);
         assert_eq!(input.defaults_version(), facts.defaults_version);
-        assert_eq!(input.defaults(), facts.defaults);
+        assert_eq!(input.defaults(), &facts.defaults);
     }
 
     /// S01 / INV-003 / INV-008 / INV-012: every cross-wired session, result,
@@ -1865,7 +1881,7 @@ mod tests {
 
         let cross_wired_result = creation_reconstitution_failure(CreationFacts {
             result_session: session_id(4),
-            ..matching
+            ..matching.clone()
         });
         assert_eq!(
             cross_wired_result,
@@ -1874,7 +1890,7 @@ mod tests {
 
         let replaced_provenance = creation_reconstitution_failure(CreationFacts {
             provenance: owner_initiated_empty(),
-            ..CreationFacts::matching(fork_create, session_id(3))
+            ..CreationFacts::matching(fork_create.clone(), session_id(3))
         });
         assert_eq!(
             replaced_provenance,
@@ -1890,7 +1906,7 @@ mod tests {
 
         let cross_wired_defaults_owner = creation_reconstitution_failure(CreationFacts {
             defaults_session: session_id(9),
-            ..matching
+            ..matching.clone()
         });
         assert_eq!(
             cross_wired_defaults_owner,
@@ -1899,7 +1915,7 @@ mod tests {
 
         let later_defaults_version = creation_reconstitution_failure(CreationFacts {
             defaults_version: second_version,
-            ..matching
+            ..matching.clone()
         });
         assert_eq!(
             later_defaults_version,
@@ -1908,7 +1924,7 @@ mod tests {
 
         let replaced_defaults = creation_reconstitution_failure(CreationFacts {
             defaults: defaults(5),
-            ..matching
+            ..matching.clone()
         });
         assert_eq!(
             replaced_defaults,

@@ -25,11 +25,11 @@ use signalbox_domain::{
     ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
     PreparedModelCallRequest, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
-    SessionConfigurationDefaultsVersion, SessionId, StopRequestedModelCallTurn,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolApprovalDecision,
-    ToolAttemptEnd, ToolDenialReason, ToolExecutionError, ToolRequest, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolRoundModelCallIdentities, TurnAttemptId,
-    TurnId, UserContent,
+    SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
+    StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
+    ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -366,6 +366,7 @@ fn render_frontier_messages<'a>(
 pub struct PreparedModelOperation {
     request: PreparedModelCallRequest,
     credential_reference: ModelCallCredentialReference,
+    system_prompt: Option<SessionSystemPrompt>,
     messages: Box<[ModelConversationMessage]>,
     tools: Box<[ToolDefinition]>,
 }
@@ -374,6 +375,7 @@ impl PreparedModelOperation {
     fn render(
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
+        system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
@@ -387,6 +389,7 @@ impl PreparedModelOperation {
         Ok(Self {
             request,
             credential_reference,
+            system_prompt,
             messages,
             tools,
         })
@@ -400,6 +403,12 @@ impl PreparedModelOperation {
     /// Borrows the exact durable credential reference pinned with the call.
     pub const fn credential_reference(&self) -> &ModelCallCredentialReference {
         &self.credential_reference
+    }
+
+    /// Borrows the exact session system prompt frozen through the turn's
+    /// defaults epoch, when that epoch carries one.
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_ref().map(SessionSystemPrompt::as_str)
     }
 
     /// Borrows the exact messages in frontier order.
@@ -490,6 +499,8 @@ pub enum PrepareModelCallOutcome {
         credential_reference: ModelCallCredentialReference,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        /// Exact optional session system prompt on the turn's frozen epoch.
+        system_prompt: Option<SessionSystemPrompt>,
         /// Exact durable authority for every tool-related frontier entry.
         tool_entries: Box<[ResolvedToolConversationEntry]>,
     },
@@ -1318,12 +1329,14 @@ where
                     request,
                     credential_reference,
                     dangerous_tool_auto_approval,
+                    system_prompt,
                     tool_entries,
                 }) => {
                     break (
                         request,
                         credential_reference,
                         dangerous_tool_auto_approval,
+                        system_prompt,
                         tool_entries,
                     );
                 }
@@ -1340,7 +1353,13 @@ where
             }
         };
 
-        let (prepared, credential_reference, dangerous_tool_auto_approval, tool_entries) = prepared;
+        let (
+            prepared,
+            credential_reference,
+            dangerous_tool_auto_approval,
+            system_prompt,
+            tool_entries,
+        ) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let turn = prepared.turn();
@@ -1349,6 +1368,7 @@ where
         let operation = PreparedModelOperation::render(
             *prepared,
             credential_reference,
+            system_prompt,
             advertised_tools.clone(),
             &tool_entries,
         )
@@ -1964,6 +1984,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            system_prompt: None,
             tool_entries: Box::new([]),
         }
     }
@@ -2064,7 +2085,7 @@ mod tests {
             version,
             session_id,
             version,
-            defaults,
+            defaults.clone(),
         )
         .reconstitute()
         .expect("fixture Session facts are correlated");
@@ -2679,6 +2700,7 @@ mod tests {
         let operation = PreparedModelOperation::render(
             request,
             credential_reference.clone(),
+            None,
             Box::new([]),
             &[],
         )

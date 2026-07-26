@@ -7,14 +7,15 @@ use std::{
     process::ExitCode,
 };
 
-use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome};
+use arguments::{Command, DangerousToolAutoApprovalArgument, ParseOutcome, SystemPromptArgument};
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
-    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES, ModelCallDisposition,
-    ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+    ConversationImportSource, ErrorCode, InputContent, MAX_FRAME_BYTES,
+    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
+    ServerFrame, ServerMessage, SessionEvent, SystemPromptMember, SystemPromptText, ToolBatchState,
     TurnState, decode_server_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
@@ -85,6 +86,23 @@ async fn execute(
         | Command::Transcript { .. }
         | Command::Follow { .. } => None,
     };
+    let system_prompt_text = match &arguments.command {
+        Command::Create {
+            system_prompt_file: Some(path),
+            ..
+        }
+        | Command::Model {
+            system_prompt: SystemPromptArgument::File(path),
+            ..
+        } => Some(read_system_prompt_file(path).await?),
+        Command::Create { .. }
+        | Command::List
+        | Command::Send { .. }
+        | Command::Model { .. }
+        | Command::Transcript { .. }
+        | Command::Follow { .. }
+        | Command::Import { .. } => None,
+    };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
     let mut output = Output::new(stdout, stderr, arguments.raw_output);
@@ -93,7 +111,17 @@ async fn execute(
         Command::Create {
             selection,
             command_id,
-        } => create(&mut client, &mut output, selection, command_id).await,
+            system_prompt_file: _,
+        } => {
+            create(
+                &mut client,
+                &mut output,
+                selection,
+                command_id,
+                system_prompt_text,
+            )
+            .await
+        }
         Command::List => list(&mut client, &mut output).await,
         Command::Send {
             session_id,
@@ -117,7 +145,16 @@ async fn execute(
             command_id,
             defaults_version,
             dangerous_tool_auto_approval,
+            system_prompt,
         } => {
+            let system_prompt = match system_prompt {
+                SystemPromptArgument::Keep => ModelSystemPromptChoice::Keep,
+                SystemPromptArgument::Clear => ModelSystemPromptChoice::Clear,
+                SystemPromptArgument::File(_) => ModelSystemPromptChoice::Replace(
+                    system_prompt_text
+                        .ok_or(ClientError::Input("system prompt file was not read"))?,
+                ),
+            };
             replace_session_model(
                 &mut client,
                 &mut output,
@@ -126,6 +163,7 @@ async fn execute(
                 command_id,
                 defaults_version,
                 dangerous_tool_auto_approval,
+                system_prompt,
             )
             .await
         }
@@ -161,6 +199,36 @@ async fn read_import_source(path: &Path) -> Result<Vec<u8>, ClientError> {
         return Err(ClientError::SourceExceedsFrame);
     }
     Ok(source)
+}
+
+async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(ClientError::source_file)?;
+    let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_UTF8_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol("system prompt read bound overflow"))?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(ClientError::source_file)?;
+    if bytes.is_empty() {
+        return Err(ClientError::Input(
+            "the system prompt file must not be empty",
+        ));
+    }
+    if bytes.len() > MAX_SYSTEM_PROMPT_UTF8_BYTES {
+        return Err(ClientError::Input(
+            "the system prompt exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ClientError::Input("the system prompt must be valid UTF-8"))?;
+    SystemPromptText::try_new(text)
+        .map_err(|_| ClientError::Input("the system prompt must not contain U+0000"))
 }
 
 fn socket_path(
@@ -216,6 +284,7 @@ async fn create(
     output: &mut Output<'_>,
     selection: ModelSelection,
     command_id: Option<CommandId>,
+    system_prompt: Option<SystemPromptText>,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -228,6 +297,7 @@ async fn create(
         .mutation_request(ClientRequest::CreateSession {
             command_id,
             initial_model_selection: selection,
+            system_prompt: SystemPromptMember::present(system_prompt),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -244,12 +314,26 @@ async fn create(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedSessionDefaults {
     version: CanonicalU64,
     dangerous_tool_auto_approval: bool,
+    system_prompt: Option<SystemPromptText>,
 }
 
+/// The model verb's resolved replacement choice for the session system
+/// prompt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ModelSystemPromptChoice {
+    /// Copy the observed epoch's exact prompt forward unchanged.
+    Keep,
+    /// Replace the prompt with exact user-supplied file content.
+    Replace(SystemPromptText),
+    /// Install the replacement epoch without a prompt.
+    Clear,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn replace_session_model(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -258,6 +342,7 @@ async fn replace_session_model(
     command_id: Option<CommandId>,
     defaults_version: Option<CanonicalU64>,
     dangerous_tool_auto_approval: Option<DangerousToolAutoApprovalArgument>,
+    system_prompt: ModelSystemPromptChoice,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -267,14 +352,29 @@ async fn replace_session_model(
         )?;
     }
     let observed = match (defaults_version, dangerous_tool_auto_approval) {
-        (Some(version), Some(posture)) => ObservedSessionDefaults {
-            version,
-            dangerous_tool_auto_approval: matches!(
-                posture,
-                DangerousToolAutoApprovalArgument::ApproveAll
-            ),
-        },
-        (None, None) => observe_session_defaults(client, session_id).await?,
+        (Some(version), Some(posture)) => {
+            // Recovery pins version and posture from the printed facts. A
+            // copied-forward prompt is re-read from the immutable epoch the
+            // printed version names, so the retried payload is byte-exact
+            // regardless of later concurrent replacements.
+            let system_prompt = match &system_prompt {
+                ModelSystemPromptChoice::Keep => {
+                    read_session_defaults(client, session_id, Some(version))
+                        .await?
+                        .system_prompt
+                }
+                ModelSystemPromptChoice::Replace(_) | ModelSystemPromptChoice::Clear => None,
+            };
+            ObservedSessionDefaults {
+                version,
+                dangerous_tool_auto_approval: matches!(
+                    posture,
+                    DangerousToolAutoApprovalArgument::ApproveAll
+                ),
+                system_prompt,
+            }
+        }
+        (None, None) => read_session_defaults(client, session_id, None).await?,
         (Some(_), None) | (None, Some(_)) => {
             return Err(ClientError::Input(
                 "model recovery requires the complete printed defaults facts",
@@ -290,6 +390,11 @@ async fn replace_session_model(
             "disabled"
         },
     )?;
+    let replacement_system_prompt = match system_prompt {
+        ModelSystemPromptChoice::Keep => observed.system_prompt.clone(),
+        ModelSystemPromptChoice::Replace(text) => Some(text),
+        ModelSystemPromptChoice::Clear => None,
+    };
 
     let mut connection = client
         .mutation_request(ClientRequest::ReplaceSessionDefaults {
@@ -298,6 +403,7 @@ async fn replace_session_model(
             expected_defaults_version: observed.version,
             model_selection: selection,
             dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
+            system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -306,9 +412,11 @@ async fn replace_session_model(
             defaults_version: installed_version,
             model_selection,
             dangerous_tool_auto_approval,
+            system_prompt: receipt_system_prompt,
         } if replaced_session == session_id
             && model_selection == selection
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
+            && receipt_system_prompt.value() == Some(&replacement_system_prompt)
             && observed
                 .version
                 .value()
@@ -333,97 +441,41 @@ async fn replace_session_model(
     }
 }
 
-async fn observe_session_defaults(
+async fn read_session_defaults(
     client: &mut ProcessClient,
-    selected_session: CanonicalUuid,
+    session_id: CanonicalUuid,
+    defaults_version: Option<CanonicalU64>,
 ) -> Result<ObservedSessionDefaults, ClientError> {
-    let mut after_session_id = None;
-    loop {
-        let mut connection = client
-            .request(ClientRequest::ListSessionMetadata {
-                required_tags: Vec::new(),
-                title_contains: None,
-                include_archived: true,
-                page_size: CanonicalU64::new(100),
-                after_session_id,
+    let mut connection = client
+        .request(ClientRequest::ReadSessionDefaults {
+            session_id,
+            defaults_version,
+        })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::SessionDefaults {
+            session_id: read_session,
+            defaults_version: read_version,
+            model_selection: _,
+            dangerous_tool_auto_approval,
+            system_prompt,
+        } if read_session == session_id
+            && defaults_version.is_none_or(|named| named == read_version) =>
+        {
+            Ok(ObservedSessionDefaults {
+                version: read_version,
+                dangerous_tool_auto_approval,
+                system_prompt,
             })
-            .await?;
-        match connection.message().await? {
-            ServerMessage::SessionMetadataPageStart {} => {}
-            ServerMessage::Error {
-                code,
-                message,
-                detail,
-            } => return Err(ClientError::remote(code, message, detail)),
-            _ => {
-                return Err(ClientError::Protocol(
-                    "session metadata page did not begin with its start frame",
-                ));
-            }
         }
-        let mut selected = None;
-        let mut observed_count = 0_u64;
-        let mut last_session_id = after_session_id;
-        let mut last_in_page = None;
-        loop {
-            match connection.message().await? {
-                ServerMessage::SessionMetadataSummary {
-                    session_id,
-                    defaults_version,
-                    dangerous_tool_auto_approval,
-                    ..
-                } => {
-                    if last_session_id.is_some_and(|last: CanonicalUuid| {
-                        session_id.into_uuid() <= last.into_uuid()
-                    }) {
-                        return Err(ClientError::Protocol(
-                            "session metadata summaries were not strictly ordered",
-                        ));
-                    }
-                    observed_count = observed_count.checked_add(1).ok_or(ClientError::Protocol(
-                        "session metadata summary count overflowed",
-                    ))?;
-                    last_session_id = Some(session_id);
-                    last_in_page = Some(session_id);
-                    if session_id == selected_session {
-                        selected = Some(ObservedSessionDefaults {
-                            version: defaults_version,
-                            dangerous_tool_auto_approval,
-                        });
-                    }
-                }
-                ServerMessage::SessionMetadataPageEnd {
-                    session_count,
-                    next_after_session_id,
-                } => {
-                    if session_count.value() != observed_count
-                        || next_after_session_id.is_some() && next_after_session_id != last_in_page
-                    {
-                        return Err(ClientError::Protocol(
-                            "session metadata page count or cursor was invalid",
-                        ));
-                    }
-                    if let Some(selected) = selected {
-                        return Ok(selected);
-                    }
-                    let Some(next) = next_after_session_id else {
-                        return Err(ClientError::Input("the selected session was not listed"));
-                    };
-                    after_session_id = Some(next);
-                    break;
-                }
-                ServerMessage::Error {
-                    code,
-                    message,
-                    detail,
-                } => return Err(ClientError::remote(code, message, detail)),
-                _ => {
-                    return Err(ClientError::Protocol(
-                        "session metadata page sequence or count was invalid",
-                    ));
-                }
-            }
-        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "session defaults read returned an unexpected response",
+        )),
     }
 }
 
@@ -1410,6 +1462,7 @@ mod tests {
                 selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             },
             Some(CommandId::try_from_uuid(Uuid::from_u128(2))?),
+            None,
         )
         .await;
 

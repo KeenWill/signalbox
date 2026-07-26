@@ -7280,7 +7280,7 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
         repository,
     );
 
-    let first = service.execute(request).await?;
+    let first = service.execute(request.clone()).await?;
     let replay = service.execute(request).await?;
     assert_eq!(first, replay);
     let CreateSessionOutcome::Applied(recorded_receipt) = first else {
@@ -7770,7 +7770,7 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     let first = prepared(0x101, 0x701, direct(0x801));
 
     assert_eq!(
-        repository.handle(first).await?,
+        repository.handle(first.clone()).await?,
         CreateSessionHandlingOutcome::Applied(first.applied_result())
     );
 
@@ -7791,11 +7791,11 @@ async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<()
     let separate = prepared(0x102, 0x704, direct(0x801));
     let alias_creation = prepared(0x103, 0x705, alias(0x803));
     assert_eq!(
-        repository.handle(separate).await?,
+        repository.handle(separate.clone()).await?,
         CreateSessionHandlingOutcome::Applied(separate.applied_result())
     );
     assert_eq!(
-        repository.handle(alias_creation).await?,
+        repository.handle(alias_creation.clone()).await?,
         CreateSessionHandlingOutcome::Applied(alias_creation.applied_result())
     );
     let loaded_alias = repository
@@ -7931,7 +7931,7 @@ async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<
 
     let colliding = prepared(0x122, 0x721, direct(0x822));
     let error = repository
-        .handle(colliding)
+        .handle(colliding.clone())
         .await
         .expect_err("the session identity collision must abort first handling");
     assert!(matches!(error, CreateSessionRepositoryError::Database(_)));
@@ -7944,7 +7944,7 @@ async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<
 
     let retry = prepared(0x122, 0x722, direct(0x822));
     assert_eq!(
-        repository.handle(retry).await?,
+        repository.handle(retry.clone()).await?,
         CreateSessionHandlingOutcome::Applied(retry.applied_result())
     );
 
@@ -7963,7 +7963,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     let input_repository = SubmitInputRepository::new(pool.clone());
     let cross_wired = replacement(0x135, 0x735, 1, direct(0x835));
-    defaults_repository.handle(cross_wired).await?;
+    defaults_repository.handle(cross_wired.clone()).await?;
 
     sqlx::query(
         "DROP TRIGGER durable_command_requires_typed_record
@@ -8313,13 +8313,13 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
         ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
     let load_service = LoadSessionService::new(SessionRepository::new(pool.clone()));
     let creation = prepared(0x211, 0x711, direct(0x811));
-    create_repository.handle(creation).await?;
+    create_repository.handle(creation.clone()).await?;
 
     let first = replacement_request(0x212, 0x711, 1, alias(0x812));
-    let first_outcome = defaults_service.execute(first).await?;
+    let first_outcome = defaults_service.execute(first.clone()).await?;
     let ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
         first_applied,
-    )) = first_outcome
+    )) = &first_outcome
     else {
         panic!("the first replacement must apply");
     };
@@ -8327,7 +8327,10 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
         first_applied.installed().version(),
         SessionConfigurationDefaultsVersion::try_from_u64(2).expect("positive version")
     );
-    assert_eq!(defaults_service.execute(first).await?, first_outcome);
+    assert_eq!(
+        defaults_service.execute(first.clone()).await?,
+        first_outcome
+    );
 
     let conflict = replacement_request(0x212, 0x711, 1, direct(0x813));
     assert_eq!(
@@ -8338,7 +8341,7 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
     );
 
     let stale = replacement_request(0x213, 0x711, 1, direct(0x814));
-    let stale_outcome = defaults_service.execute(stale).await?;
+    let stale_outcome = defaults_service.execute(stale.clone()).await?;
     let ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
         ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(stale_result),
     )) = stale_outcome
@@ -8715,7 +8718,7 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
 
     let defaults_reuse = replacement(0x221, 0x721, 1, alias(0x822));
     assert_eq!(
-        defaults_repository.handle(defaults_reuse).await?,
+        defaults_repository.handle(defaults_reuse.clone()).await?,
         ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse {
             command_id: defaults_reuse.command_id()
         }
@@ -8755,10 +8758,10 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
     ));
 
     let defaults = replacement(0x222, 0x721, 1, alias(0x823));
-    defaults_repository.handle(defaults).await?;
+    defaults_repository.handle(defaults.clone()).await?;
     let create_reuse = prepared(0x222, 0x722, direct(0x824));
     assert_eq!(
-        create_repository.handle(create_reuse).await?,
+        create_repository.handle(create_reuse.clone()).await?,
         CreateSessionHandlingOutcome::ConflictingReuse {
             command_id: create_reuse.command().command_id()
         }
@@ -8914,7 +8917,7 @@ async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result
     .execute(&pool)
     .await?;
     let exhausted = replacement(0x243, 0x741, u64::MAX, alias(0x844));
-    let exhausted_outcome = defaults_repository.handle(exhausted).await?;
+    let exhausted_outcome = defaults_repository.handle(exhausted.clone()).await?;
     assert!(matches!(
         exhausted_outcome,
         ReplaceSessionDefaultsHandlingOutcome::Rejected(
@@ -8940,7 +8943,7 @@ async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result
     let mut failing_service = ReplaceSessionDefaultsService::new(defaults_repository.clone());
     assert!(matches!(
         failing_service
-            .execute(fails_after_claim)
+            .execute(fails_after_claim.clone())
             .await
             .expect_err("the colliding immutable successor aborts the transaction"),
         ReplaceSessionDefaultsRepositoryError::Database { .. }
@@ -8988,11 +8991,11 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
         "only an absent session row is a not-found result"
     );
     assert_eq!(
-        create_repository.handle(direct_creation).await?,
+        create_repository.handle(direct_creation.clone()).await?,
         CreateSessionHandlingOutcome::Applied(direct_creation.applied_result())
     );
     assert_eq!(
-        create_repository.handle(alias_creation).await?,
+        create_repository.handle(alias_creation.clone()).await?,
         CreateSessionHandlingOutcome::Applied(alias_creation.applied_result())
     );
 
@@ -9111,12 +9114,12 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     let unknown_provenance = prepared(0x515, 0x915, direct(0x815));
     let duplicate_projection = prepared(0x516, 0x916, direct(0x816));
     for creation in [
-        missing_pointer,
-        invalid_pointer,
-        missing_selected,
-        malformed_selected,
-        unknown_provenance,
-        duplicate_projection,
+        missing_pointer.clone(),
+        invalid_pointer.clone(),
+        missing_selected.clone(),
+        malformed_selected.clone(),
+        unknown_provenance.clone(),
+        duplicate_projection.clone(),
     ] {
         create_repository.handle(creation).await?;
     }
@@ -16756,7 +16759,7 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
     let command_id = creation.command().command_id().into_uuid();
     let session_id = creation.applied_result().session().into_uuid();
     let error = repository
-        .handle(creation)
+        .handle(creation.clone())
         .await
         .expect_err("the deferred fixture failure must abort commit");
     assert!(matches!(error, CreateSessionRepositoryError::Database(_)));
@@ -16795,7 +16798,7 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
         .await?;
 
     assert_eq!(
-        repository.handle(creation).await?,
+        repository.handle(creation.clone()).await?,
         CreateSessionHandlingOutcome::Applied(creation.applied_result())
     );
     let committed: (i64, i64, i64, i64, Decimal) = sqlx::query_as(
@@ -16838,11 +16841,11 @@ async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
     let creation = prepared(0xe32, 0xe42, direct(0xe52));
 
     assert_eq!(
-        repository.handle(creation).await?,
+        repository.handle(creation.clone()).await?,
         CreateSessionHandlingOutcome::Applied(creation.applied_result())
     );
     assert_eq!(
-        repository.handle(creation).await?,
+        repository.handle(creation.clone()).await?,
         CreateSessionHandlingOutcome::Applied(creation.applied_result())
     );
     assert_eq!(

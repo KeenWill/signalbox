@@ -44,7 +44,8 @@ pub use configuration::{
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionDefaultsVersionMismatch, TurnConfigurationProvenance, UnknownModelAlias,
+    SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptError,
+    SessionSystemPromptFailure, TurnConfigurationProvenance, UnknownModelAlias,
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use context_frontier::{

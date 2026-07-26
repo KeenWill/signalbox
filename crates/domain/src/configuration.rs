@@ -229,11 +229,115 @@ impl SessionConfigurationDefaultsVersion {
     }
 }
 
+/// One exact session-level system prompt.
+///
+/// Admission rejects empty text, any text containing U+0000 (which
+/// PostgreSQL text cannot store), and text whose UTF-8 encoding exceeds
+/// [`Self::MAX_UTF8_BYTES`]. Admitted text is never trimmed, normalized,
+/// case-folded, or otherwise rewritten; equality is the exact ordered
+/// scalar sequence. Absence of a prompt is `Option::None` on the owning
+/// defaults value, never an empty prompt.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SessionSystemPrompt(String);
+
+impl SessionSystemPrompt {
+    /// The admission bound in UTF-8 bytes, mirroring the accepted-input
+    /// content bound (docs/spec/sessions-and-transcript.md).
+    pub const MAX_UTF8_BYTES: usize = 1_048_576;
+
+    /// Checks the admission rules without rewriting the value.
+    pub fn try_new(value: String) -> Result<Self, SessionSystemPromptError> {
+        let failure = if value.is_empty() {
+            Some(SessionSystemPromptFailure::Empty)
+        } else if value.len() > Self::MAX_UTF8_BYTES {
+            Some(SessionSystemPromptFailure::TooLarge { bytes: value.len() })
+        } else if value.contains('\0') {
+            Some(SessionSystemPromptFailure::ContainsNull)
+        } else {
+            None
+        };
+        match failure {
+            Some(failure) => Err(SessionSystemPromptError { value, failure }),
+            None => Ok(Self(value)),
+        }
+    }
+
+    /// Borrows the exact admitted prompt text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact admitted prompt text.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// Why a session system prompt was not admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionSystemPromptFailure {
+    /// The prompt was empty; absence is `None`, never empty text.
+    Empty,
+    /// The prompt exceeded the admission bound.
+    TooLarge {
+        /// The observed UTF-8 byte count.
+        bytes: usize,
+    },
+    /// The prompt contained U+0000.
+    ContainsNull,
+}
+
+/// Failed system-prompt construction retaining the rejected value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSystemPromptError {
+    value: String,
+    failure: SessionSystemPromptFailure,
+}
+
+impl SessionSystemPromptError {
+    /// Borrows the rejected text.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the admission failure.
+    pub const fn failure(&self) -> SessionSystemPromptFailure {
+        self.failure
+    }
+
+    /// Returns the rejected text and failure.
+    pub fn into_parts(self) -> (String, SessionSystemPromptFailure) {
+        (self.value, self.failure)
+    }
+}
+
+impl std::fmt::Display for SessionSystemPromptError {
+    /// Renders the failure without the rejected content.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.failure {
+            SessionSystemPromptFailure::Empty => {
+                write!(f, "a session system prompt cannot be empty")
+            }
+            SessionSystemPromptFailure::TooLarge { bytes } => write!(
+                f,
+                "a session system prompt is {bytes} UTF-8 bytes; the maximum is {}",
+                SessionSystemPrompt::MAX_UTF8_BYTES
+            ),
+            SessionSystemPromptFailure::ContainsNull => {
+                write!(f, "a session system prompt cannot contain U+0000")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionSystemPromptError {}
+
 /// One complete normalized model-selection default value.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionConfigurationDefaults {
     model: ModelSelectionRequest,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    system_prompt: Option<SessionSystemPrompt>,
 }
 
 impl SessionConfigurationDefaults {
@@ -242,6 +346,7 @@ impl SessionConfigurationDefaults {
         Self {
             model,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            system_prompt: None,
         }
     }
 
@@ -253,6 +358,20 @@ impl SessionConfigurationDefaults {
         Self {
             model,
             dangerous_tool_auto_approval,
+            system_prompt: None,
+        }
+    }
+
+    /// Creates a complete defaults value stating every field explicitly.
+    pub const fn complete(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+    ) -> Self {
+        Self {
+            model,
+            dangerous_tool_auto_approval,
+            system_prompt,
         }
     }
 
@@ -265,6 +384,11 @@ impl SessionConfigurationDefaults {
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
     }
+
+    /// Borrows the optional session system prompt.
+    pub const fn system_prompt(&self) -> Option<&SessionSystemPrompt> {
+        self.system_prompt.as_ref()
+    }
 }
 
 /// The current immutable version of a session's model-selection defaults.
@@ -272,7 +396,7 @@ impl SessionConfigurationDefaults {
 /// Replacement installs a complete later version; it never mutates an
 /// existing one. Whether an update affects only subsequently accepted origin
 /// input is an aggregate acceptance rule, not a property of this value.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct VersionedSessionConfigurationDefaults {
     version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
@@ -302,7 +426,7 @@ impl VersionedSessionConfigurationDefaults {
 
     /// Installs a complete replacement as the next immutable version, or
     /// `None` when the version counter is exhausted.
-    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Option<Self> {
+    pub fn replace(&self, defaults: SessionConfigurationDefaults) -> Option<Self> {
         Some(Self {
             version: self.version.checked_next()?,
             defaults,
@@ -701,7 +825,7 @@ mod tests {
     #[test]
     fn session_creation_establishes_defaults_version_one() {
         let initial = defaults(1);
-        let established = VersionedSessionConfigurationDefaults::establish(initial);
+        let established = VersionedSessionConfigurationDefaults::establish(initial.clone());
 
         assert_eq!(
             established.version(),
@@ -720,7 +844,7 @@ mod tests {
         let replacement_version = SessionConfigurationDefaultsVersion(2);
         let established = VersionedSessionConfigurationDefaults::establish(initial);
         let replaced = established
-            .replace(replacement)
+            .replace(replacement.clone())
             .expect("an unexhausted version counter installs the next version");
 
         assert_eq!(established.version(), established_version);

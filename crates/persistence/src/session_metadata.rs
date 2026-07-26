@@ -446,6 +446,7 @@ impl PostgresSessionMetadataPage {
                 selected_defaults.direct_model_selection_id,
                 selected_defaults.model_alias_id,
                 selected_defaults.dangerous_tool_auto_approval,
+                selected_defaults.system_prompt,
                 metadata.session_id AS metadata_session_id,
                 metadata.title,
                 COALESCE(metadata.archived, false) AS archived,
@@ -1043,6 +1044,7 @@ fn decode_list_item(
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
         required(row, "dangerous_tool_auto_approval")?,
+        row.try_get("system_prompt")?,
     )?;
     let metadata_session: Option<Uuid> = row.try_get("metadata_session_id")?;
     let tags: Vec<String> = required(row, "tags")?;
@@ -1109,6 +1111,7 @@ fn decode_defaults(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     tool_approval: String,
+    system_prompt: Option<String>,
 ) -> Result<SessionConfigurationDefaults, SessionMetadataRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
@@ -1134,12 +1137,17 @@ fn decode_defaults(
             field: "dangerous_tool_auto_approval",
             value: tool_approval,
         })?;
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    let system_prompt = system_prompt
+        .map(|value| {
+            signalbox_domain::SessionSystemPrompt::try_new(value)
+                .map_err(|_| SessionMetadataCorruption::Inconsistent("system prompt admission"))
+        })
+        .transpose()?;
+    Ok(SessionConfigurationDefaults::complete(
+        model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+    ))
 }
 
 struct EncodedActor {

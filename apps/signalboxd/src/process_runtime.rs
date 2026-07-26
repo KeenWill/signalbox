@@ -47,8 +47,8 @@ use signalbox_persistence::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessModelSelection,
         ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
-        ProcessSessionAncestry, ProcessTranscriptEntry, ProcessTranscriptItem,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessSessionAncestry, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
+        ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -63,10 +63,11 @@ use signalbox_process_protocol::{
     IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
     ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
-    RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata as WireSessionMetadata, ToolBatchState, TranscriptEntry, TranscriptTextEntry,
-    TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    RejectionDetail, RequestId, SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION, ServerFrame, ServerMessage,
+    SessionEvent, SessionMetadata as WireSessionMetadata, SystemPromptMember, SystemPromptText,
+    ToolBatchState, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
+    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
+    recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -442,6 +443,7 @@ where
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,
+            system_prompt,
         } => {
             handle_create_session(
                 writer,
@@ -449,6 +451,7 @@ where
                 request_id,
                 command_id.into_uuid(),
                 initial_model_selection,
+                system_prompt,
                 &services.pool,
             )
             .await
@@ -582,6 +585,7 @@ where
             expected_defaults_version,
             model_selection,
             dangerous_tool_auto_approval,
+            system_prompt,
         } => {
             handle_replace_session_defaults(
                 writer,
@@ -592,8 +596,23 @@ where
                 expected_defaults_version,
                 model_selection,
                 dangerous_tool_auto_approval,
+                system_prompt,
                 &services.pool,
                 services.model_configuration.as_ref(),
+            )
+            .await
+        }
+        ClientRequest::ReadSessionDefaults {
+            session_id,
+            defaults_version,
+        } => {
+            handle_read_session_defaults(
+                writer,
+                version,
+                request_id,
+                session_id,
+                defaults_version,
+                &services.pool,
             )
             .await
         }
@@ -742,14 +761,28 @@ async fn handle_create_session<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     initial_model_selection: WireModelSelection,
+    system_prompt: SystemPromptMember,
     pool: &PgPool,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let request = CreateSessionRequest::try_new(
         DurableCommandId::from_uuid(command_id),
-        SessionConfigurationDefaults::new(domain_model_selection(initial_model_selection)),
+        SessionConfigurationDefaults::complete(
+            domain_model_selection(initial_model_selection),
+            DangerousToolAutoApproval::Disabled,
+            system_prompt,
+        ),
     );
     let Ok(request) = request else {
         return write_error(
@@ -1170,6 +1203,63 @@ where
     }
 }
 
+async fn handle_read_session_defaults<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    defaults_version: Option<CanonicalU64>,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let repository = ProcessReadRepository::new(pool.clone());
+    match repository
+        .read_session_defaults(
+            SessionId::from_uuid(session_id.into_uuid()),
+            defaults_version.map(|value| value.value()),
+        )
+        .await
+    {
+        Ok(ProcessSessionDefaultsRead::Read(read)) => {
+            let system_prompt = match wire_system_prompt(read.defaults().system_prompt()) {
+                Some(system_prompt) => system_prompt,
+                None => return Err(ProcessConnectionError::EncodeInvariant),
+            };
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionDefaults {
+                    session_id,
+                    defaults_version: CanonicalU64::new(read.version().as_u64()),
+                    model_selection: wire_domain_model_selection(read.defaults().model()),
+                    dangerous_tool_auto_approval: matches!(
+                        read.defaults().dangerous_tool_auto_approval(),
+                        DangerousToolAutoApproval::ApproveAll
+                    ),
+                    system_prompt,
+                },
+            )
+            .await
+        }
+        Ok(
+            ProcessSessionDefaultsRead::SessionNotFound
+            | ProcessSessionDefaultsRead::VersionNotFound,
+        ) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await
+        }
+        Err(error) => write_process_read_error(writer, version, request_id, error).await,
+    }
+}
+
 async fn handle_replace_session_metadata<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -1303,6 +1393,7 @@ async fn handle_replace_session_defaults<Writer>(
     expected_defaults_version: CanonicalU64,
     model_selection: WireModelSelection,
     dangerous_tool_auto_approval: bool,
+    system_prompt: SystemPromptMember,
     pool: &PgPool,
     model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
@@ -1320,14 +1411,25 @@ where
         )
         .await;
     };
+    let prompt_member_is_absent = system_prompt.value().is_none();
+    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let replacement_model = domain_model_selection(model_selection);
-    let replacement = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+    let replacement = SessionConfigurationDefaults::complete(
         replacement_model,
         if dangerous_tool_auto_approval {
             DangerousToolAutoApproval::ApproveAll
         } else {
             DangerousToolAutoApproval::Disabled
         },
+        system_prompt,
     );
     let durable_command_id = DurableCommandId::from_uuid(command_id);
     let request = ReplaceSessionDefaultsRequest::try_new(
@@ -1379,12 +1481,56 @@ where
         )
         .await;
     }
+    // A replacement below version nine cannot carry the prompt member, so on
+    // a session whose current epoch has a present prompt it would silently
+    // clear a fact its version cannot represent. Gate it before any command
+    // is recorded; a claimed identity replays its recorded result
+    // unconditionally, and an absent session is left to the transaction's
+    // recorded session_not_found.
+    if !command_is_claimed
+        && prompt_member_is_absent
+        && version.as_u64() < SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
+    {
+        let read = ProcessReadRepository::new(pool.clone());
+        match read
+            .read_session_defaults(SessionId::from_uuid(session_id.into_uuid()), None)
+            .await
+        {
+            Ok(ProcessSessionDefaultsRead::Read(current))
+                if current.defaults().system_prompt().is_some() =>
+            {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::unsupported_version(SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION),
+                )
+                .await;
+            }
+            Ok(
+                ProcessSessionDefaultsRead::Read(_)
+                | ProcessSessionDefaultsRead::SessionNotFound
+                | ProcessSessionDefaultsRead::VersionNotFound,
+            ) => {}
+            Err(error) => {
+                return write_process_read_error(writer, version, request_id, error).await;
+            }
+        }
+    }
     let mut service = ReplaceSessionDefaultsService::new(repository);
     match service.execute(request).await {
         Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
             applied,
         ))) => {
             let installed = applied.installed();
+            let system_prompt = if version.as_u64() < SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION {
+                SystemPromptMember::absent()
+            } else {
+                SystemPromptMember::present(
+                    wire_system_prompt(installed.defaults().system_prompt())
+                        .ok_or(ProcessConnectionError::EncodeInvariant)?,
+                )
+            };
             write_message(
                 writer,
                 version,
@@ -1397,6 +1543,7 @@ where
                         installed.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
                     ),
+                    system_prompt,
                 },
             )
             .await
@@ -2549,6 +2696,37 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
         ModelSelectionRequest::Alias(alias) => WireModelSelection::Alias {
             alias_id: wire_uuid(alias.into_uuid()),
         },
+    }
+}
+
+/// Maps the presence-checked wire member into the domain's optional bounded
+/// prompt. Frame validation already bounds the text; construction failure is
+/// a fail-closed invalid request rather than a panic.
+fn domain_system_prompt(
+    member: SystemPromptMember,
+) -> Result<Option<signalbox_domain::SessionSystemPrompt>, ()> {
+    match member.value() {
+        None | Some(None) => Ok(None),
+        Some(Some(text)) => {
+            signalbox_domain::SessionSystemPrompt::try_new(text.as_str().to_owned())
+                .map(Some)
+                .map_err(|_| ())
+        }
+    }
+}
+
+/// Maps the domain's optional bounded prompt onto the wire text type.
+///
+/// The domain admission is strictly at least as strict as the wire's, so a
+/// `None` here is fail-closed encode-invariant evidence.
+fn wire_system_prompt(
+    prompt: Option<&signalbox_domain::SessionSystemPrompt>,
+) -> Option<Option<SystemPromptText>> {
+    match prompt {
+        None => Some(None),
+        Some(value) => SystemPromptText::try_new(value.as_str().to_owned())
+            .ok()
+            .map(Some),
     }
 }
 

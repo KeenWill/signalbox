@@ -391,9 +391,9 @@ impl SessionMetadataListItem {
         self.defaults_version
     }
 
-    /// Returns the complete current defaults value.
-    pub const fn defaults(&self) -> SessionConfigurationDefaults {
-        self.defaults
+    /// Borrows the complete current defaults value.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
     }
 
     /// Borrows the exact optional title.
@@ -950,7 +950,7 @@ mod tests {
 
         assert_eq!(item.session(), session);
         assert_eq!(item.defaults_version(), version);
-        assert_eq!(item.defaults(), defaults());
+        assert_eq!(item.defaults(), &defaults());
         assert_eq!(item.title(), snapshot.content().title());
         assert_eq!(
             item.tags().collect::<Vec<_>>(),

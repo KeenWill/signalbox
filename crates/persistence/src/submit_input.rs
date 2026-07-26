@@ -4060,6 +4060,7 @@ async fn load_complete_rows(
             defaults.direct_model_selection_id AS defaults_direct_id,
             defaults.model_alias_id AS defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS defaults_tool_auto_approval,
+            defaults.system_prompt AS defaults_system_prompt,
             (
                 SELECT count(*)
                   FROM accepted_input AS effect
@@ -4969,6 +4970,7 @@ fn decode_applied_turn_origin(
         row.try_get("defaults_direct_id")?,
         row.try_get("defaults_alias_id")?,
         required(row, "defaults_tool_auto_approval")?,
+        row.try_get("defaults_system_prompt")?,
         "selected defaults",
     )?;
     let stored_requested_model = decode_model_selection(
@@ -5235,6 +5237,7 @@ fn decode_rejected(
                 row.try_get("defaults_direct_id")?,
                 row.try_get("defaults_alias_id")?,
                 required(row, "defaults_tool_auto_approval")?,
+                row.try_get("defaults_system_prompt")?,
                 "selected defaults",
             )?;
             if selected != defaults_version {
@@ -5665,6 +5668,7 @@ fn decode_defaults(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, SubmitInputRepositoryError> {
     let model = decode_model_selection(kind, direct, alias, field)?;
@@ -5675,12 +5679,17 @@ fn decode_defaults(
                 value: dangerous_tool_auto_approval,
             }
         })?;
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    let system_prompt = system_prompt
+        .map(|value| {
+            signalbox_domain::SessionSystemPrompt::try_new(value)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("system prompt admission"))
+        })
+        .transpose()?;
+    Ok(SessionConfigurationDefaults::complete(
+        model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+    ))
 }
 
 fn decode_dangerous_tool_auto_approval(

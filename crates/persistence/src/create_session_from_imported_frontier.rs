@@ -43,7 +43,7 @@ use crate::{
     outbox,
 };
 
-const STORAGE_VERSION: i16 = 2;
+const STORAGE_VERSION: i16 = 3;
 const OWNER_INITIATED: &str = "owner_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
 const APPLIED: &str = "applied";
@@ -455,8 +455,8 @@ async fn insert_prepared(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             dangerous_tool_auto_approval, system_prompt)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(defaults_version_to_numeric(defaults.version()))
@@ -466,6 +466,12 @@ async fn insert_prepared(
     .bind(dangerous_tool_auto_approval_to_str(
         defaults.defaults().dangerous_tool_auto_approval(),
     ))
+    .bind(
+        defaults
+            .defaults()
+            .system_prompt()
+            .map(signalbox_domain::SessionSystemPrompt::as_str),
+    )
     .execute(&mut *connection)
     .await?;
 
@@ -485,10 +491,11 @@ async fn insert_prepared(
              imported_frontier_position, imported_relationship_kind,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, result_kind, created_session_id)
+             dangerous_tool_auto_approval, system_prompt, result_kind,
+             created_session_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16)",
+             $14, $15, $16, $17)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND)
@@ -508,6 +515,12 @@ async fn insert_prepared(
             .initial_configuration_defaults()
             .dangerous_tool_auto_approval(),
     ))
+    .bind(
+        command
+            .initial_configuration_defaults()
+            .system_prompt()
+            .map(signalbox_domain::SessionSystemPrompt::as_str),
+    )
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
@@ -617,6 +630,7 @@ async fn load_creation_from_connection(
             c.direct_model_selection_id AS command_direct_id,
             c.model_alias_id AS command_alias_id,
             c.dangerous_tool_auto_approval AS command_tool_auto_approval,
+            c.system_prompt AS command_system_prompt,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -631,7 +645,8 @@ async fn load_creation_from_connection(
             v.model_selection_kind AS stored_model_kind,
             v.direct_model_selection_id AS stored_direct_id,
             v.model_alias_id AS stored_alias_id,
-            v.dangerous_tool_auto_approval AS stored_tool_auto_approval
+            v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
+            v.system_prompt AS stored_system_prompt
          FROM durable_command AS d
          LEFT JOIN create_session_from_imported_frontier_command AS c
            ON c.command_id = d.command_id
@@ -699,6 +714,7 @@ async fn load_creation_from_connection(
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
         required(&row, "command_tool_auto_approval")?,
+        row.try_get("command_system_prompt")?,
         typed_version,
         "command model selection",
     )?;
@@ -719,6 +735,7 @@ async fn load_creation_from_connection(
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
         required(&row, "stored_tool_auto_approval")?,
+        row.try_get("stored_system_prompt")?,
         typed_version,
         "stored model selection",
     )?;
@@ -787,6 +804,7 @@ pub(crate) fn reconstitute_bounded_current(
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
         required(&row, "dangerous_tool_auto_approval")?,
+        row.try_get("system_prompt")?,
         "model selection",
     )?;
 
@@ -865,7 +883,7 @@ pub(crate) async fn load_complete_current(
         current_defaults.version(),
         session.id(),
         current_defaults.version(),
-        *current_defaults.defaults(),
+        current_defaults.defaults().clone(),
         conversation,
         projection.seed_records,
         projection.seed_snapshots,
@@ -1126,6 +1144,7 @@ fn decode_selection(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -1147,12 +1166,17 @@ fn decode_selection(
                 value: dangerous_tool_auto_approval,
             })
         })?;
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    let system_prompt = system_prompt
+        .map(|value| {
+            signalbox_domain::SessionSystemPrompt::try_new(value)
+                .map_err(|_| ImportedSessionCorruption::Inconsistent("system prompt admission"))
+        })
+        .transpose()?;
+    Ok(SessionConfigurationDefaults::complete(
+        model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+    ))
 }
 
 fn decode_versioned_selection(
@@ -1160,10 +1184,23 @@ fn decode_versioned_selection(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
     storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
-    let defaults = decode_selection(kind, direct, alias, dangerous_tool_auto_approval, field)?;
+    if storage_version <= 2 && system_prompt.is_some() {
+        return Err(
+            ImportedSessionCorruption::Inconsistent("pre-version-three system prompt").into(),
+        );
+    }
+    let defaults = decode_selection(
+        kind,
+        direct,
+        alias,
+        dangerous_tool_auto_approval,
+        system_prompt,
+        field,
+    )?;
     if storage_version == 1
         && defaults.dangerous_tool_auto_approval()
             != signalbox_domain::DangerousToolAutoApproval::Disabled
@@ -1206,7 +1243,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ImportedSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1 | 2) {
+    if matches!(actual, 1 | 2 | 3) {
         Ok(actual)
     } else {
         Err(ImportedSessionCorruption::Unsupported {
