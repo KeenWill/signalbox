@@ -115,10 +115,13 @@ An owner decision is the canonical `DecideToolRequest` command: owner-global
 `Deny { reason }`. A denial reason is absent or 1–1024 bytes of non-control
 Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
 render without copying unbounded or terminal-control content. Equality excludes
-only the command identifier. Registry lookup precedes current-state validation;
-equal replay returns the recorded applied-or-rejected result, cross-kind or
-different-payload reuse conflicts, and a pre-commit failure claims no identity
-(INV-012).
+only the command identifier. The version-eight `decide_tool_request` request in
+[process-protocol](process-protocol.md#client-requests) is the client surface
+that issues this command; its wire posture requires a denial reason even though
+the command admits an absent one. Registry lookup precedes current-state
+validation; equal replay returns the recorded applied-or-rejected result,
+cross-kind or different-payload reuse conflicts, and a pre-commit failure claims
+no identity (INV-012).
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
@@ -139,7 +142,12 @@ approval wait is not a denial and does not bypass the decision command. A
 terminal stop materializes the denial result before its terminal marker. This is
 two independently durable commands, not one atomic deny-and-end command; after
 decision progression opens execution, the ordinary dispatch-gate race between
-remaining tool work and the interrupt applies.
+remaining tool work and the interrupt applies. On the wire this composition is
+`decide_tool_request` followed by `stop_turn`
+([process-protocol](process-protocol.md#client-requests)); a `stop_turn` against
+the parked wait records the typed
+`interrupt_unavailable_while_awaiting_approval` rejection and leaves the wait
+intact.
 
 ## Registry, placement, and effect metadata
 

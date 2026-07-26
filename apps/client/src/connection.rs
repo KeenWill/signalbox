@@ -78,7 +78,7 @@ impl Connection {
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
         let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
-        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Six, request_id, request)
+        let frame = ClientFrame::try_new_for_version(ProtocolVersion::Eight, request_id, request)
             .map_err(FrameEncodeError::Validation)?;
         let encoded = encode_client_line(&frame).map_err(|error| match error {
             FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
@@ -87,7 +87,7 @@ impl Connection {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
-            version: ProtocolVersion::Six,
+            version: ProtocolVersion::Eight,
             request_id,
             reader: BufReader::new(reader),
             writer,
@@ -180,7 +180,9 @@ mod tests {
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Two)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Three)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Four)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Five)?;
         assert_pre_admission_errors_are_admitted(ProtocolVersion::Six)?;
+        assert_pre_admission_errors_are_admitted(ProtocolVersion::Eight)?;
         Ok(())
     }
 
@@ -190,7 +192,9 @@ mod tests {
         assert_application_error_is_rejected(ProtocolVersion::Two)?;
         assert_application_error_is_rejected(ProtocolVersion::Three)?;
         assert_application_error_is_rejected(ProtocolVersion::Four)?;
+        assert_application_error_is_rejected(ProtocolVersion::Five)?;
         assert_application_error_is_rejected(ProtocolVersion::Six)?;
+        assert_application_error_is_rejected(ProtocolVersion::Eight)?;
         Ok(())
     }
 

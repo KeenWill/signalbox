@@ -36,6 +36,13 @@ pub const CONVERSATION_IMPORT_PROTOCOL_VERSION: u64 = 5;
 /// The forward-only session-defaults replacement protocol version.
 pub const MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION: u64 = 6;
 
+/// The client turn-control protocol version.
+///
+/// Version seven is reserved by the open owner turn-reconciliation stack
+/// (`agent/turn-reconciliation-recovery`) and is admitted only when that stack
+/// lands its `reconcile_turn` vocabulary.
+pub const TURN_CONTROL_PROTOCOL_VERSION: u64 = 8;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -51,6 +58,8 @@ pub enum ProtocolVersion {
     Five,
     /// Forward-only session-defaults replacement vocabulary.
     Six,
+    /// Client turn-control vocabulary.
+    Eight,
 }
 
 impl ProtocolVersion {
@@ -63,6 +72,7 @@ impl ProtocolVersion {
             Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
             Self::Five => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::Eight => TURN_CONTROL_PROTOCOL_VERSION,
         }
     }
 
@@ -74,6 +84,7 @@ impl ProtocolVersion {
             SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
             CONVERSATION_IMPORT_PROTOCOL_VERSION => Some(Self::Five),
             MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
+            TURN_CONTROL_PROTOCOL_VERSION => Some(Self::Eight),
             _ => None,
         }
     }
@@ -926,6 +937,52 @@ pub enum ClientRequest {
         /// Exact complete source bytes.
         source: ConversationImportSource,
     },
+    /// Stop the exact active turn through the accepted interrupt treatment.
+    ///
+    /// The request applies the `Interrupt` delivery to the named active turn:
+    /// its stop is durably requested and terminalization flows through the
+    /// existing lifecycle, while `content` becomes the immediate-successor
+    /// origin the session continues with. No standalone cancellation command
+    /// exists; this verb is the interrupt treatment on the wire (INV-029).
+    StopTurn {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// The turn the caller observed active in the session.
+        expected_active_turn_id: CanonicalUuid,
+        /// Exact owner text for the immediate successor turn.
+        content: InputContent,
+        /// Caller-observed defaults version.
+        expected_defaults_version: CanonicalU64,
+    },
+    /// Supply the owner decision for one pending tool request.
+    DecideToolRequest {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Session the caller expects to own the request.
+        session_id: CanonicalUuid,
+        /// Exact logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact closed approval decision.
+        decision: ToolDecision,
+    },
+}
+
+/// One closed wire approval decision for a pending tool request.
+///
+/// The wire surface requires a denial reason; the daemon validates it against
+/// the domain's denial-reason contract before command construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolDecision {
+    /// Execution is permitted subject to current aggregate guards.
+    Approve {},
+    /// Execution is permanently prohibited for this request.
+    Deny {
+        /// Exact owner explanation rendered to the model.
+        reason: String,
+    },
 }
 
 impl ClientRequest {
@@ -936,6 +993,7 @@ impl ClientRequest {
             | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
             Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
             | Self::SubmitInput { .. }
@@ -1105,6 +1163,68 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// The caller named a turn that no longer holds the session slot.
+    ActiveTurnMismatch {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Turn the caller expected to be active.
+        expected_active_turn_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+    },
+    /// No turn held the session slot when the caller named one.
+    NoActiveTurn {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Turn the caller expected to be active.
+        expected_active_turn_id: CanonicalUuid,
+    },
+    /// A distinct earlier stop was already applied to the active turn.
+    InterruptAlreadyApplied {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+        /// Command whose applied result already carries the stop proof.
+        existing_command_id: CanonicalUuid,
+    },
+    /// The active turn is parked on a tool-approval wait, which a stop can
+    /// neither decide nor bypass; the caller denies the pending request first.
+    InterruptUnavailableWhileAwaitingApproval {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+    },
+    /// No logical tool request had the named identity.
+    ToolRequestNotFound {
+        /// Absent logical tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The named tool request already had a terminal approval resolution.
+    ToolRequestAlreadyResolved {
+        /// Resolved logical tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// An earlier request in the same batch still awaited its decision.
+    ToolRequestNotEarliestUndecided {
+        /// Named logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Earliest undecided request owed a decision first.
+        earliest_tool_request_id: CanonicalUuid,
+    },
+    /// The named tool request is not owned by the named session, so no
+    /// decision is admitted for it.
+    ///
+    /// This precondition is refused before a durable command is recorded; a
+    /// correctly correlated request instead reaches the canonical decision
+    /// command and its recorded rejections above.
+    ToolRequestNotInSession {
+        /// Session the caller named.
+        session_id: CanonicalUuid,
+        /// Tool request the caller named.
+        tool_request_id: CanonicalUuid,
+    },
     /// The caller observed stale defaults.
     DefaultsVersionMismatch {
         /// Target session.
@@ -1141,6 +1261,14 @@ impl RejectionDetail {
     const fn minimum_protocol_version(self) -> u64 {
         match self {
             Self::DefaultsVersionExhausted { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ActiveTurnMismatch { .. }
+            | Self::NoActiveTurn { .. }
+            | Self::InterruptAlreadyApplied { .. }
+            | Self::InterruptUnavailableWhileAwaitingApproval { .. }
+            | Self::ToolRequestNotFound { .. }
+            | Self::ToolRequestAlreadyResolved { .. }
+            | Self::ToolRequestNotEarliestUndecided { .. }
+            | Self::ToolRequestNotInSession { .. } => TURN_CONTROL_PROTOCOL_VERSION,
             Self::SessionNotFound { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::DefaultsVersionMismatch { .. }
@@ -2025,6 +2153,16 @@ pub enum ServerMessage {
         /// Complete committed dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
     },
+    /// One recorded owner tool-decision receipt.
+    ///
+    /// The receipt mirrors the recorded applied result exactly; an equal
+    /// command replay returns this same projection.
+    ToolRequestDecided {
+        /// Decided logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact recorded decision.
+        decision: ToolDecision,
+    },
     /// One new immutable imported conversation was inserted.
     ConversationImportInserted {
         /// Newly durable imported-conversation identity.
@@ -2135,6 +2273,7 @@ impl ServerMessage {
                 CONVERSATION_IMPORT_PROTOCOL_VERSION
             }
             Self::SessionDefaultsReplaced { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ToolRequestDecided { .. } => TURN_CONTROL_PROTOCOL_VERSION,
             Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
@@ -2400,7 +2539,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, and 6",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, and 8",
             ),
         }
     }
@@ -2609,7 +2748,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6") {
+    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6" | "8") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -2718,6 +2857,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "4" => Some(ProtocolVersion::Four),
         "5" => Some(ProtocolVersion::Five),
         "6" => Some(ProtocolVersion::Six),
+        "8" => Some(ProtocolVersion::Eight),
         _ => None,
     }
 }
@@ -2768,9 +2908,9 @@ mod tests {
         MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor,
         MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
         ProtocolVersion, RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION,
-        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line,
+        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
+        encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -2852,7 +2992,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, and 6")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, and 8")
         );
     }
 
@@ -2862,7 +3002,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":7,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":9,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -3051,7 +3191,10 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
+        // Version seven remains reserved by the open owner turn-reconciliation
+        // stack and is not admitted until that stack lands.
         assert_unsupported_version("7");
+        assert_unsupported_version("9");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -3823,6 +3966,263 @@ mod tests {
             r#"{"type":"conversation_import_already_imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003"}"#,
         )?;
         Ok(())
+    }
+
+    /// INV-033: the stop request is admitted only by version eight and keeps
+    /// its exact closed shape across one encode/decode round trip.
+    #[test]
+    fn inv033_version_eight_stop_turn_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::StopTurn {
+            command_id: command(4)?,
+            session_id: uuid(6),
+            expected_active_turn_id: uuid(7),
+            content: InputContent::new(String::from("continue after the stop")),
+            expected_defaults_version: CanonicalU64::new(1),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Six,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Eight, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":8,\"request_id\":\"1\",\"request\":{\"type\":\"stop_turn\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
+             \"content\":\"continue after the stop\",\
+             \"expected_defaults_version\":\"1\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: both closed decision shapes are admitted only by version eight
+    /// and keep their exact wire forms across one encode/decode round trip.
+    #[test]
+    fn inv033_version_eight_decide_tool_request_has_exact_closed_decision_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let approval = ClientRequest::DecideToolRequest {
+            command_id: command(4)?,
+            session_id: uuid(6),
+            tool_request_id: uuid(7),
+            decision: ToolDecision::Approve {},
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::Six, request(1)?, approval.clone()),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let approval_frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Eight, request(1)?, approval)?;
+        let encoded_approval = encode_client_line(&approval_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded_approval.clone())?,
+            "{\"version\":8,\"request_id\":\"1\",\"request\":{\"type\":\"decide_tool_request\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\",\
+             \"decision\":{\"type\":\"approve\"}}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded_approval)?, approval_frame);
+
+        let denial_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eight,
+            request(2)?,
+            ClientRequest::DecideToolRequest {
+                command_id: command(5)?,
+                session_id: uuid(6),
+                tool_request_id: uuid(7),
+                decision: ToolDecision::Deny {
+                    reason: String::from("writes outside the workspace"),
+                },
+            },
+        )?;
+        let encoded_denial = encode_client_line(&denial_frame)?;
+        assert_eq!(
+            String::from_utf8(encoded_denial.clone())?,
+            "{\"version\":8,\"request_id\":\"2\",\"request\":{\"type\":\"decide_tool_request\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000005\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\",\
+             \"decision\":{\"type\":\"deny\",\"reason\":\"writes outside the workspace\"}}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded_denial)?, denial_frame);
+
+        assert_client_malformed(
+            r#"{"version":8,"request_id":"3","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve","reason":"approve carries no reason"}}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":8,"request_id":"4","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"deny"}}}"#,
+        );
+        Ok(())
+    }
+
+    /// INV-033: version eight retains every earlier request unchanged.
+    #[test]
+    fn inv033_version_eight_retains_the_earlier_request_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Eight,
+            request(1)?,
+            ClientRequest::SubmitInput {
+                command_id: command(4)?,
+                session_id: uuid(6),
+                content: InputContent::new(String::from("ordinary work")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":8,"));
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: every stop rejection carries its exact closed wire shape.
+    #[test]
+    fn inv033_stop_rejection_details_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("no turn held the session slot"),
+                detail: ErrorDetail::rejected(RejectionDetail::NoActiveTurn {
+                    session_id: uuid(6),
+                    expected_active_turn_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"no turn held the session slot","detail":{"type":"no_active_turn","session_id":"00000000-0000-0000-0000-000000000006","expected_active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the expected active turn is stale"),
+                detail: ErrorDetail::rejected(RejectionDetail::ActiveTurnMismatch {
+                    session_id: uuid(6),
+                    expected_active_turn_id: uuid(7),
+                    active_turn_id: uuid(8),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the expected active turn is stale","detail":{"type":"active_turn_mismatch","session_id":"00000000-0000-0000-0000-000000000006","expected_active_turn_id":"00000000-0000-0000-0000-000000000007","active_turn_id":"00000000-0000-0000-0000-000000000008"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("a stop was already applied"),
+                detail: ErrorDetail::rejected(RejectionDetail::InterruptAlreadyApplied {
+                    session_id: uuid(6),
+                    active_turn_id: uuid(7),
+                    existing_command_id: uuid(9),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"a stop was already applied","detail":{"type":"interrupt_already_applied","session_id":"00000000-0000-0000-0000-000000000006","active_turn_id":"00000000-0000-0000-0000-000000000007","existing_command_id":"00000000-0000-0000-0000-000000000009"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the active turn awaits a tool decision"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
+                        session_id: uuid(6),
+                        active_turn_id: uuid(7),
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"rejected","message":"the active turn awaits a tool decision","detail":{"type":"interrupt_unavailable_while_awaiting_approval","session_id":"00000000-0000-0000-0000-000000000006","active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )
+    }
+
+    /// INV-033: the decision receipt and every decision rejection carry their
+    /// exact closed wire shapes, admitted only by version eight.
+    #[test]
+    fn inv033_tool_decision_responses_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let approval_receipt = ServerMessage::ToolRequestDecided {
+            tool_request_id: uuid(7),
+            decision: ToolDecision::Approve {},
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Six,
+                request(1)?,
+                approval_receipt.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(1)?,
+            approval_receipt,
+            r#"{"type":"tool_request_decided","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ToolRequestDecided {
+                tool_request_id: uuid(7),
+                decision: ToolDecision::Deny {
+                    reason: String::from("writes outside the workspace"),
+                },
+            },
+            r#"{"type":"tool_request_decided","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"deny","reason":"writes outside the workspace"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("no logical request had this identity"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotFound {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"no logical request had this identity","detail":{"type":"tool_request_not_found","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the request already has a resolution"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestAlreadyResolved {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the request already has a resolution","detail":{"type":"tool_request_already_resolved","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("an earlier request awaits its decision"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotEarliestUndecided {
+                    tool_request_id: uuid(7),
+                    earliest_tool_request_id: uuid(8),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"an earlier request awaits its decision","detail":{"type":"tool_request_not_earliest_undecided","tool_request_id":"00000000-0000-0000-0000-000000000007","earliest_tool_request_id":"00000000-0000-0000-0000-000000000008"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the request is not owned by the session"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotInSession {
+                    session_id: uuid(6),
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the request is not owned by the session","detail":{"type":"tool_request_not_in_session","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )
     }
 
     #[test]

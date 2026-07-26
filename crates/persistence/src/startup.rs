@@ -779,6 +779,7 @@ fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryE
         }
         ToolLoopRepositoryError::Corruption(_)
         | ToolLoopRepositoryError::DifferentCommandKind
+        | ToolLoopRepositoryError::ConflictingCommandReuse
         | ToolLoopRepositoryError::InvalidTransition(_) => {
             StartupScanCorruption::Inconsistent("tool-attempt restart state").into()
         }

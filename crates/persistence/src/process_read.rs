@@ -913,6 +913,28 @@ impl ProcessReadRepository {
         .map_err(Into::into)
     }
 
+    /// Returns the session owning the named logical tool request, or `None`
+    /// when no request has that identity.
+    ///
+    /// This narrow read lets a process adapter refuse a decision whose named
+    /// session does not own the named request before a durable command is
+    /// recorded; the canonical decision command remains the authority for
+    /// every recorded outcome.
+    pub async fn tool_request_session(
+        &self,
+        request: ToolRequestId,
+    ) -> Result<Option<SessionId>, ProcessReadError> {
+        let row = sqlx::query_scalar::<_, Uuid>(
+            "SELECT session_id
+               FROM tool_request
+              WHERE request_id = $1",
+        )
+        .bind(request.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(SessionId::from_uuid))
+    }
+
     /// Returns whether the selected session has a model-identity boundary.
     pub async fn session_has_model_identity_history(
         &self,

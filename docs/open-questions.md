@@ -346,10 +346,12 @@ questions below remain open.
   backpressure, and redaction rules, remain undecided. The implemented durable
   transition relay is owned by [process-protocol](spec/process-protocol.md).
   Blocks live-token display. (S02, S24)
-- **Process-protocol operation expansion.** Defaults replacement, delivery
-  treatments other than `StartWhenNoActiveTurn`, cancellation, approval, tools,
-  and administrative operations need their owning product slices and exact wire
-  projections. Blocks only those operations. (S01–S10)
+- **Process-protocol operation expansion.** The interrupt treatment now crosses
+  the wire as `stop_turn` and the canonical tool decision as
+  `decide_tool_request` ([process-protocol](spec/process-protocol.md)); the
+  next-safe-point and after-current delivery treatments and administrative
+  operations still need their owning product slices and exact wire projections.
+  Blocks only those operations. (S01–S10)
 - **Persistence implementation within the accepted relational baseline.**
   [persistence-protocol](spec/persistence-protocol.md) closes the broad
   stable-storage question, selects the driver, pool, migration, runtime, and
@@ -384,9 +386,11 @@ questions below remain open.
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
   browser protocol and product slice are measured. (S01, S02, S24)
-- **Client approval presentation.** How pending tool-approval prompts are
-  surfaced and owner decisions are collected across the terminal baseline and
-  later client forms remains undesigned. (S10, S11, S24)
+- **Client approval presentation.** The terminal baseline now surfaces the
+  pending request through the transcript's awaiting-turn and tool-use lines and
+  collects decisions through `approve`/`deny`
+  ([process-protocol](spec/process-protocol.md#terminal-client)); interactive
+  prompting and later client forms remain undesigned. (S10, S11, S24)
 
 ## General-purpose artifacts
 

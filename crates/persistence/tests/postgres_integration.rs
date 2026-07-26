@@ -1902,9 +1902,7 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
                 || panic!("conflicting replay consumes no identity"),
             )
             .await,
-        Err(ToolLoopRepositoryError::InvalidTransition(
-            "command replay payload differs from the durable command"
-        ))
+        Err(ToolLoopRepositoryError::ConflictingCommandReuse)
     ));
 
     let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
@@ -3407,17 +3405,8 @@ async fn inv012_tool_decision_command_race_has_one_global_winner() -> Result<(),
     assert!(
         matches!(
             (&first_result, &second_result),
-            (
-                Ok(_),
-                Err(ToolLoopRepositoryError::InvalidTransition(
-                    "command replay payload differs from the durable command"
-                ))
-            ) | (
-                Err(ToolLoopRepositoryError::InvalidTransition(
-                    "command replay payload differs from the durable command"
-                )),
-                Ok(_)
-            )
+            (Ok(_), Err(ToolLoopRepositoryError::ConflictingCommandReuse))
+                | (Err(ToolLoopRepositoryError::ConflictingCommandReuse), Ok(_))
         ),
         "exactly one request-local decision wins the owner-global identity"
     );
