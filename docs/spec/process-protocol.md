@@ -15,17 +15,18 @@ surface adds protocol version five; versions one through four remain unchanged,
 verified through PR #252 (`agent/import-surfaces`). The mid-session
 model-selection stack adds protocol version six for complete, forward-only
 defaults replacement and its model-identity frontier entry; versions one through
-five remain unchanged, verified through PR #272 (`agent/mid-session-model`).
-Protocol version seven is reserved by the open owner turn-reconciliation stack
-(PR #281, `agent/turn-reconciliation-recovery`) for its `reconcile_turn` request
-and is not admitted by this implementation until that stack lands. The
-turn-control stack takes protocol version eight for the `stop_turn` and
-`decide_tool_request` requests; versions one through six retain their closed
-request and message vocabularies unchanged. The implementation in this stack
-speaks versions one through six and version eight, and its terminal client
-selects version eight. This page is the normative boundary between a local
-client process and `signalboxd`; domain values, PostgreSQL records, and wire
-messages remain distinct representations.
+five remain unchanged, verified through PR #272 (`agent/mid-session-model`). The
+owner turn-reconciliation stack adds protocol version seven for the single
+`reconcile_turn` request; versions one through six retain their closed request
+and message vocabularies unchanged, verified through PR #281
+(`agent/turn-reconciliation-recovery`). The turn-control stack adds protocol
+version eight for the `stop_turn` and `decide_tool_request` requests, taken
+while version seven was still reserved by the then-open turn-reconciliation
+stack; versions one through seven retain their closed request and message
+vocabularies unchanged. The implementation in this stack speaks versions one
+through eight, and its terminal client selects version eight. This page is the
+normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -33,26 +34,25 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-Every admitted version uses one Unix domain stream socket. The daemon requires
-its path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its
-`--socket <path>` override when present and otherwise requires that environment
-value. `signalboxd` binds the socket with owner-only `0600` permissions. The
-configured path must be absolute and must end in an explicit filename component;
-a trailing separator, `/.`, or `/..` is rejected rather than normalized. The
-daemon canonicalizes its existing parent once and uses that resolved parent for
-the socket lifetime; the parent must be a directory owned by the daemon's
-effective user with traditional permission mode exactly `0700`. This
-owner-private immediate parent is required even when the socket node itself has
-mode `0600`; version one does not rely on every supported Unix implementation
-enforcing socket-node permissions. Every resolved ancestor up to the filesystem
-root must also resist same-machine replacement: a group- or other-writable
-ancestor is accepted only when it has the sticky bit and the next path component
-toward the socket is owned by the daemon's effective user. Every ancestor must
-itself be owned by either root or the daemon's effective user, so an
-unprivileged different owner cannot make a currently protected directory
-writable after validation. An untrusted owner, a non-sticky writable ancestor,
-or a sticky writable ancestor containing a component owned by another user fails
-startup.
+All eight versions use one Unix domain stream socket. The daemon requires its
+path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
+override when present and otherwise requires that environment value.
+`signalboxd` binds the socket with owner-only `0600` permissions. The configured
+path must be absolute and must end in an explicit filename component; a trailing
+separator, `/.`, or `/..` is rejected rather than normalized. The daemon
+canonicalizes its existing parent once and uses that resolved parent for the
+socket lifetime; the parent must be a directory owned by the daemon's effective
+user with traditional permission mode exactly `0700`. This owner-private
+immediate parent is required even when the socket node itself has mode `0600`;
+version one does not rely on every supported Unix implementation enforcing
+socket-node permissions. Every resolved ancestor up to the filesystem root must
+also resist same-machine replacement: a group- or other-writable ancestor is
+accepted only when it has the sticky bit and the next path component toward the
+socket is owned by the daemon's effective user. Every ancestor must itself be
+owned by either root or the daemon's effective user, so an unprivileged
+different owner cannot make a currently protected directory writable after
+validation. An untrusted owner, a non-sticky writable ancestor, or a sticky
+writable ancestor containing a component owned by another user fails startup.
 
 Before inspecting the final path, the daemon opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
@@ -137,7 +137,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`, `2`, `3`, `4`, `5`, `6`, or `8`;
+- `version`: JSON integer `1`, `2`, `3`, `4`, `5`, `6`, `7`, or `8`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -149,18 +149,18 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version outside the admitted set —
-including the reserved version seven — produces an `unsupported_version` error
-naming the supported versions, then the server closes the connection. Every
-response uses the request's admitted version; when no version can be admitted,
-the server error uses version one as the pre-admission fallback. A client
-speaking an admitted version above one admits that version-one fallback only for
-`malformed_frame` or `unsupported_version`, then applies the ordinary
-request-identity check; every other response-version mismatch fails locally. A
-server error uses `request_id = "0"` only when the incoming frame prevents
-recovery of a valid nonzero identity; zero is never a valid client identity or
-success-response identity. Leading zeroes, a plus sign, whitespace, and any
-spelling other than the shortest ASCII decimal form are invalid.
+spellings decode to the same name. A version other than one through eight
+produces an `unsupported_version` error naming the supported versions, then the
+server closes the connection. Every response uses the request's admitted
+version; when no version can be admitted, the server error uses version one as
+the pre-admission fallback. A client speaking version two through eight admits
+that version-one fallback only for `malformed_frame` or `unsupported_version`,
+then applies the ordinary request-identity check; every other response-version
+mismatch fails locally. A server error uses `request_id = "0"` only when the
+incoming frame prevents recovery of a valid nonzero identity; zero is never a
+valid client identity or success-response identity. Leading zeroes, a plus sign,
+whitespace, and any spelling other than the shortest ASCII decimal form are
+invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -185,6 +185,7 @@ that variant.
 | `replace_session_metadata` | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                        | Durably replace one complete metadata snapshot as the owner actor.                                                                                                 |
 | `import_conversation`      | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                               | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                            |
 | `replace_session_defaults` | 6       | `command_id` and `session_id` (canonical UUID strings), `expected_defaults_version` (canonical decimal string), `model_selection` (selection object), `dangerous_tool_auto_approval` (boolean) | Install one complete immutable defaults epoch as the owner actor, conditional on the exact current epoch.                                                          |
+| `reconcile_turn`           | 7       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                 | Supply the owner reconciliation decision for the named turn parked on an ambiguous model call, accepting `content` as its immediate successor origin.              |
 | `stop_turn`                | 8       | `command_id`, `session_id`, and `expected_active_turn_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string)                                 | Apply the accepted interrupt treatment to the named active turn, accepting `content` as its immediate-successor origin.                                            |
 | `decide_tool_request`      | 8       | `command_id`, `session_id`, and `tool_request_id` (canonical UUID strings), `decision` (a decision object below)                                                                               | Supply the owner decision for one pending tool request through the canonical decision command.                                                                     |
 
@@ -260,6 +261,24 @@ treatment in every version. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
+`reconcile_turn` is the one request that names a treatment explicitly, and it is
+narrow by construction. The daemon reads whether the named turn is the session's
+active turn parked in the `awaiting_model_call_recovery` phase and refuses
+anything else with `rejected` and a `turn_not_awaiting_reconciliation` detail,
+before any durable command is recorded. That precondition is skipped in exactly
+the two cases the durable boundary owns the answer to: a command identity that
+already names durable intent replays its recorded result unconditionally
+(INV-012), because the first handling already released the wait it would now be
+refused for; and an absent session is left to the transaction's recorded
+`session_not_found`. Every other request reaches the authoritative transaction,
+which applies the accepted `Interrupt` delivery in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
+and revalidates the expected active turn under the scheduler lock. A caller that
+loses a race there receives `active_turn_mismatch` when another turn took the
+slot, or `no_active_turn` when the winning decision left the slot empty. The
+verb therefore supplies the interrupt authority a reconciliation-required
+terminal already requires and never becomes a standalone active-turn stop.
+
 `stop_turn` is the explicit stop verb, and it is the accepted `Interrupt`
 delivery in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#occupied-slot-input-handling)
@@ -299,24 +318,26 @@ Versions two and three admit the same request vocabulary as version one and add
 no new mutation authority. Version four retains that vocabulary and adds only
 the three metadata requests. Version five retains all earlier requests and adds
 only `import_conversation`. Version six retains all earlier requests and adds
-only `replace_session_defaults`. Version eight retains all earlier requests and
-adds only `stop_turn` and `decide_tool_request`. A metadata request carried
-under version one, two, or three, an import request carried under version one
-through four, a defaults-replacement request carried under version one through
-five, or a turn-control request carried under version one through six, is
-classified as `malformed_frame` because its supported version does not admit
-that request variant; it never reaches application construction. A version-one
+only `replace_session_defaults`. Version seven retains all earlier requests and
+adds only `reconcile_turn`. Version eight retains all earlier requests and adds
+only `stop_turn` and `decide_tool_request`. A metadata request carried under
+version one, two, or three, an import request carried under version one through
+four, a defaults-replacement request carried under version one through five, a
+reconciliation request carried under version one through six, or a turn-control
+request carried under version one through seven, is classified as
+`malformed_frame` because its supported version does not admit that request
+variant; it never reaches application construction. A version-one
 `submit_input`, `read_transcript`, or `follow_session` request that selects
 imported ancestry returns a version-one `unsupported_version` error naming
 version two before mutation or snapshot construction.
 
-Versions four through six and version eight also inherit every transcript,
-turn-state, entry, and event shape admitted by version three, including the
-imported representations introduced by version two and the tool-bearing
-representations introduced by version three. A `read_transcript`,
-`follow_session`, or `submit_input` under any of those versions therefore never
-requires a downgrade or a newer version for a representation already admitted by
-version three.
+Versions four through eight also inherit every transcript, turn-state, entry,
+and event shape admitted by version three, including the imported
+representations introduced by version two and the tool-bearing representations
+introduced by version three. A version-four through version-eight
+`read_transcript`, `follow_session`, or `submit_input` therefore never requires
+a downgrade or a newer version for a representation already admitted by version
+three.
 
 Tool-free native sessions remain readable and mutable through every version. A
 version-one or version-two `read_transcript` or `follow_session` request whose
@@ -366,8 +387,9 @@ request.
 
 Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted mutation request — `create_session`,
-`submit_input`, `stop_turn`, `decide_tool_request`, `replace_session_metadata`,
-`replace_session_defaults`, or `import_conversation` — produces exactly one of:
+`submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
+`replace_session_metadata`, `replace_session_defaults`, or `import_conversation`
+— produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
@@ -453,11 +475,17 @@ admits `session_not_found { session_id }`,
 `session_not_found { session_id }`. A version-six `replace_session_defaults`
 rejection admits `session_not_found { session_id }`,
 `defaults_version_mismatch { session_id, expected, current }`, and
-`defaults_version_exhausted { session_id, current }`. A version-eight
-`stop_turn` rejection admits `session_not_found`, `defaults_version_mismatch`,
-`unknown_model_alias`, and `acceptance_position_exhausted` as above, plus
-`no_active_turn { session_id, expected_active_turn_id }`,
-`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`,
+`defaults_version_exhausted { session_id, current }`. A version-seven
+`reconcile_turn` rejection admits `session_not_found`,
+`defaults_version_mismatch`, `unknown_model_alias`, and
+`acceptance_position_exhausted` as above, plus
+`active_turn_mismatch { session_id, expected_active_turn_id, active_turn_id }`
+and `no_active_turn { session_id, expected_active_turn_id }` for a decision that
+lost its race, and `turn_not_awaiting_reconciliation { session_id, turn_id }`
+for the refused precondition. A version-eight `stop_turn` rejection admits
+`session_not_found`, `defaults_version_mismatch`, `unknown_model_alias`, and
+`acceptance_position_exhausted` as above, plus `no_active_turn`,
+`active_turn_mismatch`,
 `interrupt_already_applied { session_id, active_turn_id, existing_command_id }`,
 and
 `interrupt_unavailable_while_awaiting_approval { session_id, active_turn_id }`.
@@ -465,12 +493,13 @@ A version-eight `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. That last
-detail reports a refusal made before command recording, so unlike every other
-`rejected` detail it names no durable command result and has no replay
-projection; a caller that repeats the request observes the current state, not a
-recorded outcome. Other error codes have no `detail`. An equal replay returns
-the same success or rejection projection as the first handling.
+and `tool_request_not_in_session { session_id, tool_request_id }`. The
+`turn_not_awaiting_reconciliation` and `tool_request_not_in_session` details
+report refusals made before command recording, so unlike every other `rejected`
+detail they name no durable command result and have no replay projection; a
+caller that repeats the request observes the current state, not a recorded
+outcome. Other error codes have no `detail`. An equal replay returns the same
+success or rejection projection as the first handling.
 
 The error-code set in every admitted version is:
 
@@ -487,10 +516,13 @@ The error-code set in every admitted version is:
 | `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                                                                      |
 | `internal`            | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
-For `create_session`, `submit_input`, `stop_turn`, `decide_tool_request`,
-`replace_session_metadata`, and `replace_session_defaults`, a lost commit
-response maps to `commit_ambiguous`; the client retries the exact command
-identity and payload to discover the recorded outcome. A definitely pre-commit
+For `create_session`, `submit_input`, `reconcile_turn`, `stop_turn`,
+`decide_tool_request`, `replace_session_metadata`, and
+`replace_session_defaults`, a lost commit response maps to `commit_ambiguous`;
+the client retries the exact command identity and payload to discover the
+recorded outcome. A `reconcile_turn` or `decide_tool_request` retry reaches that
+recorded outcome unconditionally, because a claimed command identity bypasses
+the precondition the first handling already satisfied. A definitely pre-commit
 infrastructure failure maps to `unavailable`.
 
 Conversation import carries no durable command identity because exact
@@ -767,23 +799,24 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-Every admitted version forwards durable transition events only. Provider token
-deltas remain transient inside the model-runtime boundary and are not added to
-the outbox. The terminal `send` command follows the submitted turn, accepts
-terminal state from the initial snapshot or waits for its durable terminal
-event, rereads the authoritative transcript, and prints the committed assistant
-text. Every version exits with a typed nonzero recovery-required diagnostic
-after observing `active_awaiting_model_call_recovery` or a live terminal
-`ambiguous` model-call transition followed by that authoritative state.
+All eight versions forward durable transition events only. Provider token deltas
+remain transient inside the model-runtime boundary and are not added to the
+outbox. The terminal `send` command follows the submitted turn, accepts terminal
+state from the initial snapshot or waits for its durable terminal event, rereads
+the authoritative transcript, and prints the committed assistant text. Every
+version exits with a typed nonzero recovery-required diagnostic after observing
+`active_awaiting_model_call_recovery` or a live terminal `ambiguous` model-call
+transition followed by that authoritative state.
 
 Version three applies the same behavior to `active_awaiting_tool_recovery` and
-to `tool_batch_transition { recovery_required }` followed by that state. Neither
-recovery wait has a process-protocol writer that can complete it. An
-`active_awaiting_tool_approval` turn remains an ordinary nonterminal wait that
-`send` keeps waiting through; version eight's `decide_tool_request` is its
-resolving writer, issued from a second connection while the waiting client's
-transcript names the pending request and its proposing tool. A client disconnect
-never cancels model or tool work.
+to `tool_batch_transition { recovery_required }` followed by that state. A
+model-call recovery wait has one process-protocol writer that completes it —
+version seven's `reconcile_turn`, which the diagnostic's operator runs next; the
+tool recovery wait still has none. An `active_awaiting_tool_approval` turn
+remains an ordinary nonterminal wait that `send` keeps waiting through; version
+eight's `decide_tool_request` is its resolving writer, issued from a second
+connection while the waiting client's transcript names the pending request and
+its proposing tool. A client disconnect never cancels model or tool work.
 
 Version three rereads after each `tool_batch_transition { proposed }` and
 `tool_batch_transition { results_projected }`; every version rereads after a
@@ -825,6 +858,7 @@ by their declared version as described above. The client accepts a global
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
 - `import --format <claude-code|codex> <file>`;
+- `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `stop <session-uuid> [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `approve <session-uuid> <tool-request-uuid> [--command-id <uuid>]`;
 - `deny <session-uuid> <tool-request-uuid> --reason <text> [--command-id <uuid>]`.
@@ -832,6 +866,12 @@ by their declared version as described above. The client accepts a global
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
 fails before socket I/O.
+
+`reconcile` reads its successor content the same way and names the parked turn
+the operator observed in the session transcript. It prints the same recovery
+values as `send`, then follows the accepted successor turn to its own terminal,
+so one invocation both records the reconciliation decision and continues the
+conversation.
 
 `stop` reads its successor content the same way. When `--turn` is absent it
 reads the authoritative transcript, selects the single turn holding the active
@@ -862,23 +902,24 @@ names the session; it copies both the defaults version and dangerous-tool
 posture, prints those facts, and changes only the requested model selection.
 Thus every client-generated or server-discovered recovery value is visible
 before its commit can become ambiguous. Exact replay also requires the original
-selection or session argument and, for `send` and `stop`, the exact
-standard-input content; the client does not echo that potentially sensitive
-input or synthesize a shell command. Its ambiguity diagnostic directs the user
-to retry the original command with those arguments and input plus any printed
-recovery values. For recovery, the user supplies the printed command identity;
-`send` then also requires the exact `--defaults-version`, and `stop` requires
-command identity, defaults version, and the exact expected `--turn`, because a
-stopped turn cannot be rediscovered once the first handling terminalizes it.
-`model` instead requires all three printed facts — command identity, defaults
-version, and dangerous-tool posture. Each recovery set is all-or-none. The
-client never silently substitutes a new command identity for an ambiguous
-attempt. It uses a fresh nonzero request identity per connection, validates that
-a defaults receipt is the exact successor carrying the requested selection and
-copied posture, validates that a decision receipt echoes the exact request and
-decision it sent, renders only known version-eight messages, and exits nonzero
-on protocol or application errors other than the follow-specific
-`resync_required` control case, which reconnects for a fresh snapshot.
+selection or session argument and, for `send`, `reconcile`, and `stop`, the
+exact standard-input content; the client does not echo that potentially
+sensitive input or synthesize a shell command. Its ambiguity diagnostic directs
+the user to retry the original command with those arguments and input plus any
+printed recovery values. For recovery, the user supplies the printed command
+identity; `send` and `reconcile` then also require the exact
+`--defaults-version`, and `stop` requires command identity, defaults version,
+and the exact expected `--turn`, because a stopped turn cannot be rediscovered
+once the first handling terminalizes it. `model` instead requires all three
+printed facts — command identity, defaults version, and dangerous-tool posture.
+Each recovery set is all-or-none. The client never silently substitutes a new
+command identity for an ambiguous attempt. It uses a fresh nonzero request
+identity per connection, validates that a defaults receipt is the exact
+successor carrying the requested selection and copied posture, validates that a
+decision receipt echoes the exact request and decision it sent, renders only
+known version-eight messages, and exits nonzero on protocol or application
+errors other than the follow-specific `resync_required` control case, which
+reconnects for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

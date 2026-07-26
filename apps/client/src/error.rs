@@ -191,6 +191,13 @@ impl fmt::Display for RejectionDisplay {
                 "no_active_turn session={session_id} \
                  expected_active_turn={expected_active_turn_id}"
             ),
+            RejectionDetail::TurnNotAwaitingReconciliation {
+                session_id,
+                turn_id,
+            } => write!(
+                formatter,
+                "turn_not_awaiting_reconciliation session={session_id} turn={turn_id}"
+            ),
             RejectionDetail::InterruptAlreadyApplied {
                 session_id,
                 active_turn_id,
