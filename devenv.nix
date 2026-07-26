@@ -273,11 +273,11 @@ in
       chmod 600 ${shellArg authorityKey} ${shellArg serverKey}
       chmod 644 ${shellArg authorityCertificate} ${shellArg serverCertificate}
 
-      # Seeded verbatim from the checked-in example, which already states the
-      # dated canonical model id. Keep it that way when editing the copy:
-      # `provider_model` must be the exact identity the provider echoes back,
-      # and an undated alias makes a call commit ambiguously, stops the daemon,
-      # and wedges the session it was serving.
+      # Seeded verbatim from the checked-in example, so the copy starts with
+      # that file's undated family names. The bridge relates a reported
+      # identity to the configured one; the rule, including the dated snapshot
+      # a family name resolves to, is stated under provider-target identity in
+      # docs/spec/model-call-execution.md.
       if [ ! -f ${shellArg daemonConfigFile} ]; then
         echo "dev instance: seeding" ${shellArg daemonConfigFile} \
              "from config/signalboxd.example.toml"

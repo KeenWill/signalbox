@@ -108,11 +108,13 @@ alone afterwards so local edits survive. Wipe the whole instance with
 `.devenv/state/dev-instance/signalboxd.toml`.
 
 Two things are worth knowing before editing the seeded catalog or reaching for
-the socket. The seeded `provider_model` is the dated
-`claude-haiku-4-5-20251001`; the spelling that value must take is stated in
+the socket. The seed is a copy of the checked-in example, so it carries that
+file's undated family names such as `claude-haiku-4-5`; the spelling a
+`provider_model` must take is stated in
 [configuration and credentials](docs/spec/configuration-and-credentials.md#the-static-model-and-alias-catalog),
-and what happens when the provider reports a different one in
-[model-call execution](docs/spec/model-call-execution.md#provider-observation-classification).
+and how a reported identity is related back to it — including the dated snapshot
+a family name resolves to — in
+[provider-target identity](docs/spec/model-call-execution.md#provider-target-identity).
 And the process socket lives at `$DEVENV_RUNTIME/signalbox/signalboxd.sock`
 rather than directly in the runtime directory, because the daemon accepts only a
 socket parent meeting the ownership and permission rules the
