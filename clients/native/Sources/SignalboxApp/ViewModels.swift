@@ -416,7 +416,7 @@ final class SessionDetailViewModel: ObservableObject {
         do {
             async let events = service.listEvents(sessionID: session.id)
             async let artifacts = service.listArtifacts(sessionID: session.id)
-            replaceEvents(with: try await events)
+            try replaceEvents(with: await events)
             self.artifacts = try await artifacts
             errorMessage = nil
         } catch {
@@ -451,7 +451,7 @@ final class SessionDetailViewModel: ObservableObject {
         }
         if result == .recoverableFailure, !Task.isCancelled {
             do {
-                replaceEvents(with: try await initialHistoryLoad.events.value)
+                try replaceEvents(with: await initialHistoryLoad.events.value)
                 artifacts = try await initialHistoryLoad.artifacts.value
                 errorMessage = nil
             } catch {
@@ -596,7 +596,7 @@ final class SessionDetailViewModel: ObservableObject {
         guard let service = serviceProvider() else { return }
         do {
             try await service.confirmInvocation(sessionID: session.id, invocationID: invocationID)
-            replaceEvents(with: try await service.listEvents(sessionID: session.id))
+            try replaceEvents(with: await service.listEvents(sessionID: session.id))
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -610,7 +610,7 @@ final class SessionDetailViewModel: ObservableObject {
                 invocationID: invocationID,
                 reason: "Denied from native client."
             )
-            replaceEvents(with: try await service.listEvents(sessionID: session.id))
+            try replaceEvents(with: await service.listEvents(sessionID: session.id))
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -706,7 +706,16 @@ final class SessionDetailViewModel: ObservableObject {
             let preservedStreamError = errorMessage == latestStreamDiagnostic
                 ? errorMessage
                 : nil
-            replaceEvents(with: synchronizedEvents)
+            do {
+                // A snapshot naming an event ID twice is as unusable as a
+                // failed read: the normalizer refuses it without mutating
+                // state, so the already rendered history survives and this
+                // enters the same bounded recovery path.
+                try replaceEvents(with: synchronizedEvents)
+            } catch {
+                failHistorySynchronization(synchronization, error: error)
+                return
+            }
             errorMessage = nil
             synchronization.bufferedMessages.forEach(apply)
             if errorMessage == nil {
@@ -728,17 +737,26 @@ final class SessionDetailViewModel: ObservableObject {
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
                 return
             }
-            synchronization.bufferedMessages.forEach(apply)
-            errorMessage = lastStreamDiagnostic(
-                in: synchronization.bufferedMessages
-            ) ?? error.localizedDescription
-            disconnectStream()
-            guard let completion = synchronization.completion else {
-                connectStream(synchronizeHistory: true)
-                return
-            }
-            completion.resume(returning: .recoverableFailure)
+            failHistorySynchronization(synchronization, error: error)
         }
+    }
+
+    /// Reports an unusable authoritative history read and hands the session to
+    /// the bounded recovery path, having already claimed `synchronization`.
+    private func failHistorySynchronization(
+        _ synchronization: StreamHistorySynchronization,
+        error: Error
+    ) {
+        synchronization.bufferedMessages.forEach(apply)
+        errorMessage = lastStreamDiagnostic(
+            in: synchronization.bufferedMessages
+        ) ?? error.localizedDescription
+        disconnectStream()
+        guard let completion = synchronization.completion else {
+            connectStream(synchronizeHistory: true)
+            return
+        }
+        completion.resume(returning: .recoverableFailure)
     }
 
     private func displayInitialHistory(
@@ -750,7 +768,7 @@ final class SessionDetailViewModel: ObservableObject {
             guard streamHistorySynchronization?.streamID == streamID else {
                 return
             }
-            replaceEvents(with: events)
+            try replaceEvents(with: events)
             errorMessage = nil
         } catch {
             guard streamHistorySynchronization?.streamID == streamID else {
@@ -884,9 +902,12 @@ final class SessionDetailViewModel: ObservableObject {
         eventNormalizer.remove(eventID: eventID)
     }
 
-    private func replaceEvents(with events: [SignalboxStoredEvent]) {
+    /// - Throws: when the snapshot is corrupt, leaving the rendered history
+    ///   unchanged so the caller can fail the refresh instead of displaying a
+    ///   history the normalizer could not represent consistently.
+    private func replaceEvents(with events: [SignalboxStoredEvent]) throws {
         objectWillChange.send()
-        eventNormalizer.replaceAll(with: events)
+        try eventNormalizer.replaceAll(with: events)
         hasLoadedHistorySnapshot = true
     }
 

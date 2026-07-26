@@ -209,9 +209,9 @@ final class SignalboxNativeTests: XCTestCase {
             sessionID: SignalboxSessionID(rawValue: MockSignalboxFixtures.failedSessionID)
         )
 
-        assertIncrementalNormalizationMatchesNaive(activeEvents)
-        assertIncrementalNormalizationMatchesNaive(approvalEvents)
-        assertIncrementalNormalizationMatchesNaive(failedEvents)
+        try assertIncrementalNormalizationMatchesNaive(activeEvents)
+        try assertIncrementalNormalizationMatchesNaive(approvalEvents)
+        try assertIncrementalNormalizationMatchesNaive(failedEvents)
     }
 
     func testIncrementalNormalizerLongSequencePreservesOutputWithinLinearEvaluationBudget() throws {
@@ -233,10 +233,7 @@ final class SignalboxNativeTests: XCTestCase {
     }
 
     func testIncrementalNormalizerKeepsStableTimelineCollectionAcrossAppends() throws {
-        let timestamp = try SignalboxJSONCoding.decoder().decode(
-            Date.self,
-            from: Data(LongSequenceFixture.timestampJSON.utf8)
-        )
+        let timestamp = try longSequenceTimestamp()
         let firstRecord = longSequenceRecord(
             eventID: LongSequenceFixture.firstEventID,
             timestamp: timestamp
@@ -256,6 +253,136 @@ final class SignalboxNativeTests: XCTestCase {
             Array(timeline),
             SignalboxEventNormalizer.normalize([firstRecord, secondRecord])
         )
+    }
+
+    /// A frame replayed behind a history resynchronization may restate an event
+    /// the snapshot already delivered; the later frame corrects the stored one
+    /// rather than adding a second record under the same identity.
+    func testIncrementalNormalizerAppliesReplayedEventIDAsUpdate() throws {
+        let timestamp = try longSequenceTimestamp()
+        let snapshotRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.firstEventID,
+            timestamp: timestamp
+        )
+        let replayedRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.firstEventID,
+            timestamp: timestamp,
+            text: DuplicateEventFixture.replayedText
+        )
+        let incremental = try SignalboxIncrementalEventNormalizer(records: [snapshotRecord])
+
+        incremental.upsert(replayedRecord)
+
+        XCTAssertEqual(incremental.records, [replayedRecord])
+        XCTAssertEqual(incremental.timelineItems.count, 1)
+        XCTAssertEqual(
+            incremental.timelineItems,
+            SignalboxEventNormalizer.normalize([replayedRecord])
+        )
+    }
+
+    /// A single snapshot cannot legitimately name one event twice, so the
+    /// refresh fails instead of storing a history whose records, index, and
+    /// timeline describe different event sets.
+    func testIncrementalNormalizerRejectsDuplicatedSnapshotWithoutMutatingState() throws {
+        let timestamp = try longSequenceTimestamp()
+        let firstRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.firstEventID,
+            timestamp: timestamp
+        )
+        let secondRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.secondEventID,
+            timestamp: timestamp
+        )
+        let incremental = try SignalboxIncrementalEventNormalizer(records: [firstRecord])
+        let loadedRecords = incremental.records
+        let loadedTimeline = incremental.timelineItems
+
+        XCTAssertThrowsError(
+            try incremental.replaceAll(with: [firstRecord, secondRecord, secondRecord])
+        ) { error in
+            XCTAssertEqual(
+                error as? SignalboxEventNormalizerError,
+                .duplicateEventIDs([
+                    SignalboxEventID(rawValue: LongSequenceFixture.secondEventID),
+                ])
+            )
+            // The refresh failure reaches the session banner, so it has to read
+            // as a sentence rather than an enum dump.
+            XCTAssertTrue(
+                error.localizedDescription.contains("\(LongSequenceFixture.secondEventID)"),
+                error.localizedDescription
+            )
+        }
+
+        XCTAssertEqual(incremental.records, loadedRecords)
+        XCTAssertEqual(incremental.timelineItems, loadedTimeline)
+    }
+
+    /// Deleting an event must not leave a record the index and timeline no
+    /// longer know about, which is what a collapsed duplicate would strand.
+    func testIncrementalNormalizerRemovalLeavesNoOrphanedRecord() throws {
+        let timestamp = try longSequenceTimestamp()
+        let firstRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.firstEventID,
+            timestamp: timestamp
+        )
+        let secondRecord = longSequenceRecord(
+            eventID: LongSequenceFixture.secondEventID,
+            timestamp: timestamp
+        )
+        let incremental = SignalboxIncrementalEventNormalizer()
+        try incremental.replaceAll(with: [firstRecord, secondRecord])
+        XCTAssertThrowsError(
+            try incremental.replaceAll(with: [firstRecord, secondRecord, secondRecord])
+        )
+
+        incremental.remove(
+            eventID: SignalboxEventID(rawValue: LongSequenceFixture.secondEventID)
+        )
+
+        XCTAssertEqual(incremental.records, [firstRecord])
+        XCTAssertEqual(incremental.timelineItems.count, incremental.records.count)
+        XCTAssertEqual(
+            incremental.timelineItems,
+            SignalboxEventNormalizer.normalize(incremental.records)
+        )
+    }
+
+    /// The post-hello snapshot is authoritative, so a corrupt one is as
+    /// unusable as a failed read: history stays as rendered and the session
+    /// takes the bounded recovery path.
+    func testStreamHelloFailsSynchronizationOnDuplicatedHistorySnapshot() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+        let duplicatedSnapshot = try fixture.expectedSynchronizedEvents
+            + [XCTUnwrap(fixture.expectedSynchronizedEvents.last)]
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents(returning: duplicatedSnapshot)
+        await service.waitForStreamInvocationCount(
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
+        await loadTask.value
+
+        XCTAssertEqual(viewModel.events, fixture.historyEvents)
+        XCTAssertEqual(
+            viewModel.timelineItems,
+            SignalboxEventNormalizer.normalize(fixture.historyEvents)
+        )
+        XCTAssertEqual(
+            service.streamInvocationCount,
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
+        viewModel.disconnectStream()
     }
 
     func testLoadAndConnectDisplaysHistoryBeforeStreamHello() async throws {
@@ -1142,7 +1269,8 @@ final class SignalboxNativeTests: XCTestCase {
             "Missing required field at event.created_from."
         )
         let naiveTimeline = SignalboxEventNormalizer.normalize([record])
-        let incrementalTimeline = SignalboxIncrementalEventNormalizer(records: [record]).timelineItems
+        let incrementalTimeline = try SignalboxIncrementalEventNormalizer(records: [record])
+            .timelineItems
         XCTAssertEqual(incrementalTimeline, naiveTimeline)
         XCTAssertTrue(naiveTimeline.isEmpty)
     }
@@ -1232,17 +1360,14 @@ final class SignalboxNativeTests: XCTestCase {
         _ records: [SignalboxStoredEvent],
         file: StaticString = #filePath,
         line: UInt = #line
-    ) {
-        let incremental = SignalboxIncrementalEventNormalizer(records: records)
+    ) throws {
+        let incremental = try SignalboxIncrementalEventNormalizer(records: records)
         let naiveTimeline = SignalboxEventNormalizer.normalize(records)
         XCTAssertEqual(incremental.timelineItems, naiveTimeline, file: file, line: line)
     }
 
     private func longSequenceNormalizationComparison() throws -> LongSequenceComparison {
-        let timestamp = try SignalboxJSONCoding.decoder().decode(
-            Date.self,
-            from: Data(LongSequenceFixture.timestampJSON.utf8)
-        )
+        let timestamp = try longSequenceTimestamp()
         var naiveRecords: [SignalboxStoredEvent] = []
         var naiveTimeline: [SignalboxTimelineItem] = []
         var naiveMetrics = SignalboxEventNormalizationMetrics()
@@ -1301,10 +1426,19 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
-    /// A visible user message whose identity and text derive from its event ID.
+    private func longSequenceTimestamp() throws -> Date {
+        try SignalboxJSONCoding.decoder().decode(
+            Date.self,
+            from: Data(LongSequenceFixture.timestampJSON.utf8)
+        )
+    }
+
+    /// A visible user message whose identity and text derive from its event ID,
+    /// unless `text` supplies content for a record that restates an event ID.
     private func longSequenceRecord(
         eventID: Int,
-        timestamp: Date
+        timestamp: Date,
+        text: String? = nil
     ) -> SignalboxStoredEvent {
         SignalboxStoredEvent(
             eventID: SignalboxEventID(rawValue: eventID),
@@ -1317,7 +1451,7 @@ final class SignalboxNativeTests: XCTestCase {
                             .text(
                                 SignalboxTextContent(
                                     kind: LongSequenceFixture.textPartKind,
-                                    text: "\(LongSequenceFixture.textPrefix)\(eventID)"
+                                    text: text ?? "\(LongSequenceFixture.textPrefix)\(eventID)"
                                 )
                             ),
                         ]
@@ -1471,6 +1605,12 @@ private enum LongSequenceFixture {
     static let textPartKind = "text"
     static let textPrefix = "Long-sequence event "
     static let createdFrom = "test"
+}
+
+private enum DuplicateEventFixture {
+    /// Distinguishes the record a replayed frame stores from the one the
+    /// snapshot delivered under the same event ID.
+    static let replayedText = "Replayed correction for an already stored event"
 }
 
 private struct LongSequenceComparison {

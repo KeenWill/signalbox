@@ -1187,6 +1187,47 @@ impl ReviewPassEvidence {
         Self::new(pass.reference, pass.kind, policy, pass.state.clone())
     }
 
+    /// Projects one exact effect result from already authenticated terminal
+    /// pass evidence while preserving its identity, purpose, policy, turn, and
+    /// terminal outcome.
+    ///
+    /// The effect aggregate remains responsible for validating that the
+    /// proposed result belongs to that effect. Persistence may use this
+    /// projection while atomically deciding which exact result first binds an
+    /// otherwise result-free terminal pass.
+    pub fn project_result(&self, result: ReviewPassResult) -> Option<Self> {
+        let state = match &self.state {
+            ReviewPassState::Succeeded {
+                turn,
+                output_frontier,
+                result: None,
+            } => ReviewPassState::Succeeded {
+                turn: *turn,
+                output_frontier: *output_frontier,
+                result: Some(result),
+            },
+            ReviewPassState::Blocked { turn, result: None } => ReviewPassState::Blocked {
+                turn: *turn,
+                result: Some(result),
+            },
+            ReviewPassState::Succeeded {
+                result: Some(current),
+                ..
+            }
+            | ReviewPassState::Blocked {
+                result: Some(current),
+                ..
+            } if current == &result => return Some(self.clone()),
+            ReviewPassState::Queued
+            | ReviewPassState::Running { .. }
+            | ReviewPassState::Failed { .. }
+            | ReviewPassState::Cancelled { .. }
+            | ReviewPassState::Succeeded { .. }
+            | ReviewPassState::Blocked { .. } => return None,
+        };
+        Some(Self::new(self.reference, self.kind, self.policy, state))
+    }
+
     /// Returns the canonical pass reference.
     pub const fn reference(&self) -> ReviewPassRef {
         self.reference
@@ -6695,6 +6736,129 @@ mod tests {
             ReviewPassTurnOutcome::Cancelled,
             Some(frontier_id(8)),
         );
+    }
+
+    /// S29 / INV-040: authenticated successful pass evidence may project one
+    /// exact effect result without changing its execution facts.
+    #[test]
+    fn inv040_succeeded_pass_evidence_projects_one_exact_effect_result() {
+        let pass = succeeded_pass(70, ReviewPassKind::ImportExternalContext);
+        let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+            link_id(71),
+            ReviewExternalObjectState::Current,
+        ));
+
+        let projected = pass
+            .project_result(result.clone())
+            .expect("succeeded evidence may project an atomic effect result");
+
+        assert_eq!(projected.reference(), pass.reference());
+        assert_eq!(projected.kind(), pass.kind());
+        assert_eq!(projected.policy(), pass.policy());
+        assert_eq!(
+            projected.state(),
+            &ReviewPassState::Succeeded {
+                turn: turn_id(170),
+                output_frontier: frontier_id(270),
+                result: Some(result),
+            }
+        );
+    }
+
+    /// S29 / INV-040: an authenticated effect projection admits exact replay
+    /// but cannot be rebound to a distinct result.
+    #[test]
+    fn inv040_pass_evidence_result_projection_is_immutable() {
+        let pass = succeeded_pass(71, ReviewPassKind::ImportExternalContext);
+        let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+            link_id(72),
+            ReviewExternalObjectState::Current,
+        ));
+        let projected = pass
+            .project_result(result.clone())
+            .expect("result-free succeeded evidence admits its first result");
+        let distinct = ReviewPassResult::ExternalLinkNoChange(
+            ReviewExternalLinkNoChangeResult::new(link_id(72), ReviewExternalObjectState::Outdated),
+        );
+
+        assert_eq!(projected.project_result(result), Some(projected.clone()));
+        assert_eq!(projected.project_result(distinct), None);
+    }
+
+    /// S29 / INV-040: authenticated blocked pass evidence may project one exact
+    /// effect result without changing its execution facts.
+    #[test]
+    fn inv040_blocked_pass_evidence_projects_one_exact_effect_result() {
+        let pass = ReviewPassEvidence::new(
+            pass_ref(72),
+            ReviewPassKind::Publish,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Blocked {
+                turn: turn_id(73),
+                result: None,
+            },
+        );
+        let result = ReviewPassResult::ExternalLinkPublicationBlocked(
+            ReviewExternalLinkPublicationBlockedResult::new(
+                link_id(74),
+                text("publication is unavailable"),
+            ),
+        );
+
+        let projected = pass
+            .project_result(result.clone())
+            .expect("blocked evidence may project an atomic effect result");
+
+        assert_eq!(projected.reference(), pass.reference());
+        assert_eq!(projected.kind(), pass.kind());
+        assert_eq!(projected.policy(), pass.policy());
+        assert_eq!(
+            projected.state(),
+            &ReviewPassState::Blocked {
+                turn: turn_id(73),
+                result: Some(result),
+            }
+        );
+    }
+
+    /// S29 / INV-040: non-effect pass states cannot project effect results.
+    #[test]
+    fn inv040_non_effect_pass_evidence_rejects_result_projection() {
+        let result = ReviewPassResult::ExternalLinkNoChange(ReviewExternalLinkNoChangeResult::new(
+            link_id(75),
+            ReviewExternalObjectState::Current,
+        ));
+        let queued = ReviewPassEvidence::new(
+            pass_ref(76),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Queued,
+        );
+        let running = ReviewPassEvidence::new(
+            pass_ref(77),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Running { turn: turn_id(78) },
+        );
+        let failed = ReviewPassEvidence::new(
+            pass_ref(79),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Failed { turn: turn_id(80) },
+        );
+        let cancelled = ReviewPassEvidence::new(
+            pass_ref(81),
+            ReviewPassKind::ImportExternalContext,
+            ReviewPolicy::version_one(),
+            ReviewPassState::Cancelled {
+                turn: Some(turn_id(82)),
+            },
+        );
+
+        assert_eq!(queued.project_result(result.clone()), None);
+        assert_eq!(running.project_result(result.clone()), None);
+        assert_eq!(failed.project_result(result.clone()), None);
+        assert_eq!(cancelled.project_result(result), None);
     }
 
     /// S29 / INV-040: a terminal canonical turn outcome always carries its

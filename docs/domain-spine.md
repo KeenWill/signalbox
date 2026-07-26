@@ -5473,6 +5473,7 @@ impl ReviewRunEvidence {
 pub struct ReviewPassEvidence { /* validated pass + canonical run policy */ }
 impl ReviewPassEvidence {
     pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self;
+    pub fn project_result(&self, result: ReviewPassResult) -> Option<Self>;
     // accessors: reference(), kind(), policy(), state()
 }
 pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
