@@ -44,6 +44,85 @@ and `Cargo.lock`, `.github/workflows/rust.yml`,
 `config/signalboxd.example.toml`, and the living documents naming the server
 process.
 
+## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
+
+**Context.** [tool-loop](spec/tool-loop.md) and S07 fix the caller protocol for
+ending a turn whose approval wait is parked: record the denial first, then
+submit the interrupt once decision progression opens execution; an interrupt
+alone is not a denial and does not bypass the decision command. What the hub
+records for an interrupt that arrives while the wait is still parked was
+unspecified: the domain accepted it, persistence closure routing then demanded a
+live `Running` execution, and the whole submit transaction failed with a
+bug-classed `NoLiveExecution` error — a misleading outcome for every owner stop
+issued while a confirm request was pending, unlike every sibling
+invalid-interrupt condition, which records an authoritative typed rejection.
+
+**Decision.** The domain rejects the interrupt with
+`InterruptUnavailableWhileAwaitingApproval { session, active_turn }`, recorded
+durably as rejection kind `interrupt_unavailable_while_awaiting_approval`
+(migration `202607280001`) with replay reconstitution, exactly like the sibling
+invalid-interrupt rejections. The wait remains parked; the caller resolves the
+approval obligation through the decision command first.
+
+**Rejected alternatives.** Park-and-defer (hold the interrupt and apply it once
+decision progression opens execution): it converts one command into a delayed
+effect with no typed receipt, contradicts the two-independent-commands shape the
+specification fixes for deny-and-end, and needs new durable state for the parked
+interrupt. Keeping the transaction failure under a friendlier classification: a
+rollback still records nothing durable, so replay of the command stays
+undefined.
+
+**Affects.** `crates/domain/src/submit_input.rs`,
+`crates/persistence/src/submit_input.rs` and migration `202607280001`,
+`apps/hubd/src/process_runtime.rs`, and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
+
+## 2026-07-25 — Consume passes whose external observation is unchanged
+
+**Context.** Omitting both the observation row and pass result preserves compact
+state history, but leaves the succeeded import pass eligible for later result
+binding. After another pass changes the external state, replaying that old pass
+could turn its formerly unchanged report into a new durable transition.
+
+**Decision.** An unchanged report still appends no observation row. Its
+succeeded external-context-import pass instead binds one immutable
+`ExternalLinkNoChange` result naming the exact reservation and reported state.
+That result consumes the pass exactly once without treating the poll as
+meaning-bearing external history. This supersedes only the earlier
+[unchanged-observation decision's](#2026-07-25--do-not-record-unchanged-external-observations)
+choice to leave that pass result absent.
+
+**Rejected alternatives.** Leaving the result absent permits later reuse.
+Appending every unchanged report makes history grow with polling frequency.
+Rejecting an equal report loses successful orchestration evidence without
+consuming the pass.
+
+**Affects.** Review-pass results, external-link observation admission, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
+## 2026-07-25 — Bind every blocked publication to its reservation
+
+**Context.** Publication may use target-, run-, or finding-associated
+reservations. A finding-event result can authenticate only the last form, so a
+blocked write through either other association otherwise retains no durable
+connection between its pass and attempted reservation.
+
+**Decision.** Every blocked external-publication pass binds its exact pending
+reservation and nonempty reason. A finding-associated operation that also blocks
+the finding uses the reservation-bearing `FindingEvent` result. Other blocked
+publications use `ExternalLinkPublicationBlocked`, which admits every
+reservation association. Later reconciliation must attach that same reservation.
+
+**Rejected alternatives.** Restricting publication to finding associations
+removes target- and run-level publication already admitted by the external-link
+model. Leaving a blocked result absent cannot authenticate retry or
+reconciliation. Binding two results to one pass defeats result immutability.
+
+**Affects.** Review-pass result shapes, publication reconciliation, the
+[review-workflows specification](spec/review-workflows.md), and the
+`2026072604xx` persistence slice.
+
 ## 2026-07-25 — Bind blocked publication to its attempted reservation
 
 **Context.** A blocked external-publication pass can follow an ambiguous write
@@ -539,6 +618,72 @@ external-link evidence, the
 [review-workflows specification](spec/review-workflows.md), and relational
 checks in the `2026072602xx` persistence slice.
 
+## 2026-07-25 — Expose one-file conversation import to the owner
+
+**Context.** Conversation conversion and idempotent Postgres ingestion were
+reachable only through tests. The accepted converter seam consumes exact
+caller-supplied bytes and declares a fixed format version, while process
+protocol versions one through four are closed. The commissioned operational
+slice needs one owner-supplied file and a visible inserted-versus-existing
+outcome without selecting directory, watching, bulk, or session-seeding policy.
+
+**Decision.** Add process protocol version five and advance the terminal client
+to it. Add one `import_conversation` request carrying an explicit
+`ClaudeCodeSessionJsonlV2` or `CodexRolloutJsonlV1` selection and the complete
+source bytes as canonical padded base64. The terminal reads exactly one path,
+but the path does not cross the wire; hubd selects the fixed converter and calls
+`ImportConversationService`. Return distinct `conversation_import_inserted` and
+`conversation_import_already_imported` messages, each with the durable
+imported-conversation identity, and print distinct terminal labels. Use the
+small focused `base64` crate, already present transitively, rather than owning a
+wire codec. The existing frame cap remains the only transport bound; no
+independent source-size policy or migration is added. Bound the client read at
+one byte beyond the maximum decoded payload the frame could possibly carry. Hubd
+retains queued decoded sources under the aggregate inbound-frame budget, admits
+one expanded import aggregate and store operation at a time, and runs the
+service away from asynchronous runtime workers. Decode canonical base64 once
+under the existing inbound-frame permit; do not allocate a second full-size
+canonical encoding for validation.
+
+**Rejected alternatives.** Sending a filesystem path would make the daemon
+interpret client filesystem context and add path encoding and access semantics
+to the wire. Format detection would obscure the converter version the digest
+binds. Adding a directory or bulk verb would decide discovery and failure policy
+outside this slice. Reusing a closed protocol version would reinterpret captured
+frames. Unbounded concurrent conversion would let owner-local peers multiply
+expanded aggregate and database-pool pressure.
+
+**Affects.** [conversation-import](spec/conversation-import.md),
+[process-protocol](spec/process-protocol.md), `crates/process-protocol`,
+`apps/hubd`, `apps/client`, and their PostgreSQL and boundary tests.
+
+## 2026-07-25 — Bound isolated PostgreSQL integration concurrency to four tests
+
+**Context.** Across the latest fifteen successful `main` runs after the
+cross-suite matrix landed, the Rust workflow took a median 8m44s. Persistence
+was the critical path at 8m36s, versus 2m32s for validation, 2m37s for hubd, and
+50s for the terminal client; its test step consumed about 95 percent of the job
+while cache handling took about 18s. Harness inspection found no shared database
+to protect: 214 ignored tests start fresh pinned PostgreSQL containers, use
+Docker-assigned ports, migrate their own databases, and retain their container
+handles for the test scope. The single-thread setting was conservative.
+
+**Decision.** Run up to four tests concurrently inside each PostgreSQL
+integration binary, matching the four CPUs of the public Ubuntu runner while
+keeping an explicit resource bound. Retain every per-test container and
+migration call, including migration-prefix tests, so SQLx checksum validation
+and test isolation remain unchanged.
+
+**Rejected alternatives.** Additional matrix shards repeat checkout and cache
+setup without improving isolation. A shared server with template databases would
+require database-scoping cluster-wide lock probes and dedicated handling for
+server-loss and migration-prefix tests. Cache changes target seconds rather than
+the eight-minute critical path. Libtest's runner-dependent default would leave
+Docker concurrency implicit.
+
+**Affects.** `.github/workflows/rust.yml` test scheduling only; no test,
+database, schema, migration, or checksum semantics change.
+
 ## 2026-07-25 — Refuse ambient PostgreSQL configuration channels in production
 
 **Context.** The specification states that hubd reads exactly four deployment
@@ -614,6 +759,30 @@ process-configuration section of
 [configuration and credentials](spec/configuration-and-credentials.md), and a
 direct `url` dependency for `signalbox-persistence` — already in the tree as
 SQLx's own URL parser, so it adds an edge rather than a crate.
+
+## 2026-07-25 — Check living-spec consistency deterministically in CI
+
+**Context.** Reviews have repeatedly found dead file and heading citations,
+premature invariant-enforcement references, misplaced decision entries, and
+missing specification verification references. These checks depend only on the
+checked-out repository but were still performed by reviewers.
+
+**Decision.** Add one Python-standard-library checker to the validate job. It
+checks invariant enforcement citations and explicitly named tests, every
+relative Markdown target and heading anchor under `docs/` and in `AGENTS.md`,
+newest-first decision dates, and the presence and local format of subsystem-page
+verification references. Output is stable and per violation; the check performs
+no network access or semantic PR verification.
+
+**Rejected alternatives.** Keep the checks reviewer-only, which preserves the
+repeated labor and late feedback. Add a third-party link checker, which adds a
+dependency without covering the repository-specific invariant and decision
+formats. Discover every INV-tagged test or judge whether a verification PR is
+fresh, which would exceed the mechanically decidable scope.
+
+**Affects.** `scripts/check_docs_consistency.py`, its regression tests,
+`AGENTS.md`, the Rust workflow's validate job, and future edits to the
+living-spec surface.
 
 ## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
 

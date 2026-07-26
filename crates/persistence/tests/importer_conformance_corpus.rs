@@ -28,9 +28,9 @@ use signalbox_domain::{
     ImportedSessionRelationship, ImportedSourceAttestation, ImportedSourceMetadata,
     ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
     ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
-    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ModelSelectionRequest,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionConfigurationDefaults,
-    SessionId, TranscriptAncestry,
+    ImportedTranscriptEntry, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
+    ModelSelectionRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
 
@@ -40,6 +40,8 @@ const CLAUDE_V2_BOUNDARY_LOSSES: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v2-boundary-losses.jsonl");
 const CODEX_V1_TOOL_ROUND: &[u8] =
     include_bytes!("fixtures/importer-conformance/codex-rollout-v1-tool-round.jsonl");
+const CODEX_V1_STRUCTURED_TOOLS: &[u8] =
+    include_bytes!("fixtures/importer-conformance/codex-rollout-v1-structured-tools.jsonl");
 const CLAUDE_V2_DEPTH_128: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v2-depth-128.jsonl");
 const CLAUDE_V2_DEPTH_129: &[u8] =
@@ -221,6 +223,42 @@ fn fixture_text_member<'a>(
         panic!("fixture member {member_name:?} must contain text");
     };
     value
+}
+
+#[track_caller]
+fn fixture_object_member<'a>(
+    value: &'a ImportedStructuredValue,
+    member_name: &str,
+) -> &'a ImportedStructuredValue {
+    let ImportedStructuredValue::Object(members) = value else {
+        panic!("fixture value containing {member_name:?} must be an object");
+    };
+    let member = members
+        .iter()
+        .find(|member| member.name().as_str() == member_name)
+        .unwrap_or_else(|| panic!("fixture object must contain {member_name:?}"));
+    let value @ ImportedStructuredValue::Object(_) = member.value() else {
+        panic!("fixture member {member_name:?} must contain an object");
+    };
+    value
+}
+
+#[track_caller]
+fn fixture_array_member<'a>(
+    value: &'a ImportedStructuredValue,
+    member_name: &str,
+) -> &'a [ImportedStructuredValue] {
+    let ImportedStructuredValue::Object(members) = value else {
+        panic!("fixture value containing {member_name:?} must be an object");
+    };
+    let member = members
+        .iter()
+        .find(|member| member.name().as_str() == member_name)
+        .unwrap_or_else(|| panic!("fixture object must contain {member_name:?}"));
+    let ImportedStructuredValue::Array(elements) = member.value() else {
+        panic!("fixture member {member_name:?} must contain an array");
+    };
+    elements
 }
 
 fn render_media(media: &ImportedMediaSource) -> String {
@@ -416,6 +454,55 @@ fn s28_fixture_text_member_returns_the_named_fixture_value() {
 }
 
 #[test]
+fn s28_fixture_object_member_returns_the_named_nested_object() {
+    let expected = ImportedStructuredValue::Object(
+        vec![ImportedStructuredObjectMember::new(
+            ImportedText::new(String::from("id")),
+            ImportedStructuredValue::String(ImportedText::new(String::from("nested-value"))),
+        )]
+        .into_boxed_slice(),
+    );
+    let fixture = ImportedStructuredValue::Object(
+        vec![
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("other")),
+                ImportedStructuredValue::String(ImportedText::new(String::from("other-value"))),
+            ),
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("payload")),
+                expected.clone(),
+            ),
+        ]
+        .into_boxed_slice(),
+    );
+
+    assert_eq!(fixture_object_member(&fixture, "payload"), &expected);
+}
+
+#[test]
+fn s28_fixture_array_member_returns_the_named_array_elements() {
+    let expected = vec![
+        ImportedStructuredValue::String(ImportedText::new(String::from("first"))),
+        ImportedStructuredValue::Null,
+    ];
+    let fixture = ImportedStructuredValue::Object(
+        vec![
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("other")),
+                ImportedStructuredValue::String(ImportedText::new(String::from("other-value"))),
+            ),
+            ImportedStructuredObjectMember::new(
+                ImportedText::new(String::from("elements")),
+                ImportedStructuredValue::Array(expected.clone().into_boxed_slice()),
+            ),
+        ]
+        .into_boxed_slice(),
+    );
+
+    assert_eq!(fixture_array_member(&fixture, "elements"), expected);
+}
+
+#[test]
 fn s28_conformance_renderer_reports_each_raw_record_and_entry_boundary() {
     let imported = convert_claude(br#"{"type":"system"}"#);
 
@@ -514,6 +601,152 @@ fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
         ImportedTranscriptContent::Text(_)
     ));
     expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-tool-round.txt"]
+        .assert_eq(&render_conversation(&imported));
+}
+
+/// Checks that one converted entry occupies the stated imported position and
+/// carries exactly the stated content. Both facts stay at the call site: the
+/// entry index states where the converter placed the payload, the position
+/// states the ordinal it stamped on it, and the content states the whole
+/// mapping — so dropping, reordering, or altering any mapped field fails here
+/// rather than only in the golden.
+#[track_caller]
+fn assert_entry_maps(
+    entry: &ImportedTranscriptEntry,
+    position: u64,
+    expected: ImportedTranscriptContent,
+) {
+    assert_eq!(entry.position().as_u64(), position);
+    assert_eq!(entry.content(), &expected);
+}
+
+/// S28 / INV-038: the Codex era's structured tool vocabulary — tool search
+/// call and output, local shell call, web search call, and the custom tool call
+/// and its output — retains each call identity, structured argument or action
+/// value, and result content in converted order. The targeted asserts below
+/// carry that enforcement (testing-style rule 10); the golden supplements them
+/// with the full raw-record, source-metadata, and frontier shape.
+#[test]
+fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
+    let imported = convert_codex(CODEX_V1_STRUCTURED_TOOLS);
+    let session_meta = imported.raw_records()[0].normalized();
+    let search_call = fixture_object_member(imported.raw_records()[1].normalized(), "payload");
+    let search_output = fixture_object_member(imported.raw_records()[2].normalized(), "payload");
+    let shell_call = fixture_object_member(imported.raw_records()[3].normalized(), "payload");
+    let web_call = fixture_object_member(imported.raw_records()[4].normalized(), "payload");
+    let custom_call = fixture_object_member(imported.raw_records()[5].normalized(), "payload");
+    let custom_output = fixture_object_member(imported.raw_records()[6].normalized(), "payload");
+
+    assert_eq!(imported.raw_records().len(), 7);
+    assert_eq!(imported.entries().len(), 7);
+    assert_entry_maps(
+        &imported.entries()[0],
+        1,
+        ImportedTranscriptContent::SourceEvent {
+            source_type: ImportedSourceAttestation::Attested(
+                fixture_text_member(session_meta, "type").clone(),
+            ),
+        },
+    );
+    assert_entry_maps(
+        &imported.entries()[1],
+        2,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: ImportedSourceAttestation::Attested(
+                fixture_text_member(search_call, "call_id").clone(),
+            ),
+            name: ImportedSourceAttestation::NotAttested,
+            input: ImportedSourceAttestation::Attested(
+                fixture_object_member(search_call, "arguments").clone(),
+            ),
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    );
+    assert_entry_maps(
+        &imported.entries()[2],
+        3,
+        ImportedTranscriptContent::ToolResult {
+            source_call_id: ImportedSourceAttestation::Attested(
+                fixture_text_member(search_output, "call_id").clone(),
+            ),
+            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                vec![
+                    ImportedToolResultBlock::SourceResultBlock {
+                        source_type: ImportedSourceAttestation::Attested(
+                            fixture_text_member(
+                                &fixture_array_member(search_output, "tools")[0],
+                                "type",
+                            )
+                            .clone(),
+                        ),
+                    },
+                    ImportedToolResultBlock::SourceResultBlock {
+                        source_type: ImportedSourceAttestation::NotAttested,
+                    },
+                ]
+                .into_boxed_slice(),
+            )),
+            is_error: ImportedSourceAttestation::NotAttested,
+        },
+    );
+    assert_entry_maps(
+        &imported.entries()[3],
+        4,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: ImportedSourceAttestation::Attested(
+                fixture_text_member(shell_call, "call_id").clone(),
+            ),
+            name: ImportedSourceAttestation::NotAttested,
+            input: ImportedSourceAttestation::Attested(
+                fixture_object_member(shell_call, "action").clone(),
+            ),
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    );
+    assert_entry_maps(
+        &imported.entries()[4],
+        5,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: ImportedSourceAttestation::Attested(
+                fixture_text_member(web_call, "id").clone(),
+            ),
+            name: ImportedSourceAttestation::NotAttested,
+            input: ImportedSourceAttestation::Attested(
+                fixture_object_member(web_call, "action").clone(),
+            ),
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    );
+    assert_entry_maps(
+        &imported.entries()[5],
+        6,
+        ImportedTranscriptContent::ToolCall {
+            source_call_id: ImportedSourceAttestation::Attested(
+                fixture_text_member(custom_call, "call_id").clone(),
+            ),
+            name: ImportedSourceAttestation::Attested(
+                fixture_text_member(custom_call, "name").clone(),
+            ),
+            input: ImportedSourceAttestation::Attested(ImportedStructuredValue::String(
+                fixture_text_member(custom_call, "input").clone(),
+            )),
+            caller: ImportedSourceAttestation::NotAttested,
+        },
+    );
+    assert_entry_maps(
+        &imported.entries()[6],
+        7,
+        ImportedTranscriptContent::ToolResult {
+            source_call_id: ImportedSourceAttestation::Attested(
+                fixture_text_member(custom_output, "call_id").clone(),
+            ),
+            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(
+                fixture_text_member(custom_output, "output").clone(),
+            )),
+            is_error: ImportedSourceAttestation::NotAttested,
+        },
+    );
+    expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-structured-tools.txt"]
         .assert_eq(&render_conversation(&imported));
 }
 

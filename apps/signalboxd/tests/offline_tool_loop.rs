@@ -27,8 +27,8 @@ use signalbox_domain::{
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, PerInputConfigurationChoices, ProviderModelIdentity,
     ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision,
-    ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
+    SessionId, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
@@ -1051,6 +1051,89 @@ async fn s10_s11_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_run
     fixture
         .activate_and_complete_turn(later_turn, "post-cancellation submit completed")
         .await?;
+    Ok(())
+}
+
+/// S07 / S10 / INV-012 / INV-028: an interrupt alone against a parked approval
+/// wait records the authoritative typed rejection — it is not a denial and
+/// does not bypass the decision command — and the wait remains parked with no
+/// tool attempt until its canonical decision command resolves the obligation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejected()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "confirmed",
+        ToolPermissionDefault::Confirm,
+        ToolEffectClass::EffectFree,
+    )]);
+    let executor = RecordingExecutor::completing();
+    let (execution, _runtime) = fixture.execution(
+        [tool_use_script(&[("confirmed", "{}")])],
+        tool_catalog,
+        executor.clone(),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+
+    let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
+    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let mut submit = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        SubmitInputRepository::new(fixture.pool.clone()),
+        nudge,
+        fixture.tool_dispatch_gate.clone(),
+    );
+    let outcome = submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x3320)),
+            fixture.session,
+            UserContent::try_text(String::from("stop while confirm is pending"))
+                .expect("fixture interrupt content is admitted"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: fixture.turn,
+                configuration: default_configuration(),
+            },
+        )?)
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                    session,
+                    active_turn,
+                },
+            )) if session == fixture.session && active_turn == fixture.turn
+        ),
+        "an interrupt alone must not bypass the decision command: {outcome:?}"
+    );
+
+    assert!(executor.events().is_empty());
+    let parked: (String, Option<Uuid>, i64) = sqlx::query_as(
+        "SELECT active_phase_kind, approval_tool_request_id,
+                (SELECT count(*) FROM tool_attempt WHERE turn_id = $2)
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        parked,
+        (
+            String::from("awaiting_tool_approval"),
+            Some(request.into_uuid()),
+            0,
+        ),
+        "the approval wait must remain parked after the rejected interrupt"
+    );
     Ok(())
 }
 

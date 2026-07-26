@@ -1257,6 +1257,10 @@ pub enum SubmitInputRejectedResult {
         active_turn: TurnId,
         existing_command: DurableCommandId,
     },
+    InterruptUnavailableWhileAwaitingApproval {
+        session: SessionId,
+        active_turn: TurnId,
+    },
 }
 
 pub struct PreparedSubmitInput { /* private */ }
@@ -1375,6 +1379,13 @@ impl SubmitInputReconstitutionInput {
         result_existing_command: DurableCommandId,
         active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
         existing_interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn rejected_interrupt_unavailable_while_awaiting_approval(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
     ) -> Self;
     pub const fn rejected_session_not_found(
         command: SubmitInput,
@@ -5278,6 +5289,8 @@ pub enum ReviewTargetError {
     ForeignParent { target: ReviewTargetId },
     MissingParentBase { target: ReviewTargetId },
     DisconnectedParent { target: ReviewTargetId },
+    RepeatedChangeRequest { target: ReviewTargetId },
+    ParentIdentityMismatch { target: ReviewTargetId },
 }
 impl ReviewTarget {
     pub fn try_new(
@@ -5288,6 +5301,16 @@ impl ReviewTarget {
         head_revision: ReviewKey,
         base_revision: Option<ReviewKey>,
         stack_parent: Option<&ReviewTarget>,
+    ) -> Result<Self, ReviewTargetError>;
+    pub fn try_reconstitute(
+        id: ReviewTargetId,
+        provider: ReviewKey,
+        repository: ReviewKey,
+        subject: ReviewTargetSubject,
+        head_revision: ReviewKey,
+        base_revision: Option<ReviewKey>,
+        stack_parent: Option<ReviewTargetId>,
+        stack_parent_evidence: Option<&ReviewTarget>,
     ) -> Result<Self, ReviewTargetError>;
     // accessors: id(), provider(), repository(), subject(), head_revision(),
     // base_revision(), stack_parent(), ancestry()
@@ -5387,11 +5410,29 @@ impl ReviewExternalLinkObservationResult {
     ) -> Self;
     // accessors: link(), ordinal(), state()
 }
+pub struct ReviewExternalLinkNoChangeResult { /* reservation + observation frontier + state */ }
+impl ReviewExternalLinkNoChangeResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        observed_through: ReviewEventOrdinal,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    // accessors: link(), observed_through(), state()
+}
+pub struct ReviewExternalLinkPublicationBlockedResult {
+    /* pending reservation + reason */
+}
+impl ReviewExternalLinkPublicationBlockedResult {
+    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self;
+    // accessors: link(), reason()
+}
 pub enum ReviewPassResult {
     ProducedFindings(ReviewProducedFindings),
     FindingEvent(ReviewFindingEventResult),
     ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
     ExternalLinkObservation(ReviewExternalLinkObservationResult),
+    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
+    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
 }
 pub struct ReviewReferencedFindingEvidence { /* reference + frozen status */ }
 impl ReviewReferencedFindingEvidence {
@@ -5420,23 +5461,20 @@ pub enum ReviewRunState {
     Blocked { blocking_pass: ReviewPassRef },
     Cancelled { last_pass: Option<ReviewPassRef> },
 }
-pub struct ReviewRunEvidence { /* canonical run reference + workflow + policy */ }
+pub struct ReviewRunEvidence { /* canonical run reference + workflow + policy + state */ }
 impl ReviewRunEvidence {
     pub const fn new(
         reference: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         policy: ReviewPolicy,
+        state: ReviewRunState,
     ) -> Self;
-    // accessors: reference(), workflow(), policy()
+    // accessors: reference(), workflow(), policy(), state()
 }
-pub struct ReviewPassEvidence { /* canonical pass reference + kind + policy + state */ }
+pub struct ReviewPassEvidence { /* validated pass + canonical run policy */ }
 impl ReviewPassEvidence {
-    pub const fn new(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        policy: ReviewPolicy,
-        state: ReviewPassState,
-    ) -> Self;
+    pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self;
+    pub fn project_result(&self, result: ReviewPassResult) -> Option<Self>;
     // accessors: reference(), kind(), policy(), state()
 }
 pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
@@ -5553,12 +5591,13 @@ impl ReviewPassReconstitutionInput {
         workflow_run: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         session: SessionId,
-        accepted_input: ReviewPassAcceptedInputEvidence,
+        accepted_input: AcceptedInputId,
+        accepted_input_evidence: ReviewPassAcceptedInputEvidence,
         state: ReviewPassState,
         turn_evidence: Option<ReviewPassTurnEvidence>,
     ) -> Self;
     // accessors: reference(), kind(), workflow_run(), workflow(), session(),
-    // accepted_input(), state(), turn_evidence()
+    // accepted_input(), accepted_input_evidence(), state(), turn_evidence()
 }
 pub struct ReviewPass { /* reference + session input + origin turn + state */ }
 pub enum ReviewPassConstructionFailure {
@@ -5577,6 +5616,7 @@ impl ReviewPassConstructionError {
 pub enum ReviewPassReconstitutionFailure {
     ForeignWorkflowRun,
     RunWorkflowMismatch,
+    AcceptedInputEvidenceMismatch,
     AcceptedInputSessionMismatch,
     AcceptedInputHasNoOriginTurn,
     MissingTurnEvidence,
@@ -5735,14 +5775,15 @@ impl ReviewFindingEvent {
     pub const fn new(
         finding: ReviewFindingRef,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         kind: ReviewFindingEventKind,
     ) -> Self;
     // accessors: finding(), ordinal(), pass(), pass_evidence(), run_evidence(),
     // kind()
 }
-pub struct ReviewFinding { /* proposal + complete event history + derived status */ }
+pub struct ReviewFinding { /* proposal + history + derived status + replay indexes */ }
 impl ReviewFinding {
     pub const fn new(proposal: ReviewFindingProposal) -> Self;
     pub fn try_reconstitute(
@@ -5762,6 +5803,7 @@ pub enum ReviewFindingTransitionFailure {
     IncompatibleProducingPassEvidence,
     ForeignEventFinding,
     ForeignEventPass,
+    EventPassEvidenceMismatch,
     IncompatibleEventRunEvidence,
     EventPolicyMismatch,
     ConflictingPassEvidence,
@@ -5799,11 +5841,12 @@ pub enum ReviewExternalObjectKind {
     ReviewComment,
     ChangeRequestComment,
 }
-pub struct ReviewExternalLinkAttachment { /* link + pass + run + external object key */ }
+pub struct ReviewExternalLinkAttachment { /* link + stored pass + pass/run evidence + object key */ }
 impl ReviewExternalLinkAttachment {
     pub const fn new(
         link: ReviewExternalLinkId,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         external_object: ReviewKey,
     ) -> Self;
@@ -5815,19 +5858,25 @@ pub enum ReviewExternalObjectState {
     Outdated,
     Resolved,
 }
-pub struct ReviewExternalLinkObservation { /* link + ordinal + pass + run + state */ }
+pub struct ReviewExternalLinkObservation { /* link + ordinal + stored pass + pass/run evidence + state */ }
 impl ReviewExternalLinkObservation {
     pub const fn new(
         link: ReviewExternalLinkId,
         ordinal: ReviewEventOrdinal,
-        pass: ReviewPassEvidence,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
         run: ReviewRunEvidence,
         state: ReviewExternalObjectState,
     ) -> Self;
     // accessors: link(), ordinal(), pass(), pass_evidence(), run_evidence(),
     // state()
 }
-pub struct ReviewExternalLink { /* reservation + optional attachment + observations */ }
+pub struct ReviewExternalLinkClaim { /* pass + run */ }
+impl ReviewExternalLinkClaim {
+    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
+    // accessors: pass(), pass_evidence(), run_evidence()
+}
+pub struct ReviewExternalLink { /* reservation + attachment + observations + consumed claims */ }
 impl ReviewExternalLink {
     pub fn try_reserve(
         id: ReviewExternalLinkId,
@@ -5843,14 +5892,25 @@ impl ReviewExternalLink {
         object_kind: ReviewExternalObjectKind,
         attachment: Option<ReviewExternalLinkAttachment>,
         observations: Vec<ReviewExternalLinkObservation>,
+        claims: Vec<ReviewExternalLinkClaim>,
         target: &ReviewTarget,
     ) -> Result<Self, ReviewExternalLinkTransitionFailure>;
     pub fn attach(self, attachment: ReviewExternalLinkAttachment)
         -> Result<Self, ReviewExternalLinkTransitionError>;
     pub fn observe(self, observation: ReviewExternalLinkObservation)
         -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn confirm_unchanged(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn block_publication(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
     // accessors: id(), association(), provider(), object_kind(), attachment(),
-    // observations()
+    // observations(), claims()
 }
 pub struct ReviewExternalObjectClaim {
     /* target + provider + repository + subject + canonical object */
@@ -5868,6 +5928,7 @@ impl ReviewExternalObjectClaim {
 }
 pub enum ReviewExternalObjectClaimError {
     ForeignTarget,
+    ProviderMismatch,
     NotAttached,
     DifferentObject,
     SameTarget,
@@ -5885,9 +5946,13 @@ pub enum ReviewExternalLinkTransitionFailure {
     ForeignObservationLink,
     ForeignPass,
     IncompatibleAttachmentPass,
+    AttachmentPassEvidenceMismatch,
     IncompatibleAttachmentRunEvidence,
     IncompatibleObservationPass,
+    ObservationPassEvidenceMismatch,
     IncompatibleObservationRunEvidence,
+    IncompatiblePublicationBlockPass,
+    IncompatiblePublicationBlockRunEvidence,
     UnchangedObservation,
     ConflictingPassEvidence,
     ConflictingRunEvidence,
@@ -5925,9 +5990,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 78                   |
+| domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **448 (+1 free fn)** |
+| **signalbox-domain total**                         | **451 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

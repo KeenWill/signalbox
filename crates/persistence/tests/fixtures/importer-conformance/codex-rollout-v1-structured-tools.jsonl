@@ -1,0 +1,7 @@
+{"timestamp":"2025-03-01T00:00:00Z","type":"session_meta","payload":{"id":"session-record","session_id":"structured-tools-session"}}
+{"timestamp":"2025-03-01T00:00:01Z","type":"response_item","payload":{"type":"tool_search_call","call_id":"call-search","arguments":{"query":"read_file","limit":2}}}
+{"timestamp":"2025-03-01T00:00:02Z","type":"response_item","payload":{"type":"tool_search_output","call_id":"call-search","tools":[{"type":"function","name":"read_file"},"bare-element"]}}
+{"timestamp":"2025-03-01T00:00:03Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call-shell","action":{"type":"exec","command":["list","synthetic"]}}}
+{"timestamp":"2025-03-01T00:00:04Z","type":"response_item","payload":{"type":"web_search_call","id":"item-web","action":{"type":"search","query":"synthetic reference"}}}
+{"timestamp":"2025-03-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-custom","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}}
+{"timestamp":"2025-03-01T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":"applied"}}

@@ -517,9 +517,21 @@ fn build_http_request(
         })
 }
 
-fn streamed_response_prefix_len(current: usize, chunk: usize) -> (usize, bool) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrefixBudget {
+    Accepted { len: usize },
+    Overflowed { accepted_len: usize },
+}
+
+fn streamed_response_prefix_len(current: usize, chunk: usize) -> PrefixBudget {
     let remaining = MAX_STREAMED_RESPONSE_BYTES.saturating_sub(current);
-    (chunk.min(remaining), chunk > remaining)
+    if chunk > remaining {
+        PrefixBudget::Overflowed {
+            accepted_len: remaining,
+        }
+    } else {
+        PrefixBudget::Accepted { len: chunk }
+    }
 }
 
 fn process_streamed_chunk<C: Clone>(
@@ -531,7 +543,11 @@ fn process_streamed_chunk<C: Clone>(
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> Option<TerminalEvidence> {
-    let (accepted, exceeded) = streamed_response_prefix_len(*streamed_bytes, bytes.len());
+    let budget = streamed_response_prefix_len(*streamed_bytes, bytes.len());
+    let accepted = match budget {
+        PrefixBudget::Accepted { len } => len,
+        PrefixBudget::Overflowed { accepted_len } => accepted_len,
+    };
     *streamed_bytes += accepted;
     // Records completed before a framing failure are applied first, so
     // evidence they carry is never lost to how the transport batched bytes.
@@ -551,11 +567,12 @@ fn process_streamed_chunk<C: Clone>(
     if let Some(error) = outcome.error {
         return Some(decoder.violation_evidence(error.to_string()));
     }
-    exceeded.then(|| {
-        decoder.violation_evidence(format!(
+    match budget {
+        PrefixBudget::Accepted { .. } => None,
+        PrefixBudget::Overflowed { .. } => Some(decoder.violation_evidence(format!(
             "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
-        ))
-    })
+        ))),
+    }
 }
 
 impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicRuntime<A> {
@@ -1338,7 +1355,7 @@ mod tests {
     };
 
     use super::{
-        MAX_STREAMED_RESPONSE_BYTES, RedactingObservationSink, build_http_request,
+        MAX_STREAMED_RESPONSE_BYTES, PrefixBudget, RedactingObservationSink, build_http_request,
         process_streamed_chunk, redact_evidence, redact_json, redact_native_message,
         serialize_request, streamed_response_prefix_len, without_unproven_refusal,
     };
@@ -1783,15 +1800,15 @@ mod tests {
     fn streamed_response_budget_rejects_aggregate_overflow() {
         assert_eq!(
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 1),
-            (1, false)
+            PrefixBudget::Accepted { len: 1 }
         );
         assert_eq!(
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 2),
-            (1, true)
+            PrefixBudget::Overflowed { accepted_len: 1 }
         );
         assert_eq!(
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES, usize::MAX),
-            (0, true)
+            PrefixBudget::Overflowed { accepted_len: 0 }
         );
     }
 
