@@ -123,11 +123,17 @@ states and creates neither that directory nor those permissions itself; the
 daemon process makes it before binding. Point the terminal client there with
 `--socket`.
 
-The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`,
-overridable with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE`. No key material is
-committed or generated. When that file is read, and what its absence does, are
-stated in the
-[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle).
+The daemon reads its Anthropic key from `~/.config/signalbox/anthropic-api-key`
+and its code-host token from `~/.config/signalbox/github-token`, overridable
+with `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and
+`SIGNALBOX_DEV_GITHUB_TOKEN_FILE` respectively. No credential material is
+committed or generated. Both paths are passed to the daemon unconditionally
+because it requires both variables at startup; neither file has to exist, since
+neither is read at startup. When each file is read, and what its absence does,
+are stated in the
+[credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle),
+which also states that a trailing newline in either file is ignored — so
+`gh auth token > ~/.config/signalbox/github-token` works as written.
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
 [configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration)
