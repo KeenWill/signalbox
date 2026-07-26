@@ -513,6 +513,11 @@ CREATE TABLE runner_registration_profile_approval (
             credential_profile_name,
             tool_name
         ),
+    CONSTRAINT runner_registration_profile_approval_tool_name_shape
+        CHECK (
+            octet_length(tool_name) BETWEEN 1 AND 64
+            AND tool_name ~ '^[A-Za-z0-9_-]+$'
+        ),
     CONSTRAINT runner_registration_profile_approval_closed
         CHECK (approval_kind IN ('automatic', 'session_policy')),
     CONSTRAINT runner_registration_profile_approval_profile_fk
@@ -1237,7 +1242,11 @@ BEGIN
        AND registered.tool_name = pinned.tool_name
      WHERE pinned.session_id = checked_session
        AND pinned.event_ordinal = checked_event
-       AND registered.tool_name IS NULL;
+       AND (
+            registered.tool_name IS NULL
+            OR pinned.runner_required IS DISTINCT FROM
+                (registered.loci_kind = 'runner_only')
+       );
     IF placement.pinned_tool_count <> actual_tools
        OR foreign_tools <> 0
        OR (
@@ -1954,6 +1963,13 @@ BEGIN
                         current_event.event_ordinal
                  WHERE current_event.lease_id = checked_lease
                    AND current_event.generation = checked_generation
+                   AND current_event.event_ordinal = (
+                        SELECT max(latest.event_ordinal)
+                          FROM runner_lease_event AS latest
+                         WHERE latest.lease_id = checked_lease
+                           AND latest.generation =
+                                checked_generation
+                   )
             )
        )
     THEN
@@ -1993,6 +2009,36 @@ AFTER INSERT OR UPDATE OR DELETE ON runner_current_lease_event
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_lease_generation_complete();
+
+CREATE FUNCTION require_runner_tool_request_lease_binding_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    binding runner_tool_request_lease_binding%ROWTYPE :=
+        COALESCE(NEW, OLD);
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS generation
+          JOIN tool_attempt AS attempt
+            ON attempt.attempt_id = generation.attempt_id
+         WHERE generation.lease_id = binding.lease_id
+           AND attempt.request_id = binding.request_id
+    )
+    THEN
+        RAISE EXCEPTION 'runner request binding lacks its lease lineage'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_tool_request_lease_binding_requires_lineage
+AFTER INSERT OR UPDATE OR DELETE ON runner_tool_request_lease_binding
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_tool_request_lease_binding_complete();
 
 CREATE VIEW runner_current_tool_attempt AS
 SELECT attempt.*

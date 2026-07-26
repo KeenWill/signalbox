@@ -90,6 +90,8 @@ tools are runner-only because the daemon-local tool attempt model cannot carry
 their three-way retry classification; relational registration shape rejects an
 idempotent combined-locus row as well. Configuration-file parsing and
 replacement are later application work; the domain value is independent of TOML.
+Relational profile-approval rows apply the same checked `ToolName` shape while
+remaining independent of the runner's advertised subset.
 
 Each `RunnerToolDeclaration` contains:
 
@@ -220,8 +222,10 @@ enrollment or grant, a current registration that no longer preserves any
 runner-required pinned capability, mismatched tool or effect, non-successor
 generation, attempt reuse after claimed safe work, and every retry after claimed
 side-effecting loss. One durable request-to-lease binding prevents a fresh lease
-identity from bypassing an established request's retry lineage. Every generation
-must commit its ordinal-one offered event and a current event head; a generation
+identity from bypassing an established request's retry lineage and must commit
+with a matching generation for that request. Every generation must commit its
+ordinal-one offered event and a current event head; every later event must
+advance that head to the latest ordinal in the same transaction. A generation
 without loadable state evidence fails closed. Lease admission shares the
 canonical enrollment, current registration pointer, and selected grant authority
 locks, so enrollment or grant revocation and registration replacement serialize
@@ -289,11 +293,13 @@ not match its current request and validated capabilities. The store retains
 append-only created, pinned, runner-lost, runner-replaced, and profile-replaced
 records behind one current pointer. Relational transition checks require
 contiguous event history, exact revision succession, unchanged affinity facts at
-runner loss, and profile-only changes for profile replacement. Reconstitution
-reads the current record with its exact validated registration and tool
-inventory. The loaded persistence wrapper retains that historical registration
-and its durable revision so a caller can reconcile against newer availability
-and persist `RunnerLost` without reconstructing or guessing the pinned evidence.
+runner loss, profile-only changes for profile replacement, and each stored
+tool's runner-required flag to match its declaration's runner-only or combined
+locus. Reconstitution reads the current record with its exact validated
+registration and tool inventory. The loaded persistence wrapper retains that
+historical registration and its durable revision so a caller can reconcile
+against newer availability and persist `RunnerLost` without reconstructing or
+guessing the pinned evidence.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic

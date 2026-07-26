@@ -1019,6 +1019,34 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv004_inv043_orphan_request_lease_binding_cannot_commit() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_tool_request_lease_binding
+            (request_id, lease_id)
+         VALUES ($1, $2)",
+    )
+    .bind(uuid(LATER_LEASE_PHYSICAL_ATTEMPT.request))
+    .bind(uuid(LEASE + 99))
+    .execute(&mut *malformed)
+    .await?;
+    let orphan = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("a request binding must install its matching lease lineage");
+
+    assert_check_violation(orphan);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn s31_inv042_concurrent_enrollment_revocation_blocks_a_later_lease()
@@ -1294,6 +1322,42 @@ async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), B
     .expect_err("the first placement row cannot begin as a replacement");
 
     assert_check_violation(malformed_first);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_inv044_placement_required_flag_matches_registered_locus()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_tool
+         DISABLE TRIGGER runner_session_placement_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let mismatched_flag = sqlx::query(
+        "UPDATE runner_session_placement_tool
+            SET runner_required = false
+          WHERE session_id = $1
+            AND event_ordinal = 2
+            AND tool_name = $2",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .bind(tool("inspect").as_str())
+    .execute(&pool)
+    .await
+    .expect_err("a runner-only declaration must remain runner-required");
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_tool
+         ENABLE TRIGGER runner_session_placement_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(mismatched_flag);
     drop(pool);
     Ok(())
 }
@@ -1842,6 +1906,32 @@ async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<d
     .expect_err("the lease event head cannot be rewound to retained history");
 
     assert_check_violation(rewound_head);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_appended_lease_event_must_advance_current_head() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 2, 'claimed')",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .bind(Decimal::from(pin.lease.correlation().generation.get()))
+    .execute(&mut *malformed)
+    .await?;
+    let stale_head = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("an appended lease event must advance its current head");
+
+    assert_check_violation(stale_head);
+    malformed.rollback().await?;
     drop(pool);
     Ok(())
 }
@@ -2856,6 +2946,54 @@ async fn s30_inv042_idempotent_registration_tool_requires_runner_only_locus()
     .await?;
 
     assert_check_violation(invalid_locus);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_registration_profile_approval_requires_tool_name_shape()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let stored = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_registration_profile_approval
+         DISABLE TRIGGER runner_registration_profile_approval_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let invalid_tool = sqlx::query(
+        "UPDATE runner_registration_profile_approval
+            SET tool_name = ''
+          WHERE enrollment_id = $1
+            AND registration_revision = $2
+            AND credential_profile_name = $3
+            AND tool_name = $4",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(stored.revision().get()))
+    .bind(profile().as_str())
+    .bind(tool("inspect").as_str())
+    .execute(&pool)
+    .await
+    .expect_err("profile approval tools use the checked ToolName vocabulary");
+    sqlx::query(
+        "ALTER TABLE runner_registration_profile_approval
+         ENABLE TRIGGER runner_registration_profile_approval_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(invalid_tool);
     drop(pool);
     Ok(())
 }
