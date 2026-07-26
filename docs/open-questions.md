@@ -164,10 +164,17 @@ identifiers refer to [scenarios.md](scenarios.md).
 - **Fallback configuration and visibility.** Requires explicit session/turn
   policy, per-call provenance, and clear UI; no constructible fallback
   configuration exists in the baseline. Blocks fallback. (S20, S22)
-- **Model identifier normalization and detailed provenance representation.** The
-  mismatch disposition itself is accepted
-  ([model-call-execution](spec/model-call-execution.md)). Blocks the provider
-  provenance schema. (S20–S23)
+- **Detailed provider provenance representation.** Model identifier
+  normalization is decided: the
+  [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
+  accepts an alias resolved to its own dated snapshot as the same target and
+  keeps a different lineage as a distinct substitution outcome
+  ([decision](decisions.md#2026-07-26--normalize-an-alias-to-its-dated-snapshot-and-keep-substitution-distinct)).
+  The mismatch disposition itself is likewise accepted
+  ([model-call-execution](spec/model-call-execution.md)). What remains open is
+  the durable per-call provenance schema that would record the concrete served
+  identity and a substitution as evidence rather than as operator diagnostics
+  and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
 - **Future known-provider-failure retry.** Version one never automatically
   retries a known or ambiguous provider failure; any later retry command or
   policy, including backoff and resource limits, is a separate decision the

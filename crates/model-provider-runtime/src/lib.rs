@@ -23,11 +23,19 @@ use signalbox_domain::{
 };
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
-    CredentialReference, MessagePart, ModelOperation, ModelRuntime, ModelSettings, Observation,
-    ObservationFact, ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget,
-    ResolvedTarget, TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition,
-    ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
+    CredentialAccessFailure, CredentialReference, LossCause, MessagePart, ModelOperation,
+    ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationFailure,
+    PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName,
+    ToolResultRecord, UnsentCause,
 };
+
+/// The longest provider-reported model identity retained for operator
+/// diagnostics.
+///
+/// The provider controls the reported spelling, so the diagnostic projection
+/// is bounded before it can reach a log line.
+const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
 
@@ -147,6 +155,331 @@ impl fmt::Display for RuntimeModelCatalogError {
 
 impl Error for RuntimeModelCatalogError {}
 
+/// How one provider-reported model identity relates to the configured exact
+/// provider-model spelling for the call's resolved target.
+///
+/// docs/spec/model-call-execution.md owns the law this vocabulary encodes:
+/// an alias made concrete is the same logical target, while a served identity
+/// from another lineage is a substitution the daemon never authorized.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProviderTargetRelation {
+    /// The reported identity is byte-identical to the configured spelling.
+    Exact,
+    /// The reported identity is the configured spelling made concrete by a
+    /// provider dated-snapshot qualifier — the same logical target, named in
+    /// its canonical concrete form.
+    AliasConcretion,
+    /// The reported identity names a different model lineage: the provider
+    /// served something other than the configured target.
+    DifferentLineage,
+}
+
+/// Relates one provider-reported identity to the configured exact spelling.
+///
+/// The rule is derived from the configured target's own family, never from a
+/// table of known provider identifiers:
+///
+/// - equal spellings are [`Exact`](ProviderTargetRelation::Exact);
+/// - the configured spelling followed by `-` and a *dated snapshot qualifier*
+///   is [`AliasConcretion`](ProviderTargetRelation::AliasConcretion) — the
+///   configured family made concrete;
+/// - everything else is
+///   [`DifferentLineage`](ProviderTargetRelation::DifferentLineage).
+///
+/// A dated snapshot qualifier is `YYYYMMDD` or `YYYY-MM-DD`; calendar
+/// validity is deliberately not checked, because the shape alone makes the
+/// distinction. Requiring a full date shape — rather than
+/// any trailing segment — is what keeps a *version* extension of the same
+/// family name from being read as a snapshot: with `claude-opus-4`
+/// configured, `claude-opus-4-5` extends the family by one digit and stays
+/// `DifferentLineage`, while `claude-haiku-4-5-20251001` against a configured
+/// `claude-haiku-4-5` is the same lineage made concrete. Any other extension —
+/// a delivery or speed variant, a differently named family — is likewise a
+/// different lineage, because it is not the configured target.
+/// The two arguments are the distinct target facts of
+/// docs/spec/runtime-substrate.md rather than two adjacent strings, so a
+/// caller cannot silently transpose this authorization-sensitive comparison:
+/// the relation is asymmetric, and swapping the operands would turn an alias
+/// concretion into a substitution.
+pub fn relate_provider_target(
+    configured: &ResolvedTarget,
+    reported: &ProviderReportedModel,
+) -> ProviderTargetRelation {
+    let configured = configured.as_str();
+    let reported = reported.as_str();
+    if reported == configured {
+        return ProviderTargetRelation::Exact;
+    }
+    if !configured.is_empty()
+        && let Some(remainder) = reported.strip_prefix(configured)
+        && let Some(qualifier) = remainder.strip_prefix('-')
+        && is_dated_snapshot_qualifier(qualifier)
+    {
+        return ProviderTargetRelation::AliasConcretion;
+    }
+    ProviderTargetRelation::DifferentLineage
+}
+
+/// Whether a trailing segment is a provider dated-snapshot qualifier.
+///
+/// Two shapes are admitted, matching the two forms providers publish for a
+/// pinned snapshot of one model family: `YYYYMMDD` and `YYYY-MM-DD`. Calendar
+/// validity is deliberately not checked — the shape alone separates a dated
+/// snapshot from a family or delivery-variant extension, and rejecting an
+/// implausible date would add a second rule without adding a distinction.
+fn is_dated_snapshot_qualifier(qualifier: &str) -> bool {
+    let bytes = qualifier.as_bytes();
+    match bytes.len() {
+        8 => bytes.iter().all(u8::is_ascii_digit),
+        10 => bytes
+            .iter()
+            .enumerate()
+            .all(|(position, byte)| match position {
+                4 | 7 => *byte == b'-',
+                _ => byte.is_ascii_digit(),
+            }),
+        _ => false,
+    }
+}
+
+/// Why one exchange ended without a definitive provider response.
+///
+/// A projection of the runtime's `LossCause` down to a stable token: the
+/// runtime's own variants retain provider-controlled transport and parser
+/// text, which never reaches operator telemetry (INV-035).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BoundaryLossCode {
+    /// Cancellation fired after send commenced.
+    CancellationRequested,
+    /// A local timeout elapsed with no definitive response.
+    TimedOut,
+    /// Transport failure that cannot be proven to precede acceptance.
+    TransportFailed,
+    /// Response headers arrived but the body was lost.
+    ResponseBodyLost,
+    /// A success-status body was not the provider's completion material.
+    ResponseUnintelligible,
+    /// The response carried a status outside the provider's contract.
+    UnexpectedHttpStatus,
+    /// The event stream ended without its terminal marker.
+    StreamEndedWithoutTerminalMarker,
+    /// The event stream violated its protocol.
+    StreamProtocolViolation,
+}
+
+impl BoundaryLossCode {
+    /// The stable operator-facing token for this loss.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CancellationRequested => "boundary_loss_cancellation_requested",
+            Self::TimedOut => "boundary_loss_timed_out",
+            Self::TransportFailed => "boundary_loss_transport_failed",
+            Self::ResponseBodyLost => "boundary_loss_response_body_lost",
+            Self::ResponseUnintelligible => "boundary_loss_response_unintelligible",
+            Self::UnexpectedHttpStatus => "boundary_loss_unexpected_http_status",
+            Self::StreamEndedWithoutTerminalMarker => "boundary_loss_stream_incomplete",
+            Self::StreamProtocolViolation => "boundary_loss_stream_protocol_violation",
+        }
+    }
+
+    const fn of(cause: &LossCause) -> Self {
+        match cause {
+            LossCause::CancellationRequested => Self::CancellationRequested,
+            LossCause::TimedOut(_) => Self::TimedOut,
+            LossCause::TransportFailed(_) => Self::TransportFailed,
+            LossCause::ResponseBodyLost(_) => Self::ResponseBodyLost,
+            LossCause::ResponseUnintelligible { .. } => Self::ResponseUnintelligible,
+            LossCause::UnexpectedHttpStatus => Self::UnexpectedHttpStatus,
+            LossCause::StreamEndedWithoutTerminalMarker { .. } => {
+                Self::StreamEndedWithoutTerminalMarker
+            }
+            LossCause::StreamProtocolViolation { .. } => Self::StreamProtocolViolation,
+        }
+    }
+}
+
+/// The stable, sanitized cause of one model-call outcome or bridge defect.
+///
+/// Every value renders as a fixed operator-facing token
+/// ([`as_str`](Self::as_str)); no provider response text, request or response
+/// body, credential material, or user content can reach it (INV-035). The
+/// runtime's own exhaustive `ProviderErrorKind` classification is carried
+/// verbatim rather than restated, so the adapter taxonomy of
+/// docs/spec/runtime-substrate.md and this operator vocabulary cannot drift
+/// apart.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ModelCallCauseCode {
+    /// The exchange completed with usable assistant material.
+    Completed,
+    /// The provider reported a refusal outcome.
+    Refused,
+    /// A definitive provider error response.
+    ProviderError(ProviderErrorKind),
+    /// A definitive provider cancellation response.
+    CancellationConfirmed,
+    /// Cancellation fired before any send was attempted.
+    CancelledBeforeSend,
+    /// The connection failed before any request byte was written.
+    ConnectFailed,
+    /// An incomplete write the provider contract proves was unacceptable.
+    SendIncompleteProvenUnacceptable,
+    /// The exchange was lost after possible provider acceptance.
+    BoundaryLoss(BoundaryLossCode),
+    /// Capability preparation reported that the adapter does not support the
+    /// requested operation.
+    UnsupportedOperation,
+    /// The pinned credential reference could not be resolved during
+    /// preparation.
+    CredentialUnavailable(CredentialAccessCode),
+    /// A resolved credential cannot authenticate the constructed request.
+    CredentialUnusable,
+    /// The provider served a model from a different lineage than the
+    /// configured target.
+    ProviderTargetSubstituted,
+    /// Completion tool material could not form a bounded domain proposal
+    /// batch.
+    UnrepresentableToolMaterial,
+    /// The completion's finish reason contradicted its own content.
+    FinishContradictsContent,
+    /// A durably resolved target had no runtime mapping.
+    UnconfiguredTarget,
+    /// Runtime preparation reported a local adapter defect.
+    PreparationDefect,
+    /// The runtime returned a different caller-owned correlation identity.
+    CorrelationMismatch,
+    /// Durable authorization did not match the prepared one-shot request.
+    AuthorizationMismatch,
+    /// A runtime observation did not carry the caller-owned call identity.
+    ObservationCorrelationMismatch,
+    /// Definitive response material is outside the supported slice.
+    UnsupportedCompletionMaterial,
+    /// A runtime text part cannot construct exact domain assistant text.
+    InvalidAssistantText,
+    /// A checked application schema could not form a runtime JSON value.
+    InvalidToolSchema,
+    /// Runtime tool material could not form a bounded domain proposal.
+    InvalidToolProposal,
+}
+
+impl ModelCallCauseCode {
+    /// The stable operator-facing token for this cause.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Refused => "provider_refused",
+            Self::ProviderError(kind) => provider_error_token(kind),
+            Self::CancellationConfirmed => "provider_cancellation_confirmed",
+            Self::CancelledBeforeSend => "cancelled_before_send",
+            Self::ConnectFailed => "connect_failed",
+            Self::SendIncompleteProvenUnacceptable => "send_incomplete_proven_unacceptable",
+            Self::BoundaryLoss(code) => code.as_str(),
+            Self::UnsupportedOperation => "unsupported_operation",
+            Self::CredentialUnavailable(code) => code.as_str(),
+            Self::CredentialUnusable => "credential_unusable",
+            Self::ProviderTargetSubstituted => "provider_target_substituted",
+            Self::UnrepresentableToolMaterial => "unrepresentable_tool_material",
+            Self::FinishContradictsContent => "finish_contradicts_content",
+            Self::UnconfiguredTarget => "unconfigured_target",
+            Self::PreparationDefect => "preparation_defect",
+            Self::CorrelationMismatch => "correlation_mismatch",
+            Self::AuthorizationMismatch => "authorization_mismatch",
+            Self::ObservationCorrelationMismatch => "observation_correlation_mismatch",
+            Self::UnsupportedCompletionMaterial => "unsupported_completion_material",
+            Self::InvalidAssistantText => "invalid_assistant_text",
+            Self::InvalidToolSchema => "invalid_tool_schema",
+            Self::InvalidToolProposal => "invalid_tool_proposal",
+        }
+    }
+}
+
+/// Why a pinned credential reference could not be resolved.
+///
+/// A projection of the runtime's `CredentialAccessFailure` down to a stable
+/// token. The reference itself is deliberately not carried: it is non-secret
+/// but names deployment configuration, and the failure class is what an
+/// operator acts on.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CredentialAccessCode {
+    /// No delivery artifact is mapped to the reference.
+    Unmapped,
+    /// The mapped artifact could not be reached.
+    Unavailable,
+    /// The artifact was present but could not be read as a value.
+    Unreadable,
+}
+
+impl CredentialAccessCode {
+    /// The stable operator-facing token for this access failure.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unmapped => "credential_unmapped",
+            Self::Unavailable => "credential_unavailable",
+            Self::Unreadable => "credential_unreadable",
+        }
+    }
+
+    const fn of(failure: CredentialAccessFailure) -> Self {
+        match failure {
+            CredentialAccessFailure::Unmapped => Self::Unmapped,
+            CredentialAccessFailure::Unavailable => Self::Unavailable,
+            CredentialAccessFailure::Unreadable => Self::Unreadable,
+        }
+    }
+}
+
+/// The sanitized cause of one trustworthy pre-send preparation failure.
+///
+/// The runtime's own closed `PreparationFailure` vocabulary maps here without
+/// its rendered detail strings, which are adapter- and provider-controlled.
+const fn preparation_failure_cause(failure: &PreparationFailure) -> ModelCallCauseCode {
+    match failure {
+        PreparationFailure::UnsupportedOperation { .. } => ModelCallCauseCode::UnsupportedOperation,
+        PreparationFailure::CredentialUnavailable { error } => {
+            ModelCallCauseCode::CredentialUnavailable(CredentialAccessCode::of(error.failure))
+        }
+        PreparationFailure::CredentialUnusable { .. } => ModelCallCauseCode::CredentialUnusable,
+    }
+}
+
+/// The stable token for one runtime provider-error classification.
+///
+/// Kept as an exhaustive `match` so a new `ProviderErrorKind` cannot reach
+/// operator telemetry without a deliberate token.
+const fn provider_error_token(kind: ProviderErrorKind) -> &'static str {
+    match kind {
+        ProviderErrorKind::CredentialRejected => "provider_credential_rejected",
+        ProviderErrorKind::PermissionDenied => "provider_permission_denied",
+        ProviderErrorKind::InvalidRequest => "provider_invalid_request",
+        ProviderErrorKind::TargetNotFound => "provider_target_not_found",
+        ProviderErrorKind::RequestTooLarge => "provider_request_too_large",
+        ProviderErrorKind::RateLimited => "provider_rate_limited",
+        ProviderErrorKind::QuotaExhausted => "provider_quota_exhausted",
+        ProviderErrorKind::Overloaded => "provider_overloaded",
+        ProviderErrorKind::ProviderInternal => "provider_internal",
+        ProviderErrorKind::Unrecognized => "provider_unrecognized_error",
+    }
+}
+
+/// Bounds a provider-reported identity before it reaches operator telemetry.
+///
+/// The provider controls the reported spelling, so the diagnostic projection
+/// is truncated to [`DIAGNOSTIC_MODEL_IDENTITY_LIMIT`] bytes on a character
+/// boundary. The value is already credential-redacted by the adapter
+/// (docs/spec/runtime-substrate.md); this bound keeps a hostile length from
+/// reaching a log line.
+fn diagnostic_model_identity(reported: &str) -> String {
+    if reported.len() <= DIAGNOSTIC_MODEL_IDENTITY_LIMIT {
+        return reported.to_owned();
+    }
+    let mut boundary = DIAGNOSTIC_MODEL_IDENTITY_LIMIT;
+    while boundary > 0 && !reported.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut bounded = String::from(reported.get(..boundary).unwrap_or_default());
+    bounded.push_str("… [truncated]");
+    bounded
+}
+
 #[derive(Clone, Copy)]
 struct PreparedBinding {
     session: SessionId,
@@ -174,7 +507,7 @@ impl PreparedBinding {
 pub struct RuntimeModelCallCapability<Prepared> {
     prepared: Prepared,
     binding: PreparedBinding,
-    provider_model: String,
+    resolved_target: ResolvedTarget,
 }
 
 /// Sanitized adapter defect; provider response text and credentials are never
@@ -191,8 +524,10 @@ pub enum RuntimeModelCallProviderError {
     AuthorizationMismatch,
     /// A runtime observation did not carry the caller-owned call identity.
     ObservationCorrelationMismatch,
-    /// A provider-reported model mismatch cannot yet form durable evidence.
-    UnrepresentableProviderTargetMismatch,
+    /// The provider served a model from a different lineage than the
+    /// configured target — a substitution the daemon never authorized, and a
+    /// distinct outcome from an alias made concrete.
+    ProviderTargetSubstituted,
     /// Definitive response material is outside the first text-only slice.
     UnsupportedCompletionMaterial,
     /// A runtime text part cannot construct exact domain assistant text.
@@ -215,8 +550,8 @@ impl fmt::Display for RuntimeModelCallProviderError {
             Self::ObservationCorrelationMismatch => {
                 "model runtime observation carried a different correlation"
             }
-            Self::UnrepresentableProviderTargetMismatch => {
-                "provider target mismatch cannot be represented durably"
+            Self::ProviderTargetSubstituted => {
+                "provider served a different model lineage than the configured target"
             }
             Self::UnsupportedCompletionMaterial => {
                 "provider completion contains unsupported assistant material"
@@ -229,6 +564,34 @@ impl fmt::Display for RuntimeModelCallProviderError {
 }
 
 impl Error for RuntimeModelCallProviderError {}
+
+impl RuntimeModelCallProviderError {
+    /// The stable, sanitized operator-facing cause of this fail-closed
+    /// outcome.
+    ///
+    /// The shared operator taxonomy
+    /// (docs/spec/runtime-substrate.md#operator-failure-taxonomy) says only
+    /// *how bad* a failure is; this says *what happened*, without exposing
+    /// provider text or user content.
+    pub const fn cause_code(self) -> ModelCallCauseCode {
+        match self {
+            Self::UnconfiguredTarget => ModelCallCauseCode::UnconfiguredTarget,
+            Self::PreparationDefect => ModelCallCauseCode::PreparationDefect,
+            Self::CorrelationMismatch => ModelCallCauseCode::CorrelationMismatch,
+            Self::AuthorizationMismatch => ModelCallCauseCode::AuthorizationMismatch,
+            Self::ObservationCorrelationMismatch => {
+                ModelCallCauseCode::ObservationCorrelationMismatch
+            }
+            Self::ProviderTargetSubstituted => ModelCallCauseCode::ProviderTargetSubstituted,
+            Self::UnsupportedCompletionMaterial => {
+                ModelCallCauseCode::UnsupportedCompletionMaterial
+            }
+            Self::InvalidAssistantText => ModelCallCauseCode::InvalidAssistantText,
+            Self::InvalidToolSchema => ModelCallCauseCode::InvalidToolSchema,
+            Self::InvalidToolProposal => ModelCallCauseCode::InvalidToolProposal,
+        }
+    }
+}
 
 impl ClassifyOperatorFailure for RuntimeModelCallProviderError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -318,11 +681,14 @@ where
         let call = request.call();
         let credential =
             CredentialReference::new(operation.credential_reference().as_str().to_owned());
-        let definition = self
-            .models
-            .resolve(call.target())
-            .ok_or(RuntimeModelCallProviderError::UnconfiguredTarget)?;
         let correlation = call.id();
+        let definition = self.models.resolve(call.target()).ok_or_else(|| {
+            fail_closed(
+                correlation,
+                RuntimeModelCallProviderError::UnconfiguredTarget,
+                None,
+            )
+        })?;
         let binding = PreparedBinding {
             session: request.session(),
             turn: request.turn(),
@@ -337,8 +703,14 @@ where
             .tools()
             .iter()
             .map(|definition| {
-                let schema = decode_checked_raw_json(definition.input_schema().as_str())
-                    .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
+                let schema =
+                    decode_checked_raw_json(definition.input_schema().as_str()).map_err(|_| {
+                        fail_closed(
+                            correlation,
+                            RuntimeModelCallProviderError::InvalidToolSchema,
+                            None,
+                        )
+                    })?;
                 Ok(ToolDefinition::with_raw_schema(
                     definition.name().as_str(),
                     definition.description(),
@@ -346,16 +718,16 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let resolved_target = ResolvedTarget::new(definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
-            ResolvedTarget::new(definition.provider_model().to_owned()),
+            resolved_target.clone(),
             messages,
             ModelSettings::new(definition.max_output_tokens()),
         );
         runtime_operation.tools = tools;
-        let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
             .prepare(runtime_operation, CancellationSignal::when(cancellation))
@@ -365,7 +737,7 @@ where
                 RuntimeModelCallCapability {
                     prepared,
                     binding,
-                    provider_model,
+                    resolved_target,
                 },
             )),
             PreparationOutcome::Cancelled {
@@ -376,9 +748,14 @@ where
             }
             PreparationOutcome::Failed {
                 correlation: returned,
-                ..
+                failure,
             } => {
                 require_correlation(correlation, returned)?;
+                tracing::warn!(
+                    cause_code = preparation_failure_cause(&failure).as_str(),
+                    model_call_id = %correlation.as_uuid(),
+                    "model runtime reported a trustworthy capability-preparation failure"
+                );
                 Ok(ModelCallCapabilityPreparation::KnownFailure)
             }
             PreparationOutcome::Defect {
@@ -386,7 +763,11 @@ where
                 ..
             } => {
                 require_correlation(correlation, returned)?;
-                Err(RuntimeModelCallProviderError::PreparationDefect)
+                Err(fail_closed(
+                    correlation,
+                    RuntimeModelCallProviderError::PreparationDefect,
+                    None,
+                ))
             }
         }
     }
@@ -402,10 +783,14 @@ where
         AcceptancePossible: FnOnce() + Send,
         Cancellation: Future<Output = ()> + Send + 'static,
     {
-        if !capability.binding.matches(&authorized) {
-            return Err(RuntimeModelCallProviderError::AuthorizationMismatch);
-        }
         let correlation = authorized.call().id();
+        if !capability.binding.matches(&authorized) {
+            return Err(fail_closed(
+                correlation,
+                RuntimeModelCallProviderError::AuthorizationMismatch,
+                None,
+            ));
+        }
         let mut observations = AcceptanceObservations {
             expected_correlation: correlation,
             correlation_mismatch: false,
@@ -422,16 +807,81 @@ where
             .await;
         require_correlation(correlation, report.correlation)?;
         if observations.correlation_mismatch {
-            return Err(RuntimeModelCallProviderError::ObservationCorrelationMismatch);
+            return Err(fail_closed(
+                correlation,
+                RuntimeModelCallProviderError::ObservationCorrelationMismatch,
+                None,
+            ));
         }
-        let observation = classify_terminal(
+        let classified = classify_terminal(
             report.evidence,
             &observations.observations,
-            capability.provider_model.as_str(),
-        )?;
+            &capability.resolved_target,
+        )
+        .map_err(|failure| {
+            fail_closed(correlation, failure.error, failure.served_target.as_deref())
+        })?;
+        report_classified_outcome(correlation, &classified);
         Ok(authorized
             .observation_correlation()
-            .bind_terminal_observation(observation))
+            .bind_terminal_observation(classified.observation))
+    }
+}
+
+/// Records one fail-closed bridge outcome for operators and returns it.
+///
+/// Sanitized by construction: the correlation identity, the stable cause
+/// token, and — for a substitution — the bounded provider identity that
+/// actually served are the only fields, so no provider text, response body,
+/// credential material, or user content can reach telemetry (INV-035).
+fn fail_closed(
+    correlation: ModelCallId,
+    error: RuntimeModelCallProviderError,
+    served_target: Option<&str>,
+) -> RuntimeModelCallProviderError {
+    match served_target {
+        Some(served_target) => tracing::error!(
+            failure_class = ?error.operator_failure_class(),
+            cause_code = error.cause_code().as_str(),
+            model_call_id = %correlation.as_uuid(),
+            served_provider_target = served_target,
+            "model call failed closed at the runtime bridge"
+        ),
+        None => tracing::error!(
+            failure_class = ?error.operator_failure_class(),
+            cause_code = error.cause_code().as_str(),
+            model_call_id = %correlation.as_uuid(),
+            "model call failed closed at the runtime bridge"
+        ),
+    }
+    error
+}
+
+/// Records one classified terminal outcome for operators.
+fn report_classified_outcome(correlation: ModelCallId, classified: &TerminalClassification) {
+    if let Some(concrete_target) = &classified.concrete_target {
+        tracing::info!(
+            model_call_id = %correlation.as_uuid(),
+            concrete_provider_target = concrete_target.as_str(),
+            "provider served the configured target in its concrete dated form"
+        );
+    }
+    match classified.observation {
+        ModelCallTerminalObservation::Completed { .. }
+        | ModelCallTerminalObservation::CompletedWithTools { .. } => {
+            tracing::debug!(
+                cause_code = classified.cause.as_str(),
+                model_call_id = %correlation.as_uuid(),
+                "model call completed"
+            );
+        }
+        _ => {
+            tracing::warn!(
+                cause_code = classified.cause.as_str(),
+                model_call_id = %correlation.as_uuid(),
+                "model call produced no assistant material"
+            );
+        }
     }
 }
 
@@ -569,6 +1019,8 @@ fn decode_checked_raw_json(
     serde_json::value::RawValue::from_string(value.to_owned())
 }
 
+/// A correlation mismatch is a fail-closed bridge defect like any other, so
+/// it is recorded through [`fail_closed`] rather than returned silently.
 fn require_correlation(
     expected: ModelCallId,
     returned: ModelCallId,
@@ -576,7 +1028,11 @@ fn require_correlation(
     if expected == returned {
         Ok(())
     } else {
-        Err(RuntimeModelCallProviderError::CorrelationMismatch)
+        Err(fail_closed(
+            expected,
+            RuntimeModelCallProviderError::CorrelationMismatch,
+            None,
+        ))
     }
 }
 
@@ -638,27 +1094,74 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
     }
 }
 
+/// One classified terminal outcome plus the sanitized diagnostics that
+/// explain it to an operator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalClassification {
+    observation: ModelCallTerminalObservation,
+    cause: ModelCallCauseCode,
+    /// The concrete provider identity that served the exchange, retained
+    /// only when it was the configured target made concrete rather than the
+    /// exact configured spelling.
+    concrete_target: Option<String>,
+}
+
+/// One fail-closed classification outcome plus the sanitized diagnostics that
+/// explain it.
+///
+/// A substitution carries the bounded identity that actually served, because
+/// the recorded decision makes substitution a separate *recorded* outcome:
+/// the token alone would leave an operator unable to name the model the
+/// provider used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClassificationFailure {
+    error: RuntimeModelCallProviderError,
+    served_target: Option<String>,
+}
+
+impl ClassificationFailure {
+    /// A defect with no served identity to record.
+    const fn bare(error: RuntimeModelCallProviderError) -> Self {
+        Self {
+            error,
+            served_target: None,
+        }
+    }
+}
+
 fn classify_terminal(
     evidence: TerminalEvidence,
     observations: &[Observation<ModelCallId>],
-    expected_provider_model: &str,
-) -> Result<ModelCallTerminalObservation, RuntimeModelCallProviderError> {
-    if observations.iter().any(|observation| {
-        matches!(
-            &observation.fact,
-            ObservationFact::ProviderModelReported(reported)
-                if reported.as_str() != expected_provider_model
-        )
-    }) || reported_model(&evidence)
-        .is_some_and(|reported| reported.as_str() != expected_provider_model)
-    {
-        // docs/spec/model-call-execution.md forbids collapsing mismatch
-        // evidence into an ordinary provider failure. Provider identity
-        // normalization and its durable provenance schema remain an
-        // owner-gated open question, so fail the adapter stage closed
-        // instead of committing the wrong lifecycle.
-        return Err(RuntimeModelCallProviderError::UnrepresentableProviderTargetMismatch);
+    configured_target: &ResolvedTarget,
+) -> Result<TerminalClassification, ClassificationFailure> {
+    // docs/spec/model-call-execution.md: an alias resolved to its own
+    // canonical dated form is the same logical target and is accepted with
+    // the concrete identity recorded as evidence; a served identity from
+    // another lineage is a substitution the daemon never authorized and is a
+    // separate outcome, never collapsed into an ordinary provider failure.
+    let mut concrete_target = None;
+    for reported in reported_identities(&evidence, observations) {
+        match relate_provider_target(configured_target, reported) {
+            ProviderTargetRelation::Exact => {}
+            ProviderTargetRelation::AliasConcretion => {
+                concrete_target = Some(diagnostic_model_identity(reported.as_str()));
+            }
+            ProviderTargetRelation::DifferentLineage => {
+                return Err(ClassificationFailure {
+                    error: RuntimeModelCallProviderError::ProviderTargetSubstituted,
+                    served_target: Some(diagnostic_model_identity(reported.as_str())),
+                });
+            }
+        }
     }
+
+    let classify = |observation, cause| {
+        Ok(TerminalClassification {
+            observation,
+            cause,
+            concrete_target: concrete_target.clone(),
+        })
+    };
 
     match evidence {
         TerminalEvidence::Completed(completion) => {
@@ -670,8 +1173,11 @@ fn classify_terminal(
                 match part {
                     AssistantPart::Text(text) if text.is_empty() => {}
                     AssistantPart::Text(text) => {
-                        let text = AssistantText::try_new(text)
-                            .map_err(|_| RuntimeModelCallProviderError::InvalidAssistantText)?;
+                        let text = AssistantText::try_new(text).map_err(|_| {
+                            ClassificationFailure::bare(
+                                RuntimeModelCallProviderError::InvalidAssistantText,
+                            )
+                        })?;
                         text_parts.push(text.clone());
                         response_parts.push(AssistantResponsePart::Text(text));
                     }
@@ -679,51 +1185,115 @@ fn classify_terminal(
                         tool_count += 1;
                         let Ok(name) = DomainToolName::try_new(proposal.name.as_str().to_owned())
                         else {
-                            return Ok(ModelCallTerminalObservation::KnownFailed);
+                            return classify(
+                                ModelCallTerminalObservation::KnownFailed,
+                                ModelCallCauseCode::UnrepresentableToolMaterial,
+                            );
                         };
                         let Ok(arguments) = NormalizedToolArguments::try_from_provider_text(
                             proposal.arguments_json,
                         ) else {
-                            return Ok(ModelCallTerminalObservation::KnownFailed);
+                            return classify(
+                                ModelCallTerminalObservation::KnownFailed,
+                                ModelCallCauseCode::UnrepresentableToolMaterial,
+                            );
                         };
                         response_parts.push(AssistantResponsePart::ToolCall(
                             DomainToolCallProposal::new(name, arguments),
                         ));
                     }
                     AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {
-                        return Err(RuntimeModelCallProviderError::UnsupportedCompletionMaterial);
+                        return Err(ClassificationFailure::bare(
+                            RuntimeModelCallProviderError::UnsupportedCompletionMaterial,
+                        ));
                     }
                 }
             }
             if tool_count == 0 {
                 if matches!(finish, CompletionFinish::ToolUse) {
-                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                    return classify(
+                        ModelCallTerminalObservation::KnownFailed,
+                        ModelCallCauseCode::FinishContradictsContent,
+                    );
                 }
-                Ok(ModelCallTerminalObservation::Completed {
-                    assistant_text: text_parts,
-                })
+                classify(
+                    ModelCallTerminalObservation::Completed {
+                        assistant_text: text_parts,
+                    },
+                    ModelCallCauseCode::Completed,
+                )
             } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
-                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                    return classify(
+                        ModelCallTerminalObservation::KnownFailed,
+                        ModelCallCauseCode::FinishContradictsContent,
+                    );
                 }
                 let Ok(response) = ToolUsingAssistantResponse::try_from_parts(response_parts)
                 else {
-                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                    return classify(
+                        ModelCallTerminalObservation::KnownFailed,
+                        ModelCallCauseCode::UnrepresentableToolMaterial,
+                    );
                 };
-                Ok(ModelCallTerminalObservation::CompletedWithTools { response })
+                classify(
+                    ModelCallTerminalObservation::CompletedWithTools { response },
+                    ModelCallCauseCode::Completed,
+                )
             }
         }
-        TerminalEvidence::Refused(_) => Ok(ModelCallTerminalObservation::Refused),
-        TerminalEvidence::ProviderError(_)
-        | TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence {
-            cause: UnsentCause::ConnectFailed(_) | UnsentCause::SendIncompleteProvenUnacceptable(_),
-        }) => Ok(ModelCallTerminalObservation::KnownFailed),
-        TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence {
-            cause: UnsentCause::CancelledBeforeSend,
-        }) => Ok(ModelCallTerminalObservation::Cancelled),
-        TerminalEvidence::CancellationConfirmed(_) => Ok(ModelCallTerminalObservation::Cancelled),
-        TerminalEvidence::BoundaryLoss(_) => Ok(ModelCallTerminalObservation::Ambiguous),
+        TerminalEvidence::Refused(_) => classify(
+            ModelCallTerminalObservation::Refused,
+            ModelCallCauseCode::Refused,
+        ),
+        TerminalEvidence::ProviderError(error) => classify(
+            ModelCallTerminalObservation::KnownFailed,
+            ModelCallCauseCode::ProviderError(error.kind),
+        ),
+        TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence { cause }) => {
+            match cause {
+                UnsentCause::ConnectFailed(_) => classify(
+                    ModelCallTerminalObservation::KnownFailed,
+                    ModelCallCauseCode::ConnectFailed,
+                ),
+                UnsentCause::SendIncompleteProvenUnacceptable(_) => classify(
+                    ModelCallTerminalObservation::KnownFailed,
+                    ModelCallCauseCode::SendIncompleteProvenUnacceptable,
+                ),
+                UnsentCause::CancelledBeforeSend => classify(
+                    ModelCallTerminalObservation::Cancelled,
+                    ModelCallCauseCode::CancelledBeforeSend,
+                ),
+            }
+        }
+        TerminalEvidence::CancellationConfirmed(_) => classify(
+            ModelCallTerminalObservation::Cancelled,
+            ModelCallCauseCode::CancellationConfirmed,
+        ),
+        TerminalEvidence::BoundaryLoss(loss) => classify(
+            ModelCallTerminalObservation::Ambiguous,
+            ModelCallCauseCode::BoundaryLoss(BoundaryLossCode::of(&loss.cause)),
+        ),
     }
+}
+
+/// Every provider-reported identity this exchange produced, early
+/// observations first and terminal evidence last.
+///
+/// The mismatch rule of docs/spec/model-call-execution.md is
+/// timing-sensitive, so an identity reported before the terminal report is
+/// considered on equal footing with the one carried by the report itself.
+fn reported_identities<'evidence>(
+    evidence: &'evidence TerminalEvidence,
+    observations: &'evidence [Observation<ModelCallId>],
+) -> impl Iterator<Item = &'evidence ProviderReportedModel> {
+    observations
+        .iter()
+        .filter_map(|observation| match &observation.fact {
+            ObservationFact::ProviderModelReported(reported) => Some(reported),
+            _ => None,
+        })
+        .chain(reported_model(evidence))
 }
 
 fn reported_model(evidence: &TerminalEvidence) -> Option<&ProviderReportedModel> {
@@ -744,6 +1314,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use expect_test::expect;
     use signalbox_application::ModelConversationMessage;
     use signalbox_domain::{
         AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
@@ -752,12 +1323,14 @@ mod tests {
         SessionId, ToolExecutionError, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
         ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
     };
+    use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
-        CompletionFinish, ConversationMessage, ExchangeFacts, LossCause, NativeErrorFacts,
-        Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence, ProviderErrorEvidence,
-        ProviderErrorKind, ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+        CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
+        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+        PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
+        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
+        ToolCallProposal, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
@@ -770,6 +1343,16 @@ mod tests {
 
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
+    }
+
+    /// The exact provider-model spelling one deployment configures.
+    fn configured(spelling: &str) -> signalbox_model_runtime::ResolvedTarget {
+        signalbox_model_runtime::ResolvedTarget::new(spelling.to_owned())
+    }
+
+    /// One provider-reported identity, exactly as observed.
+    fn reported(spelling: &str) -> ProviderReportedModel {
+        ProviderReportedModel::new(spelling.to_owned())
     }
 
     fn target(value: u128) -> ResolvedProviderTarget {
@@ -878,8 +1461,9 @@ mod tests {
     #[track_caller]
     fn assert_invalid_tool_proposal_closes(evidence: TerminalEvidence) {
         assert_eq!(
-            classify_terminal(evidence, &[], "model-exact")
-                .expect("invalid proposal has a durable terminal classification"),
+            classify_terminal(evidence, &[], &configured("model-exact"))
+                .expect("invalid proposal has a durable terminal classification")
+                .observation,
             ModelCallTerminalObservation::KnownFailed
         );
     }
@@ -1082,9 +1666,10 @@ mod tests {
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("typed refusal evidence is supported"),
+            .expect("typed refusal evidence is supported")
+            .observation,
             ModelCallTerminalObservation::Refused
         );
         assert_eq!(
@@ -1097,9 +1682,10 @@ mod tests {
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("typed provider-error evidence is supported"),
+            .expect("typed provider-error evidence is supported")
+            .observation,
             ModelCallTerminalObservation::KnownFailed
         );
         assert_eq!(
@@ -1110,9 +1696,10 @@ mod tests {
                     native: NativeErrorFacts::default(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("typed cancellation evidence is supported"),
+            .expect("typed cancellation evidence is supported")
+            .observation,
             ModelCallTerminalObservation::Cancelled
         );
         assert_eq!(
@@ -1123,9 +1710,10 @@ mod tests {
                     }),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("typed non-acceptance evidence is supported"),
+            .expect("typed non-acceptance evidence is supported")
+            .observation,
             ModelCallTerminalObservation::KnownFailed
         );
         assert_eq!(
@@ -1134,9 +1722,10 @@ mod tests {
                     cause: UnsentCause::CancelledBeforeSend,
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("pre-send cancellation evidence is supported"),
+            .expect("pre-send cancellation evidence is supported")
+            .observation,
             ModelCallTerminalObservation::Cancelled
         );
         assert_eq!(
@@ -1151,9 +1740,10 @@ mod tests {
                     usage: TokenUsage::unreported(),
                 }),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("typed boundary-loss evidence is supported"),
+            .expect("typed boundary-loss evidence is supported")
+            .observation,
             ModelCallTerminalObservation::Ambiguous
         );
     }
@@ -1173,9 +1763,10 @@ mod tests {
                     ],
                 ),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("text-only completion is supported"),
+            .expect("text-only completion is supported")
+            .observation,
             ModelCallTerminalObservation::Completed {
                 assistant_text: vec![
                     signalbox_domain::AssistantText::try_new(String::from("first"))
@@ -1191,9 +1782,14 @@ mod tests {
     /// normalized domain proposals without retaining provider identifiers.
     #[test]
     fn s10_inv002_inv005_tool_completion_crosses_as_provider_neutral_proposals() {
-        let observation = classify_terminal(tool_completion("model-exact"), &[], "model-exact")
-            .expect("tool-use completion is supported");
-        let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
+        let classified = classify_terminal(
+            tool_completion("model-exact"),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("tool-use completion is supported");
+        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        else {
             panic!("tool-use finish produces a same-turn tool round");
         };
         assert_eq!(response.parts().len(), 2);
@@ -1225,9 +1821,10 @@ mod tests {
                     })],
                 ),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("mismatched finish still classifies"),
+            .expect("mismatched finish still classifies")
+            .observation,
             ModelCallTerminalObservation::KnownFailed,
             "tool calls without a ToolUse finish are not an admitted batch"
         );
@@ -1239,9 +1836,10 @@ mod tests {
                     vec![AssistantPart::Text(String::from("no call"))],
                 ),
                 &[],
-                "model-exact",
+                &configured("model-exact"),
             )
-            .expect("mismatched finish still classifies"),
+            .expect("mismatched finish still classifies")
+            .observation,
             ModelCallTerminalObservation::KnownFailed,
             "a ToolUse finish without a tool call is not an ordinary completion"
         );
@@ -1319,35 +1917,396 @@ mod tests {
         assert_invalid_tool_proposal_closes(mismatched_finish);
     }
 
-    /// INV-014: either early or terminal provider-model mismatch prevents
-    /// response material from becoming authoritative.
+    /// INV-014: either early or terminal evidence of a *different lineage*
+    /// prevents response material from becoming authoritative, and the
+    /// substitution is its own recorded outcome rather than an ordinary
+    /// provider failure.
     #[test]
-    fn inv014_reported_target_mismatch_precedes_completion() {
+    fn inv014_cross_model_substitution_precedes_completion() {
         let early = vec![Observation {
             correlation: call(),
-            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new("other")),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                "claude-opus-4-8",
+            )),
         }];
         assert_eq!(
             classify_terminal(
                 completion(
-                    "model-exact",
-                    vec![AssistantPart::Text(String::from("hidden"))]
+                    "claude-haiku-4-5",
+                    vec![AssistantPart::Text(String::from("hidden"))],
                 ),
                 &early,
-                "model-exact",
+                &configured("claude-haiku-4-5"),
             )
-            .expect_err("unrepresentable mismatch must fail closed"),
-            super::RuntimeModelCallProviderError::UnrepresentableProviderTargetMismatch
+            .expect_err("a substituted lineage must fail closed"),
+            super::ClassificationFailure {
+                error: super::RuntimeModelCallProviderError::ProviderTargetSubstituted,
+                served_target: Some(String::from("claude-opus-4-8")),
+            }
         );
         assert_eq!(
             classify_terminal(
-                completion("other", vec![AssistantPart::Text(String::from("hidden"))]),
+                completion(
+                    "claude-opus-4-8",
+                    vec![AssistantPart::Text(String::from("hidden"))],
+                ),
                 &[],
-                "model-exact",
+                &configured("claude-haiku-4-5"),
             )
-            .expect_err("unrepresentable mismatch must fail closed"),
-            super::RuntimeModelCallProviderError::UnrepresentableProviderTargetMismatch
+            .expect_err("a substituted lineage must fail closed"),
+            super::ClassificationFailure {
+                error: super::RuntimeModelCallProviderError::ProviderTargetSubstituted,
+                served_target: Some(String::from("claude-opus-4-8")),
+            }
         );
+    }
+
+    /// S20 / INV-014: an alias resolved to its own canonical dated form is
+    /// the same logical target. The exchange completes, and the concrete
+    /// identity that actually served it is retained as sanitized evidence.
+    ///
+    /// This is the regression pin for the live wedge: before the
+    /// normalization law, a configured undated alias whose response echoed
+    /// the dated identity failed the adapter stage closed, terminalized the
+    /// call ambiguously, and stopped the daemon.
+    #[test]
+    fn s20_inv014_alias_resolved_to_its_dated_form_is_the_same_target() {
+        let early = vec![Observation {
+            correlation: call(),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                "claude-haiku-4-5-20251001",
+            )),
+        }];
+
+        let classified = classify_terminal(
+            completion(
+                "claude-haiku-4-5-20251001",
+                vec![AssistantPart::Text(String::from("hello"))],
+            ),
+            &early,
+            &configured("claude-haiku-4-5"),
+        )
+        .expect("an alias made concrete is the configured target");
+
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    signalbox_domain::AssistantText::try_new(String::from("hello"))
+                        .expect("fixture text is admitted"),
+                ],
+            }
+        );
+        assert_eq!(classified.cause, super::ModelCallCauseCode::Completed);
+        assert_eq!(
+            classified.concrete_target.as_deref(),
+            Some("claude-haiku-4-5-20251001"),
+            "the concrete identity that served the exchange is retained as evidence"
+        );
+    }
+
+    /// S20 / INV-014: an exactly matching identity needs no normalization
+    /// record, so nothing is manufactured for it.
+    #[test]
+    fn s20_inv014_exact_identity_records_no_concretion() {
+        let classified = classify_terminal(
+            completion(
+                "claude-haiku-4-5",
+                vec![AssistantPart::Text(String::from("hello"))],
+            ),
+            &[],
+            &configured("claude-haiku-4-5"),
+        )
+        .expect("an exact identity is the configured target");
+
+        assert_eq!(classified.concrete_target, None);
+    }
+
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct RelationRow {
+        configured: &'static str,
+        reported: &'static str,
+        relation: String,
+    }
+
+    /// Renders one relation row per configured/reported pair, in the given
+    /// order.
+    fn relation_rows(pairs: &[(&'static str, &'static str)]) -> Vec<RelationRow> {
+        pairs
+            .iter()
+            .map(|(configured_spelling, reported_spelling)| RelationRow {
+                configured: configured_spelling,
+                reported: reported_spelling,
+                relation: format!(
+                    "{:?}",
+                    super::relate_provider_target(
+                        &configured(configured_spelling),
+                        &reported(reported_spelling),
+                    )
+                ),
+            })
+            .collect()
+    }
+
+    /// S20 / INV-014: the discriminator between an alias made concrete and a
+    /// substituted lineage, stated as a table.
+    #[test]
+    fn s20_inv014_provider_target_relation_rule_is_stated_by_example() {
+        let rows = relation_rows(&[
+            ("claude-haiku-4-5", "claude-haiku-4-5"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-20251001"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-2025-10-01"),
+            ("claude-haiku-4-5", "claude-opus-4-8"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-fast"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-2025100"),
+            ("claude-haiku-4-5", "claude-haiku-4-5-202510012"),
+            ("claude-opus-4", "claude-opus-4-5"),
+            ("claude-opus-4-5", "claude-opus-4-5-20251101"),
+            ("claude-opus-4-5-20251101", "claude-opus-4-5"),
+            ("", "claude-haiku-4-5-20251001"),
+        ]);
+
+        expect![[r#"
+            ┌──────────────────────────┬─────────────────────────────┬──────────────────┐
+            │ configured               │ reported                    │ relation         │
+            ├──────────────────────────┼─────────────────────────────┼──────────────────┤
+            │ claude-haiku-4-5         │ claude-haiku-4-5            │ Exact            │
+            │ claude-haiku-4-5         │ claude-haiku-4-5-20251001   │ AliasConcretion  │
+            │ claude-haiku-4-5         │ claude-haiku-4-5-2025-10-01 │ AliasConcretion  │
+            │ claude-haiku-4-5         │ claude-opus-4-8             │ DifferentLineage │
+            │ claude-haiku-4-5         │ claude-haiku-4-5-fast       │ DifferentLineage │
+            │ claude-haiku-4-5         │ claude-haiku-4-5-2025100    │ DifferentLineage │
+            │ claude-haiku-4-5         │ claude-haiku-4-5-202510012  │ DifferentLineage │
+            │ claude-opus-4            │ claude-opus-4-5             │ DifferentLineage │
+            │ claude-opus-4-5          │ claude-opus-4-5-20251101    │ AliasConcretion  │
+            │ claude-opus-4-5-20251101 │ claude-opus-4-5             │ DifferentLineage │
+            │ ""                       │ claude-haiku-4-5-20251001   │ DifferentLineage │
+            └──────────────────────────┴─────────────────────────────┴──────────────────┘
+        "#]]
+        .assert_eq(&table(rows));
+    }
+
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct CauseRow {
+        outcome: &'static str,
+        cause_code: &'static str,
+    }
+
+    /// Renders one cause row per classifiable outcome, in the given order.
+    ///
+    /// Every evidence value here classifies, so the row builder reads the
+    /// cause directly; the fail-closed cause codes are asserted separately.
+    fn cause_rows(outcomes: Vec<(&'static str, TerminalEvidence)>) -> Vec<CauseRow> {
+        outcomes
+            .into_iter()
+            .map(|(outcome, evidence)| CauseRow {
+                outcome,
+                cause_code: classify_terminal(evidence, &[], &configured("model-exact"))
+                    .expect("every fixture in this table classifies")
+                    .cause
+                    .as_str(),
+            })
+            .collect()
+    }
+
+    /// INV-035: every classified outcome carries a stable, sanitized operator
+    /// cause token; no provider text, response body, or credential material
+    /// can reach one.
+    #[test]
+    fn inv035_every_classified_outcome_carries_a_stable_sanitized_cause_code() {
+        let rows = cause_rows(vec![
+            (
+                "completed",
+                completion("model-exact", vec![AssistantPart::Text(String::from("ok"))]),
+            ),
+            (
+                "refused",
+                TerminalEvidence::Refused(RefusalEvidence {
+                    exchange: ExchangeFacts::default(),
+                    message_id: None,
+                    reported_model: None,
+                    content: Vec::new(),
+                    usage: TokenUsage::unreported(),
+                }),
+            ),
+            (
+                "provider_error(credential_rejected)",
+                TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                    exchange: ExchangeFacts::default(),
+                    reported_model: None,
+                    kind: ProviderErrorKind::CredentialRejected,
+                    native: NativeErrorFacts::default(),
+                    usage: TokenUsage::unreported(),
+                }),
+            ),
+            (
+                "proven_unsent(connect_failed)",
+                TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::ConnectFailed(TransportFacts {
+                        detail: String::from("safe typed fixture"),
+                    }),
+                }),
+            ),
+            (
+                "proven_unsent(cancelled_before_send)",
+                TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::CancelledBeforeSend,
+                }),
+            ),
+            (
+                "boundary_loss(transport_failed)",
+                TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    cause: LossCause::TransportFailed(TransportFacts {
+                        detail: String::from("safe typed fixture"),
+                    }),
+                    exchange: ExchangeFacts::default(),
+                    reported_model: None,
+                    finish_reported: None,
+                    usage: TokenUsage::unreported(),
+                }),
+            ),
+        ]);
+
+        expect![[r#"
+            ┌──────────────────────────────────────┬────────────────────────────────┐
+            │ outcome                              │ cause_code                     │
+            ├──────────────────────────────────────┼────────────────────────────────┤
+            │ completed                            │ completed                      │
+            │ refused                              │ provider_refused               │
+            │ provider_error(credential_rejected)  │ provider_credential_rejected   │
+            │ proven_unsent(connect_failed)        │ connect_failed                 │
+            │ proven_unsent(cancelled_before_send) │ cancelled_before_send          │
+            │ boundary_loss(transport_failed)      │ boundary_loss_transport_failed │
+            └──────────────────────────────────────┴────────────────────────────────┘
+        "#]]
+        .assert_eq(&table(rows));
+    }
+
+    /// INV-035: a fail-closed substitution carries the same sanitized cause
+    /// vocabulary as a classified outcome.
+    #[test]
+    fn inv035_substitution_failure_carries_its_sanitized_cause_code() {
+        let failure = classify_terminal(
+            completion("claude-opus-4-8", vec![]),
+            &[],
+            &configured("claude-haiku-4-5"),
+        )
+        .expect_err("a substituted lineage must fail closed");
+
+        assert_eq!(
+            failure.error.cause_code().as_str(),
+            "provider_target_substituted"
+        );
+        assert_eq!(failure.served_target.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct PreparationRow {
+        failure: &'static str,
+        cause_code: &'static str,
+    }
+
+    /// Renders one cause row per trustworthy pre-send preparation failure, in
+    /// the given order.
+    fn preparation_rows(failures: Vec<(&'static str, PreparationFailure)>) -> Vec<PreparationRow> {
+        failures
+            .into_iter()
+            .map(|(failure_name, failure)| PreparationRow {
+                failure: failure_name,
+                cause_code: super::preparation_failure_cause(&failure).as_str(),
+            })
+            .collect()
+    }
+
+    /// INV-035: a trustworthy pre-send preparation failure — the outcome the
+    /// application commits as `KnownFailed` before any provider traffic —
+    /// carries the same stable, sanitized cause vocabulary as a terminal
+    /// classification, without its adapter-rendered detail text.
+    #[test]
+    fn inv035_preparation_failures_carry_stable_sanitized_cause_codes() {
+        let rows = preparation_rows(vec![
+            (
+                "unsupported_operation",
+                PreparationFailure::UnsupportedOperation {
+                    detail: String::from("safe typed fixture"),
+                },
+            ),
+            (
+                "credential_unavailable(unmapped)",
+                PreparationFailure::CredentialUnavailable {
+                    error: CredentialAccessError::new(
+                        signalbox_model_runtime::CredentialReference::new("scripted-test"),
+                        CredentialAccessFailure::Unmapped,
+                    ),
+                },
+            ),
+            (
+                "credential_unavailable(unavailable)",
+                PreparationFailure::CredentialUnavailable {
+                    error: CredentialAccessError::new(
+                        signalbox_model_runtime::CredentialReference::new("scripted-test"),
+                        CredentialAccessFailure::Unavailable,
+                    ),
+                },
+            ),
+            (
+                "credential_unavailable(unreadable)",
+                PreparationFailure::CredentialUnavailable {
+                    error: CredentialAccessError::new(
+                        signalbox_model_runtime::CredentialReference::new("scripted-test"),
+                        CredentialAccessFailure::Unreadable,
+                    ),
+                },
+            ),
+            (
+                "credential_unusable",
+                PreparationFailure::CredentialUnusable {
+                    detail: String::from("safe typed fixture"),
+                },
+            ),
+        ]);
+
+        expect![[r#"
+            ┌─────────────────────────────────────┬────────────────────────┐
+            │ failure                             │ cause_code             │
+            ├─────────────────────────────────────┼────────────────────────┤
+            │ unsupported_operation               │ unsupported_operation  │
+            │ credential_unavailable(unmapped)    │ credential_unmapped    │
+            │ credential_unavailable(unavailable) │ credential_unavailable │
+            │ credential_unavailable(unreadable)  │ credential_unreadable  │
+            │ credential_unusable                 │ credential_unusable    │
+            └─────────────────────────────────────┴────────────────────────┘
+        "#]]
+        .assert_eq(&table(rows));
+    }
+
+    /// INV-035: a hostile provider-reported identity is bounded before it can
+    /// reach an operator log line.
+    #[test]
+    fn inv035_diagnostic_model_identity_is_bounded() {
+        let configured = "claude-haiku-4-5";
+        let reported = format!("{configured}-{}", "1".repeat(8));
+        assert_eq!(
+            super::diagnostic_model_identity(&reported).len(),
+            reported.len()
+        );
+
+        let hostile = "x".repeat(super::DIAGNOSTIC_MODEL_IDENTITY_LIMIT * 4);
+        let bounded = super::diagnostic_model_identity(&hostile);
+        assert!(bounded.starts_with(&"x".repeat(super::DIAGNOSTIC_MODEL_IDENTITY_LIMIT)));
+        assert!(bounded.ends_with("… [truncated]"));
     }
 
     #[test]
