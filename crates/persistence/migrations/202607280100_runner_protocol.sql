@@ -849,7 +849,9 @@ CREATE TABLE runner_session_placement_record (
                 AND (
                     state_kind = 'unpinned'
                     OR (
-                        workspace_repository_key =
+                        workspace_repository_key IS NOT NULL
+                        AND workspace_working_directory IS NOT NULL
+                        AND workspace_repository_key =
                             requested_repository_key
                         AND workspace_working_directory =
                             pinned_working_directory
@@ -1335,8 +1337,6 @@ CREATE TABLE runner_credential_grant (
             grant_revision,
             credential_profile_name
         ),
-    CONSTRAINT runner_credential_grant_session_revision_key
-        UNIQUE (session_id, grant_revision),
     CONSTRAINT runner_credential_grant_revision_shape
         CHECK (
             grant_revision BETWEEN 1 AND 18446744073709551615
@@ -1568,18 +1568,6 @@ BEGIN
     IF grant_row.tool_count <> actual_tools
        OR invalid_tools <> 0
        OR initial_audit <> 1
-       OR (
-            grant_row.prior_grant_revision IS NOT NULL
-            AND EXISTS (
-                SELECT 1
-                  FROM runner_credential_grant_audit AS prior_audit
-                 WHERE prior_audit.session_id = grant_row.session_id
-                   AND prior_audit.runner_id = grant_row.prior_runner_id
-                   AND prior_audit.grant_revision =
-                        grant_row.prior_grant_revision
-                   AND prior_audit.event_kind = 'revoked'
-            )
-       )
        OR NOT EXISTS (
             SELECT 1
               FROM runner_session_placement_record AS placement

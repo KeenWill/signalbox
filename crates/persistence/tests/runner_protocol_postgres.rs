@@ -18,7 +18,7 @@ use signalbox_domain::{
     ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -43,6 +43,9 @@ const AUTHENTICATION: u128 = 0x9300;
 const REPLACEMENT_ENROLLMENT: u128 = 0x9101;
 const REPLACEMENT_RUNNER: u128 = 0x9201;
 const REPLACEMENT_AUTHENTICATION: u128 = 0x9301;
+const LATER_ENROLLMENT: u128 = 0x9102;
+const LATER_RUNNER: u128 = 0x9202;
+const LATER_AUTHENTICATION: u128 = 0x9302;
 const SESSION: u128 = 0x9400;
 const FOREIGN_SESSION: u128 = 0x9401;
 const LEASE: u128 = 0x9500;
@@ -856,11 +859,18 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
     .execute(&mut *revocation)
     .await?;
     revocation.commit().await?;
-    let rejected = replacement_store
+    let stored = replacement_store
         .await
-        .expect_err("a revoked predecessor cannot authorize replacement");
+        .expect("the serialized successor does not reactivate its revoked predecessor");
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the successor placement remains loadable");
 
-    assert_store_check_violation(rejected);
+    assert_eq!(stored.placement(), &replacement.placement);
+    assert_eq!(stored.grant(), Some(&replacement_grant));
+    assert_eq!(loaded.placement(), &replacement.placement);
+    assert_eq!(loaded.grant(), Some(&replacement_grant));
     drop(pool);
     Ok(())
 }
@@ -1294,16 +1304,20 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
             Some(revoked),
         )
         .expect("the domain records a successor grant revision");
-    let revoked_predecessor = store
+    store
         .store_placement(
             &replacement.placement,
             Some(&registration),
             replacement.grant.as_ref(),
         )
-        .await
-        .expect_err("a revoked predecessor cannot authorize its replacement");
+        .await?;
+    let loaded_replacement = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the successor of a revoked grant remains loadable");
 
-    assert_store_check_violation(revoked_predecessor);
+    assert_eq!(loaded_replacement.placement(), &replacement.placement);
+    assert_eq!(loaded_replacement.grant(), replacement.grant.as_ref());
     drop(pool);
     Ok(())
 }
@@ -1591,6 +1605,183 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
 
     assert_eq!(loaded.placement(), &replacement.placement);
     assert_eq!(loaded.grant(), replacement.grant.as_ref());
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_profile_free_replacement_starts_independent_grant_lineage()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let first_enrollment = enrollment();
+    store.insert_enrollment(&first_enrollment).await?;
+    let first_registration = store
+        .register(first_enrollment.enrollment(), advertisement(), &catalog())
+        .await?;
+    let profiled_request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: Some(profile()),
+        workspace: WorkspaceRequirement::None,
+    };
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        profiled_request.clone(),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &first_enrollment,
+            first_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/first".to_owned())
+                .expect("the first runner directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the first runner pins the placement");
+    store.store_pin(&pin, &first_registration).await?;
+    let first_lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the first runner may be marked lost");
+    store
+        .store_placement(&first_lost, Some(&first_registration), pin.grant.as_ref())
+        .await?;
+    let second_enrollment = replacement_enrollment();
+    store.insert_enrollment(&second_enrollment).await?;
+    let second_registration = store
+        .register(second_enrollment.enrollment(), advertisement(), &catalog())
+        .await?;
+    let profile_free = first_lost
+        .replace_lost_runner(
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::CapabilityClass(class()),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+            },
+            second_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/second".to_owned())
+                .expect("the second runner directory is valid"),
+            None,
+            pin.grant,
+        )
+        .expect("the replacement may intentionally omit a credential profile");
+    store
+        .store_placement(&profile_free.placement, Some(&second_registration), None)
+        .await?;
+    let second_lost = profile_free
+        .placement
+        .mark_runner_lost()
+        .expect("the profile-free runner may be marked lost");
+    store
+        .store_placement(&second_lost, Some(&second_registration), None)
+        .await?;
+    let later_enrollment = RunnerEnrollment::new(
+        RunnerEnrollmentId::from_uuid(uuid(LATER_ENROLLMENT)),
+        RunnerId::from_uuid(uuid(LATER_RUNNER)),
+        RunnerAuthenticationId::from_uuid(uuid(LATER_AUTHENTICATION)),
+        [class()],
+    );
+    store.insert_enrollment(&later_enrollment).await?;
+    let later_registration = store
+        .register(later_enrollment.enrollment(), advertisement(), &catalog())
+        .await?;
+    let later = second_lost
+        .replace_lost_runner(
+            profiled_request,
+            later_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/later".to_owned())
+                .expect("the later runner directory is valid"),
+            None,
+            None,
+        )
+        .expect("profile selection after a profile-free placement starts a grant lineage");
+    store
+        .store_placement(
+            &later.placement,
+            Some(&later_registration),
+            later.grant.as_ref(),
+        )
+        .await?;
+    let loaded = store
+        .load_placement(SessionId::from_uuid(uuid(SESSION)))
+        .await?
+        .expect("the later profiled replacement is durable");
+
+    assert_eq!(loaded.placement(), &later.placement);
+    assert_eq!(loaded.grant(), later.grant.as_ref());
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: WorkspaceRepositoryKey::try_new("signalbox".to_owned())
+                    .expect("the repository key is valid"),
+            },
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let missing_workspace = sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id,
+             selector_capability_class, directory_selection_kind,
+             requested_working_directory,
+             requested_credential_profile_name,
+             workspace_requirement_kind, requested_repository_key,
+             state_kind, pinned_runner_id, pinned_working_directory,
+             pinned_credential_profile_name, registration_enrollment_id,
+             registration_revision, pinned_tool_count,
+             workspace_repository_key, workspace_working_directory,
+             credential_grant_revision)
+         SELECT session_id, 2, placement_revision, 'pinned',
+                selector_kind, selector_runner_id,
+                selector_capability_class, directory_selection_kind,
+                requested_working_directory,
+                requested_credential_profile_name,
+                workspace_requirement_kind, requested_repository_key,
+                'pinned', $2, '/workspace/session',
+                NULL, $3, $4, 1,
+                NULL, NULL, NULL
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = 1",
+    )
+    .bind(uuid(SESSION))
+    .bind(registration.registration().runner().into_uuid())
+    .bind(registration.registration().enrollment().into_uuid())
+    .bind(Decimal::from(registration.revision().get()))
+    .execute(&pool)
+    .await
+    .expect_err("a pinned worktree placement requires both provisioned facts");
+
+    assert_check_violation(missing_workspace);
     drop(pool);
     Ok(())
 }
