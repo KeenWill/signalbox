@@ -5213,6 +5213,7 @@ pub enum RunnerDomainError {
     DuplicateProfile(CredentialProfileName),
     DuplicateWorkspaceCapability(WorkspaceCapability),
     UndeclaredProfileTool(ToolName),
+    UnsupportedDaemonIdempotency(ToolName),
     EnrollmentRevoked,
     CapabilityClassNotAllowed(RunnerCapabilityClass),
     ToolUndeclared(ToolName),
@@ -5379,7 +5380,7 @@ pub struct RunnerLeaseReconstitutionInput {
 pub enum RunnerLeaseLoss {
     RetryPermitted {
         lost: RunnerLease,
-        retry: RunnerLeaseRetryAuthority,
+        retry: Box<RunnerLeaseRetryAuthority>,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
@@ -5461,6 +5462,7 @@ impl SessionRunnerPlacement {
     ) -> Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
     pub fn reconstitute(
         self,
+        expected_session: SessionId,
         registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: state(), revision()
