@@ -258,6 +258,25 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testINV033UnadmittedNestedTurnFieldFailsSnapshotClosed() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurnWithUnadmittedField()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testINV033MalformedNestedEntryFailsSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -296,7 +315,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testFutureTurnStateFailsAuthoritativeSnapshotClosed() throws {
+  func testINV033FutureTurnStateFailsAuthoritativeSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -315,7 +334,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testFutureNestedModelCallStateFailsAuthoritativeSnapshotClosed() throws {
+  func testINV033FutureNestedModelCallStateFailsAuthoritativeSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -353,7 +372,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testFutureEntryVariantFailsAuthoritativeSnapshotClosed() throws {
+  func testINV033FutureEntryVariantFailsAuthoritativeSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -431,6 +450,48 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(
       transport.machine.phase,
       .recovery(failedStage: .steady, failureCount: 1, nextGeneration: 2)
+    )
+  }
+
+  func testINV033UnknownModelCallStateCannotAdvanceReplayCursor() throws {
+    var transport = try SynchronizationFixture.transportAtReplay(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownModelCallStateEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedEvent(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .replay)
+    )
+  }
+
+  func testINV033UnknownToolBatchStateCannotAdvanceSteadyCursor() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownToolBatchStateEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedEvent(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
     )
   }
 
@@ -1441,6 +1502,24 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func queuedTurnWithUnadmittedField() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"queued",
+          "accepted_input_id":"\(acceptedInput)",
+          "content":"fixture prompt",
+          "fixture_unadmitted":true
+        }
+      }
+      """
+    )
+  }
+
   static func malformedTranscriptEntry() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -1687,6 +1766,46 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func unknownModelCallStateEvent(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"model_call_transition",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "state":{"type":"fixture_future_model_call_state"}
+        }
+      }
+      """
+    )
+  }
+
+  static func unknownToolBatchStateEvent(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"tool_batch_transition",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "state":{"type":"fixture_future_tool_batch_state"}
+        }
+      }
+      """
+    )
+  }
+
   static func unknownEvent(cursor: UInt64) throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -1873,6 +1992,17 @@ private enum SynchronizationFixture {
   ) -> Bool {
     effects.contains { effect in
       if case .publishSnapshot = effect {
+        return true
+      }
+      return false
+    }
+  }
+
+  static func containsPublishedEvent(
+    _ effects: [SignalboxSessionSynchronizationEffect]
+  ) -> Bool {
+    effects.contains { effect in
+      if case .publishEvent = effect {
         return true
       }
       return false

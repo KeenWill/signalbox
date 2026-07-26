@@ -456,6 +456,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
             ?? "A malformed followed event could not be decoded."
         )
       }
+      guard !followed.event.hasUnknownNestedState else {
+        return protocolFailure(
+          stage: .replay,
+          message: "A known followed event contained an unknown closed state."
+        )
+      }
       let observedCursor = replayBufferLastCursor ?? snapshotCursor
       guard followed.cursor > observedCursor else {
         return diagnosticEffects(for: followed, stage: .replay)
@@ -545,6 +551,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: .steady,
         message: followed.event.decodingDiagnostic?.message
           ?? "A malformed followed event could not be decoded."
+      )
+    }
+    guard !followed.event.hasUnknownNestedState else {
+      return protocolFailure(
+        stage: .steady,
+        message: "A known followed event contained an unknown closed state."
       )
     }
     guard followed.cursor > cursor else {
@@ -1480,6 +1492,19 @@ extension SignalboxImportedSourceSpeaker {
 }
 
 extension SignalboxProcessSessionEvent {
+  fileprivate var hasUnknownNestedState: Bool {
+    switch self {
+    case .modelCallTransition(_, _, let state):
+      return state.isUnknown
+    case .toolBatchTransition(_, _, let state):
+      return state.isUnknown
+    case .sessionCreated, .inputAccepted, .turnActivated, .turnCompleted, .turnFailed,
+      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+      .turnToolReconciliationRequired, .unknown:
+      return false
+    }
+  }
+
   fileprivate var decodingDiagnostic: SignalboxDecodingDiagnostic? {
     if case .unknown(_, _, let diagnostic) = self {
       return diagnostic
@@ -1506,6 +1531,13 @@ extension SignalboxProcessSessionEvent {
 }
 
 extension SignalboxModelCallState {
+  fileprivate var isUnknown: Bool {
+    if case .unknown = self {
+      return true
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     if case .unknown(_, let payload) = self {
       return payload.encodedUTF8Bytes
@@ -1515,6 +1547,13 @@ extension SignalboxModelCallState {
 }
 
 extension SignalboxToolBatchState {
+  fileprivate var isUnknown: Bool {
+    if case .unknown = self {
+      return true
+    }
+    return false
+  }
+
   fileprivate var retainedUTF8Bytes: UInt {
     if case .unknown(_, let payload) = self {
       return payload.encodedUTF8Bytes
