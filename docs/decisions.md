@@ -10,6 +10,32 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Select execution locus before authorization
+
+**Context.** A combined-locus tool can use a runner-resident credential profile
+or execute daemon-locally without that profile. Runner re-registration may make
+the first locus unavailable while leaving the second admissible. Reusing the
+runner pair's automatic approval for daemon execution would silently cross both
+the credential and tool-policy boundaries.
+
+**Decision.** The runner domain retains daemon fallback as admissibility only:
+runner lease creation returns `ToolUnavailable` and consumes no reusable
+daemon-execution authority. Later application orchestration must select a locus
+before authorization. If runner availability changes before dispatch, daemon
+fallback discards the runner-pair authorization and resolves the daemon-local
+tool policy without the runner-resident credential profile. Locus is a material
+approval constraint and is never selected by the model or runner.
+
+**Rejected alternatives.** Reusing runner-pair `Automatic` authority can bypass
+a daemon-local `Confirm` default and cannot supply the runner-resident
+credential. Silently disabling daemon fallback contradicts the combined-locus
+declaration. Letting the executor choose after approval makes policy depend on
+ambient availability rather than recorded intent.
+
+**Affects.** `ToolAdmissibleLoci`, combined-locus registration reconciliation,
+approval orchestration, INV-019 and INV-042, S16, and the
+[runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-26 — Make runner lease authority single-use and tool-bound
 
 **Context.** An authorized physical attempt identifies its request, session,

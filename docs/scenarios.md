@@ -247,9 +247,9 @@ those tests.
   interrupt terminalizes it.
 - **Required invariants:** INV-009, INV-019, INV-021, INV-025, INV-026, INV-029,
   INV-034.
-- **Remaining questions:** Reconciliation workflow, idempotency-key support,
-  effect taxonomy, who may record separate resolving evidence for terminal
-  ambiguity, and which tool effects permit accepted-risk continuation.
+- **Remaining questions:** Reconciliation workflow, idempotency-key support, who
+  may record separate resolving evidence for terminal ambiguity, and which tool
+  effects permit accepted-risk continuation.
 
 ## S07 — Submit an interrupting message
 
@@ -531,7 +531,7 @@ those tests.
   acts; Postgres stores authoritative state.
 - **Failure behavior:** Runner unavailability is visible and does not silently
   move locality-sensitive work. Stale results fail fencing.
-- **Required invariants:** INV-011, INV-019, INV-021–INV-026.
+- **Required invariants:** INV-011, INV-019, INV-021–INV-026, INV-042–INV-044.
 - **Remaining questions:** Durable lease/affinity orchestration, result-size
   handling, and local MCP capability discovery.
 
