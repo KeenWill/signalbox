@@ -185,6 +185,11 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
 
     assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(streamed.contains("[redacted]"));
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text("[redacted]".to_string())],
+        "terminal completion content must carry the stateful stream redaction"
+    );
     assert_eq!(result.spawns, 1);
 }
 

@@ -319,6 +319,7 @@ pub(crate) struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     pending: Option<PendingStreamText<C>>,
     suppressing: bool,
+    terminal_text_capture: Option<String>,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -327,7 +328,19 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             inner,
             pending: None,
             suppressing: false,
+            terminal_text_capture: None,
         }
+    }
+
+    /// Starts recording every emitted final-text byte, so terminal evidence
+    /// can carry exactly the stateful cross-fragment redaction the streamed
+    /// deltas received instead of a stateless re-redaction of the raw text.
+    pub(crate) fn begin_terminal_text_capture(&mut self) {
+        self.terminal_text_capture = Some(String::new());
+    }
+
+    pub(crate) fn take_terminal_text_capture(&mut self) -> String {
+        self.terminal_text_capture.take().unwrap_or_default()
     }
 
     fn flush_boundary(&mut self) {
@@ -391,6 +404,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     fn emit(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
         if text.is_empty() {
             return;
+        }
+        if field == StreamField::Text
+            && let Some(capture) = &mut self.terminal_text_capture
+        {
+            capture.push_str(&text);
         }
         let fact = match field {
             StreamField::Text => ObservationFact::TextDelta { index, text },
