@@ -65,10 +65,12 @@ dangerous session blanket, `Automatic` authorizes only its exact catalog pair;
 tool-only automatic default. Session creation records the profile request, and
 pinning snapshots it with the now-exact runner and advertised tool inventory.
 Replacement is a checked forward-only complete snapshot that emits typed change
-facts for later frontier injection. Revocation gates later lease creation but
-does not cancel or rewrite an already offered lease. Arbitrary tool output is a
-separate result-egress boundary and carries no no-disclosure claim in this
-slice.
+facts for later frontier injection. Runner replacement consumes a prior
+pinned-profile grant and creates a checked successor revision rather than
+recreating revision one. Revocation gates later lease creation but does not
+cancel or rewrite an already offered lease; its prior revision remains terminal.
+Arbitrary tool output is a separate result-egress boundary and carries no
+no-disclosure claim in this slice.
 
 **Rejected alternatives.** Sending values from the daemon creates a second
 credential-distribution system. Letting a runner advertise approval posture
