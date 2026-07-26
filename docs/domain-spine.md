@@ -5921,6 +5921,7 @@ impl ReviewExternalObjectClaim {
 }
 pub enum ReviewExternalObjectClaimError {
     ForeignTarget,
+    ProviderMismatch,
     NotAttached,
     DifferentObject,
     SameTarget,
