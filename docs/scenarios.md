@@ -434,9 +434,11 @@ those tests.
 
 - **User intent:** Trust current state despite delayed or retried transport
   delivery.
-- **Durable commands:** Validate result envelope against tool-attempt identity
-  and dispatch generation; record duplicate/stale evidence if audit policy
-  requires, without applying it again.
+- **Durable commands:** For daemon-local execution, validate the result envelope
+  against the authorized tool-attempt dispatch correlation. For runner
+  execution, additionally validate the exact runner lease identity, runner
+  identity, tool name, and lease-lineage generation; record duplicate/stale
+  evidence if audit policy requires, without applying it again.
 - **State transitions:** Current work remains unchanged; a first valid current
   result may advance exactly once.
 - **Transient updates:** Runner acknowledgement may state “duplicate” or
@@ -445,7 +447,7 @@ those tests.
   fencing; runner retries delivery until acknowledged.
 - **Failure behavior:** A stale success cannot overwrite a newer failure,
   result, cancellation, or reconciliation state.
-- **Required invariants:** INV-011, INV-012, INV-021.
+- **Required invariants:** INV-011, INV-012, INV-021, INV-043.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   result acknowledgement, compatibility, and subscriber observation remain
   [open](open-questions.md#scheduling-and-runners): the retired protocol designs
