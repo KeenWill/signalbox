@@ -407,13 +407,17 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             HubRuntimeError::infrastructure(phase)
         })?;
     let pool = database.pool().clone();
-    let (tool_catalog, tool_executor) = DaemonTools::try_new_production(
+    let (tool_catalog, tool_executor) = match DaemonTools::try_new_production(
         SystemCurrentTimeClock,
         pool.clone(),
         code_host_credentials,
-    )
-    .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
-    .into_parts();
+    ) {
+        Ok(tools) => tools.into_parts(),
+        Err(_) => {
+            let _ = database.close().await;
+            return Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration));
+        }
+    };
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
