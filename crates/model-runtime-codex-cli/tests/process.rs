@@ -1903,12 +1903,43 @@ fn assert_recorded_process_group_exited(_path: std::path::PathBuf) {}
 #[cfg(unix)]
 fn process_group_exists(process_group: rustix::process::Pid) -> bool {
     rustix::process::test_kill_process_group(process_group).is_ok()
+        && process_group_has_live_member(process_group)
+}
+
+/// A host whose PID 1 does not promptly reap orphans can hold a fully killed
+/// group as unreaped zombies that still accept the signal probe above; only a
+/// member in a non-zombie state counts as alive.
+#[cfg(target_os = "linux")]
+fn process_group_has_live_member(process_group: rustix::process::Pid) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+            proc_stat_process_group(&stat) == Some(process_group.as_raw_nonzero().get())
+                && !proc_stat_is_zombie(&stat)
+        })
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_live_member(_process_group: rustix::process::Pid) -> bool {
+    true
 }
 
 #[cfg(target_os = "linux")]
 fn proc_stat_is_zombie(stat: &str) -> bool {
     stat.rsplit_once(") ")
         .is_some_and(|(_, fields)| fields.starts_with("Z "))
+}
+
+/// Reads the process-group field of one `/proc/<pid>/stat` line: the second
+/// field after the parenthesized command, whose own closing parenthesis is
+/// found from the right because the command may itself contain one.
+#[cfg(target_os = "linux")]
+fn proc_stat_process_group(stat: &str) -> Option<i32> {
+    let (_, fields) = stat.rsplit_once(") ")?;
+    fields.split(' ').nth(2)?.parse().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -1921,6 +1952,27 @@ fn linux_proc_stat_zombie_is_an_exited_process_state() {
 #[test]
 fn linux_proc_stat_running_is_not_an_exited_process_state() {
     assert!(!proc_stat_is_zombie("42 (sleep) S 1 42 42 0"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_names_its_process_group() {
+    assert_eq!(proc_stat_process_group("42 (sleep) Z 1 42 42 0"), Some(42));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_group_parse_survives_a_parenthesized_command() {
+    assert_eq!(
+        proc_stat_process_group("42 (watch (x)) S 1 42 42 0"),
+        Some(42)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_own_process_group_has_a_live_member() {
+    assert!(process_group_has_live_member(rustix::process::getpgrp()));
 }
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
