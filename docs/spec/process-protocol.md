@@ -8,11 +8,13 @@ protocol version three for tool-bearing projection; versions one and two retain
 their closed message vocabularies unchanged. The session-metadata stack adds
 protocol version four for paginated metadata listing, single-session metadata
 reads, and durable complete-snapshot replacement; versions one through three
-retain their closed request and message vocabularies unchanged. The
-implementation in this stack speaks versions one through four, and its terminal
-client continues to select version three. This page is the normative boundary
-between a local client process and `signalbox-hubd`; domain values, PostgreSQL
-records, and wire messages remain distinct representations.
+retain their closed request and message vocabularies unchanged. The one-file
+conversation-import surface adds protocol version five; versions one through
+four remain unchanged, verified through PR #252 (`agent/import-surfaces`). The
+implementation in this stack speaks versions one through five, and its terminal
+client selects version five. This page is the normative boundary between a local
+client process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
+messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -20,7 +22,7 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-All four versions use one Unix domain stream socket. The hub requires its path
+All five versions use one Unix domain stream socket. The hub requires its path
 in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
 `signalbox-hubd` binds the socket with owner-only `0600` permissions. The
@@ -95,9 +97,16 @@ pre-admission read-ahead across 128 tasks at 1 MiB and aggregate admitted raw
 frame accumulation at 64 MiB. After decoding, the task consumes the frame into
 one owned request rather than cloning its payload. Submitted text moves into
 application admission: rejection drops it before awaiting response output, and
-acceptance reuses the decoded allocation. A peer that stops reading responses
-therefore cannot retain out-of-policy input content after its rejection is
-known.
+acceptance reuses the decoded allocation. Conversation-import source bytes
+likewise move directly into a dedicated import admission path. At most one
+conversion-and-store operation runs at a time. A decoded import waiting for that
+permit retains its inbound-frame permit, so queued source bytes remain inside
+the existing 64 MiB aggregate frame budget; only the admitted import can retain
+the expanded aggregate or use repository work. The admitted service runs on the
+blocking pool so synchronous conversion does not occupy an asynchronous runtime
+worker. Its source and aggregate are dropped and its permit is released before
+response output. A peer that stops reading responses therefore cannot retain
+rejected input or completed import content.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -116,7 +125,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`, `2`, `3`, or `4`;
+- `version`: JSON integer `1`, `2`, `3`, `4`, or `5`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -128,11 +137,11 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. A version other than one, two, three, or four
+spellings decode to the same name. A version other than one through five
 produces an `unsupported_version` error naming the supported versions, then the
 server closes the connection. Every response uses the request's admitted
 version; when no version can be admitted, the server error uses version one as
-the pre-admission fallback. A client speaking version two, three, or four admits
+the pre-admission fallback. A client speaking version two through five admits
 that version-one fallback only for `malformed_frame` or `unsupported_version`,
 then applies the ordinary request-identity check; every other response-version
 mismatch fails locally. A server error uses `request_id = "0"` only when the
@@ -162,6 +171,7 @@ that variant.
 | `list_session_metadata`    | 4       | `required_tags` (string array), `title_contains` (string or null), `include_archived` (boolean), `page_size` (canonical decimal string), `after_session_id` (canonical UUID string or null) | Read one filtered metadata-summary page in session-identity order.                                                                                                 |
 | `read_session_metadata`    | 4       | `session_id` (canonical UUID string)                                                                                                                                                        | Read one complete current metadata snapshot.                                                                                                                       |
 | `replace_session_metadata` | 4       | `command_id` and `session_id` (canonical UUID strings), `metadata` (the complete metadata object below)                                                                                     | Durably replace one complete metadata snapshot as the owner actor.                                                                                                 |
+| `import_conversation`      | 5       | `format` (`claude_code_session_jsonl_v2` or `codex_rollout_jsonl_v1`), `source` (canonical padded base64 string)                                                                            | Convert and idempotently resolve or insert one complete external conversation snapshot.                                                                            |
 
 A selection object is exactly one of:
 
@@ -211,25 +221,27 @@ value cannot construct the corresponding application input; no currently valid
 metadata frame is intended to reach that mapping error.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in all four versions. If a turn is already active, the normal typed
+treatment in all five versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
 Versions two and three admit the same request vocabulary as version one and add
 no new mutation authority. Version four retains that vocabulary and adds only
-the three metadata requests. A metadata request carried under version one, two,
-or three is classified as `malformed_frame` because its supported version does
-not admit that request variant; it never reaches application construction. A
-version-one `submit_input`, `read_transcript`, or `follow_session` request that
-selects imported ancestry returns a version-one `unsupported_version` error
-naming version two before mutation or snapshot construction.
+the three metadata requests. Version five retains all earlier requests and adds
+only `import_conversation`. A metadata request carried under version one, two,
+or three, or an import request carried under version one through four, is
+classified as `malformed_frame` because its supported version does not admit
+that request variant; it never reaches application construction. A version-one
+`submit_input`, `read_transcript`, or `follow_session` request that selects
+imported ancestry returns a version-one `unsupported_version` error naming
+version two before mutation or snapshot construction.
 
-Version four also inherits every transcript, turn-state, entry, and event shape
-admitted by version three, including the imported representations introduced by
-version two and the tool-bearing representations introduced by version three. A
-version-four `read_transcript`, `follow_session`, or `submit_input` therefore
-never requires a downgrade or a version newer than four for a representation
-already admitted by version three.
+Versions four and five also inherit every transcript, turn-state, entry, and
+event shape admitted by version three, including the imported representations
+introduced by version two and the tool-bearing representations introduced by
+version three. A version-four or version-five `read_transcript`,
+`follow_session`, or `submit_input` therefore never requires a downgrade or a
+newer version for a representation already admitted by version three.
 
 Tool-free native sessions remain readable and mutable through every version. A
 version-one or version-two `read_transcript` or `follow_session` request whose
@@ -252,18 +264,34 @@ same accepted content is projected in a queued turn or durable update event. The
 exact capacity choice is recorded in the
 [input-bound decision](../decisions.md#2026-07-23--bound-process-protocol-input-at-1-mib).
 
+An import `source` is the complete exact byte sequence encoded with RFC 4648
+standard-alphabet padded base64. A noncanonical spelling is a malformed frame.
+The server validates canonical padding and trailing bits in the same decode that
+constructs the source bytes under the existing inbound-frame permit; validation
+does not construct a second full-size canonical encoding. There is no
+independent source-size admission rule in this slice: the existing 8 MiB
+encoded-frame limit determines whether one complete request can cross the
+boundary. Before socket I/O, the terminal's bounded reader takes at most one
+byte beyond three quarters of the frame cap, the greatest decoded byte count
+that base64 could possibly fit. It rejects a source reaching that extra byte;
+exact request encoding happens before socket I/O and remains authoritative for
+smaller inputs. The source path is client-local and never appears in the
+request.
+
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
-that variant. Every accepted `create_session`, `submit_input`, or
-`replace_session_metadata` request produces exactly one of:
+that variant. Every accepted mutation request — `create_session`,
+`submit_input`, `replace_session_metadata`, or `import_conversation` — produces
+exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`;
 - `session_metadata_replaced` with `session_id`, the complete `metadata`
   snapshot installed by that recorded handling, and its non-null `last_writer`;
-  or
+- `conversation_import_inserted` with `imported_conversation_id`;
+- `conversation_import_already_imported` with `imported_conversation_id`; or
 - `error` with a stable `code` and a non-sensitive `message`.
 
 A replayed metadata receipt remains the exact snapshot installed by its original
@@ -328,7 +356,7 @@ admits `session_not_found { session_id }`,
 `session_not_found { session_id }`. Other error codes have no `detail`. An equal
 replay returns the same success or rejection projection as the first handling.
 
-The error-code set in all four versions is:
+The error-code set in all five versions is:
 
 | Code                  | Meaning                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -347,6 +375,14 @@ For `create_session`, `submit_input`, and `replace_session_metadata`, a lost
 commit response maps to `commit_ambiguous`; the client retries the exact command
 identity and payload to discover the recorded outcome. A definitely pre-commit
 infrastructure failure maps to `unavailable`.
+
+Conversation import carries no durable command identity because exact
+format-and-source replay already resolves through the import digest. A selected
+converter's content-silent rejection maps to `invalid_request`. The current
+repository error does not retain the failing database phase, so every import
+database error maps conservatively to `commit_ambiguous`; retrying the exact
+format and bytes returns either the first inserted identity or the existing
+identity. Import integrity failures map to `internal`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
@@ -610,7 +646,7 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-All four versions forward durable transition events only. Provider token deltas
+All five versions forward durable transition events only. Provider token deltas
 remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
@@ -652,21 +688,28 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack continues to use version three; version
-four's metadata operations are core protocol and hub capabilities without new
-terminal-client UX. Older clients remain supported for representations admitted
-by their declared version as described above. The client accepts a global
+The `signalbox` binary in this stack uses version five; version four's metadata
+operations remain core protocol and hub capabilities without new terminal-client
+UX. Older clients remain supported for representations admitted by their
+declared version as described above. The client accepts a global
 `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `transcript <session-uuid>`;
-- `follow <session-uuid>`.
+- `follow <session-uuid>`;
+- `import --format <claude-code|codex> <file>`.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
 fails before socket I/O.
+
+`import` reads one bounded file snapshot before socket I/O, sends its exact
+bytes rather than its path, and prints either `inserted` or `already_imported`
+with the durable imported-conversation identity. Its complete behavior is owned
+by the
+[conversation-import operational surface](conversation-import.md#operational-surface).
 
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` first reads the
@@ -682,9 +725,9 @@ printed command identity; `send` then also requires the exact
 `--defaults-version`, and the two flags are rejected unless supplied together.
 The client never silently substitutes a new command identity for an ambiguous
 attempt. It uses a fresh nonzero request identity per connection, renders only
-known version-three messages, and exits nonzero on protocol or application
-errors other than the follow-specific `resync_required` control case, which
-reconnects for a fresh snapshot.
+known version-five messages, and exits nonzero on protocol or application errors
+other than the follow-specific `resync_required` control case, which reconnects
+for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
 owner-private anonymous temporary-file spool before replay or presentation. Turn

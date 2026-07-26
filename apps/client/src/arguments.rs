@@ -1,7 +1,11 @@
 use std::{ffi::OsString, fmt, iter, path::PathBuf};
 
-use clap::{ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, error::ErrorKind};
-use signalbox_process_protocol::{CanonicalU64, CanonicalUuid, CommandId, ModelSelection};
+use clap::{
+    ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
+};
+use signalbox_process_protocol::{
+    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ModelSelection,
+};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -28,6 +32,10 @@ pub(crate) enum Command {
     },
     Follow {
         session_id: CanonicalUuid,
+    },
+    Import {
+        format: ConversationImportFormat,
+        path: PathBuf,
     },
 }
 
@@ -78,6 +86,8 @@ enum CliCommand {
     Transcript(SessionArguments),
     /// Print a snapshot and follow durable session updates.
     Follow(SessionArguments),
+    /// Import one Claude Code session or Codex rollout JSONL file.
+    Import(ImportArguments),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -129,6 +139,22 @@ struct SessionArguments {
     session_id: CanonicalUuid,
 }
 
+#[derive(Debug, ClapArgs)]
+struct ImportArguments {
+    /// Select the source family and its current fixed converter version.
+    #[arg(long, value_enum)]
+    format: ImportFormatArgument,
+    /// Read exactly one source file.
+    #[arg(value_name = "FILE")]
+    path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ImportFormatArgument {
+    ClaudeCode,
+    Codex,
+}
+
 pub(crate) fn parse(
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<ParseOutcome, UsageError> {
@@ -165,6 +191,15 @@ pub(crate) fn parse(
         },
         CliCommand::Follow(arguments) => Command::Follow {
             session_id: arguments.session_id,
+        },
+        CliCommand::Import(arguments) => Command::Import {
+            format: match arguments.format {
+                ImportFormatArgument::ClaudeCode => {
+                    ConversationImportFormat::ClaudeCodeSessionJsonlV2
+                }
+                ImportFormatArgument::Codex => ConversationImportFormat::CodexRolloutJsonlV1,
+            },
+            path: arguments.path,
         },
     };
     Ok(ParseOutcome::Run(Arguments {
@@ -203,6 +238,8 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, path::Path};
+
+    use signalbox_process_protocol::ConversationImportFormat;
 
     use super::{Arguments, Command, ParseOutcome, parse};
 
@@ -282,6 +319,39 @@ mod tests {
             .is_err()
         );
         assert!(parse(["create"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn import_maps_one_explicit_supported_format_and_file() {
+        let parsed = parse(["import", "--format", "codex", "rollout.jsonl"].map(Into::into))
+            .expect("the explicit supported format and one path parse");
+
+        assert_codex_import(parsed, Path::new("rollout.jsonl"));
+    }
+
+    #[test]
+    fn import_requires_an_explicit_format() {
+        assert!(parse(["import", "rollout.jsonl"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn import_rejects_an_unsupported_format() {
+        assert!(
+            parse(["import", "--format", "future-format", "rollout.jsonl"].map(Into::into))
+                .is_err()
+        );
+    }
+
+    #[track_caller]
+    fn assert_codex_import(parsed: ParseOutcome, expected_path: &Path) {
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful import parse runs the client");
+        };
+        let Command::Import { format, path } = arguments.command else {
+            panic!("the successful import parse selects the import command");
+        };
+        assert_eq!(format, ConversationImportFormat::CodexRolloutJsonlV1);
+        assert_eq!(path, expected_path);
     }
 
     #[test]
