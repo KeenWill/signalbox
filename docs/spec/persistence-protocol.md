@@ -126,9 +126,12 @@ Representation rules, all enforced in the schema:
 - Migration `202607280201` adds the closed `model_identity_changed`
   semantic-entry payload, whose turn, positive defaults epoch, and direct
   selection are total only for that kind. Deferred checks bind it to the named
-  turn's frozen epoch and direct selection, require exactly one such entry iff a
-  started turn's immediate predecessor froze a different selection, and require
-  the turn-start frontier to end with that entry immediately followed by the
+  turn's frozen epoch and direct selection and, for a turn whose immutable
+  boundary-requirement fact is true, require exactly one such entry iff a
+  started turn's immediate predecessor froze a different selection. A false fact
+  is reserved for active or terminal turns started before the boundary law;
+  those turns require no boundary entry and cannot carry one. When present, the
+  turn-start frontier ends with the boundary entry immediately followed by the
   turn origin. The lifecycle insertion trigger admits that two-entry suffix
   atomically while preserving the predecessor prefix and exact count.
 - A `context_frontier` header records its immutable total member count and an
