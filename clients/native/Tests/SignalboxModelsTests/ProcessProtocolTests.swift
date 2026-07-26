@@ -157,4 +157,46 @@ final class ProcessProtocolTests: XCTestCase {
       )
     )
   }
+
+  func testDuplicateDecodedMemberDegradesBeforeTypedProjection() throws {
+    let encoded = Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_snapshot_start",
+          "session_id":"\(sessionID)",
+          "cursor":"12",
+          "\\u0063ursor":"12"
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      ProcessProtocolFixture.duplicateSnapshotBoundaryMessage(sessionID: sessionID)
+    )
+  }
+}
+
+private enum ProcessProtocolFixture {
+  static func duplicateSnapshotBoundaryMessage(
+    sessionID: String
+  ) -> SignalboxProcessServerMessage {
+    .unknown(
+      kind: "transcript_snapshot_start",
+      payload: [
+        "type": .string("transcript_snapshot_start"),
+        "session_id": .string(sessionID),
+        "cursor": .string("12"),
+      ],
+      decodingDiagnostic: SignalboxDecodingDiagnostic(
+        message: "Invalid field value at message."
+      )
+    )
+  }
 }

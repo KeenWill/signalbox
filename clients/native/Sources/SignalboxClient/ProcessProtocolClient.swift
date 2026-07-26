@@ -79,10 +79,7 @@ public actor SignalboxProcessClient {
           let reader = SignalboxProcessLineReader(connection: connection)
           while !Task.isCancelled {
             let line = try await reader.nextLine()
-            let response = try SignalboxJSONCoding.decoder().decode(
-              SignalboxProcessServerFrame.self,
-              from: line
-            )
+            let response = try SignalboxProcessServerFrame.decode(from: line)
             guard
               Self.admits(
                 responseVersion: response.version,

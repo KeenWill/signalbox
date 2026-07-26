@@ -274,6 +274,7 @@ would publish state the server never described.
 
 **Affects.** The native synchronization policy, snapshot accumulator, scripted
 transport tests, and application composition that selects the capacity.
+
 ## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
 
 **Context.** The recorded Tier 1 catalog direction calls for ten daemon-held
@@ -304,6 +305,7 @@ violate result admission.
 `apps/signalboxd` code-host modules and composition root, and their mocked
 offline tests. Library-documentation lookup remains deferred until its provider
 is selected.
+
 ## 2026-07-25 — Grandfather pre-boundary started frontiers
 
 **Context.** Before durable model-identity boundaries existed, per-input model
