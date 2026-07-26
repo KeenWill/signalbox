@@ -16,7 +16,9 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{
-    mapping::{input_position_to_numeric, session_id_to_uuid, turn_id_to_uuid},
+    mapping::{
+        defaults_version_to_numeric, input_position_to_numeric, session_id_to_uuid, turn_id_to_uuid,
+    },
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
@@ -25,6 +27,8 @@ use crate::{
 /// Which fresh activation identity collided with an existing durable identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartEligibleTurnIdentityCollision {
+    /// The proposed model-identity boundary semantic entry already exists.
+    ModelIdentityEntry,
     /// The proposed semantic origin-entry identity already exists.
     OriginEntry,
     /// The proposed starting context-frontier identity already exists.
@@ -36,6 +40,7 @@ pub enum StartEligibleTurnIdentityCollision {
 impl fmt::Display for StartEligibleTurnIdentityCollision {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let identity = match self {
+            Self::ModelIdentityEntry => "model-identity semantic-entry",
             Self::OriginEntry => "origin semantic-entry",
             Self::StartingFrontier => "starting context-frontier",
             Self::InitialAttempt => "initial turn-attempt",
@@ -293,6 +298,9 @@ async fn handle_in_transaction(
                 AcceptedInputEligibilityFailure::OriginEntryIdentityAlreadyExists => {
                     StartEligibleTurnIdentityCollision::OriginEntry
                 }
+                AcceptedInputEligibilityFailure::ModelIdentityEntryIdentityAlreadyExists => {
+                    StartEligibleTurnIdentityCollision::ModelIdentityEntry
+                }
                 AcceptedInputEligibilityFailure::StartingFrontierIdentityAlreadyExists => {
                     StartEligibleTurnIdentityCollision::StartingFrontier
                 }
@@ -334,12 +342,18 @@ async fn insert_prepared_activation(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnActivation,
 ) -> Result<signalbox_domain::ActivatedAcceptedInputTurn, StartEligibleTurnRepositoryError> {
-    let (activated, origin_entry, starting_snapshot) = prepared.into_parts();
+    let (activated, starting_entries, starting_snapshot) = prepared.into_parts();
+    let Some(origin_entry) = starting_entries.last() else {
+        return Err(StartEligibleTurnRepositoryError::HubInvariant(
+            "prepared activation entries",
+        ));
+    };
     let accepted_input = match origin_entry.payload() {
         InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
             *accepted_input
         }
         InitialSemanticTranscriptEntryPayload::Imported { .. }
+        | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -363,17 +377,77 @@ async fn insert_prepared_activation(
         ));
     }
 
-    sqlx::query(
-        "INSERT INTO semantic_transcript_entry
-            (source_session_id, semantic_entry_id, payload_kind,
-             origin_accepted_input_id, failed_turn_id)
-         VALUES ($1, $2, 'origin_accepted_input', $3, NULL)",
-    )
-    .bind(session_id_to_uuid(origin_entry.source_session()))
-    .bind(origin_entry.identity().into_uuid())
-    .bind(accepted_input.into_uuid())
-    .execute(&mut *connection)
-    .await?;
+    for entry in &starting_entries {
+        match entry.payload() {
+            InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                turn,
+                defaults_version,
+                selected,
+            } => {
+                if *turn != activated.turn() {
+                    return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                        "prepared model-identity turn",
+                    ));
+                }
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         model_identity_turn_id, model_identity_defaults_version,
+                         model_identity_direct_selection_id)
+                     VALUES ($1, $2, 'model_identity_changed', $3, $4, $5)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(turn_id_to_uuid(*turn))
+                .bind(defaults_version_to_numeric(*defaults_version))
+                .bind(selected.into_uuid())
+                .execute(&mut *connection)
+                .await
+                .map_err(|error| {
+                    semantic_entry_insert_error(
+                        error,
+                        StartEligibleTurnIdentityCollision::ModelIdentityEntry,
+                    )
+                })?;
+            }
+            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: entry_accepted_input,
+            } if *entry_accepted_input == accepted_input => {
+                sqlx::query(
+                    "INSERT INTO semantic_transcript_entry
+                        (source_session_id, semantic_entry_id, payload_kind,
+                         origin_accepted_input_id)
+                     VALUES ($1, $2, 'origin_accepted_input', $3)",
+                )
+                .bind(session_id_to_uuid(entry.source_session()))
+                .bind(entry.identity().into_uuid())
+                .bind(entry_accepted_input.into_uuid())
+                .execute(&mut *connection)
+                .await
+                .map_err(|error| {
+                    semantic_entry_insert_error(
+                        error,
+                        StartEligibleTurnIdentityCollision::OriginEntry,
+                    )
+                })?;
+            }
+            InitialSemanticTranscriptEntryPayload::Imported { .. }
+            | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+            | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
+            | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+            | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+            | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
+                return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                    "prepared activation-entry payload",
+                ));
+            }
+        }
+    }
 
     let member_count = u64::try_from(starting_snapshot.entry_count()).map_err(|_| {
         StartEligibleTurnRepositoryError::HubInvariant("starting frontier member count")
@@ -578,6 +652,21 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartEligibleTurnIdentityCo
     }
 }
 
+fn semantic_entry_insert_error(
+    error: sqlx::Error,
+    candidate: StartEligibleTurnIdentityCollision,
+) -> StartEligibleTurnRepositoryError {
+    match error
+        .as_database_error()
+        .and_then(|database| database.constraint())
+    {
+        Some("semantic_transcript_entry_pk" | "semantic_transcript_entry_id_global") => {
+            StartEligibleTurnRepositoryError::IdentityCollision(candidate)
+        }
+        _ => error.into(),
+    }
+}
+
 fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(database) => {
@@ -594,11 +683,15 @@ mod tests {
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use sqlx::error::{DatabaseError, ErrorKind};
 
-    use super::{StartEligibleTurnRepositoryError, commit_failure_is_ambiguous};
+    use super::{
+        StartEligibleTurnIdentityCollision, StartEligibleTurnRepositoryError,
+        commit_failure_is_ambiguous, semantic_entry_insert_error,
+    };
 
     #[derive(Debug)]
     struct ServerCommitFailure {
         code: &'static str,
+        constraint: Option<&'static str>,
     }
 
     impl fmt::Display for ServerCommitFailure {
@@ -632,6 +725,10 @@ mod tests {
 
         fn code(&self) -> Option<Cow<'_, str>> {
             Some(Cow::Borrowed(self.code))
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
         }
     }
 
@@ -677,7 +774,10 @@ mod tests {
 
     #[test]
     fn server_rejected_commit_is_not_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "23514" }));
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
+            code: "23514",
+            constraint: None,
+        }));
         let commit_ambiguous = commit_failure_is_ambiguous(&error);
 
         assert!(!commit_ambiguous);
@@ -696,9 +796,30 @@ mod tests {
         assert_server_reported_unknown_commit_outcome_is_ambiguous("40003");
     }
 
+    #[test]
+    fn model_identity_entry_collision_retains_its_candidate_kind() {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
+            code: "23505",
+            constraint: Some("semantic_transcript_entry_id_global"),
+        }));
+
+        assert!(matches!(
+            semantic_entry_insert_error(
+                error,
+                StartEligibleTurnIdentityCollision::ModelIdentityEntry,
+            ),
+            StartEligibleTurnRepositoryError::IdentityCollision(
+                StartEligibleTurnIdentityCollision::ModelIdentityEntry
+            )
+        ));
+    }
+
     #[track_caller]
     fn assert_server_reported_unknown_commit_outcome_is_ambiguous(code: &'static str) {
-        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure {
+            code,
+            constraint: None,
+        }));
         let commit_ambiguous = commit_failure_is_ambiguous(&error);
 
         assert!(commit_ambiguous);

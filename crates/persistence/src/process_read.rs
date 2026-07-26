@@ -361,6 +361,21 @@ pub enum ProcessImportedContentKind {
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
+    /// Injected boundary declaring the model identity newly in force.
+    ModelIdentityChanged {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Turn whose start first observes the identity.
+        turn: TurnId,
+        /// Immutable defaults epoch bound by that turn.
+        defaults_version: u64,
+        /// Exact direct model identity frozen for that turn.
+        selected: DirectModelSelection,
+    },
     /// Exact accepted owner input.
     User {
         /// Zero-based position in the projected frontier.
@@ -890,6 +905,25 @@ impl ProcessReadRepository {
                  SELECT 1
                    FROM tool_request
                   WHERE session_id = $1
+             )",
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Returns whether the selected session has a model-identity boundary.
+    pub async fn session_has_model_identity_history(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<bool, ProcessReadError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM semantic_transcript_entry
+                  WHERE source_session_id = $1
+                    AND payload_kind = 'model_identity_changed'
              )",
         )
         .bind(session_id_to_uuid(requested_session))
@@ -1950,6 +1984,9 @@ async fn open_transcript_entry_cursor(
             entry.cancelled_turn_id,
             entry.imported_conversation_id,
             entry.imported_transcript_entry_id,
+            entry.model_identity_turn_id,
+            entry.model_identity_defaults_version,
+            entry.model_identity_direct_selection_id,
             imported.source_speaker_kind AS imported_source_speaker_kind,
             imported.content_encoding AS imported_content_encoding,
             accepted.content_text AS origin_content,
@@ -2062,6 +2099,11 @@ fn decode_transcript_entry(
     let cancelled_turn: Option<Uuid> = row.try_get("cancelled_turn_id")?;
     let imported_conversation: Option<Uuid> = row.try_get("imported_conversation_id")?;
     let imported_entry: Option<Uuid> = row.try_get("imported_transcript_entry_id")?;
+    let model_identity_turn: Option<Uuid> = row.try_get("model_identity_turn_id")?;
+    let model_identity_defaults_version: Option<Decimal> =
+        row.try_get("model_identity_defaults_version")?;
+    let model_identity_direct_selection: Option<Uuid> =
+        row.try_get("model_identity_direct_selection_id")?;
     let imported_source_speaker: Option<String> = row.try_get("imported_source_speaker_kind")?;
     let imported_content: Option<Vec<u8>> = row.try_get("imported_content_encoding")?;
     let origin_content: Option<String> = row.try_get("origin_content")?;
@@ -2076,6 +2118,51 @@ fn decode_transcript_entry(
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+
+    if payload_kind == "model_identity_changed" {
+        if origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || tool_result_request.is_some()
+            || tool_result_attempt.is_some()
+            || completed_turn.is_some()
+            || cancelled_turn.is_some()
+            || imported_conversation.is_some()
+            || imported_entry.is_some()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("model identity semantic entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::ModelIdentityChanged {
+            entry_index,
+            source_session,
+            entry,
+            turn: TurnId::from_uuid(
+                model_identity_turn.ok_or(ProcessReadCorruption::Missing("model identity turn"))?,
+            ),
+            defaults_version: decode_positive(
+                model_identity_defaults_version.ok_or(ProcessReadCorruption::Missing(
+                    "model identity defaults version",
+                ))?,
+                "model identity defaults version",
+            )?,
+            selected: DirectModelSelection::from_uuid(model_identity_direct_selection.ok_or(
+                ProcessReadCorruption::Missing("model identity direct selection"),
+            )?),
+        });
+    }
+    if model_identity_turn.is_some()
+        || model_identity_defaults_version.is_some()
+        || model_identity_direct_selection.is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("native semantic model identity fields").into(),
+        );
+    }
 
     if payload_kind == "assistant_tool_use" {
         let (Some(call), Some(request), Some(turn), Some(name), Some(arguments)) = (

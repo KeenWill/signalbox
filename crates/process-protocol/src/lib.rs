@@ -33,8 +33,11 @@ pub const SESSION_METADATA_PROTOCOL_VERSION: u64 = 4;
 /// The one-source conversation-import protocol version.
 pub const CONVERSATION_IMPORT_PROTOCOL_VERSION: u64 = 5;
 
+/// The forward-only session-defaults replacement protocol version.
+pub const MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION: u64 = 6;
+
 /// The owner turn-reconciliation protocol version.
-pub const TURN_RECONCILIATION_PROTOCOL_VERSION: u64 = 6;
+pub const TURN_RECONCILIATION_PROTOCOL_VERSION: u64 = 7;
 
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -49,8 +52,10 @@ pub enum ProtocolVersion {
     Four,
     /// One-source conversation-import vocabulary.
     Five,
-    /// Owner turn-reconciliation vocabulary.
+    /// Forward-only session-defaults replacement vocabulary.
     Six,
+    /// Owner turn-reconciliation vocabulary.
+    Seven,
 }
 
 impl ProtocolVersion {
@@ -62,7 +67,8 @@ impl ProtocolVersion {
             Self::Three => TOOL_LOOP_PROTOCOL_VERSION,
             Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
             Self::Five => CONVERSATION_IMPORT_PROTOCOL_VERSION,
-            Self::Six => TURN_RECONCILIATION_PROTOCOL_VERSION,
+            Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::Seven => TURN_RECONCILIATION_PROTOCOL_VERSION,
         }
     }
 
@@ -73,7 +79,8 @@ impl ProtocolVersion {
             TOOL_LOOP_PROTOCOL_VERSION => Some(Self::Three),
             SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
             CONVERSATION_IMPORT_PROTOCOL_VERSION => Some(Self::Five),
-            TURN_RECONCILIATION_PROTOCOL_VERSION => Some(Self::Six),
+            MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
+            TURN_RECONCILIATION_PROTOCOL_VERSION => Some(Self::Seven),
             _ => None,
         }
     }
@@ -906,6 +913,19 @@ pub enum ClientRequest {
         /// Complete replacement object.
         metadata: SessionMetadata,
     },
+    /// Replace one session's complete defaults with a new immutable epoch.
+    ReplaceSessionDefaults {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Exact caller-observed current epoch.
+        expected_defaults_version: CanonicalU64,
+        /// Complete replacement model selection.
+        model_selection: ModelSelection,
+        /// Complete replacement dangerous-tool blanket-auto posture.
+        dangerous_tool_auto_approval: bool,
+    },
     /// Import one complete external conversation snapshot.
     ImportConversation {
         /// Explicit format-versioned converter selection.
@@ -940,6 +960,7 @@ impl ClientRequest {
             | Self::ReadSessionMetadata { .. }
             | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
             Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
+            Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
             Self::ReconcileTurn { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
@@ -1154,6 +1175,29 @@ pub enum RejectionDetail {
         /// Last representable position.
         last: CanonicalU64,
     },
+    /// The session defaults epoch ordinal was exhausted.
+    DefaultsVersionExhausted {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Last representable epoch.
+        current: CanonicalU64,
+    },
+}
+
+impl RejectionDetail {
+    const fn minimum_protocol_version(self) -> u64 {
+        match self {
+            Self::DefaultsVersionExhausted { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ActiveTurnMismatch { .. } | Self::TurnNotAwaitingReconciliation { .. } => {
+                TURN_RECONCILIATION_PROTOCOL_VERSION
+            }
+            Self::SessionNotFound { .. }
+            | Self::ActiveTurnPresent { .. }
+            | Self::DefaultsVersionMismatch { .. }
+            | Self::UnknownModelAlias { .. }
+            | Self::AcceptancePositionExhausted { .. } => 1,
+        }
+    }
 }
 
 /// Presence-checked rejection detail on an error message.
@@ -1181,6 +1225,13 @@ impl ErrorDetail {
 
     const fn is_absent(&self) -> bool {
         self.0.is_none()
+    }
+
+    const fn minimum_protocol_version(self) -> u64 {
+        match self.0 {
+            Some(detail) => detail.minimum_protocol_version(),
+            None => 1,
+        }
     }
 }
 
@@ -1629,6 +1680,15 @@ pub enum ImportedContentKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// Injected boundary declaring the model identity newly in force.
+    ModelIdentityChanged {
+        /// Turn whose start first observes the new model identity.
+        turn_id: CanonicalUuid,
+        /// Immutable defaults epoch bound by the turn.
+        defaults_version: CanonicalU64,
+        /// Exact direct model identity frozen for the turn.
+        selected_model_id: CanonicalUuid,
+    },
     /// Assistant proposed one durable tool request.
     AssistantToolUse {
         /// Owning turn.
@@ -1696,6 +1756,7 @@ pub enum TranscriptEntry {
 impl TranscriptEntry {
     const fn minimum_protocol_version(&self) -> u64 {
         match self {
+            Self::ModelIdentityChanged { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
             Self::AssistantToolUse { .. }
             | Self::ToolExecutionResult { .. }
             | Self::ToolDenied { .. }
@@ -2003,6 +2064,17 @@ pub enum ServerMessage {
         /// Non-null last replacement writer.
         last_writer: MetadataLastWriter,
     },
+    /// One successful forward-only session-defaults replacement receipt.
+    SessionDefaultsReplaced {
+        /// Updated session.
+        session_id: CanonicalUuid,
+        /// Newly installed immutable defaults epoch.
+        defaults_version: CanonicalU64,
+        /// Complete committed model selection.
+        model_selection: ModelSelection,
+        /// Complete committed dangerous-tool blanket-auto posture.
+        dangerous_tool_auto_approval: bool,
+    },
     /// One new immutable imported conversation was inserted.
     ConversationImportInserted {
         /// Newly durable imported-conversation identity.
@@ -2112,6 +2184,8 @@ impl ServerMessage {
             | Self::ConversationImportAlreadyImported { .. } => {
                 CONVERSATION_IMPORT_PROTOCOL_VERSION
             }
+            Self::SessionDefaultsReplaced { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::Error { detail, .. } => detail.minimum_protocol_version(),
             Self::SessionCreated { .. }
             | Self::InputSubmitted { .. }
             | Self::SessionsStart {}
@@ -2119,8 +2193,7 @@ impl ServerMessage {
             | Self::SessionsEnd { .. }
             | Self::TranscriptSnapshotStart { .. }
             | Self::TranscriptContent { .. }
-            | Self::TranscriptSnapshotEnd { .. }
-            | Self::Error { .. } => 1,
+            | Self::TranscriptSnapshotEnd { .. } => 1,
         }
     }
 
@@ -2377,7 +2450,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, and 6",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, and 7",
             ),
         }
     }
@@ -2586,7 +2659,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6") {
+    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6" | "7") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -2695,6 +2768,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "4" => Some(ProtocolVersion::Four),
         "5" => Some(ProtocolVersion::Five),
         "6" => Some(ProtocolVersion::Six),
+        "7" => Some(ProtocolVersion::Seven),
         _ => None,
     }
 }
@@ -2829,7 +2903,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, and 6")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, and 7")
         );
     }
 
@@ -2839,7 +2913,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":7,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":8,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -3028,7 +3102,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("7");
+        assert_unsupported_version("8");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -3654,8 +3728,8 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the reconciliation request is admitted only by version six and
-    /// keeps its exact closed shape across one encode/decode round trip.
+    /// INV-033: the reconciliation request is admitted only by version seven
+    /// and keeps its exact closed shape across one encode/decode round trip.
     #[test]
     fn inv033_version_six_reconcile_turn_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3669,7 +3743,7 @@ mod tests {
         };
         assert_eq!(
             ClientFrame::try_new_for_version(
-                ProtocolVersion::Five,
+                ProtocolVersion::Six,
                 request_id,
                 request_value.clone(),
             ),
@@ -3677,11 +3751,11 @@ mod tests {
         );
 
         let frame =
-            ClientFrame::try_new_for_version(ProtocolVersion::Six, request_id, request_value)?;
+            ClientFrame::try_new_for_version(ProtocolVersion::Seven, request_id, request_value)?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":6,\"request_id\":\"1\",\"request\":{\"type\":\"reconcile_turn\",\
+            "{\"version\":7,\"request_id\":\"1\",\"request\":{\"type\":\"reconcile_turn\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
@@ -3692,12 +3766,12 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: version six retains every earlier request unchanged.
+    /// INV-033: version seven retains every earlier request unchanged.
     #[test]
-    fn inv033_version_six_retains_the_earlier_request_vocabulary()
+    fn inv033_version_seven_retains_the_earlier_request_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
-            ProtocolVersion::Six,
+            ProtocolVersion::Seven,
             request(1)?,
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
@@ -3708,7 +3782,7 @@ mod tests {
         )?;
         let encoded = encode_client_line(&frame)?;
 
-        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":6,"));
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":7,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
@@ -3756,6 +3830,121 @@ mod tests {
         assert_client_malformed(
             r#"{"version":5,"request_id":"1","request":{"type":"import_conversation","format":"codex_rollout_jsonl_v1","source":"AA==="}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_inv046_version_six_adds_forward_only_defaults_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_malformed(
+            r#"{"version":5,"request_id":"6","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":5,"request_id":"7","message":{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":5,"request_id":"8","message":{"type":"transcript_entry","entry_index":"5","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000006","entry":{"type":"model_identity_changed","turn_id":"00000000-0000-0000-0000-000000000007","defaults_version":"4","selected_model_id":"00000000-0000-0000-0000-000000000004"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":5,"request_id":"9","message":{"type":"error","code":"rejected","message":"defaults version exhausted","detail":{"type":"defaults_version_exhausted","session_id":"00000000-0000-0000-0000-000000000002","current":"18446744073709551615"}}}"#,
+        );
+        let request_id = request(6)?;
+        let request_value = ClientRequest::ReplaceSessionDefaults {
+            command_id: command(1)?,
+            session_id: uuid(2),
+            expected_defaults_version: CanonicalU64::new(3),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            dangerous_tool_auto_approval: true,
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Five,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Six, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":6,\"request_id\":\"6\",\"request\":{\"type\":\"replace_session_defaults\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
+             \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
+             \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"dangerous_tool_auto_approval\":true}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        let replacement_receipt = ServerMessage::SessionDefaultsReplaced {
+            session_id: uuid(2),
+            defaults_version: CanonicalU64::new(4),
+            model_selection: ModelSelection::Direct {
+                selection_id: uuid(4),
+            },
+            dangerous_tool_auto_approval: true,
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Five,
+                request(7)?,
+                replacement_receipt.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(7)?,
+            replacement_receipt,
+            r#"{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}"#,
+        )?;
+        let model_identity_entry = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(5),
+            source_session_id: uuid(2),
+            entry_id: uuid(6),
+            entry: TranscriptEntry::ModelIdentityChanged {
+                turn_id: uuid(7),
+                defaults_version: CanonicalU64::new(4),
+                selected_model_id: uuid(4),
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Five,
+                request(8)?,
+                model_identity_entry.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(8)?,
+            model_identity_entry,
+            r#"{"type":"transcript_entry","entry_index":"5","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000006","entry":{"type":"model_identity_changed","turn_id":"00000000-0000-0000-0000-000000000007","defaults_version":"4","selected_model_id":"00000000-0000-0000-0000-000000000004"}}"#,
+        )?;
+        let exhaustion = ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            message: String::from("defaults version exhausted"),
+            detail: ErrorDetail::rejected(RejectionDetail::DefaultsVersionExhausted {
+                session_id: uuid(2),
+                current: CanonicalU64::new(u64::MAX),
+            }),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::Five,
+                request(9)?,
+                exhaustion.clone(),
+            ),
+            Err(FrameValidationError::MessageRequiresNewerVersion)
+        );
+        assert_server_message_round_trip(
+            request(9)?,
+            exhaustion,
+            r#"{"type":"error","code":"rejected","message":"defaults version exhausted","detail":{"type":"defaults_version_exhausted","session_id":"00000000-0000-0000-0000-000000000002","current":"18446744073709551615"}}"#,
+        )?;
+        Ok(())
     }
 
     #[test]

@@ -546,6 +546,10 @@ struct FixedActivationIds {
 }
 
 impl StartEligibleTurnIdGenerator for FixedActivationIds {
+    fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(u128::MAX))
+    }
+
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
         self.origin_entry
             .take()
