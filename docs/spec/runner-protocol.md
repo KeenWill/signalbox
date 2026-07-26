@@ -3,9 +3,9 @@
 This page specifies the implemented runner-protocol foundation. Its domain
 surface is verified against the implementing stack rooted at PR #259
 (`agent/runner-protocol`) through PR #260; its relational persistence clauses
-are verified against the runner-persistence PR stacked on PR #260. It owns
-logical runner enrollment, daemon-authoritative catalog validation, runner
-leases, session placement and affinity, credential-profile grants, and workspace
+are verified against PR #267 (`agent/runner-persistence`). It owns logical
+runner enrollment, daemon-authoritative catalog validation, runner leases,
+session placement and affinity, credential-profile grants, and workspace
 requirements. The tool registry's common declarations remain owned by
 [tool loop](tool-loop.md); session transcript and frontier mechanics remain
 owned by [sessions and transcript](sessions-and-transcript.md); physical tool
