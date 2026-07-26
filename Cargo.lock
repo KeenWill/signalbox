@@ -2593,12 +2593,12 @@ dependencies = [
  "expect-test",
  "signalbox-application",
  "signalbox-domain",
- "signalbox-hubd",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",
  "signalbox-persistence",
  "signalbox-process-protocol",
+ "signalboxd",
  "sqlx",
  "tempfile",
  "testcontainers-modules",
@@ -2653,32 +2653,6 @@ name = "signalbox-expect-table"
 version = "0.0.0"
 dependencies = [
  "expect-test",
-]
-
-[[package]]
-name = "signalbox-hubd"
-version = "0.0.0"
-dependencies = [
- "jiff",
- "rustix",
- "serde_json",
- "signalbox-application",
- "signalbox-conversation-import-claude-code",
- "signalbox-conversation-import-codex",
- "signalbox-domain",
- "signalbox-model-provider-runtime",
- "signalbox-model-runtime",
- "signalbox-model-runtime-anthropic",
- "signalbox-persistence",
- "signalbox-process-protocol",
- "sqlx",
- "tempfile",
- "testcontainers-modules",
- "tokio",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2771,6 +2745,32 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "signalboxd"
+version = "0.0.0"
+dependencies = [
+ "jiff",
+ "rustix",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-conversation-import-claude-code",
+ "signalbox-conversation-import-codex",
+ "signalbox-domain",
+ "signalbox-model-provider-runtime",
+ "signalbox-model-runtime",
+ "signalbox-model-runtime-anthropic",
+ "signalbox-persistence",
+ "signalbox-process-protocol",
+ "sqlx",
+ "tempfile",
+ "testcontainers-modules",
+ "tokio",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
