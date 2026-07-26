@@ -17,7 +17,8 @@ WebSocket, or OpenAI-compatible surfaces.
 - Project transcript snapshots into the existing timeline normalizer.
 - Preserve queued input separately until matching transcript content appears.
 - Submit input with the session's defaults version and retry only an exact
-  `commit_ambiguous` command, with a finite schedule.
+  `commit_ambiguous` command, with a finite schedule; if that schedule is
+  exhausted, retain the prepared command identity for an explicit retry.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
@@ -94,7 +95,8 @@ Phase A closes the imported transport and synchronization findings: settings now
 install the tested socket client; every reconnect path is capped; deadlines are
 typed separately from heartbeat concerns; snapshot/stream ordering is owned by
 the synchronization machine; fallbacks preserve diagnostics; failed submission
-preserves the composer; internal wire details do not become legacy
+preserves the composer and an unresolved ambiguous submission preserves its
+prepared command identity; internal wire details do not become legacy
 `visible_to_user` failures; and no credential crosses a plaintext URL.
 
 The following work remains:

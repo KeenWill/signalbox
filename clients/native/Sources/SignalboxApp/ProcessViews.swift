@@ -250,6 +250,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   let session: SignalboxProcessSession
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var synchronization: (any SignalboxSessionSynchronizing)?
+  private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var projector = SignalboxProcessTranscriptProjector()
   private let normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -294,22 +295,39 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     guard !content.isEmpty, let service = serviceProvider() else {
       return
     }
+    var preparedForAttempt: SignalboxPreparedInputSubmission?
     do {
-      let prepared = try await service.prepareInputSubmission(
-        session: session,
-        content: content
-      )
+      let prepared =
+        if let unresolvedSubmission {
+          unresolvedSubmission
+        } else {
+          try await service.prepareInputSubmission(
+            session: session,
+            content: content
+          )
+        }
+      preparedForAttempt = prepared
       let submitted = try await service.submit(prepared)
       pendingInputs.append(
         SignalboxProcessPendingInput(
           id: submitted.acceptedInputID,
           turnID: submitted.turnID,
-          content: content
+          content: prepared.content
         )
       )
-      composerText = ""
+      unresolvedSubmission = nil
+      if content == prepared.content {
+        composerText = ""
+      }
       errorMessage = nil
     } catch {
+      if let serviceError = error as? SignalboxProcessServiceError,
+        case .mutationRetryExhausted = serviceError
+      {
+        unresolvedSubmission = preparedForAttempt
+      } else {
+        unresolvedSubmission = nil
+      }
       errorMessage = error.localizedDescription
     }
   }

@@ -147,31 +147,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   }
 
   public func testConnection() async throws {
-    try await withExchange(
-      request: .listSessionMetadata(
-        requiredTags: [],
-        titleContains: nil,
-        includeArchived: false,
-        pageSize: SignalboxCanonicalUInt64(rawValue: 1),
-        afterSessionID: nil
-      )
-    ) { exchange in
-      guard let first = try await exchange.next() else {
-        throw SignalboxProcessServiceError.unexpectedMessage(
-          "The daemon closed the metadata probe without a response."
-        )
-      }
-      switch first.message {
-      case .sessionMetadataPageStart:
-        return
-      case .protocolError(let error):
-        throw remote(error)
-      default:
-        throw SignalboxProcessServiceError.unexpectedMessage(
-          "The metadata probe did not begin with its page boundary."
-        )
-      }
-    }
+    _ = try await metadataPage(
+      includeArchived: false,
+      after: nil,
+      pageSize: SignalboxCanonicalUInt64(rawValue: 1)
+    )
   }
 
   public func listSessions(
@@ -188,7 +168,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       }
       let page = try await metadataPage(
         includeArchived: includeArchived,
-        after: cursor
+        after: cursor,
+        pageSize: policy.metadataPageSize
       )
       sessions.append(contentsOf: page.sessions)
       pageCount += 1
@@ -289,14 +270,15 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
 
   private func metadataPage(
     includeArchived: Bool,
-    after cursor: SignalboxCanonicalUUID?
+    after cursor: SignalboxCanonicalUUID?,
+    pageSize: SignalboxCanonicalUInt64
   ) async throws -> MetadataPage {
     try await withExchange(
       request: .listSessionMetadata(
         requiredTags: [],
         titleContains: nil,
         includeArchived: includeArchived,
-        pageSize: policy.metadataPageSize,
+        pageSize: pageSize,
         afterSessionID: cursor
       )
     ) { exchange in

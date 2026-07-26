@@ -47,7 +47,9 @@ final class AppCoordinator: ObservableObject {
             self.service = MockSignalboxService()
             self.processService = SignalboxProcessService(
                 requester: SignalboxProcessClient(
-                    connectionFactory: MockProcessProtocolConnectionFactory()
+                    connectionFactory: MockProcessProtocolConnectionFactory(
+                        scenario: screenshotScenario
+                    )
                 ),
                 policy: .nativeDefault
             )
@@ -92,6 +94,7 @@ final class AppCoordinator: ObservableObject {
             return
         }
         let candidate = Self.makeProcessService(socketPath: socketPath)
+        processService = nil
         await processSettings.test(using: candidate)
         if processSettings.connectionStatus == .connected {
             processService = candidate
@@ -101,6 +104,15 @@ final class AppCoordinator: ObservableObject {
         processService = nil
         await processSettings.test(using: nil)
         #endif
+    }
+
+    func saveProcessSocketPath() {
+        guard !isMockMode else {
+            return
+        }
+        processService = nil
+        processSettings.save()
+        NotificationCenter.default.post(name: .refreshRequested, object: nil)
     }
 }
 

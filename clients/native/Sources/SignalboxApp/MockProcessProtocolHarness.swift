@@ -10,7 +10,11 @@ import Foundation
 /// The app mock exercises the same v5 encoder, decoder, framing, and request
 /// identities as the Unix-socket adapter. Only its byte transport is in memory.
 struct MockProcessProtocolConnectionFactory: SignalboxProcessConnectionFactory {
-  private let state = MockProcessProtocolState()
+  private let state: MockProcessProtocolState
+
+  init(scenario: ScreenshotScenario? = nil) {
+    state = MockProcessProtocolState(scenario: scenario)
+  }
 
   func makeConnection() -> any SignalboxProcessConnection {
     MockProcessProtocolConnection(state: state)
@@ -18,7 +22,7 @@ struct MockProcessProtocolConnectionFactory: SignalboxProcessConnectionFactory {
 }
 
 enum MockProcessProtocolFixtures {
-  static let sessionCount = 5
+  static let sessionCount = 8
   static let conversationRecordCount = 2
   static let snapshotCursor = "4"
   static let firstAcceptancePosition = "1"
@@ -34,6 +38,14 @@ enum MockProcessProtocolFixtures {
   static let activeAcceptedInputID = "eeeeeeee-0000-4000-8000-000000000001"
   static let activeTurnID = "ffffffff-0000-4000-8000-000000000001"
   static let activeModelCallID = "12121212-0000-4000-8000-000000000001"
+  static let completedToolUseEntryID = "dddddddd-0000-4000-8000-000000000007"
+  static let completedToolResultEntryID = "dddddddd-0000-4000-8000-000000000008"
+  static let completedToolRequestID = "abababab-0000-4000-8000-000000000002"
+  static let completedToolAttemptID = "abababab-0000-4000-8000-000000000003"
+  static let completedAttemptID = "abababab-0000-4000-8000-000000000004"
+  static let completedFrontierID = "abababab-0000-4000-8000-000000000005"
+  static let completedToolName = "save_report"
+  static let completedToolOutput = "Saved artifact runner-status.md"
   static let approvalUserEntryID = "dddddddd-0000-4000-8000-000000000003"
   static let approvalToolEntryID = "dddddddd-0000-4000-8000-000000000004"
   static let approvalAcceptedInputID = "eeeeeeee-0000-4000-8000-000000000002"
@@ -102,6 +114,7 @@ private actor MockProcessProtocolState {
     var archived: Bool
   }
 
+  private let scenario: ScreenshotScenario?
   private var sessions = [
     Session(
       id: MockSignalboxFixtures.approvalSessionID,
@@ -125,6 +138,27 @@ private actor MockProcessProtocolState {
       archived: false
     ),
     Session(
+      id: MockSignalboxFixtures.markdownTableSessionID,
+      defaultsVersion: "1",
+      title: "Markdown table",
+      tags: ["markdown"],
+      archived: false
+    ),
+    Session(
+      id: MockSignalboxFixtures.markdownCodeSessionID,
+      defaultsVersion: "1",
+      title: "Markdown code blocks",
+      tags: ["markdown"],
+      archived: false
+    ),
+    Session(
+      id: MockSignalboxFixtures.markdownSessionID,
+      defaultsVersion: "1",
+      title: "Markdown mixed message",
+      tags: ["markdown"],
+      archived: false
+    ),
+    Session(
       id: MockSignalboxFixtures.failedSessionID,
       defaultsVersion: "2",
       title: "Failed local turn",
@@ -139,6 +173,10 @@ private actor MockProcessProtocolState {
       archived: true
     ),
   ]
+
+  init(scenario: ScreenshotScenario?) {
+    self.scenario = scenario
+  }
 
   func response(to data: Data) throws -> MockProcessProtocolResponse {
     let object = try JSONSerialization.jsonObject(with: data)
@@ -300,6 +338,7 @@ private actor MockProcessProtocolState {
 
   private func transcript(_ session: Session) -> [[String: Any]] {
     let cursor = MockProcessProtocolFixtures.snapshotCursor
+    let fixture = transcriptFixture(session)
     var messages: [[String: Any]] = [
       [
         "type": "transcript_snapshot_start",
@@ -307,26 +346,62 @@ private actor MockProcessProtocolState {
         "cursor": cursor,
       ]
     ]
-    if session.id == MockSignalboxFixtures.approvalSessionID {
-      messages.append(contentsOf: approvalTranscript(sessionID: session.id))
-    } else if session.id == MockSignalboxFixtures.failedSessionID {
-      messages.append(contentsOf: failedTranscript(sessionID: session.id))
-    } else {
-      messages.append(contentsOf: conversationTranscript(sessionID: session.id))
-    }
+    messages.append(contentsOf: fixture.records)
     messages.append([
       "type": "transcript_snapshot_end",
       "session_id": session.id,
       "cursor": cursor,
-      "turn_count": session.id == MockSignalboxFixtures.approvalSessionID
-        || session.id == MockSignalboxFixtures.failedSessionID
-        ? MockProcessProtocolFixtures.singleTurnCount : MockProcessProtocolFixtures.emptyTurnCount,
-      "entry_count": MockProcessProtocolFixtures.transcriptEntryCount,
+      "turn_count": fixture.turnCount,
+      "entry_count": fixture.entryCount,
     ])
     return messages
   }
 
-  private func conversationTranscript(sessionID: String) -> [[String: Any]] {
+  private struct TranscriptFixture {
+    let records: [[String: Any]]
+    let turnCount: String
+    let entryCount: String
+  }
+
+  private func transcriptFixture(_ session: Session) -> TranscriptFixture {
+    if session.id == MockSignalboxFixtures.approvalSessionID {
+      return TranscriptFixture(
+        records: approvalTranscript(sessionID: session.id),
+        turnCount: MockProcessProtocolFixtures.singleTurnCount,
+        entryCount: MockProcessProtocolFixtures.transcriptEntryCount
+      )
+    }
+    if session.id == MockSignalboxFixtures.failedSessionID {
+      return TranscriptFixture(
+        records: failedTranscript(sessionID: session.id),
+        turnCount: MockProcessProtocolFixtures.singleTurnCount,
+        entryCount: MockProcessProtocolFixtures.transcriptEntryCount
+      )
+    }
+    if session.id == MockSignalboxFixtures.activeSessionID, scenario == .completedTool {
+      return TranscriptFixture(
+        records: completedToolTranscript(sessionID: session.id),
+        turnCount: MockProcessProtocolFixtures.singleTurnCount,
+        entryCount: "3"
+      )
+    }
+    let conversation = conversationContent(sessionID: session.id)
+    return TranscriptFixture(
+      records: conversationTranscript(
+        sessionID: session.id,
+        userText: conversation.user,
+        assistantText: conversation.assistant
+      ),
+      turnCount: MockProcessProtocolFixtures.emptyTurnCount,
+      entryCount: MockProcessProtocolFixtures.transcriptEntryCount
+    )
+  }
+
+  private func conversationTranscript(
+    sessionID: String,
+    userText: String,
+    assistantText: String
+  ) -> [[String: Any]] {
     [
       textEntry(
         index: "0",
@@ -338,7 +413,7 @@ private actor MockProcessProtocolState {
           "turn_id": MockProcessProtocolFixtures.activeTurnID,
         ]
       ),
-      content(index: "0", text: "Show the native client speaking the real process protocol."),
+      content(index: "0", text: userText),
       textEntry(
         index: "1",
         sessionID: sessionID,
@@ -349,11 +424,92 @@ private actor MockProcessProtocolState {
           "model_call_id": MockProcessProtocolFixtures.activeModelCallID,
         ]
       ),
-      content(
-        index: "1",
-        text:
-          "The view is projected from a version 5 JSONL snapshot over the transport abstraction."
+      content(index: "1", text: assistantText),
+    ]
+  }
+
+  private func conversationContent(
+    sessionID: String
+  ) -> (user: String, assistant: String) {
+    switch sessionID {
+    case MockSignalboxFixtures.markdownBasicsSessionID:
+      return (
+        MockSignalboxFixtures.markdownBasicsUserText,
+        MockSignalboxFixtures.markdownBasicsAssistantText
+      )
+    case MockSignalboxFixtures.markdownTableSessionID:
+      return (
+        MockSignalboxFixtures.markdownTableUserText,
+        MockSignalboxFixtures.markdownTableAssistantText
+      )
+    case MockSignalboxFixtures.markdownCodeSessionID:
+      return (
+        MockSignalboxFixtures.markdownCodeUserText,
+        MockSignalboxFixtures.markdownCodeAssistantText
+      )
+    case MockSignalboxFixtures.markdownSessionID:
+      return (
+        MockSignalboxFixtures.markdownUserText,
+        MockSignalboxFixtures.markdownAssistantText
+      )
+    default:
+      return (
+        "Show the native client speaking the real process protocol.",
+        "The view is projected from a version 5 JSONL snapshot over the transport abstraction."
+      )
+    }
+  }
+
+  private func completedToolTranscript(sessionID: String) -> [[String: Any]] {
+    [
+      [
+        "type": "transcript_turn",
+        "turn_id": MockProcessProtocolFixtures.activeTurnID,
+        "acceptance_position": MockProcessProtocolFixtures.firstAcceptancePosition,
+        "state": [
+          "type": "completed",
+          "terminal_frontier_id": MockProcessProtocolFixtures.completedFrontierID,
+          "terminal_attempt_id": MockProcessProtocolFixtures.completedAttemptID,
+          "terminal_model_call_id": MockProcessProtocolFixtures.activeModelCallID,
+        ],
+      ],
+      textEntry(
+        index: "0",
+        sessionID: sessionID,
+        entryID: MockProcessProtocolFixtures.activeUserEntryID,
+        entry: [
+          "type": "user",
+          "accepted_input_id": MockProcessProtocolFixtures.activeAcceptedInputID,
+          "turn_id": MockProcessProtocolFixtures.activeTurnID,
+        ]
       ),
+      content(index: "0", text: "Save the runner status report."),
+      [
+        "type": "transcript_entry",
+        "entry_index": "1",
+        "source_session_id": sessionID,
+        "entry_id": MockProcessProtocolFixtures.completedToolUseEntryID,
+        "entry": [
+          "type": "assistant_tool_use",
+          "turn_id": MockProcessProtocolFixtures.activeTurnID,
+          "model_call_id": MockProcessProtocolFixtures.activeModelCallID,
+          "tool_request_id": MockProcessProtocolFixtures.completedToolRequestID,
+          "tool_name": MockProcessProtocolFixtures.completedToolName,
+          "arguments": #"{"title":"runner-status.md"}"#,
+        ],
+      ],
+      [
+        "type": "transcript_entry",
+        "entry_index": "2",
+        "source_session_id": sessionID,
+        "entry_id": MockProcessProtocolFixtures.completedToolResultEntryID,
+        "entry": [
+          "type": "tool_execution_result",
+          "tool_request_id": MockProcessProtocolFixtures.completedToolRequestID,
+          "tool_attempt_id": MockProcessProtocolFixtures.completedToolAttemptID,
+          "content": MockProcessProtocolFixtures.completedToolOutput,
+        ],
+      ],
     ]
   }
 

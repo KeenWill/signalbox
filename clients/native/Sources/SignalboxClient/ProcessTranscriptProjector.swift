@@ -363,13 +363,39 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .all:
       return true
     case .trigger(let trigger):
-      guard case .assistant(let turnID, let modelCallID) = entry else {
+      switch entry {
+      case .user(_, let turnID):
+        return turnID == self.turnID(for: trigger)
+      case .assistant(let turnID, let modelCallID):
+        guard
+          case .turnCompleted(let triggerTurnID, let triggerModelCallID, _, _) = trigger
+        else {
+          return false
+        }
+        return turnID == triggerTurnID && modelCallID == triggerModelCallID
+      case .imported, .unknown:
         return false
       }
-      if case .turnCompleted(let triggerTurnID, let triggerModelCallID, _, _) = trigger {
-        return turnID == triggerTurnID && modelCallID == triggerModelCallID
-      }
-      return false
+    }
+  }
+
+  private func turnID(
+    for trigger: SignalboxProcessSessionEvent
+  ) -> SignalboxCanonicalUUID? {
+    switch trigger {
+    case .inputAccepted(_, let turnID, _, _),
+      .turnActivated(let turnID, _),
+      .modelCallTransition(let turnID, _, _),
+      .toolBatchTransition(let turnID, _, _),
+      .turnCompleted(let turnID, _, _, _),
+      .turnFailed(let turnID, _, _),
+      .turnRefused(let turnID, _, _),
+      .turnCancelled(let turnID, _, _),
+      .turnReconciliationRequired(let turnID, _, _),
+      .turnToolReconciliationRequired(let turnID, _, _):
+      return turnID
+    case .sessionCreated, .unknown:
+      return nil
     }
   }
 

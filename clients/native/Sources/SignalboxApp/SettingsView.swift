@@ -39,7 +39,7 @@ struct SettingsScreen: View {
             .accessibilityIdentifier("test-connection-button")
 
             Button {
-              coordinator.processSettings.save()
+              coordinator.saveProcessSocketPath()
             } label: {
               Label("Save Socket Path", systemImage: "externaldrive.badge.checkmark")
             }

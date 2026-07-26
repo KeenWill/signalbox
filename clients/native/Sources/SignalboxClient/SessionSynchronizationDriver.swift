@@ -23,6 +23,11 @@ public protocol SignalboxSessionSynchronizing: Sendable {
 }
 
 public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizing {
+  private struct QueuedInput {
+    let input: SignalboxSessionSynchronizationInput
+    let completion: CheckedContinuation<Void, Never>
+  }
+
   private let requester: any SignalboxProcessRequesting
   private let sessionID: SignalboxCanonicalUUID
   private let updates: @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
@@ -35,6 +40,8 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   private var deadlineTask: Task<Void, Never>?
   private var deadlineToken: SignalboxSynchronizationDeadlineToken?
   private var reconnectTask: Task<Void, Never>?
+  private var queuedInputs: [QueuedInput] = []
+  private var isProcessingInputs = false
   private var isStarted = false
 
   public init(
@@ -72,24 +79,52 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   private func process(
     _ input: SignalboxSessionSynchronizationInput
   ) async {
-    let effects = machine.receive(input)
-    await updates(.phase(machine.phase))
-    var replayGeneration: UInt64?
-    if case .replay(let generation, _) = machine.phase,
-      effects.contains(where: { effect in
-        if case .publishSnapshot = effect {
-          return true
-        }
-        return false
-      })
-    {
-      replayGeneration = generation
+    await withCheckedContinuation { completion in
+      queuedInputs.append(QueuedInput(input: input, completion: completion))
+      guard !isProcessingInputs else {
+        return
+      }
+      isProcessingInputs = true
+      Task {
+        await drainInputs()
+      }
     }
-    for effect in effects {
-      await execute(effect)
+  }
+
+  private func drainInputs() async {
+    while !queuedInputs.isEmpty {
+      let queued = queuedInputs.removeFirst()
+      await reduceAndExecute(queued.input)
+      queued.completion.resume()
     }
-    if let replayGeneration, isStarted {
-      await process(.replayCompleted(generation: replayGeneration))
+    isProcessingInputs = false
+  }
+
+  private func reduceAndExecute(
+    _ initialInput: SignalboxSessionSynchronizationInput
+  ) async {
+    var nextInput: SignalboxSessionSynchronizationInput? = initialInput
+    while let input = nextInput {
+      nextInput = nil
+      let effects = machine.receive(input)
+      await updates(.phase(machine.phase))
+      var replayGeneration: UInt64?
+      if case .replay(let generation, _) = machine.phase,
+        effects.contains(where: { effect in
+          if case .publishSnapshot = effect {
+            return true
+          }
+          return false
+        })
+      {
+        replayGeneration = generation
+      }
+      for effect in effects {
+        await execute(effect)
+      }
+      if let replayGeneration, isStarted {
+        nextInput = .replayCompleted(generation: replayGeneration)
+      }
     }
   }
 
