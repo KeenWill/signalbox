@@ -312,12 +312,37 @@ public struct SignalboxProcessClientFrame: Encodable, Equatable, Sendable {
   }
 }
 
-public struct SignalboxProcessServerFrame: Decodable, Equatable, Sendable {
+public struct SignalboxProcessServerFrame: Equatable, Sendable {
   public let version: SignalboxProcessProtocolVersion
   public let requestID: SignalboxCanonicalUInt64
   public let message: SignalboxProcessServerMessage
 
-  public init(from decoder: Decoder) throws {
+  private init(
+    version: SignalboxProcessProtocolVersion,
+    requestID: SignalboxCanonicalUInt64,
+    message: SignalboxProcessServerMessage
+  ) {
+    self.version = version
+    self.requestID = requestID
+    self.message = message
+  }
+
+  public static func decode(from data: Data) throws -> Self {
+    var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
+    let duplicateObjectPaths = try scanner.scan()
+    let decoder = SignalboxJSONCoding.decoder()
+    decoder.userInfo[.signalboxDuplicateObjectPaths] = duplicateObjectPaths
+    let wire = try decoder.decode(SignalboxProcessServerWireFrame.self, from: data)
+    return Self(version: wire.version, requestID: wire.requestID, message: wire.message)
+  }
+}
+
+private struct SignalboxProcessServerWireFrame: Decodable {
+  let version: SignalboxProcessProtocolVersion
+  let requestID: SignalboxCanonicalUInt64
+  let message: SignalboxProcessServerMessage
+
+  init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     try payload.rejectUnadmittedFields(
       ["version", "request_id", "message"],
@@ -327,14 +352,6 @@ public struct SignalboxProcessServerFrame: Decodable, Equatable, Sendable {
     version = try container.decode(SignalboxProcessProtocolVersion.self, forKey: .version)
     requestID = try container.decode(SignalboxCanonicalUInt64.self, forKey: .requestID)
     message = try container.decode(SignalboxProcessServerMessage.self, forKey: .message)
-  }
-
-  public static func decode(from data: Data) throws -> Self {
-    var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
-    let duplicateObjectPaths = try scanner.scan()
-    let decoder = SignalboxJSONCoding.decoder()
-    decoder.userInfo[.signalboxDuplicateObjectPaths] = duplicateObjectPaths
-    return try decoder.decode(Self.self, from: data)
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -1288,6 +1305,17 @@ public struct SignalboxProcessError: Decodable, Equatable, Sendable {
   public let code: SignalboxProcessErrorCode
   public let message: String
   public let detail: SignalboxRejectionDetail?
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      ["type", "code", "message", "detail"],
+      decoder: decoder
+    )
+    code = try decoder.decode("code")
+    message = try decoder.decode("message")
+    detail = try decoder.decodeIfPresent("detail")
+  }
 }
 
 public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
@@ -1305,21 +1333,38 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
     case "session_not_found":
+      try tagged.rejectUnadmittedFields(["type", "session_id"], decoder: decoder)
       self = .sessionNotFound(sessionID: try decoder.decode("session_id"))
     case "active_turn_present":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "active_turn_id"],
+        decoder: decoder
+      )
       self = .activeTurnPresent(
         sessionID: try decoder.decode("session_id"),
         activeTurnID: try decoder.decode("active_turn_id"))
     case "defaults_version_mismatch":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "expected", "current"],
+        decoder: decoder
+      )
       self = .defaultsVersionMismatch(
         sessionID: try decoder.decode("session_id"),
         expected: try decoder.decode("expected"),
         current: try decoder.decode("current")
       )
     case "unknown_model_alias":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "alias_id"],
+        decoder: decoder
+      )
       self = .unknownModelAlias(
         sessionID: try decoder.decode("session_id"), aliasID: try decoder.decode("alias_id"))
     case "acceptance_position_exhausted":
+      try tagged.rejectUnadmittedFields(
+        ["type", "session_id", "last"],
+        decoder: decoder
+      )
       self = .acceptancePositionExhausted(
         sessionID: try decoder.decode("session_id"), last: try decoder.decode("last"))
     default:
@@ -1414,14 +1459,14 @@ private struct SignalboxUntaggedPayload: Decodable {
   }
 }
 
-private extension CodingUserInfoKey {
-  static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
+extension CodingUserInfoKey {
+  fileprivate static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
     rawValue: "org.signalbox.process-protocol.duplicate-object-paths"
   )!
 }
 
-private extension Decoder {
-  var containsDuplicateObjectMembers: Bool {
+extension Decoder {
+  fileprivate var containsDuplicateObjectMembers: Bool {
     guard
       let duplicateObjectPaths =
         userInfo[.signalboxDuplicateObjectPaths] as? Set<[String]>
@@ -1431,14 +1476,14 @@ private extension Decoder {
     return duplicateObjectPaths.contains(decodedObjectPath)
   }
 
-  func rejectDuplicateObjectMembers() throws {
+  fileprivate func rejectDuplicateObjectMembers() throws {
     guard containsDuplicateObjectMembers else {
       return
     }
     throw duplicateObjectMembersError()
   }
 
-  func duplicateObjectMembersError() -> DecodingError {
+  fileprivate func duplicateObjectMembersError() -> DecodingError {
     .dataCorrupted(
       .init(
         codingPath: codingPath,

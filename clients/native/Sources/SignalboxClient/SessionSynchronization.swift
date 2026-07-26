@@ -234,6 +234,8 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
 /// race explicit and allow stale work to be ignored without mutating state.
 public struct SignalboxSessionSynchronizationMachine: Sendable {
   static let maximumRetainedDiagnostics = 128
+  // docs/decisions.md records the 4 KiB retained-message choice.
+  static let maximumRetainedDiagnosticMessageUTF8Bytes = 4 * 1_024
 
   public private(set) var phase: SignalboxSessionSynchronizationPhase = .stopped
   public private(set) var diagnostics: [SignalboxSynchronizationDiagnostic] = []
@@ -601,6 +603,14 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     trigger: SignalboxFollowedSessionEvent,
     generation currentGeneration: UInt64
   ) -> [SignalboxSessionSynchronizationEffect] {
+    guard policy.eventBufferCapacity.maximumEvents > 0,
+      trigger.event.retainedUTF8Bytes <= policy.eventBufferCapacity.maximumUTF8Bytes
+    else {
+      return protocolFailure(
+        stage: .steady,
+        message: "A side-snapshot trigger exceeded the configured native-client capacity."
+      )
+    }
     let refreshID = nextRefreshID
     nextRefreshID = nextIdentity(after: nextRefreshID)
     activeRefresh = SignalboxSideSnapshotRefresh(
@@ -724,13 +734,20 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     let (nextBytes, overflowed) = replayBufferUTF8Bytes.addingReportingOverflow(
       retainedBytes
     )
+    let triggerBytes = activeRefresh?.trigger.event.retainedUTF8Bytes ?? 0
+    let (totalRetainedBytes, totalBytesOverflowed) = nextBytes.addingReportingOverflow(
+      triggerBytes
+    )
+    let retainedTriggerCount: UInt = activeRefresh == nil ? 0 : 1
     let (nextInsertionID, insertionIDOverflowed) =
       replayBufferNextInsertionID.addingReportingOverflow(1)
     guard
-      UInt(replayBuffer.count) < policy.eventBufferCapacity.maximumEvents,
+      UInt(replayBuffer.count) + retainedTriggerCount
+        < policy.eventBufferCapacity.maximumEvents,
       !overflowed,
+      !totalBytesOverflowed,
       !insertionIDOverflowed,
-      nextBytes <= policy.eventBufferCapacity.maximumUTF8Bytes
+      totalRetainedBytes <= policy.eventBufferCapacity.maximumUTF8Bytes
     else {
       return protocolFailure(
         stage: currentStage,
@@ -1075,11 +1092,32 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   private mutating func retainDiagnostic(
     _ diagnostic: SignalboxSynchronizationDiagnostic
   ) {
-    diagnostics.append(diagnostic)
+    diagnostics.append(
+      SignalboxSynchronizationDiagnostic(
+        kind: diagnostic.kind,
+        stage: diagnostic.stage,
+        message: retainedDiagnosticMessage(diagnostic.message)
+      )
+    )
     let overflow = diagnostics.count - Self.maximumRetainedDiagnostics
     if overflow > 0 {
       diagnostics.removeFirst(overflow)
     }
+  }
+
+  private func retainedDiagnosticMessage(_ message: String) -> String {
+    let scalars = message.unicodeScalars
+    var retainedEnd = scalars.startIndex
+    var retainedBytes = 0
+    while retainedEnd != scalars.endIndex {
+      let scalarBytes = scalars[retainedEnd].utf8.count
+      guard retainedBytes + scalarBytes <= Self.maximumRetainedDiagnosticMessageUTF8Bytes else {
+        break
+      }
+      retainedBytes += scalarBytes
+      scalars.formIndex(after: &retainedEnd)
+    }
+    return String(scalars[..<retainedEnd])
   }
 
   private mutating func clearReplayBuffer() {

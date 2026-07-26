@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
+
+**Context.** The native synchronization machine retains the latest 128
+diagnostics across fallback and reconnect. Count bounds fixed record overhead,
+but a diagnostic derived from an unknown wire kind or decoding path could retain
+nearly one full 8 MiB frame in its message, so tolerated malformed or future
+input could still make the bounded history retain roughly a gigabyte.
+
+**Decision.** Continue emitting each complete diagnostic to the current caller,
+but retain at most 4,096 UTF-8 bytes of its message in machine history,
+truncating only at a Unicode-scalar boundary. Together with the existing
+128-record cap, retained diagnostic-message text is bounded at 512 KiB. The cap
+applies to every diagnostic source so later wire-derived paths cannot reopen the
+heap-growth path.
+
+**Rejected alternatives.** A count-only limit leaves frame-sized strings
+unbounded in aggregate. Sanitizing only unknown kind names misses decoding paths
+and future diagnostic sources. Bounding emitted diagnostics would discard useful
+immediate evidence even though the caller need not retain it.
+
+**Affects.** Native synchronization diagnostic retention and its scripted tests;
+diagnostic effects remain complete.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a

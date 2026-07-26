@@ -65,10 +65,7 @@ final class ProcessProtocolTests: XCTestCase {
       """.utf8
     )
 
-    let frame = try SignalboxJSONCoding.decoder().decode(
-      SignalboxProcessServerFrame.self,
-      from: encoded
-    )
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
 
     XCTAssertEqual(
       frame.message,
@@ -103,10 +100,7 @@ final class ProcessProtocolTests: XCTestCase {
       """.utf8
     )
 
-    let frame = try SignalboxJSONCoding.decoder().decode(
-      SignalboxProcessServerFrame.self,
-      from: encoded
-    )
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
 
     XCTAssertEqual(
       frame.message,
@@ -138,10 +132,7 @@ final class ProcessProtocolTests: XCTestCase {
       """.utf8
     )
 
-    let frame = try SignalboxJSONCoding.decoder().decode(
-      SignalboxProcessServerFrame.self,
-      from: encoded
-    )
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
 
     XCTAssertEqual(
       frame.message,
@@ -226,9 +217,38 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
   }
+
+  func testExpandedErrorMessageDegradesBeforeProtocolProjection() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.expandedErrorFrame()
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.unadmittedErrorFieldDiagnostic
+    )
+  }
+
+  func testExpandedKnownErrorDetailDegradesBeforeProtocolProjection() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.expandedErrorDetailFrame(sessionID: sessionID)
+    )
+
+    XCTAssertEqual(
+      ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+      ProcessProtocolFixture.unadmittedDetailFieldDiagnostic
+    )
+  }
 }
 
 private enum ProcessProtocolFixture {
+  static let unadmittedErrorFieldDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.extra."
+  )
+  static let unadmittedDetailFieldDiagnostic = SignalboxDecodingDiagnostic(
+    message: "Invalid field value at message.detail.extra."
+  )
+
   static func duplicateSnapshotBoundaryMessage(
     sessionID: String
   ) -> SignalboxProcessServerMessage {
@@ -265,11 +285,58 @@ private enum ProcessProtocolFixture {
 
   static func excessivelyNestedFrame() -> Data {
     Data(
-      (
-        String(repeating: "[", count: 128)
-          + "null"
-          + String(repeating: "]", count: 128)
-      ).utf8
+      (String(repeating: "[", count: 128)
+        + "null"
+        + String(repeating: "]", count: 128)).utf8
     )
+  }
+
+  static func expandedErrorFrame() -> Data {
+    Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"not_found",
+          "message":"fixture error",
+          "extra":true
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func expandedErrorDetailFrame(
+    sessionID: String
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"error",
+          "code":"rejected",
+          "message":"fixture rejection",
+          "detail":{
+            "type":"session_not_found",
+            "session_id":"\(sessionID)",
+            "extra":true
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func decodingDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard case .unknown(_, _, let diagnostic) = message else {
+      return nil
+    }
+    return diagnostic
   }
 }
