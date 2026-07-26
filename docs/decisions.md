@@ -10,6 +10,73 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Narrow a credential file to its value, and name credential faults
+
+**Context.** The first live dogfood run of the dev instance could not use a
+code-host tool at all. Two separate faults compounded. The tools that write a
+credential file — `gh auth token`, `op read`, `pass`, a shell redirect —
+terminate the line they print, and the file channel read those bytes verbatim,
+so `Bearer <token>\n` could not form an `Authorization` header. The resulting
+`InvalidCredential` then shared an error detail with a definitive code-host
+rejection, so the one visible symptom was the model being told the code host had
+rejected a request the daemon never sent.
+
+**Decision.** The file channel narrows what it reads: trailing `\n` and `\r`
+bytes are dropped, every other byte is retained exactly. The narrowing lives at
+the read rather than at each adapter's header formation, so all adapters, the
+durable-record boundary, and the credential scrub agree on one value. Credential
+bytes that cannot form the authentication header now present the
+credential-unavailable detail a failed resolution already presents, leaving the
+code-host detail to mean the code host answered.
+
+**Rejected alternatives.** Trimming at header formation would leave each adapter
+narrowing separately and would hand the scrubber a value that no longer matches
+the token a provider might reflect. Trimming all ASCII whitespace would silently
+accept a credential a deployment never meant to install. Rejecting a terminated
+file outright would keep the honest contract and fail every standard
+provisioning step, which is what the smoke run did. Treating an all-termination
+file as a resolution failure would add a fourth typed failure for a case the
+adapter boundary already refuses.
+
+**Affects.** `FileCredentialAccess`, the code-host executor's known-failure
+detail selection, and the credential-lifecycle and code-host sections of the
+configuration-and-credentials and tool-loop pages. The same run found the dev
+instance never passed `GITHUB_TOKEN_FILE`, which the daemon requires at startup;
+`devenv.nix` now passes it with a `SIGNALBOX_DEV_GITHUB_TOKEN_FILE` override,
+mirroring the Anthropic key file.
+
+## 2026-07-26 — Report a failed tool attempt once, at admission
+
+**Context.** A failed tool attempt was operator-invisible. The typed error
+resolves the logical request and reaches the next model round, and nothing else;
+the same dogfood run showed a credential fault only as a model complaining about
+a code host. The daemon has no metrics or trace export, so the log line is the
+whole operator surface.
+
+**Decision.** Admitting a `KnownFailed` observation emits one `tracing` warning
+carrying the dispatched catalog tool name, the closed error kind, and the
+session and turn identities. Admission in `crates/application` is the single
+site: the executors sit behind one dispatch trait, that layer already holds
+every typed fact the event carries, and it also covers the failures admission
+itself substitutes for oversized or null-bearing results. Completed and
+ambiguous observations stay silent, as do preflight failures, which are
+model-authored rather than deployment facts.
+
+**Rejected alternatives.** Emitting from each executor would repeat the site
+five times and still miss admission-substituted failures — the same argument
+that put the provider bridge, not the adapters, in charge of runtime
+diagnostics. Carrying an `OperatorFailureClass` would be dishonest: a known tool
+failure is a resolved request, not a runtime failure, and the taxonomy grades
+how bad a failure is. Including the bounded error detail would put executor-
+chosen text in telemetry, which the redaction rules keep out. A new closed
+cause-code vocabulary for tools would duplicate the error kind that already
+exists.
+
+**Affects.** `crates/application/src/tool_loop.rs`, the staged-execution section
+of the tool-loop page, and the telemetry field inventory in the
+identity-and-commands and configuration-and-credentials pages.
+
+
 ## 2026-07-26 — Add an explicit recursive conversation-import scan
 
 **Context.** The terminal import verb accepted one named source file, while an
