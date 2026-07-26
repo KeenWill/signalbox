@@ -1,5 +1,9 @@
 //! Checked code-host argument primitives shared by tool declarations.
 
+use std::{borrow::Cow, fmt};
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::de::DeserializeOwned;
 use signalbox_domain::NormalizedToolArguments;
 
 pub(super) const MAX_REPOSITORY_BYTES: usize = 256;
@@ -7,46 +11,26 @@ pub(super) const MAX_FILE_PATH_BYTES: usize = 4 * 1024;
 pub(super) const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
 pub(super) const MAX_OPAQUE_ID_BYTES: usize = 512;
 
+/// A code-host argument value did not satisfy its checked representation.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct InvalidCodeHostArguments;
+pub struct InvalidCodeHostArguments;
 
-pub(super) fn object(
+impl fmt::Display for InvalidCodeHostArguments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid code-host arguments")
+    }
+}
+
+pub(super) fn decode<Arguments: DeserializeOwned>(
     arguments: &NormalizedToolArguments,
-    expected_members: usize,
-) -> Result<serde_json::Map<String, serde_json::Value>, InvalidCodeHostArguments> {
-    let serde_json::Value::Object(object) =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidCodeHostArguments)?
-    else {
-        return Err(InvalidCodeHostArguments);
-    };
-    (object.len() == expected_members)
-        .then_some(object)
-        .ok_or(InvalidCodeHostArguments)
-}
-
-pub(super) fn take_string(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    member: &str,
-) -> Result<String, InvalidCodeHostArguments> {
-    object
-        .remove(member)
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or(InvalidCodeHostArguments)
-}
-
-pub(super) fn take_positive_id(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    member: &str,
-) -> Result<u64, InvalidCodeHostArguments> {
-    object
-        .remove(member)
-        .and_then(|value| value.as_u64())
-        .filter(|value| *value > 0)
-        .ok_or(InvalidCodeHostArguments)
+) -> Result<Arguments, InvalidCodeHostArguments> {
+    serde_json::from_str(arguments.as_str()).map_err(|_| InvalidCodeHostArguments)
 }
 
 /// One checked GitHub repository spelling.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct CodeHostRepository {
     value: String,
     owner_end: usize,
@@ -98,8 +82,35 @@ fn valid_repository_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+impl TryFrom<String> for CodeHostRepository {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostRepository {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostRepository")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "maxLength": MAX_REPOSITORY_BYTES,
+            "pattern": r"^(?:[A-Za-z0-9_-]|\.[A-Za-z0-9_-]|\.\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\.[A-Za-z0-9_-]|\.\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// One positive change-request number representable by GitHub GraphQL.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "u64")]
 pub struct CodeHostChangeRequestNumber(u32);
 
 impl CodeHostChangeRequestNumber {
@@ -116,6 +127,71 @@ impl CodeHostChangeRequestNumber {
     }
 }
 
+impl TryFrom<u64> for CodeHostChangeRequestNumber {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostChangeRequestNumber {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostChangeRequestNumber")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": i32::MAX,
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+/// One positive GitHub REST identity representable by JSON and `u64`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "u64")]
+pub(super) struct CodeHostPositiveId(u64);
+
+impl CodeHostPositiveId {
+    pub(super) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<u64> for CodeHostPositiveId {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        (value > 0)
+            .then_some(Self(value))
+            .ok_or(InvalidCodeHostArguments)
+    }
+}
+
+impl JsonSchema for CodeHostPositiveId {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostPositiveId")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": u64::MAX,
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// Whether a value is one exact lowercase 40-hex revision. Returned revisions
 /// are admitted by this same predicate so a result can always be passed back
 /// as a revision argument.
@@ -127,7 +203,8 @@ pub(super) fn valid_revision(value: &str) -> bool {
 }
 
 /// One exact lowercase 40-hex revision.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct CodeHostRevision(String);
 
 impl CodeHostRevision {
@@ -143,8 +220,36 @@ impl CodeHostRevision {
     }
 }
 
+impl TryFrom<String> for CodeHostRevision {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostRevision {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostRevision")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 40,
+            "pattern": "^[0-9a-f]{40}$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// One checked repository-relative file path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct CodeHostFilePath(String);
 
 impl CodeHostFilePath {
@@ -163,8 +268,36 @@ impl CodeHostFilePath {
     }
 }
 
+impl TryFrom<String> for CodeHostFilePath {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostFilePath {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostFilePath")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_FILE_PATH_BYTES,
+            "pattern": r"^[^/\u0000][^\u0000]*$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// One checked nonempty comment body.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct CodeHostCommentBody(String);
 
 impl CodeHostCommentBody {
@@ -180,6 +313,33 @@ impl CodeHostCommentBody {
     }
 }
 
+impl TryFrom<String> for CodeHostCommentBody {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostCommentBody {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostCommentBody")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_COMMENT_BODY_BYTES,
+            "pattern": r"^[^\u0000]+$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
 /// Whether a value is one bounded opaque GraphQL node identity. Returned node
 /// identities are admitted by this same predicate so a result can always be
 /// passed back as an opaque identity argument.
@@ -188,7 +348,8 @@ pub(super) fn valid_opaque_id(value: &str) -> bool {
 }
 
 /// One bounded opaque GraphQL node identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct CodeHostOpaqueId(String);
 
 impl CodeHostOpaqueId {
@@ -201,5 +362,32 @@ impl CodeHostOpaqueId {
     /// Borrows the opaque identity.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for CodeHostOpaqueId {
+    type Error = InvalidCodeHostArguments;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl JsonSchema for CodeHostOpaqueId {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CodeHostOpaqueId")
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_OPAQUE_ID_BYTES,
+            "pattern": r"^[^\u0000-\u001F\u007F-\u009F]+$",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
     }
 }

@@ -1,11 +1,12 @@
 //! `change_request_thread_reply` registry declaration and typed arguments.
 
 use signalbox_domain::NormalizedToolArguments;
+use signalbox_tool_contract::ToolContract;
 
 use super::{
     CodeHostOperation,
     arguments::{
-        CodeHostCommentBody, CodeHostOpaqueId, InvalidCodeHostArguments, object, take_string,
+        CodeHostCommentBody, CodeHostOpaqueId, InvalidCodeHostArguments, decode as decode_arguments,
     },
 };
 
@@ -13,20 +14,22 @@ use super::{
 /// `ExternalEffect`; dispatch loss is commit-ambiguous.
 pub(super) const NAME: &str = "change_request_thread_reply";
 pub(super) const DESCRIPTION: &str = "Posts one reply to an exact GitHub review-thread node.";
-pub(super) const SCHEMA: &str = r#"{
-    "type": "object",
-    "properties": {
-        "thread_id": {"type": "string", "description": "Opaque review-thread node identity."},
-        "body": {"type": "string", "description": "Exact nonempty reply body."}
-    },
-    "required": ["thread_id", "body"],
-    "additionalProperties": false
-}"#;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadReplyArguments {
+    /// Opaque review-thread node identity.
     thread_id: CodeHostOpaqueId,
+    /// Exact nonempty reply body.
     body: CodeHostCommentBody,
+}
+
+pub(super) struct Contract;
+
+impl ToolContract for Contract {
+    type Arguments = ThreadReplyArguments;
+    const NAME: &'static str = NAME;
+    const DESCRIPTION: &'static str = DESCRIPTION;
 }
 
 impl ThreadReplyArguments {
@@ -44,11 +47,5 @@ impl ThreadReplyArguments {
 pub(super) fn decode(
     arguments: &NormalizedToolArguments,
 ) -> Result<CodeHostOperation, InvalidCodeHostArguments> {
-    let mut object = object(arguments, 2)?;
-    let thread_id = CodeHostOpaqueId::try_new(take_string(&mut object, "thread_id")?)?;
-    let body = CodeHostCommentBody::try_new(take_string(&mut object, "body")?)?;
-    Ok(CodeHostOperation::ThreadReply(ThreadReplyArguments {
-        thread_id,
-        body,
-    }))
+    decode_arguments(arguments).map(CodeHostOperation::ThreadReply)
 }

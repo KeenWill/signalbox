@@ -2775,9 +2775,12 @@ dependencies = [
 name = "signalbox-tools-code-host"
 version = "0.0.0"
 dependencies = [
+ "expect-test",
  "futures-util",
  "reqwest",
  "rustls",
+ "schemars 1.2.1",
+ "serde",
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
