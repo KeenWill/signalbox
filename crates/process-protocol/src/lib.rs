@@ -3738,7 +3738,7 @@ mod tests {
     /// INV-033: the reconciliation request is admitted only by version seven
     /// and keeps its exact closed shape across one encode/decode round trip.
     #[test]
-    fn inv033_version_six_reconcile_turn_request_has_an_exact_closed_shape()
+    fn inv033_version_seven_reconcile_turn_request_has_an_exact_closed_shape()
     -> Result<(), Box<dyn std::error::Error>> {
         let request_id = request(1)?;
         let request_value = ClientRequest::ReconcileTurn {
