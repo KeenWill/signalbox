@@ -5278,6 +5278,7 @@ pub enum ReviewTargetError {
     ForeignParent { target: ReviewTargetId },
     MissingParentBase { target: ReviewTargetId },
     DisconnectedParent { target: ReviewTargetId },
+    RepeatedChangeRequest { target: ReviewTargetId },
 }
 impl ReviewTarget {
     pub fn try_new(
@@ -5387,11 +5388,28 @@ impl ReviewExternalLinkObservationResult {
     ) -> Self;
     // accessors: link(), ordinal(), state()
 }
+pub struct ReviewExternalLinkNoChangeResult { /* reservation + unchanged state */ }
+impl ReviewExternalLinkNoChangeResult {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    // accessors: link(), state()
+}
+pub struct ReviewExternalLinkPublicationBlockedResult {
+    /* pending reservation + reason */
+}
+impl ReviewExternalLinkPublicationBlockedResult {
+    pub const fn new(link: ReviewExternalLinkId, reason: ReviewText) -> Self;
+    // accessors: link(), reason()
+}
 pub enum ReviewPassResult {
     ProducedFindings(ReviewProducedFindings),
     FindingEvent(ReviewFindingEventResult),
     ExternalLinkAttachment(ReviewExternalLinkAttachmentResult),
     ExternalLinkObservation(ReviewExternalLinkObservationResult),
+    ExternalLinkNoChange(ReviewExternalLinkNoChangeResult),
+    ExternalLinkPublicationBlocked(ReviewExternalLinkPublicationBlockedResult),
 }
 pub struct ReviewReferencedFindingEvidence { /* reference + frozen status */ }
 impl ReviewReferencedFindingEvidence {
@@ -5420,14 +5438,15 @@ pub enum ReviewRunState {
     Blocked { blocking_pass: ReviewPassRef },
     Cancelled { last_pass: Option<ReviewPassRef> },
 }
-pub struct ReviewRunEvidence { /* canonical run reference + workflow + policy */ }
+pub struct ReviewRunEvidence { /* canonical run reference + workflow + policy + state */ }
 impl ReviewRunEvidence {
     pub const fn new(
         reference: ReviewRunRef,
         workflow: ReviewWorkflowKind,
         policy: ReviewPolicy,
+        state: ReviewRunState,
     ) -> Self;
-    // accessors: reference(), workflow(), policy()
+    // accessors: reference(), workflow(), policy(), state()
 }
 pub struct ReviewPassEvidence { /* canonical pass reference + kind + policy + state */ }
 impl ReviewPassEvidence {
@@ -5849,6 +5868,16 @@ impl ReviewExternalLink {
         -> Result<Self, ReviewExternalLinkTransitionError>;
     pub fn observe(self, observation: ReviewExternalLinkObservation)
         -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn confirm_unchanged(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn block_publication(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> Result<Self, ReviewExternalLinkTransitionError>;
     // accessors: id(), association(), provider(), object_kind(), attachment(),
     // observations()
 }
@@ -5888,6 +5917,8 @@ pub enum ReviewExternalLinkTransitionFailure {
     IncompatibleAttachmentRunEvidence,
     IncompatibleObservationPass,
     IncompatibleObservationRunEvidence,
+    IncompatiblePublicationBlockPass,
+    IncompatiblePublicationBlockRunEvidence,
     UnchangedObservation,
     ConflictingPassEvidence,
     ConflictingRunEvidence,
@@ -5925,9 +5956,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
-| domain: review_workflow                            | 78                   |
+| domain: review_workflow                            | 80                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **448 (+1 free fn)** |
+| **signalbox-domain total**                         | **450 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
