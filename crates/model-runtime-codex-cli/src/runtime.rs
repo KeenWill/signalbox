@@ -589,7 +589,10 @@ async fn execute_process<C: Clone + Send + Sync>(
             // the normal exit path below, because the adapter cannot prove the
             // full authorized frontier reached the CLI.
             let evidence = if let Some(error) = input_error {
-                decoder.boundary_loss_unless_provider_failure(incomplete_upload_cause(&error))
+                decoder.boundary_loss_unless_provider_failure(
+                    incomplete_upload_cause(&error),
+                    &redacting_sink,
+                )
             } else {
                 decoder.finish(&mut redacting_sink)
             };
@@ -663,7 +666,10 @@ async fn execute_process<C: Clone + Send + Sync>(
     match status {
         Ok(status) if status.success() => {
             let evidence = if let Some(error) = input_error {
-                decoder.boundary_loss_unless_provider_failure(incomplete_upload_cause(&error))
+                decoder.boundary_loss_unless_provider_failure(
+                    incomplete_upload_cause(&error),
+                    &redacting_sink,
+                )
             } else {
                 decoder.finish(&mut redacting_sink)
             };
@@ -678,8 +684,11 @@ async fn execute_process<C: Clone + Send + Sync>(
             } else {
                 format!("Codex CLI exited with status {status}")
             };
+            // Evidence is built before the sink flushes so the failure
+            // message still sees the held cross-fragment redaction state.
+            let evidence = decoder.provider_error_after_exit(&message, &redacting_sink);
             redacting_sink.finish();
-            decoder.provider_error_after_exit(&message)
+            evidence
         }
         Err(error) => {
             redacting_sink.finish();

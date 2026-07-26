@@ -172,7 +172,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
-                provider_error(self.exchange, self.usage, &message)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) => self.completed(sink),
             None => boundary_loss(
@@ -189,13 +189,17 @@ impl<C: Clone> EventDecoder<C> {
         provider_error(self.exchange, self.usage, message)
     }
 
-    pub(crate) fn provider_error_after_exit(self, fallback: &str) -> TerminalEvidence {
+    pub(crate) fn provider_error_after_exit(
+        self,
+        fallback: &str,
+        sink: &RedactingSink<'_, C>,
+    ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
-                provider_error(self.exchange, self.usage, &message)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => {
-                provider_error(self.exchange, self.usage, fallback)
+                provider_failure(self.exchange, self.usage, fallback, sink)
             }
         }
     }
@@ -207,10 +211,11 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
+        sink: &RedactingSink<'_, C>,
     ) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
-                provider_error(self.exchange, self.usage, &message)
+                provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) | None => boundary_loss(self.exchange, self.usage, cause),
         }
@@ -561,6 +566,30 @@ fn provider_error(exchange: ExchangeFacts, usage: TokenUsage, message: &str) -> 
             error_token: Some("codex_cli_error".to_string()),
             error_code: None,
             message: Some(redact_text(message)),
+        },
+        usage,
+    })
+}
+
+/// Builds provider-failure evidence whose message consulted the stateful
+/// stream redactor: a failure message that extends a credential candidate
+/// held from streamed text is suppressed whole, exactly as the streamed
+/// fragments it continues would have been, instead of receiving an
+/// independent stateless re-redaction that cannot see the held marker.
+fn provider_failure<C: Clone>(
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+    message: &str,
+    sink: &RedactingSink<'_, C>,
+) -> TerminalEvidence {
+    TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        exchange,
+        reported_model: None,
+        kind: classify_error(message),
+        native: NativeErrorFacts {
+            error_token: Some("codex_cli_error".to_string()),
+            error_code: None,
+            message: Some(sink.redact_terminal_failure_text(message)),
         },
         usage,
     })

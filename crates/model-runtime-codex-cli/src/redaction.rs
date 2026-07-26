@@ -343,6 +343,26 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.terminal_text_capture.take().unwrap_or_default()
     }
 
+    /// Redacts a terminal failure message against the held lookbehind state:
+    /// a message that extends a held credential candidate — or that arrives
+    /// while the sink is suppressing an oversized one — is replaced whole,
+    /// exactly as the streamed fragments it continues are, so a credential
+    /// split between streamed text and a failure message cannot cross the
+    /// adapter boundary inside terminal evidence.
+    pub(crate) fn redact_terminal_failure_text(&self, message: &str) -> String {
+        if self.suppressing {
+            return REDACTED.to_string();
+        }
+        if let Some(pending) = &self.pending {
+            let mut joined = pending.text.clone();
+            joined.push_str(message);
+            if redact_text(&joined) != joined {
+                return REDACTED.to_string();
+            }
+        }
+        redact_text(message)
+    }
+
     fn flush_boundary(&mut self) {
         if let Some(pending) = self.pending.take() {
             if stream_candidate_starts_at_zero(&pending.text) {
@@ -879,6 +899,57 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// INV-035: a failure message that extends a credential marker held
+    /// from streamed text is suppressed whole, never returned verbatim.
+    #[test]
+    fn inv_035_terminal_failure_text_consults_held_redaction_state() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "Authorization:".to_string(),
+            },
+        });
+
+        assert_eq!(
+            sink.redact_terminal_failure_text(AUTHORIZATION_VALUE),
+            REDACTED
+        );
+    }
+
+    /// INV-035: a failure message that arrives while the sink suppresses an
+    /// oversized unterminated credential is suppressed with it.
+    #[test]
+    fn inv_035_terminal_failure_text_stays_suppressed_after_an_oversized_credential() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed);
+        sink.observe(Observation {
+            correlation: 7_u8,
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: format!("sk-{}", "x".repeat(MAX_PENDING_STREAM_BYTES)),
+            },
+        });
+
+        assert_eq!(
+            sink.redact_terminal_failure_text("harmless failure detail"),
+            REDACTED
+        );
+    }
+
+    /// A failure message with no held redaction state keeps its stateless
+    /// redaction, so harmless provider errors stay legible.
+    #[test]
+    fn terminal_failure_text_without_held_state_is_unchanged() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+        let message = "quota exhausted for the active plan";
+
+        assert_eq!(sink.redact_terminal_failure_text(message), message);
     }
 
     /// Plumbing only: streams `count` empty reasoning items at ascending
