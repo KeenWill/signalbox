@@ -653,6 +653,51 @@ final class SignalboxNativeTests: XCTestCase {
         viewModel.disconnectStream()
     }
 
+    func testArtifactRefreshFailureAfterStreamHelloKeepsStreamSynchronized() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(
+            fixture: fixture,
+            artifactFailureCallNumbers: StreamHelloHistoryReuseFixture
+                .artifactRefreshFailureCallNumbers
+        )
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
+        await loadTask.value
+        let artifactFailureReported = expectation(
+            description: "artifact refresh failure reported without stream recovery"
+        )
+        let reportedFailure = viewModel.$errorMessage
+            .filter { $0 == StreamHelloHistoryReuseFixture.artifactRefreshFailureMessage }
+            .first()
+            .sink { _ in artifactFailureReported.fulfill() }
+        await fulfillment(
+            of: [artifactFailureReported],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+
+        XCTAssertTrue(viewModel.isStreaming)
+        XCTAssertEqual(
+            service.streamInvocationCount,
+            StreamHelloHistoryReuseFixture.firstStreamInvocationCount
+        )
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedSynchronizedListEventsCallCount
+        )
+        XCTAssertEqual(viewModel.events, fixture.expectedSynchronizedEvents)
+        withExtendedLifetime(reportedFailure) {}
+        viewModel.disconnectStream()
+    }
+
     func testMockStreamHandshakeAppliesSubsequentAssistantUpdate() async throws {
         let service = MockSignalboxService()
         let sessions = try await service.listSessions(archived: false)
@@ -1392,6 +1437,11 @@ private struct StreamHelloHistoryReuseFixture {
     /// initial render request is the preceding call.
     static let initialSynchronizedHistoryFailureCallNumbers = [2]
 
+    /// The artifact fixture fails only the post-hello artifact refresh; the
+    /// initial render request is the preceding call.
+    static let artifactRefreshFailureCallNumbers = [2]
+    static let artifactRefreshFailureMessage = "Controlled artifact refresh failure"
+
     /// A local actor handoff should comfortably complete within this bound.
     static let observationTimeout: TimeInterval = 1
 
@@ -1604,6 +1654,9 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     private static let historySynchronizationFailure = SignalboxClientError.requestFailed(
         "Controlled initial history failure"
     )
+    private static let artifactRefreshFailure = SignalboxClientError.requestFailed(
+        StreamHelloHistoryReuseFixture.artifactRefreshFailureMessage
+    )
 
     private let fixture: StreamHelloHistoryReuseFixture
     private let historyEvents: [SignalboxStoredEvent]
@@ -1612,6 +1665,8 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     private var lockedListEventsCallCount = 0
     private var lockedStreamInvocationCount = 0
     private var lockedHistoryFailureCallNumbers: Set<Int>
+    private var lockedListArtifactsCallCount = 0
+    private var lockedArtifactFailureCallNumbers: Set<Int>
     private var listEventsContinuation: CheckedContinuation<[SignalboxStoredEvent], Never>?
     private var listEventsInvocationWaiters: [CheckedContinuation<Void, Never>] = []
     private var streamContinuation: AsyncThrowingStream<SignalboxServerMessage, Error>.Continuation?
@@ -1621,11 +1676,13 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         fixture: StreamHelloHistoryReuseFixture,
         historyEvents: [SignalboxStoredEvent]? = nil,
         historyFailureCallNumbers: [Int] = [],
+        artifactFailureCallNumbers: [Int] = [],
         onListEventsInvocation: (() -> Void)? = nil
     ) {
         self.fixture = fixture
         self.historyEvents = historyEvents ?? fixture.historyEvents
         self.lockedHistoryFailureCallNumbers = Set(historyFailureCallNumbers)
+        self.lockedArtifactFailureCallNumbers = Set(artifactFailureCallNumbers)
         self.onListEventsInvocation = onListEventsInvocation
     }
 
@@ -1816,7 +1873,14 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
         throw unexpectedCall()
     }
     func listArtifacts(sessionID: SignalboxSessionID) async throws -> [SignalboxArtifact] {
-        Self.noArtifacts
+        let shouldFail = lock.withLock {
+            lockedListArtifactsCallCount += 1
+            return lockedArtifactFailureCallNumbers.remove(lockedListArtifactsCallCount) != nil
+        }
+        if shouldFail {
+            throw Self.artifactRefreshFailure
+        }
+        return Self.noArtifacts
     }
     func listMonitorSessions() async throws -> [SignalboxMonitorSessionSummary] {
         throw unexpectedCall()

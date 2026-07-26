@@ -695,10 +695,7 @@ final class SessionDetailViewModel: ObservableObject {
             // started after it can observe mutations, such as deletions, that
             // landed before the stream existed. The pre-stream initial load is
             // for early rendering only and is never authoritative.
-            async let refreshedEvents = service.listEvents(sessionID: sessionID)
-            async let refreshedArtifacts = service.listArtifacts(sessionID: sessionID)
-            let synchronizedEvents = try await refreshedEvents
-            let synchronizedArtifacts = try await refreshedArtifacts
+            let synchronizedEvents = try await service.listEvents(sessionID: sessionID)
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
                 return
             }
@@ -706,13 +703,23 @@ final class SessionDetailViewModel: ObservableObject {
                 ? errorMessage
                 : nil
             replaceEvents(with: synchronizedEvents)
-            artifacts = synchronizedArtifacts
             errorMessage = nil
             synchronization.bufferedMessages.forEach(apply)
             if errorMessage == nil {
                 errorMessage = preservedStreamError
             }
             synchronization.completion?.resume(returning: .synchronized)
+            // The artifact refresh is reported, never fatal: only an event
+            // history failure may enter the recovery path below, and neither
+            // artifact failure nor artifact latency may tear down a healthy
+            // stream or suspend its consumer.
+            Task { [weak self] in
+                await self?.refreshArtifactsAfterStreamHello(
+                    service: service,
+                    sessionID: sessionID,
+                    streamID: streamID
+                )
+            }
         } catch {
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
                 return
