@@ -8,6 +8,7 @@ final class SignalboxNativeUITests: XCTestCase {
     @MainActor
     func testMainMockFlowSubmitsInput() throws {
         let app = launchMockApp()
+        let submittedContent = "Summarize the current runner state"
 
         let firstSession = app.buttons["session-row-11111111-1111-4111-8111-111111111111"]
         XCTAssertTrue(firstSession.waitForExistence(timeout: 20))
@@ -16,9 +17,9 @@ final class SignalboxNativeUITests: XCTestCase {
         let composer = app.descendants(matching: .any)["message-composer"]
         assertElementHittable(composer, named: "composer after session tap", in: app, timeout: 20)
         composer.tap()
-        composer.typeText("Summarize the current runner state")
+        composer.typeText(submittedContent)
         app.buttons["send-message-button"].tap()
-        XCTAssertTrue(app.staticTexts["Summarize the current runner state"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts[submittedContent].waitForExistence(timeout: 10))
     }
 
     @MainActor

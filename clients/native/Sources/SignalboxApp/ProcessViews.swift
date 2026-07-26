@@ -252,6 +252,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var synchronization: (any SignalboxSessionSynchronizing)?
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
+  private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var projector = SignalboxProcessTranscriptProjector()
   private let normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -305,7 +306,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedInputSubmission?
     do {
       let prepared: SignalboxPreparedInputSubmission
-      if let unresolvedSubmission, unresolvedSubmission.content == content {
+      if let unresolvedSubmission,
+        hasExactUTF8(unresolvedSubmission.content, content)
+      {
         prepared = unresolvedSubmission
       } else {
         unresolvedSubmission = nil
@@ -317,15 +320,17 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       preparedForAttempt = prepared
       let submitted = try await service.submit(prepared)
       pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
-      pendingInputs.append(
-        SignalboxProcessPendingInput(
-          id: submitted.acceptedInputID,
-          turnID: submitted.turnID,
-          content: prepared.content
+      if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
+        pendingInputs.append(
+          SignalboxProcessPendingInput(
+            id: submitted.acceptedInputID,
+            turnID: submitted.turnID,
+            content: prepared.content
+          )
         )
-      )
+      }
       unresolvedSubmission = nil
-      if content == prepared.content {
+      if hasExactUTF8(content, prepared.content) {
         composerText = ""
       }
       errorMessage = nil
@@ -351,12 +356,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         try normalizer.replaceAll(with: projection.records)
         timeline = normalizer.timelineItems
         pendingInputs = projection.pendingInputs
+        materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
         activity = projection.activity
         errorMessage = nil
       case .sideSnapshot(let snapshot, let trigger):
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
+        materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
         pendingInputs.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
         }
@@ -374,18 +381,24 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  private func hasExactUTF8(_ lhs: String, _ rhs: String) -> Bool {
+    lhs.utf8.elementsEqual(rhs.utf8)
+  }
+
   private func applyLiveEvent(_ event: SignalboxProcessSessionEvent) {
     switch event {
     case .inputAccepted(let acceptedInputID, let turnID, _, let content):
       pendingInputs.removeAll { $0.id == acceptedInputID }
-      pendingInputs.append(
-        SignalboxProcessPendingInput(
-          id: acceptedInputID,
-          turnID: turnID,
-          content: content
+      if !materializedAcceptedInputIDs.contains(acceptedInputID) {
+        pendingInputs.append(
+          SignalboxProcessPendingInput(
+            id: acceptedInputID,
+            turnID: turnID,
+            content: content
+          )
         )
-      )
-      activity = .init(state: .queued, label: "Queued")
+        activity = .init(state: .queued, label: "Queued")
+      }
     case .turnActivated:
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(_, _, let state):

@@ -17,10 +17,10 @@ WebSocket, or OpenAI-compatible surfaces.
 - Project transcript snapshots into the existing timeline normalizer.
 - Preserve queued input separately until matching transcript content appears.
 - Submit one exact, nonblank composer draft at a time with the session's
-  defaults version and retry only an exact `commit_ambiguous` command, with a
-  finite schedule; if that schedule is exhausted, retain the prepared command
-  identity while its composer draft is unchanged and prepare a new identity
-  after an edit.
+  defaults version and retry the exact prepared command after `commit_ambiguous`
+  or receipt loss, with a finite schedule; if that schedule is exhausted, retain
+  the prepared command identity while its exact UTF-8 composer draft is
+  unchanged and prepare a new identity after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
@@ -99,10 +99,11 @@ install the tested socket client; every reconnect path is capped; deadlines are
 typed separately from heartbeat concerns; snapshot/stream ordering is owned by
 the synchronization machine; fallbacks preserve diagnostics; failed submission
 preserves the exact composer text; one submission is in flight at a time; an
-unresolved ambiguous submission preserves its prepared command identity while
-the draft is unchanged; process results remain neutral unless the wire reports a
-failure; internal wire details do not become legacy `visible_to_user` failures;
-and no credential crosses a plaintext URL.
+unresolved ambiguous submission, including a lost receipt, preserves its
+prepared command identity while the exact UTF-8 draft is unchanged; process
+results remain neutral unless the wire reports a failure; internal wire details
+do not become legacy `visible_to_user` failures; and no credential crosses a
+plaintext URL.
 
 The following work remains:
 

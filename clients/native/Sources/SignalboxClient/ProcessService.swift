@@ -424,9 +424,13 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         try await exchange.next()
       }
       guard let frame else {
-        throw SignalboxProcessServiceError.unexpectedMessage(
-          "The mutation connection closed without a receipt."
+        let delay = try ambiguousMutationRetryDelay(
+          at: retryIndex,
+          message: "The mutation connection closed without a receipt."
         )
+        retryIndex += 1
+        try await wait(delay)
+        continue
       }
       if let value = success(frame.message) {
         return value
@@ -444,16 +448,26 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       guard error.code == .commitAmbiguous else {
         throw remote(error)
       }
-      guard policy.ambiguousMutationRetryDelays.indices.contains(retryIndex) else {
-        throw SignalboxProcessServiceError.mutationRetryExhausted(
-          code: error.code,
-          message: error.message
-        )
-      }
-      let delay = policy.ambiguousMutationRetryDelays[retryIndex]
+      let delay = try ambiguousMutationRetryDelay(
+        at: retryIndex,
+        message: error.message
+      )
       retryIndex += 1
       try await wait(delay)
     }
+  }
+
+  private func ambiguousMutationRetryDelay(
+    at retryIndex: Int,
+    message: String
+  ) throws -> Duration {
+    guard policy.ambiguousMutationRetryDelays.indices.contains(retryIndex) else {
+      throw SignalboxProcessServiceError.mutationRetryExhausted(
+        code: .commitAmbiguous,
+        message: message
+      )
+    }
+    return policy.ambiguousMutationRetryDelays[retryIndex]
   }
 
   private func remote(

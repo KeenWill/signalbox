@@ -238,6 +238,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testCanonicallyEquivalentEditPreparesNewCommandAfterAmbiguity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    viewModel.composerText = ProcessSubmissionFixture.precomposedContent
+
+    await viewModel.send()
+    viewModel.composerText = ProcessSubmissionFixture.decomposedContent
+    await viewModel.send()
+    let submittedCommandIDs = await service.submittedCommandIDs
+    let submittedContentBytes = await service.submittedContentBytes
+
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.editedComposerCommandIDs)
+    XCTAssertEqual(submittedContentBytes, ProcessSubmissionFixture.canonicallyEditedContentBytes)
+  }
+
+  @MainActor
   func testSubmissionPreservesExactNonblankComposerText() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -292,6 +312,34 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testSubmissionReceiptDoesNotRestoreMaterializedPendingInput() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = SuspendedSubmissionService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    let send = Task { await viewModel.send() }
+    await service.waitUntilSubmitStarted()
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUserEntry(),
+        trigger: try ProcessProjectionFixture.completedTrigger()
+      )
+    )
+    await service.completeSubmission()
+    await send.value
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    let message = try ProcessProjectionFixture.onlyTimelineMessage(in: viewModel.timeline)
+
+    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertEqual(message.text, ProcessProjectionFixture.userText)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+  }
+
+  @MainActor
   func testRefusedTurnRemovesMatchingPendingInput() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -318,6 +366,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
 
     XCTAssertEqual(error, ProcessDriverFixture.incompleteMetadataPageError)
+  }
+
+  func testMutationReceiptLossRetriesTheSameDurableCommand() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requester = SequencedProcessRequester(
+      pages: [
+        [],
+        [try ProcessDriverFixture.inputSubmitted()],
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
+    )
+
+    let receipt = try await service.submit(submission)
+    let openedRequests = await requester.openedRequests
+
+    XCTAssertEqual(receipt, try ProcessSubmissionFixture.submittedReceipt())
+    XCTAssertEqual(
+      openedRequests,
+      ProcessSubmissionFixture.retriedRequests(for: submission)
+    )
   }
 
   func testConnectionRejectsMetadataPageAboveRequestedCapacity() async throws {
@@ -510,6 +581,8 @@ private enum ProcessPresentationFixture {
 private enum ProcessSubmissionFixture {
   static let content = "fixture composer draft"
   static let replacementContent = "fixture replacement composer draft"
+  static let precomposedContent = "fixture caf\u{00e9}"
+  static let decomposedContent = "fixture cafe\u{0301}"
   static let whitespaceSensitiveContent = "  fixture indented composer draft\n"
   static let commandID = "abababab-0000-4000-8000-000000000001"
   static let replacementCommandID = "abababab-0000-4000-8000-000000000004"
@@ -520,6 +593,10 @@ private enum ProcessSubmissionFixture {
   static let retriedCommandIDs = [commandID, commandID]
   static let editedComposerCommandIDs = [commandID, replacementCommandID]
   static let editedComposerContents = [content, replacementContent]
+  static let canonicallyEditedContentBytes = [
+    Array(precomposedContent.utf8),
+    Array(decomposedContent.utf8),
+  ]
   static let whitespaceSensitiveContents = [whitespaceSensitiveContent]
   static let singleCallCounts = SubmissionCallCounts(prepare: 1, submit: 1)
 
@@ -539,6 +616,38 @@ private enum ProcessSubmissionFixture {
         """.utf8
       )
     )
+  }
+
+  static func submittedReceipt() throws -> SignalboxInputSubmitted {
+    try submittedReceipt(
+      sessionID: SignalboxCanonicalUUID(validating: ProcessDriverFixture.session)
+    )
+  }
+
+  static func preparedSubmission() throws -> SignalboxPreparedInputSubmission {
+    SignalboxPreparedInputSubmission(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      content: content,
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1)
+    )
+  }
+
+  static func retriedRequests(
+    for submission: SignalboxPreparedInputSubmission
+  ) -> [SignalboxProcessClientRequest] {
+    let request = SignalboxProcessClientRequest.submitInput(
+      commandID: submission.commandID,
+      sessionID: submission.sessionID,
+      content: submission.content,
+      expectedDefaultsVersion: submission.expectedDefaultsVersion
+    )
+    return [request, request]
+  }
+
+  static func usesReplacementCommand(for content: String) -> Bool {
+    content.utf8.elementsEqual(replacementContent.utf8)
+      || content.utf8.elementsEqual(decomposedContent.utf8)
   }
 
   static func singlePendingInput() throws -> [SignalboxProcessPendingInput] {
@@ -607,6 +716,7 @@ private struct NoopProcessSynchronization: SignalboxSessionSynchronizing {
 private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProtocol {
   private(set) var submittedCommandIDs: [String] = []
   private(set) var submittedContents: [String] = []
+  private(set) var submittedContentBytes: [[UInt8]] = []
 
   func testConnection() async throws {}
 
@@ -626,7 +736,7 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
     content: String
   ) async throws -> SignalboxPreparedInputSubmission {
     let commandID =
-      if content == ProcessSubmissionFixture.replacementContent {
+      if ProcessSubmissionFixture.usesReplacementCommand(for: content) {
         ProcessSubmissionFixture.replacementCommandID
       } else {
         ProcessSubmissionFixture.commandID
@@ -644,6 +754,7 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
   ) async throws -> SignalboxInputSubmitted {
     submittedCommandIDs.append(submission.commandID.rawValue.rawValue)
     submittedContents.append(submission.content)
+    submittedContentBytes.append(Array(submission.content.utf8))
     guard submittedCommandIDs.count > 1 else {
       throw SignalboxProcessServiceError.mutationRetryExhausted(
         code: .commitAmbiguous,
@@ -952,6 +1063,7 @@ private struct StaticProcessRequester: SignalboxProcessRequesting {
 
 private actor SequencedProcessRequester: SignalboxProcessRequesting {
   private var pages: [[SignalboxProcessServerFrame]]
+  private(set) var openedRequests: [SignalboxProcessClientRequest] = []
 
   init(pages: [[SignalboxProcessServerFrame]]) {
     self.pages = pages
@@ -960,6 +1072,7 @@ private actor SequencedProcessRequester: SignalboxProcessRequesting {
   func open(
     _ request: SignalboxProcessClientRequest
   ) async throws -> any SignalboxProcessExchange {
+    openedRequests.append(request)
     guard !pages.isEmpty else {
       throw ProcessDriverUpdateRecorderError.unexpectedRequest
     }
@@ -1019,6 +1132,12 @@ private enum ProcessDriverFixture {
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
     ambiguousMutationRetryDelays:
       SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
+  static let oneImmediateMutationRetryPolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize,
+    maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    ambiguousMutationRetryDelays: [.zero],
     synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
   )
 
@@ -1155,6 +1274,20 @@ private enum ProcessDriverFixture {
     )
   }
 
+  static func inputSubmitted() throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(session)",
+        "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+        "acceptance_position":"1",
+        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)"
+      }
+      """
+    )
+  }
+
   private static func followedFrame(
     cursor: UInt64,
     event: String
@@ -1197,6 +1330,7 @@ private enum ProcessProjectionFixture {
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
   static let proposedToolRequest = "bbbbbbbb-1111-4111-8111-111111111111"
   static let runningActivity = SignalboxProcessActivity(state: .running, label: "Running")
+  static let unavailableActivity = SignalboxProcessActivity.unavailable
   static let refusedActivity = SignalboxProcessActivity(state: .refused, label: "Refused")
   static let neutralToolCardStatus = SignalboxToolCardStatus.completed
 
@@ -1492,6 +1626,21 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureTool
     }
     return tool
+  }
+
+  static func onlyTimelineMessage(
+    in timeline: [SignalboxTimelineItem]
+  ) throws -> SignalboxTimelineMessage {
+    let messages: [SignalboxTimelineMessage] = timeline.compactMap {
+      guard case .message(let message) = $0 else {
+        return nil
+      }
+      return message
+    }
+    guard messages.count == 1, let message = messages.first else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureMessage
+    }
+    return message
   }
 
   private static func message(
