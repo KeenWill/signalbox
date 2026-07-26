@@ -87,6 +87,7 @@ impl StoredValidatedRunnerRegistration {
 pub struct StoredSessionRunnerPlacement {
     event_ordinal: u64,
     placement: SessionRunnerPlacement,
+    registration: Option<StoredValidatedRunnerRegistration>,
     grant: Option<CredentialProfileGrant>,
 }
 
@@ -97,6 +98,10 @@ impl StoredSessionRunnerPlacement {
 
     pub const fn placement(&self) -> &SessionRunnerPlacement {
         &self.placement
+    }
+
+    pub const fn registration(&self) -> Option<&StoredValidatedRunnerRegistration> {
+        self.registration.as_ref()
     }
 
     pub const fn grant(&self) -> Option<&CredentialProfileGrant> {
@@ -383,6 +388,7 @@ impl RunnerProtocolStore {
         Ok(StoredSessionRunnerPlacement {
             event_ordinal,
             placement: placement.clone(),
+            registration: registration.cloned(),
             grant: grant.cloned(),
         })
     }
@@ -500,6 +506,7 @@ impl RunnerProtocolStore {
         Ok(Some(StoredSessionRunnerPlacement {
             event_ordinal,
             placement,
+            registration,
             grant,
         }))
     }

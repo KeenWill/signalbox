@@ -42,10 +42,12 @@ The relational projection stores the typed enrollment and append-only
 active-or-revoked audit evidence. The current row and its current audit revision
 independently record the runner, authentication reference, allowed-class count,
 and exact allowed-class inventory; reconstitution requires those records to
-agree. Runner identity and authentication-reference identity each remain
-one-to-one with the logical enrollment. Registration insertion locks and reads
-that canonical enrollment; revocation and re-registration therefore cannot race
-to admit availability under revoked authority.
+agree. Every appended audit revision must be installed as that enrollment's
+canonical current revision in the same transaction, so orphan terminal audit
+evidence fails closed. Runner identity and authentication-reference identity
+each remain one-to-one with the logical enrollment. Registration insertion locks
+and reads that canonical enrollment; revocation and re-registration therefore
+cannot race to admit availability under revoked authority.
 
 A registration carries availability claims only:
 
@@ -212,15 +214,19 @@ The store retains each offered generation and its monotonic claimed, completed,
 or lost events. An offer references the current pinned placement, exact
 validated registration tool, canonical physical tool attempt, and optional
 active grant pair. Relational triggers reject a stale placement, revoked
-enrollment or grant, mismatched tool or effect, non-successor generation,
-attempt reuse after claimed safe work, and every retry after claimed
-side-effecting loss. Lease admission shares the canonical enrollment, current
-registration pointer, and selected grant authority locks, so enrollment or grant
-revocation and registration replacement serialize before the relational checks
-admit a new generation. Loads independently join the physical-attempt tool and
-pinned runner before invoking lease reconstitution. The single runner-initiated
-outbound stream, reconnect resynchronization, and exact wire correlations remain
-later stacks.
+enrollment or grant, a current registration that no longer preserves any
+runner-required pinned capability, mismatched tool or effect, non-successor
+generation, attempt reuse after claimed safe work, and every retry after claimed
+side-effecting loss. One durable request-to-lease binding prevents a fresh lease
+identity from bypassing an established request's retry lineage. Every generation
+must commit its ordinal-one offered event and a current event head; a generation
+without loadable state evidence fails closed. Lease admission shares the
+canonical enrollment, current registration pointer, and selected grant authority
+locks, so enrollment or grant revocation and registration replacement serialize
+before the relational checks admit a new generation. Loads independently join
+the physical-attempt tool and pinned runner before invoking lease
+reconstitution. The single runner-initiated outbound stream, reconnect
+resynchronization, and exact wire correlations remain later stacks.
 
 ## Session placement and affinity
 
@@ -279,7 +285,9 @@ records behind one current pointer. Relational transition checks require
 contiguous event history, exact revision succession, unchanged affinity facts at
 runner loss, and profile-only changes for profile replacement. Reconstitution
 reads the current record with its exact validated registration and tool
-inventory.
+inventory. The loaded persistence wrapper retains that historical registration
+and its durable revision so a caller can reconcile against newer availability
+and persist `RunnerLost` without reconstructing or guessing the pinned evidence.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic

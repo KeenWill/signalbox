@@ -185,6 +185,40 @@ BEFORE UPDATE OR DELETE ON runner_enrollment_audit_allowed_class
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE FUNCTION require_runner_enrollment_audit_installed()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    audit runner_enrollment_audit%ROWTYPE :=
+        COALESCE(NEW, OLD);
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM runner_enrollment AS enrollment
+         WHERE enrollment.enrollment_id = audit.enrollment_id
+           AND enrollment.revision = audit.revision
+           AND enrollment.runner_id = audit.runner_id
+           AND enrollment.authentication_reference_id =
+                audit.authentication_reference_id
+           AND enrollment.allowed_class_count =
+                audit.allowed_class_count
+           AND enrollment.state_kind = audit.state_kind
+    )
+    THEN
+        RAISE EXCEPTION 'runner enrollment audit is not canonically installed'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_enrollment_audit_requires_installation
+AFTER INSERT OR UPDATE OR DELETE ON runner_enrollment_audit
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_enrollment_audit_installed();
+
 CREATE FUNCTION require_runner_enrollment_complete()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1635,6 +1669,17 @@ CREATE TABLE runner_physical_attempt_lease_binding (
         ON DELETE RESTRICT
 );
 
+CREATE TABLE runner_tool_request_lease_binding (
+    request_id uuid PRIMARY KEY,
+    lease_id uuid NOT NULL,
+
+    CONSTRAINT runner_tool_request_lease_binding_request_fk
+        FOREIGN KEY (request_id)
+        REFERENCES tool_request (request_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+);
+
 CREATE TABLE runner_lease_generation (
     lease_id uuid NOT NULL,
     generation numeric(20, 0) NOT NULL,
@@ -1825,6 +1870,79 @@ BEFORE INSERT OR UPDATE OR DELETE ON runner_current_lease_event
 FOR EACH ROW
 EXECUTE FUNCTION guard_runner_current_lease_event();
 
+CREATE FUNCTION assert_runner_lease_generation_complete(
+    checked_lease uuid,
+    checked_generation numeric
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM runner_lease_generation
+         WHERE lease_id = checked_lease
+           AND generation = checked_generation
+    )
+       AND (
+            NOT EXISTS (
+                SELECT 1
+                  FROM runner_lease_event
+                 WHERE lease_id = checked_lease
+                   AND generation = checked_generation
+                   AND event_ordinal = 1
+                   AND state_kind = 'offered'
+            )
+            OR NOT EXISTS (
+                SELECT 1
+                  FROM runner_current_lease_event AS current_event
+                  JOIN runner_lease_event AS event
+                    ON event.lease_id = current_event.lease_id
+                   AND event.generation = current_event.generation
+                   AND event.event_ordinal =
+                        current_event.event_ordinal
+                 WHERE current_event.lease_id = checked_lease
+                   AND current_event.generation = checked_generation
+            )
+       )
+    THEN
+        RAISE EXCEPTION 'runner lease generation lacks canonical event evidence'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION require_runner_lease_generation_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM assert_runner_lease_generation_complete(
+        COALESCE(NEW.lease_id, OLD.lease_id),
+        COALESCE(NEW.generation, OLD.generation)
+    );
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_lease_generation_requires_events
+AFTER INSERT OR UPDATE OR DELETE ON runner_lease_generation
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_lease_generation_complete();
+
+CREATE CONSTRAINT TRIGGER runner_lease_event_rechecks_generation
+AFTER INSERT OR UPDATE OR DELETE ON runner_lease_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_lease_generation_complete();
+
+CREATE CONSTRAINT TRIGGER runner_current_lease_event_rechecks_generation
+AFTER INSERT OR UPDATE OR DELETE ON runner_current_lease_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_lease_generation_complete();
+
 CREATE VIEW runner_current_tool_attempt AS
 SELECT attempt.*
   FROM tool_attempt AS attempt
@@ -1887,6 +2005,11 @@ BEFORE UPDATE OR DELETE ON runner_physical_attempt_lease_binding
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_tool_request_lease_binding_is_append_only
+BEFORE UPDATE OR DELETE ON runner_tool_request_lease_binding
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER runner_lease_event_is_append_only
 BEFORE UPDATE OR DELETE ON runner_lease_event
 FOR EACH ROW
@@ -1903,8 +2026,11 @@ DECLARE
     attempted_effect text;
     attempted_state text;
     attempted_request uuid;
+    current_registration_revision numeric;
+    current_registration_runner uuid;
     registered_effect text;
     bound_lease uuid;
+    bound_request_lease uuid;
     prior runner_lease_generation%ROWTYPE;
     prior_state text;
     prior_request uuid;
@@ -1927,8 +2053,18 @@ BEGIN
      WHERE attempt.attempt_id = NEW.attempt_id
        AND attempt.session_id = NEW.session_id
        FOR UPDATE OF attempt;
-    SELECT effect_class INTO registered_effect
+    SELECT current_registration.registration_revision,
+           registration.runner_id,
+           registered.effect_class
+      INTO current_registration_revision,
+           current_registration_runner,
+           registered_effect
       FROM runner_current_registration AS current_registration
+      JOIN runner_registration AS registration
+        ON registration.enrollment_id =
+            current_registration.enrollment_id
+       AND registration.registration_revision =
+            current_registration.registration_revision
       JOIN runner_registration_tool AS registered
         ON registered.enrollment_id =
             current_registration.enrollment_id
@@ -1938,6 +2074,13 @@ BEGIN
             NEW.registration_enrollment_id
        AND registered.tool_name = NEW.tool_name
        FOR SHARE OF current_registration;
+    INSERT INTO runner_tool_request_lease_binding
+        (request_id, lease_id)
+    VALUES (attempted_request, NEW.lease_id)
+    ON CONFLICT (request_id) DO NOTHING;
+    SELECT lease_id INTO bound_request_lease
+      FROM runner_tool_request_lease_binding
+     WHERE request_id = attempted_request;
     INSERT INTO runner_physical_attempt_lease_binding
         (attempt_id, lease_id)
     VALUES (NEW.attempt_id, NEW.lease_id)
@@ -1947,6 +2090,7 @@ BEGIN
      WHERE attempt_id = NEW.attempt_id;
     IF registered_effect IS NULL
        OR attempted_request IS NULL
+       OR bound_request_lease IS DISTINCT FROM NEW.lease_id
        OR bound_lease IS DISTINCT FROM NEW.lease_id
        OR placement.state_kind IS DISTINCT FROM 'pinned'
        OR placement.event_ordinal IS DISTINCT FROM
@@ -1960,6 +2104,67 @@ BEGIN
             NEW.credential_profile_name
        OR placement.credential_grant_revision IS DISTINCT FROM
             NEW.credential_grant_revision
+       OR current_registration_runner IS DISTINCT FROM NEW.runner_id
+       OR (
+            placement.selector_kind = 'identity'
+            AND placement.selector_runner_id IS DISTINCT FROM
+                current_registration_runner
+       )
+       OR (
+            placement.selector_kind = 'capability_class'
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_registration_class
+                 WHERE enrollment_id =
+                    NEW.registration_enrollment_id
+                   AND registration_revision =
+                    current_registration_revision
+                   AND capability_class =
+                    placement.selector_capability_class
+            )
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM runner_session_placement_tool AS required
+             WHERE required.session_id = placement.session_id
+               AND required.event_ordinal = placement.event_ordinal
+               AND required.runner_required
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM runner_registration_tool AS available
+                     WHERE available.enrollment_id =
+                        NEW.registration_enrollment_id
+                       AND available.registration_revision =
+                        current_registration_revision
+                       AND available.tool_name = required.tool_name
+               )
+       )
+       OR (
+            placement.pinned_credential_profile_name IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_registration_profile
+                 WHERE enrollment_id =
+                    NEW.registration_enrollment_id
+                   AND registration_revision =
+                    current_registration_revision
+                   AND credential_profile_name =
+                    placement.pinned_credential_profile_name
+            )
+       )
+       OR (
+            placement.workspace_requirement_kind =
+                'repository_worktree'
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_registration_workspace
+                 WHERE enrollment_id =
+                    NEW.registration_enrollment_id
+                   AND registration_revision =
+                    current_registration_revision
+                   AND workspace_kind = 'worktree_per_session'
+            )
+       )
        OR enrollment_state IS DISTINCT FROM 'active'
        OR attempted_tool IS DISTINCT FROM NEW.tool_name
        OR attempted_state IS DISTINCT FROM 'in_flight'
