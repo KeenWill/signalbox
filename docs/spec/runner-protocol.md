@@ -1,8 +1,8 @@
 # Runner protocol and placement
 
-This page specifies the implemented runner-protocol domain foundation. Its
-verification reference will name the implementing stack once the bottom
-specification pull request is open. It owns logical runner enrollment,
+This page specifies the implemented runner-protocol domain foundation as
+verified against the implementing stack rooted at PR #259
+(`agent/runner-protocol`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, session placement and
 affinity, credential-profile grants, and workspace requirements. The tool
 registry's common declarations remain owned by [tool loop](tool-loop.md);
