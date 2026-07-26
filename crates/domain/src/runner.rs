@@ -5,6 +5,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::{
@@ -412,14 +416,27 @@ pub enum RunnerEnrollmentState {
 }
 
 /// Logical enrollment; identity never derives from machine properties.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct RunnerEnrollment {
     enrollment: RunnerEnrollmentId,
     runner: RunnerId,
     authentication: RunnerAuthenticationId,
     allowed_classes: BTreeSet<RunnerCapabilityClass>,
     state: RunnerEnrollmentState,
+    registration_revision: Arc<AtomicU64>,
 }
+
+impl PartialEq for RunnerEnrollment {
+    fn eq(&self, other: &Self) -> bool {
+        self.enrollment == other.enrollment
+            && self.runner == other.runner
+            && self.authentication == other.authentication
+            && self.allowed_classes == other.allowed_classes
+            && self.state == other.state
+    }
+}
+
+impl Eq for RunnerEnrollment {}
 
 impl RunnerEnrollment {
     pub fn new(
@@ -434,6 +451,7 @@ impl RunnerEnrollment {
             authentication,
             allowed_classes: allowed_classes.into_iter().collect(),
             state: RunnerEnrollmentState::Active,
+            registration_revision: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -525,6 +543,14 @@ impl RunnerEnrollment {
             };
             profiles.insert(name, policy.clone());
         }
+        let prior_revision = self
+            .registration_revision
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
+                revision.checked_add(1)
+            })
+            .map_err(|_| RunnerDomainError::GenerationExhausted)?;
+        let revision = RunnerGeneration::try_from_u64(prior_revision + 1)
+            .ok_or(RunnerDomainError::GenerationExhausted)?;
         Ok(ValidatedRunnerRegistration {
             enrollment: self.enrollment,
             runner: self.runner,
@@ -533,6 +559,8 @@ impl RunnerEnrollment {
             tools,
             profiles,
             workspaces: advertisement.workspaces,
+            revision,
+            current_revision: Arc::clone(&self.registration_revision),
         })
     }
 
@@ -546,8 +574,12 @@ impl RunnerEnrollment {
         if self.enrollment != registration.enrollment
             || self.runner != registration.runner
             || self.authentication != registration.authentication
+            || !Arc::ptr_eq(&self.registration_revision, &registration.current_revision)
         {
             return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        if !registration.is_current() {
+            return Err(RunnerDomainError::RegistrationChanged);
         }
         Ok(())
     }
@@ -569,6 +601,7 @@ impl RunnerEnrollment {
             authentication: input.authentication,
             allowed_classes: input.allowed_classes,
             state: input.state,
+            registration_revision: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -589,7 +622,7 @@ pub struct RunnerEnrollmentReconstitutionInput {
 }
 
 /// Validated availability paired with daemon-owned policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ValidatedRunnerRegistration {
     enrollment: RunnerEnrollmentId,
     runner: RunnerId,
@@ -598,7 +631,24 @@ pub struct ValidatedRunnerRegistration {
     tools: BTreeMap<ToolName, RunnerToolDeclaration>,
     profiles: BTreeMap<CredentialProfileName, CredentialProfilePolicy>,
     workspaces: BTreeSet<WorkspaceCapability>,
+    revision: RunnerGeneration,
+    current_revision: Arc<AtomicU64>,
 }
+
+impl PartialEq for ValidatedRunnerRegistration {
+    fn eq(&self, other: &Self) -> bool {
+        self.enrollment == other.enrollment
+            && self.runner == other.runner
+            && self.authentication == other.authentication
+            && self.classes == other.classes
+            && self.tools == other.tools
+            && self.profiles == other.profiles
+            && self.workspaces == other.workspaces
+            && self.revision == other.revision
+    }
+}
+
+impl Eq for ValidatedRunnerRegistration {}
 
 impl ValidatedRunnerRegistration {
     pub const fn enrollment(&self) -> RunnerEnrollmentId {
@@ -611,6 +661,14 @@ impl ValidatedRunnerRegistration {
 
     pub const fn authentication(&self) -> RunnerAuthenticationId {
         self.authentication
+    }
+
+    pub const fn revision(&self) -> RunnerGeneration {
+        self.revision
+    }
+
+    fn is_current(&self) -> bool {
+        self.current_revision.load(Ordering::Acquire) == self.revision.get()
     }
 
     pub fn satisfies(&self, selector: &RunnerSelector) -> bool {
@@ -745,7 +803,46 @@ pub enum RunnerLeaseState {
     Claimed,
     Completed,
     LostUnclaimed,
+    LostExecutionPossible,
     LostClaimed,
+}
+
+/// Durable authority proving that one offered lease never issued execution capability.
+///
+/// ```compile_fail
+/// use signalbox_domain::{RunnerLeaseCorrelation, RunnerLeaseNoExecutionProof};
+///
+/// fn fabricate(correlation: RunnerLeaseCorrelation) {
+///     let _ = RunnerLeaseNoExecutionProof { correlation };
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseNoExecutionProof {
+    correlation: RunnerLeaseCorrelation,
+}
+
+impl RunnerLeaseNoExecutionProof {
+    pub fn reconstitute(
+        input: RunnerLeaseNoExecutionProofReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError> {
+        if input.correlation != input.recorded_correlation {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        Ok(Self {
+            correlation: input.correlation,
+        })
+    }
+
+    pub const fn correlation(&self) -> &RunnerLeaseCorrelation {
+        &self.correlation
+    }
+}
+
+/// Complete independently stored no-execution proof facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseNoExecutionProofReconstitutionInput {
+    pub correlation: RunnerLeaseCorrelation,
+    pub recorded_correlation: RunnerLeaseCorrelation,
 }
 
 /// One fenced runner lease.
@@ -831,23 +928,38 @@ impl RunnerLease {
     }
 
     pub fn lose(mut self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        let claimed = match self.state {
-            RunnerLeaseState::Offered => false,
-            RunnerLeaseState::Claimed => true,
+        if !matches!(
+            self.state,
+            RunnerLeaseState::Offered | RunnerLeaseState::Claimed
+        ) {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        self.state = match self.state {
+            RunnerLeaseState::Offered => RunnerLeaseState::LostExecutionPossible,
+            RunnerLeaseState::Claimed => RunnerLeaseState::LostClaimed,
             _ => return Err(RunnerDomainError::InvalidState),
         };
-        self.state = if claimed {
-            RunnerLeaseState::LostClaimed
-        } else {
-            RunnerLeaseState::LostUnclaimed
-        };
+        self.into_loss_consequence()
+    }
+
+    pub fn lose_unclaimed(
+        mut self,
+        proof: &RunnerLeaseNoExecutionProof,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
+        if self.state != RunnerLeaseState::Offered {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        if proof.correlation != self.correlation() {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        self.state = RunnerLeaseState::LostUnclaimed;
         self.into_loss_consequence()
     }
 
     fn into_loss_consequence(self) -> Result<RunnerLeaseLoss, RunnerDomainError> {
         let claimed = match self.state {
             RunnerLeaseState::LostUnclaimed => false,
-            RunnerLeaseState::LostClaimed => true,
+            RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed => true,
             _ => return Err(RunnerDomainError::InvalidState),
         };
         if claimed && self.effect == RunnerToolEffectClass::SideEffecting {
@@ -907,8 +1019,20 @@ impl RunnerLease {
 
     pub fn reconstitute_loss(
         input: RunnerLeaseReconstitutionInput,
+        no_execution: Option<&RunnerLeaseNoExecutionProof>,
     ) -> Result<RunnerLeaseLoss, RunnerDomainError> {
-        Self::reconstitute(input)?.into_loss_consequence()
+        let lease = Self::reconstitute(input)?;
+        let proof_matches =
+            no_execution.is_some_and(|proof| proof.correlation == lease.correlation());
+        match (lease.state, proof_matches, no_execution.is_some()) {
+            (RunnerLeaseState::LostUnclaimed, true, true)
+            | (
+                RunnerLeaseState::LostExecutionPossible | RunnerLeaseState::LostClaimed,
+                false,
+                false,
+            ) => lease.into_loss_consequence(),
+            _ => Err(RunnerDomainError::InvalidState),
+        }
     }
 }
 
@@ -2175,17 +2299,29 @@ mod tests {
         enrollment_for(runner_id(RUNNER))
     }
 
+    fn enrollment_for_registration(registration: &ValidatedRunnerRegistration) -> RunnerEnrollment {
+        RunnerEnrollment {
+            enrollment: registration.enrollment,
+            runner: registration.runner,
+            authentication: registration.authentication,
+            allowed_classes: BTreeSet::from([class()]),
+            state: RunnerEnrollmentState::Active,
+            registration_revision: Arc::clone(&registration.current_revision),
+        }
+    }
+
+    fn advertisement() -> RunnerAdvertisement {
+        RunnerAdvertisement::new(
+            [class()],
+            [tool("inspect"), tool("deploy"), tool("sync")],
+            [profile("readonly"), profile("admin")],
+            [WorkspaceCapability::WorktreePerSession],
+        )
+    }
+
     fn registration_for(runner: RunnerId) -> ValidatedRunnerRegistration {
         enrollment_for(runner)
-            .register(
-                RunnerAdvertisement::new(
-                    [class()],
-                    [tool("inspect"), tool("deploy"), tool("sync")],
-                    [profile("readonly"), profile("admin")],
-                    [WorkspaceCapability::WorktreePerSession],
-                ),
-                &catalog(),
-            )
+            .register(advertisement(), &catalog())
             .expect("the advertisement is a subset of daemon policy")
     }
 
@@ -2406,7 +2542,7 @@ mod tests {
             placement_request(profile(profile_name)),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&registration),
             &registration,
             directory("/workspace/session"),
             None,
@@ -2436,7 +2572,7 @@ mod tests {
             placement_request(profile("readonly")),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&registration),
             &registration,
             directory("/workspace/session"),
             None,
@@ -2528,6 +2664,15 @@ mod tests {
             recorded_credential_authorization: lease.credential_authorization.clone(),
             recorded_state: lease.state,
         }
+    }
+
+    fn no_execution_proof(lease: &RunnerLease) -> RunnerLeaseNoExecutionProof {
+        let correlation = lease.correlation();
+        RunnerLeaseNoExecutionProof::reconstitute(RunnerLeaseNoExecutionProofReconstitutionInput {
+            correlation: correlation.clone(),
+            recorded_correlation: correlation,
+        })
+        .expect("the fixture persists the exact no-execution correlation")
     }
 
     fn placement_reconstitution_input(
@@ -2833,6 +2978,51 @@ mod tests {
     }
 
     #[test]
+    fn s30_inv042_inv043_reregistration_retires_prior_registration_authority() {
+        let enrollment = enrollment();
+        let initial = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the initial advertisement is valid");
+        let retained = initial.clone();
+        let pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin_and_offer_lease(
+            &enrollment,
+            &initial,
+            directory("/workspace/session"),
+            None,
+            authorized(
+                "inspect",
+                tool_attempt_id(ATTEMPT),
+                RunnerToolEffectClass::Pure,
+            ),
+            lease_offer_request("inspect"),
+        )
+        .expect("the initial registration pins the placement");
+        let current = enrollment
+            .register(advertisement(), &catalog())
+            .expect("the replacement advertisement is valid");
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &enrollment,
+                &retained,
+                pin.grant.as_ref(),
+                authorized(
+                    "inspect",
+                    tool_attempt_id(RETRY_ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+        assert_ne!(retained.revision(), current.revision());
+    }
+
+    #[test]
     fn s30_inv001_enrollment_reconstitution_rejects_cross_wired_runner() {
         let mut input = enrollment_reconstitution_input();
         input.recorded_runner = runner_id(REPLACEMENT_RUNNER);
@@ -2870,10 +3060,13 @@ mod tests {
         let attempt = tool_attempt_id(ATTEMPT);
         let (registration, placement, grant, lease) = offered("deploy", attempt);
 
-        let loss = lease.lose().expect("an offered lease can be lost");
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
         let replacement = placement
             .offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 loss,
@@ -2886,6 +3079,19 @@ mod tests {
             RunnerGeneration::try_from_u64(2).expect("two is positive")
         );
         assert_eq!(replacement.attempt(), attempt);
+    }
+
+    #[test]
+    fn s31_inv025_inv026_inv043_offered_side_effecting_loss_without_proof_is_ambiguous() {
+        let (_, _, _, offered) = offered("deploy", tool_attempt_id(ATTEMPT));
+        let expected_attempt = offered.attempt();
+
+        let loss = offered
+            .lose()
+            .expect("loss without no-execution proof stays ambiguous");
+
+        assert_eq!(loss.retry(), None);
+        assert_eq!(loss.crash_attempt(), Some(expected_attempt));
     }
 
     #[test]
@@ -2912,7 +3118,7 @@ mod tests {
         let (retry_batch, retired_attempt, authorization) = prepared.into_parts();
         let replacement = placement
             .offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 loss,
@@ -2964,7 +3170,7 @@ mod tests {
         let (retry_batch, _, authorization) = prepared.into_parts();
         let retry_lease = placement
             .offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 first_loss,
@@ -3032,7 +3238,10 @@ mod tests {
     #[test]
     fn s31_inv004_inv043_unclaimed_retry_cannot_mint_a_fresh_attempt() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
-        let loss = offered.lose().expect("an offered lease can be lost");
+        let proof = no_execution_proof(&offered);
+        let loss = offered
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
 
         assert_eq!(
             loss.retry()
@@ -3082,7 +3291,7 @@ mod tests {
 
         assert_eq!(
             placement.offer_retry(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 grant.as_ref(),
                 loss,
@@ -3151,7 +3360,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3171,7 +3380,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3298,7 +3507,7 @@ mod tests {
 
         let pinned = placement
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -3379,7 +3588,7 @@ mod tests {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -3451,7 +3660,7 @@ mod tests {
             placement_request(profile("readonly")),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&narrow_registration),
             &narrow_registration,
             directory("/workspace/session"),
             None,
@@ -3471,7 +3680,7 @@ mod tests {
 
         assert_eq!(
             reconciled.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&expanded_registration),
                 &expanded_registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3508,7 +3717,7 @@ mod tests {
 
         assert_eq!(
             pin_for_offer.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&narrowed_registration),
                 &narrowed_registration,
                 pin_for_offer.grant.as_ref(),
                 authorized(
@@ -3565,7 +3774,7 @@ mod tests {
         assert_eq!(reconciled.revision(), expected_revision);
         assert_eq!(
             reconciled.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&narrowed_registration),
                 &narrowed_registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3590,7 +3799,7 @@ mod tests {
 
         assert_eq!(
             lost.offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 Some(&grant),
                 authorized(
@@ -3613,7 +3822,7 @@ mod tests {
             placement_request(profile("readonly")),
         )
         .pin_and_offer_lease(
-            &enrollment(),
+            &enrollment_for_registration(&initial),
             &initial,
             directory("/workspace/old"),
             None,
@@ -3700,7 +3909,7 @@ mod tests {
         };
         let mut pin = SessionRunnerPlacement::new(session_id(SESSION), before_request.clone())
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -3859,7 +4068,7 @@ mod tests {
 
         assert_eq!(
             SessionRunnerPlacement::new(session_id(SESSION), request).pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 Some(foreign_workspace),
@@ -3891,7 +4100,7 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 authorized(
@@ -3918,7 +4127,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 automatically_authorized(
@@ -3938,7 +4147,7 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 automatically_authorized(
@@ -3965,7 +4174,7 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 pin.grant.as_ref(),
                 blanket_authorized(
@@ -4016,7 +4225,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment_for(registration.runner()),
+                &enrollment_for_registration(&registration),
                 &registration,
                 Some(&revoked),
                 authorized(
@@ -4132,7 +4341,7 @@ mod tests {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -4147,7 +4356,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 None,
                 automatically_authorized(
@@ -4166,7 +4375,7 @@ mod tests {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(session_id(SESSION), profileless_placement_request())
             .pin_and_offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 directory("/workspace/session"),
                 None,
@@ -4181,7 +4390,7 @@ mod tests {
 
         pin.placement
             .offer_lease(
-                &enrollment(),
+                &enrollment_for_registration(&registration),
                 &registration,
                 None,
                 blanket_authorized(
@@ -4197,15 +4406,18 @@ mod tests {
     #[test]
     fn s31_inv043_lost_unclaimed_lease_reconstitutes_retry_authority() {
         let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
-        let loss = offered.lose().expect("an offered lease can be lost");
+        let proof = no_execution_proof(&offered);
+        let loss = offered
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
         let expected_generation = loss
             .retry()
             .expect("unclaimed pure loss carries retry authority")
             .generation();
         let input = borrowed_lease_reconstitution_input(loss.lost());
 
-        let restored = RunnerLease::reconstitute_loss(input)
-            .expect("complete lost facts restore the checked consequence");
+        let restored = RunnerLease::reconstitute_loss(input, Some(&proof))
+            .expect("complete lost facts and proof restore the checked consequence");
 
         assert_eq!(
             restored
@@ -4215,6 +4427,21 @@ mod tests {
             expected_generation
         );
         assert_eq!(restored.crash_attempt(), None);
+    }
+
+    #[test]
+    fn s31_inv043_lost_unclaimed_reconstitution_requires_no_execution_proof() {
+        let (_, _, _, offered) = offered("inspect", tool_attempt_id(ATTEMPT));
+        let proof = no_execution_proof(&offered);
+        let loss = offered
+            .lose_unclaimed(&proof)
+            .expect("proof-backed unclaimed loss is checked");
+        let input = borrowed_lease_reconstitution_input(loss.lost());
+
+        assert_eq!(
+            RunnerLease::reconstitute_loss(input, None),
+            Err(RunnerDomainError::InvalidState)
+        );
     }
 
     #[test]
@@ -4228,7 +4455,7 @@ mod tests {
         let loss = claimed.lose().expect("a claimed lease can be lost");
         let input = borrowed_lease_reconstitution_input(loss.lost());
 
-        let restored = RunnerLease::reconstitute_loss(input)
+        let restored = RunnerLease::reconstitute_loss(input, None)
             .expect("complete lost facts restore crash classification authority");
 
         assert_eq!(restored.retry(), None);
@@ -4241,7 +4468,7 @@ mod tests {
         let input = lease_reconstitution_input(offered);
 
         assert_eq!(
-            RunnerLease::reconstitute_loss(input),
+            RunnerLease::reconstitute_loss(input, None),
             Err(RunnerDomainError::InvalidState)
         );
     }

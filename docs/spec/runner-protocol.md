@@ -48,8 +48,10 @@ It carries no permission default, effect class, placement declaration, approval
 posture, or credential value. Registration validates the advertisement against
 both the enrollment's allowed capability classes and the daemon-side catalog. An
 unknown or disallowed claim rejects the complete registration. A valid
-registration retains the exact advertised subset and attaches the
-daemon-authoritative declarations. Omitting a formerly advertised capability
+registration retains the exact advertised subset, attaches the
+daemon-authoritative declarations, and advances the enrollment-owned current
+registration revision. Retained copies of every prior registration become stale
+and cannot authorize a later lease. Omitting a formerly advertised capability
 removes its availability from the new registration, but never changes its
 daemon-side policy. A pinned session never inherits additions from
 re-registration. If a new registration omits a runner-required capability in
@@ -174,11 +176,15 @@ Completion is terminal. A stale or cross-wired correlation cannot advance the
 aggregate. Complete reconstitution accepts only the closed state shapes and
 exact correlations.
 
-`LostUnclaimed` means authoritative proof that no execution capability was
-issued, not merely absence of a claim frame after an offer was sent. A future
+`LostUnclaimed` requires an opaque durable no-execution proof bound to the exact
+lease correlation; complete loss reconstitution requires the same proof. It does
+not mean merely absence of a claim frame after an offer was sent. A future
 transport must durably commit the exact claim and acknowledge it before the
 runner may execute. Channel loss after delivery but before that acknowledgement
-cannot be interpreted as proof either way by transport alone.
+cannot be interpreted as proof either way by transport alone. Without the proof,
+losing even an `Offered` lease conservatively follows the execution-possible
+law: pure or idempotent work requires a fresh physical attempt, while
+side-effecting work requires crash classification.
 
 With that proof, loss before claim permits every effect class to be re-leased at
 the checked successor lease-lineage generation. Loss after claim follows the
