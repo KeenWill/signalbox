@@ -14,7 +14,9 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
-[configuration-and-credentials](configuration-and-credentials.md).
+[configuration-and-credentials](configuration-and-credentials.md). The
+tool-attributed metadata command and reconstitution surface was verified through
+PR #265 (`agent/tool-batch-tier0`).
 
 ## Identity model
 
@@ -303,28 +305,34 @@ attribution confers no lifecycle, authorization, or approval authority (INV-001,
 INV-020).
 
 `SubmitInput` and `ReplaceSessionMetadata` are the command kinds whose durable
-payloads carry an `actor` field. The `SubmitInput` application constructor and
-the canonical `ReplaceSessionMetadata` domain constructor fix `Actor::Owner` —
-no caller can supply another variant, and no code path constructs a non-owner
-command issuer. `SubmitInput` includes the actor in replay equality and hashing:
-replaying a claimed identifier under a different actor is conflicting reuse
-(INV-012). `ReplaceSessionMetadata` has no caller-supplied actor field to
-compare; its `actor()` accessor returns the canonical owner, while checked
-reconstitution compares the independently decoded durable actor with that value.
-Why: attribution recorded outside these checks could be laundered by replaying
-one claimed identifier under a different claimed agency. The durable field is
-constant `Owner` today; carrying it anyway keeps the truthful-`Owner`-backfill
-window open for kinds added before non-owner agencies exist. For metadata
-replacement, the recorded actor is also the applied last-writer provenance.
+payloads carry an `actor` field. The `SubmitInput` application constructor fixes
+`Actor::Owner`. Metadata replacement has two purpose-specific constructors: the
+process-facing form fixes `Actor::Owner`, while the tool-facing form requires
+one exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts
+an arbitrary actor, and model/recovery issuers remain unconstructible.
+`SubmitInput` and `ReplaceSessionMetadata` both include actor agency in replay
+equality and hashing: replaying a claimed identifier under a different actor is
+conflicting reuse (INV-012). Checked metadata reconstitution independently
+decodes the stored actor and compares it with the canonical command value. Why:
+attribution recorded outside these checks could be laundered by replaying one
+claimed identifier under a different claimed agency. For metadata replacement,
+the recorded actor is also the applied last-writer provenance.
 
 Storage follows the closed-discriminator convention: `actor_kind`
 (`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
-in `submit_input_command` and `replace_session_metadata_command`. Unknown or
-malformed stored spellings fail decoding as corruption. Metadata domain
-reconstitution independently compares the stored actor against the canonical
-command's owner actor (`CommandActorMismatch`) for both applied and rejected
-receipts, so a stored non-owner actor fails closed.
+in `submit_input_command` and `replace_session_metadata_command`. Metadata
+receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
+and `issuer_tool_request_id` columns, sealed separately from the actor
+projection. The issuer migration fixes every pre-issuer receipt to the owner
+agency that its legacy constructor required, rather than trusting the actor
+projection being checked. Unknown or malformed stored spellings fail decoding as
+corruption. A well-formed `model` or `recovery` actor on a metadata command
+fails earlier as unsupported metadata-writer corruption. Metadata loading
+constructs the canonical command from the independent issuer proof, then domain
+reconstitution compares the separately decoded supported actor against that
+command (`CommandActorMismatch`) for both applied and rejected receipts, so a
+cross-wired owner/tool actor fails closed.
 
 `CreateSession` and `ReplaceSessionDefaults` v1 carry no actor field in payload
 or storage, and no recorded-transition family (including startup-scan

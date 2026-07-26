@@ -33,7 +33,7 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, DaemonTools, FatalExecutionSupervisor,
     FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration,
     LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
     SystemCurrentTimeClock,
@@ -379,9 +379,6 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
-    let (tool_catalog, tool_executor) = CurrentTimeTool::try_new(SystemCurrentTimeClock)
-        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
-        .into_parts();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
         .map_err(|error| {
@@ -396,6 +393,14 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             HubRuntimeError::infrastructure(phase)
         })?;
     let pool = database.pool().clone();
+    let (tool_catalog, tool_executor) =
+        match DaemonTools::try_new_production(SystemCurrentTimeClock, pool.clone()) {
+            Ok(tools) => tools.into_parts(),
+            Err(_) => {
+                let _ = database.close().await;
+                return Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration));
+            }
+        };
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
