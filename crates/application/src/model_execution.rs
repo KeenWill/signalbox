@@ -1797,6 +1797,7 @@ pub struct ScriptedModelCallProvider {
     interaction_count: usize,
     last_prepared_messages: Option<Box<[ModelConversationMessage]>>,
     last_prepared_tools: Option<Box<[ToolDefinition]>>,
+    last_prepared_system_prompt: Option<Option<String>>,
 }
 
 impl ScriptedModelCallProvider {
@@ -1812,6 +1813,7 @@ impl ScriptedModelCallProvider {
             interaction_count: 0,
             last_prepared_messages: None,
             last_prepared_tools: None,
+            last_prepared_system_prompt: None,
         }
     }
 
@@ -1841,6 +1843,14 @@ impl ScriptedModelCallProvider {
     pub fn last_prepared_tools(&self) -> Option<&[ToolDefinition]> {
         self.last_prepared_tools.as_deref()
     }
+
+    /// Borrows the exact optional system prompt most recently presented for
+    /// capability preparation.
+    pub fn last_prepared_system_prompt(&self) -> Option<Option<&str>> {
+        self.last_prepared_system_prompt
+            .as_ref()
+            .map(|prompt| prompt.as_deref())
+    }
 }
 
 impl ModelCallProvider for ScriptedModelCallProvider {
@@ -1859,6 +1869,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
         self.capability_preparation_count += 1;
         self.last_prepared_messages = Some(operation.messages().to_vec().into_boxed_slice());
         self.last_prepared_tools = Some(operation.tools().to_vec().into_boxed_slice());
+        self.last_prepared_system_prompt = Some(operation.system_prompt().map(str::to_owned));
         let step = self.steps.front().cloned();
         if matches!(
             &step,
@@ -2718,6 +2729,31 @@ mod tests {
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
         assert_eq!(content.text().as_str(), "exact user request");
+    }
+
+    /// S34 / INV-046: rendering binds the exact optional frozen-epoch system
+    /// prompt onto the provider-neutral operation without rewriting it, and
+    /// an epoch without a prompt renders none.
+    #[test]
+    fn s34_inv046_render_carries_the_frozen_epoch_system_prompt() {
+        let (request, _) = prepared_fixture();
+        let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
+            .expect("fixture prompt is admissible");
+
+        let prompted = PreparedModelOperation::render(
+            request.clone(),
+            credential_reference(),
+            Some(prompt.clone()),
+            Box::new([]),
+            &[],
+        )
+        .expect("the baseline origin-only frontier renders");
+        assert_eq!(prompted.system_prompt(), Some(prompt.as_str()));
+
+        let promptless =
+            PreparedModelOperation::render(request, credential_reference(), None, Box::new([]), &[])
+                .expect("the baseline origin-only frontier renders");
+        assert_eq!(promptless.system_prompt(), None);
     }
 
     /// The recorded turn-wide availability bound counts validated producing
@@ -3696,6 +3732,70 @@ mod tests {
             provider.last_prepared_tools(),
             Some([definition].as_slice())
         );
+    }
+
+    /// S34 / INV-046: the execution loop presents the prepare transaction's
+    /// exact frozen-epoch system prompt to the provider port with the
+    /// capability operation; a promptless epoch presents none.
+    #[tokio::test]
+    async fn s34_inv046_prepared_capability_receives_the_frozen_epoch_system_prompt() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
+            .expect("fixture prompt is admissible");
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(PrepareModelCallOutcome::Ready {
+                    request: Box::new(request.clone()),
+                    credential_reference: credential_reference(),
+                    dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+                    system_prompt: Some(prompt.clone()),
+                    tool_entries: Box::new([]),
+                })]
+                .into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
+            InProcessAttemptDispatchGate::default(),
+        );
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("durable cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, _, _, _, _, provider, ..) = service.into_parts();
+        assert_eq!(
+            provider.last_prepared_system_prompt(),
+            Some(Some(prompt.as_str()))
+        );
+
+        let mut promptless_service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
+            InProcessAttemptDispatchGate::default(),
+        );
+        assert_eq!(
+            promptless_service
+                .execute(session)
+                .await
+                .expect("durable cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, _, _, _, _, provider, ..) = promptless_service.into_parts();
+        assert_eq!(provider.last_prepared_system_prompt(), Some(None));
     }
 
     /// docs/spec/model-call-execution.md: a trustworthy capability failure

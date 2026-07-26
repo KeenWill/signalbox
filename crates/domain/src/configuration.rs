@@ -651,12 +651,75 @@ mod tests {
         FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
         ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
-        VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+        SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
+        TurnConfigurationProvenance, VersionCheckedConfigurationRequest,
+        VersionedSessionConfigurationDefaults,
     };
     use crate::test_support::{alias, direct, turn_id};
     use crate::{DangerousToolAutoApproval, SteeringBinding};
     use uuid::Uuid;
+
+    /// S34 / INV-046: the session system prompt admits exactly the
+    /// 1,048,576-UTF-8-byte bound, splitting at a multibyte scalar so the
+    /// byte measure is what binds; empty and U+0000-bearing text is rejected
+    /// with the value retained unchanged.
+    #[test]
+    fn s34_inv046_system_prompt_binds_at_the_exact_utf8_byte_bound() {
+        let exact =
+            "y".repeat(SessionSystemPrompt::MAX_UTF8_BYTES - '\u{221a}'.len_utf8()) + "\u{221a}";
+        assert_eq!(exact.len(), SessionSystemPrompt::MAX_UTF8_BYTES);
+        let admitted =
+            SessionSystemPrompt::try_new(exact.clone()).expect("the exact cap is admitted");
+        assert_eq!(admitted.as_str(), exact);
+        assert_eq!(admitted.clone().into_string(), exact);
+
+        let oversized = exact + "y";
+        let oversized_length = oversized.len();
+        let error = SessionSystemPrompt::try_new(oversized.clone())
+            .expect_err("one byte over the cap is rejected");
+        assert_eq!(
+            error.failure(),
+            SessionSystemPromptFailure::TooLarge {
+                bytes: oversized_length,
+            }
+        );
+        assert_eq!(error.value(), oversized);
+
+        let empty = SessionSystemPrompt::try_new(String::new())
+            .expect_err("absence is None, never empty text");
+        assert_eq!(empty.failure(), SessionSystemPromptFailure::Empty);
+
+        let with_null = SessionSystemPrompt::try_new(String::from("a\u{0}b"))
+            .expect_err("PostgreSQL text cannot store U+0000");
+        assert_eq!(with_null.failure(), SessionSystemPromptFailure::ContainsNull);
+        assert_eq!(with_null.into_parts().0, "a\u{0}b");
+    }
+
+    /// S34 / INV-046: the complete defaults value carries the optional prompt
+    /// in structural equality, so an epoch differing only in its prompt is a
+    /// different replacement payload.
+    #[test]
+    fn s34_inv046_defaults_equality_covers_the_system_prompt() {
+        let model = ModelSelectionRequest::Direct(direct(1));
+        let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
+            .expect("test prompt is admissible");
+        let promptless = SessionConfigurationDefaults::complete(
+            model,
+            DangerousToolAutoApproval::Disabled,
+            None,
+        );
+        let prompted = SessionConfigurationDefaults::complete(
+            model,
+            DangerousToolAutoApproval::Disabled,
+            Some(prompt.clone()),
+        );
+
+        assert_eq!(promptless, SessionConfigurationDefaults::new(model));
+        assert_ne!(prompted, promptless);
+        assert_eq!(prompted.system_prompt(), Some(&prompt));
+        assert_eq!(promptless.system_prompt(), None);
+        assert_eq!(prompted.model(), model);
+    }
 
     #[test]
     fn selection_keys_expose_their_uuid_values() {

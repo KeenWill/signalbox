@@ -49,6 +49,7 @@ use signalbox_domain::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionSystemPrompt,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
@@ -78,8 +79,8 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessTranscriptEntry,
-        ProcessTurnState,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -17550,6 +17551,301 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
             OutboxCorruption::MissingTypedRecord
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S34 / INV-008 / INV-012 / INV-046: a session system prompt lives on the
+/// immutable defaults epoch. Creation stores it, the loaded current session
+/// and process defaults read return it, replacement installs a promptless
+/// successor without rewriting the prompted epoch, replay preserves the exact
+/// recorded payloads, and model-call preparation reads the prompt through the
+/// calling turn's frozen epoch rather than the current pointer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xa41));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xa42));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xa43));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xa44));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xa45));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xa46));
+    let prompt = SessionSystemPrompt::try_new(String::from("exact session instructions"))
+        .expect("test prompt is admissible");
+    let prompted_defaults = SessionConfigurationDefaults::complete(
+        ModelSelectionRequest::Direct(selection),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        Some(prompt.clone()),
+    );
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        ),
+        prompted_defaults.clone(),
+    )
+    .prepare(session)
+    .expect("owner-initiated creation without ancestry is preparable");
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    create_repository.handle(creation.clone()).await?;
+
+    assert_eq!(
+        create_repository.handle(creation.clone()).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+    let promptless_reuse = CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xa47)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(0xa60)))
+    .expect("owner-initiated creation without ancestry is preparable");
+    assert_eq!(
+        create_repository.handle(promptless_reuse).await?,
+        CreateSessionHandlingOutcome::ConflictingReuse {
+            command_id: creation.command().command_id(),
+        }
+    );
+
+    let loaded = SessionRepository::new(pool.clone())
+        .load_session(session)
+        .await?
+        .expect("the prompted session exists");
+    assert_eq!(
+        loaded.current_configuration_defaults().defaults(),
+        &prompted_defaults
+    );
+
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xa48,
+                0xa41,
+                "prompted-epoch request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xa49)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xa4a),
+            starting_frontier: Uuid::from_u128(0xa4b),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one prompted fixture target forms a catalog");
+    let call_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    assert!(matches!(
+        call_repository
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa4c)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0xa4d)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xa4e)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa4f)),
+                        TurnId::from_uuid(Uuid::from_u128(0xa50)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+
+    // Replace the defaults with a promptless successor before the prepared
+    // call resumes: the call still binds the origin's frozen prompted epoch.
+    let promptless_defaults =
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection));
+    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let replacement = ReplaceSessionDefaults::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xa51)),
+        session,
+        SessionConfigurationDefaultsVersion::try_from_u64(1).expect("positive version"),
+        promptless_defaults.clone(),
+    );
+    let ReplaceSessionDefaultsHandlingOutcome::Applied(applied) =
+        defaults_repository.handle(replacement).await?
+    else {
+        panic!("the promptless replacement must apply");
+    };
+    assert_eq!(applied.installed().defaults(), &promptless_defaults);
+    let prompted_reuse = ReplaceSessionDefaults::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xa51)),
+        session,
+        SessionConfigurationDefaultsVersion::try_from_u64(1).expect("positive version"),
+        prompted_defaults.clone(),
+    );
+    assert_eq!(
+        defaults_repository.handle(prompted_reuse).await?,
+        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse {
+            command_id: DurableCommandId::from_uuid(Uuid::from_u128(0xa51)),
+        }
+    );
+
+    let PrepareInitialModelCallOutcome::Ready { system_prompt, .. } = call_repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0xa52)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa53)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xa54)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xa55)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xa56)),
+                    TurnId::from_uuid(Uuid::from_u128(0xa57)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the checkpointed prompted call must resume as ready");
+    };
+    assert_eq!(system_prompt.as_ref(), Some(&prompt));
+
+    // The process defaults read selects the current promptless epoch, the
+    // exact named prompted epoch, and types both absences.
+    let read = ProcessReadRepository::new(pool.clone());
+    let ProcessSessionDefaultsRead::Read(current) = read.read_session_defaults(session, None).await?
+    else {
+        panic!("the current defaults epoch must read");
+    };
+    assert_eq!(current.version().as_u64(), 2);
+    assert_eq!(current.defaults(), &promptless_defaults);
+    let ProcessSessionDefaultsRead::Read(named) =
+        read.read_session_defaults(session, Some(1)).await?
+    else {
+        panic!("the named prompted epoch must read");
+    };
+    assert_eq!(named.version().as_u64(), 1);
+    assert_eq!(named.defaults(), &prompted_defaults);
+    assert_eq!(
+        read.read_session_defaults(session, Some(9)).await?,
+        ProcessSessionDefaultsRead::VersionNotFound
+    );
+    assert_eq!(
+        read.read_session_defaults(SessionId::from_uuid(Uuid::from_u128(0xa5f)), None)
+            .await?,
+        ProcessSessionDefaultsRead::SessionNotFound
+    );
+
+    // Schema bounds: an installed epoch's prompt column admits at most
+    // 1,048,576 UTF-8 bytes and never empty text, and epochs stay immutable.
+    let oversized = "y".repeat(1_048_577);
+    let oversized_insert = sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind, direct_model_selection_id,
+             model_alias_id, dangerous_tool_auto_approval, system_prompt)
+         VALUES ($1, 99, 'direct', $2, NULL, 'disabled', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(selection.into_uuid())
+    .bind(&oversized)
+    .execute(&pool)
+    .await
+    .expect_err("an over-bound stored prompt is rejected");
+    assert_eq!(
+        oversized_insert
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let empty_insert = sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind, direct_model_selection_id,
+             model_alias_id, dangerous_tool_auto_approval, system_prompt)
+         VALUES ($1, 99, 'direct', $2, NULL, 'disabled', '')",
+    )
+    .bind(session.into_uuid())
+    .bind(selection.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("an empty stored prompt is rejected");
+    assert_eq!(
+        empty_insert
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let rewrite = sqlx::query(
+        "UPDATE session_defaults_version
+         SET system_prompt = 'rewritten'
+         WHERE session_id = $1 AND version = 1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("defaults epochs are append-only");
+    assert_eq!(
+        rewrite
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    // Command/defaults agreement: an applied replacement receipt whose prompt
+    // digest disagrees with the installed epoch cannot commit.
+    let mut disagreeing = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command (command_id, command_kind, storage_version)
+         VALUES ($1, 'replace_session_defaults', 3)",
+    )
+    .bind(Uuid::from_u128(0xa58))
+    .execute(&mut *disagreeing)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_session_defaults_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_current_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id,
+             dangerous_tool_auto_approval, system_prompt, result_kind,
+             rejection_kind, result_session_id, result_installed_version,
+             result_expected_version, result_current_version)
+         VALUES ($1, 'replace_session_defaults', 3, $2, 1, 'direct', $3, NULL,
+                 'disabled', 'digest disagreement', 'applied', NULL, $2, 2,
+                 NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xa58))
+    .bind(session.into_uuid())
+    .bind(selection.into_uuid())
+    .execute(&mut *disagreeing)
+    .await?;
+    let disagreement = disagreeing
+        .commit()
+        .await
+        .expect_err("a prompt-digest disagreement cannot commit");
+    let disagreement_code = match &disagreement {
+        sqlx::Error::Database(error) => error.code(),
+        other => panic!("unexpected digest-disagreement failure: {other:?}"),
+    };
+    assert_eq!(disagreement_code.as_deref(), Some("23503"));
 
     pool.close().await;
     drop(container);

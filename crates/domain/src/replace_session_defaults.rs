@@ -989,6 +989,30 @@ mod tests {
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
 
+        // S34 / INV-046: a stored install diverging from the command's
+        // replacement only in its optional system prompt is the same
+        // fail-closed defaults mismatch.
+        let prompt_diverged = AppliedFacts {
+            defaults: SessionConfigurationDefaults::complete(
+                command.replacement().model(),
+                command.replacement().dangerous_tool_auto_approval(),
+                Some(
+                    crate::SessionSystemPrompt::try_new(String::from(
+                        "exact session instructions",
+                    ))
+                    .expect("test prompt is admissible"),
+                ),
+            ),
+            ..matching.clone()
+        }
+        .reconstitute(command.clone())
+        .expect_err("a prompt-only divergence must fail closed")
+        .failure();
+        assert_eq!(
+            prompt_diverged,
+            ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
+        );
+
         /// One fail-closed perturbation and the typed failure it produced,
         /// rendered as a snapshot row supplementing the targeted asserts
         /// above (`docs/agents/testing-style.md`, rules 10 and 12). The field names
