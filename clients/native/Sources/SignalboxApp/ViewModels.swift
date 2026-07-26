@@ -329,10 +329,16 @@ final class SessionDetailViewModel: ObservableObject {
         case ignored
     }
 
+    private enum HistorySynchronizationResult: Equatable, Sendable {
+        case synchronized
+        case recoverableFailure
+        case cancelled
+    }
+
     private struct StreamHistorySynchronization {
         let streamID: UUID
         var bufferedMessages: [SignalboxServerMessage]
-        let completion: CheckedContinuation<Bool, Never>?
+        let completion: CheckedContinuation<HistorySynchronizationResult, Never>?
     }
 
     @Published private(set) var session: SignalboxSessionMetadata
@@ -417,17 +423,17 @@ final class SessionDetailViewModel: ObservableObject {
             errorMessage = "Configure a server connection in Settings."
             return
         }
-        let synchronized: Bool = await withCheckedContinuation { continuation in
+        let result: HistorySynchronizationResult = await withCheckedContinuation { continuation in
             let started = startStream(
                 service: service,
                 synchronizeHistory: true,
                 completion: continuation
             )
             if !started {
-                continuation.resume(returning: false)
+                continuation.resume(returning: .recoverableFailure)
             }
         }
-        if !synchronized, !Task.isCancelled {
+        if result == .recoverableFailure, !Task.isCancelled {
             await load()
             connectStream(synchronizeHistory: true)
         }
@@ -454,7 +460,7 @@ final class SessionDetailViewModel: ObservableObject {
     private func startStream(
         service: any SignalboxClientProtocol,
         synchronizeHistory: Bool,
-        completion: CheckedContinuation<Bool, Never>?
+        completion: CheckedContinuation<HistorySynchronizationResult, Never>?
     ) -> Bool {
         guard streamTask == nil else {
             return false
@@ -527,7 +533,10 @@ final class SessionDetailViewModel: ObservableObject {
     }
 
     func disconnectStream() {
-        cancelHistorySynchronization(streamID: activeStreamID)
+        cancelHistorySynchronization(
+            streamID: activeStreamID,
+            result: .cancelled
+        )
         activeStreamID = nil
         streamTask?.cancel()
         streamTask = nil
@@ -658,17 +667,29 @@ final class SessionDetailViewModel: ObservableObject {
             }
             replaceEvents(with: synchronizedEvents)
             self.artifacts = synchronizedArtifacts
+            let preservedStreamError = errorMessage == latestStreamDiagnostic
+                ? errorMessage
+                : nil
             errorMessage = nil
             synchronization.bufferedMessages.forEach(apply)
-            synchronization.completion?.resume(returning: true)
+            if errorMessage == nil {
+                errorMessage = preservedStreamError
+            }
+            synchronization.completion?.resume(returning: .synchronized)
         } catch {
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
                 return
             }
             synchronization.bufferedMessages.forEach(apply)
-            errorMessage = error.localizedDescription
+            errorMessage = lastStreamDiagnostic(
+                in: synchronization.bufferedMessages
+            ) ?? error.localizedDescription
             disconnectStream()
-            synchronization.completion?.resume(returning: false)
+            guard let completion = synchronization.completion else {
+                connectStream(synchronizeHistory: true)
+                return
+            }
+            completion.resume(returning: .recoverableFailure)
         }
     }
 
@@ -690,22 +711,26 @@ final class SessionDetailViewModel: ObservableObject {
         guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
             return
         }
+        applySynchronizationDiagnostics(in: synchronization.bufferedMessages)
         guard let completion = synchronization.completion else {
             disconnectStream()
             connectStream(synchronizeHistory: true)
             return
         }
         disconnectStream()
-        completion.resume(returning: false)
+        completion.resume(returning: .recoverableFailure)
     }
 
-    private func cancelHistorySynchronization(streamID: UUID?) {
+    private func cancelHistorySynchronization(
+        streamID: UUID?,
+        result: HistorySynchronizationResult
+    ) {
         guard let streamID,
               let synchronization = takeHistorySynchronization(streamID: streamID)
         else {
             return
         }
-        synchronization.completion?.resume(returning: false)
+        synchronization.completion?.resume(returning: result)
     }
 
     private func finishStream(streamID: UUID, error: Error?) {
@@ -713,13 +738,47 @@ final class SessionDetailViewModel: ObservableObject {
             ignoredStaleStreamCompletionCount += 1
             return
         }
-        cancelHistorySynchronization(streamID: streamID)
+        cancelHistorySynchronization(
+            streamID: streamID,
+            result: .recoverableFailure
+        )
         activeStreamID = nil
         streamTask = nil
         isStreaming = false
         if let error {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func applySynchronizationDiagnostics(
+        in messages: [SignalboxServerMessage]
+    ) {
+        for message in messages {
+            switch message {
+            case .diagnostic, .unknown:
+                apply(message)
+            default:
+                continue
+            }
+        }
+    }
+
+    private func lastStreamDiagnostic(
+        in messages: [SignalboxServerMessage]
+    ) -> String? {
+        for message in messages.reversed() {
+            switch message {
+            case .diagnostic(let diagnostic):
+                return diagnostic.message
+            case .unknown(_, _, let diagnostic):
+                if let diagnostic {
+                    return diagnostic.message
+                }
+            default:
+                continue
+            }
+        }
+        return nil
     }
 
     private func upsert(artifact: SignalboxArtifact) {
