@@ -538,13 +538,13 @@ one credential-free download with redirect following still disabled. Credential
 delivery and redaction are owned by
 [configuration-and-credentials](configuration-and-credentials.md).
 
-A missing or unusable credential and a definitive rejection produce only fixed
-known-failure detail. A read transport loss is an executor infrastructure
-failure. A mutation transport loss, server failure, oversized or malformed
-success response, or malformed GraphQL acknowledgement is commit-ambiguous; the
-durable tool attempt's `ExternalEffect` classification parks crash-lost
-execution for recovery rather than silently retrying it. The adapter never
-returns code-host response bodies as error detail.
+A missing or unusable credential and a definitive client rejection produce only
+fixed known-failure detail. A read transport or server failure is an executor
+infrastructure failure. A mutation transport loss, server failure, oversized or
+malformed success response, or malformed GraphQL acknowledgement is
+commit-ambiguous; the durable tool attempt's `ExternalEffect` classification
+parks crash-lost execution for recovery rather than silently retrying it. The
+adapter never returns code-host response bodies as error detail.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four

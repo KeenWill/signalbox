@@ -408,9 +408,7 @@ impl GitHubCodeHostTransport {
         let response = self
             .send_authenticated(Method::GET, url, None, credential)
             .await?;
-        if response.status() != StatusCode::FOUND {
-            return Err(CodeHostTransportFailure::Rejected);
-        }
+        ensure_expected_status(response.status(), StatusCode::FOUND)?;
         let location = response
             .headers()
             .get(LOCATION)
@@ -436,11 +434,9 @@ impl GitHubCodeHostTransport {
             .send()
             .await
             .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
-        if response.status() != StatusCode::OK {
-            return Err(CodeHostTransportFailure::Rejected);
-        }
+        ensure_expected_status(response.status(), StatusCode::OK)?;
         let (bytes, completeness) = read_bounded(response, MAX_JOB_LOG_BYTES).await?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let (text, completeness) = bounded_lossy_text(&bytes, completeness);
         let result = CiJobLogResult::try_new(arguments.job_id(), text, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::CiJobLog(result))
@@ -543,12 +539,7 @@ impl GitHubCodeHostTransport {
         response: Response,
         expected: StatusCode,
     ) -> Result<serde_json::Value, CodeHostTransportFailure> {
-        if response.status().is_client_error() {
-            return Err(CodeHostTransportFailure::Rejected);
-        }
-        if response.status() != expected {
-            return Err(CodeHostTransportFailure::DispatchUnknown);
-        }
+        ensure_expected_status(response.status(), expected)?;
         self.json_page(response, expected)
             .await
             .map(|(value, _completeness)| value)
@@ -568,9 +559,7 @@ impl GitHubCodeHostTransport {
         response: Response,
         expected: StatusCode,
     ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
-        if response.status() != expected {
-            return Err(CodeHostTransportFailure::Rejected);
-        }
+        ensure_expected_status(response.status(), expected)?;
         let completeness = if response
             .headers()
             .get(reqwest::header::LINK)
@@ -666,6 +655,35 @@ async fn read_bounded(
         }
     }
     Ok((body, CodeHostResultCompleteness::Complete))
+}
+
+fn ensure_expected_status(
+    status: StatusCode,
+    expected: StatusCode,
+) -> Result<(), CodeHostTransportFailure> {
+    if status == expected {
+        Ok(())
+    } else if status.is_client_error() {
+        Err(CodeHostTransportFailure::Rejected)
+    } else {
+        Err(CodeHostTransportFailure::DispatchUnknown)
+    }
+}
+
+fn bounded_lossy_text(
+    bytes: &[u8],
+    completeness: CodeHostResultCompleteness,
+) -> (String, CodeHostResultCompleteness) {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() <= MAX_JOB_LOG_BYTES {
+        return (text, completeness);
+    }
+    let mut boundary = MAX_JOB_LOG_BYTES;
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text.truncate(boundary);
+    (text, CodeHostResultCompleteness::Truncated)
 }
 
 fn parse_changed_file(
@@ -935,5 +953,29 @@ mod tests {
             reject_graphql_errors(&value),
             Err(CodeHostTransportFailure::Rejected)
         );
+    }
+
+    /// A read-only server failure remains an infrastructure failure rather
+    /// than becoming definitive known-failure evidence.
+    #[test]
+    fn server_status_is_dispatch_unknown() {
+        assert_eq!(
+            ensure_expected_status(StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK),
+            Err(CodeHostTransportFailure::DispatchUnknown)
+        );
+    }
+
+    /// Lossy decoding cannot expand a retained job-log prefix beyond its
+    /// declared byte bound.
+    #[test]
+    fn lossy_job_log_text_remains_bounded() {
+        const INVALID_UTF8: u8 = 0xff;
+        const EXPECTED_TEXT_BYTES: usize = MAX_JOB_LOG_BYTES - 1;
+        let bytes = vec![INVALID_UTF8; MAX_JOB_LOG_BYTES];
+
+        let (text, completeness) = bounded_lossy_text(&bytes, CodeHostResultCompleteness::Complete);
+
+        assert_eq!(text.len(), EXPECTED_TEXT_BYTES);
+        assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
     }
 }
