@@ -5404,7 +5404,7 @@ impl RunnerLease {
     ) -> Result<Self, RunnerDomainError>;
 }
 pub struct RunnerLeaseReconstitutionInput {
-    /* public lease and independent fence */
+    /* public raw lease projection and independent fence */
 }
 pub enum RunnerLeaseLoss {
     RetryPermitted {
@@ -5422,6 +5422,12 @@ impl RunnerLeaseLoss {
 pub struct RunnerLeaseRetryAuthority { /* private */ }
 impl RunnerLeaseRetryAuthority {
     // accessors: generation()
+    pub fn prepare_claimed_attempt(
+        &self,
+        approved: ApprovedToolRequest,
+        attempt: ToolAttemptId,
+        issuing_attempt: TurnAttemptId,
+    ) -> Result<RunnerToolAttemptAuthorization, RunnerDomainError>;
 }
 
 pub enum WorkingDirectorySelection {
