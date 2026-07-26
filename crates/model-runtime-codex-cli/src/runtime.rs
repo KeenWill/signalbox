@@ -481,11 +481,15 @@ async fn execute_process<C: Clone + Send + Sync>(
             stdin.shutdown().await
         };
         tokio::pin!(send_prompt);
+        // The pending work future is polled before the control signals, so an
+        // upload result already available in the same poll wins over
+        // simultaneous cancellation, matching the work-first rule both
+        // execution stages share.
         tokio::select! {
             biased;
+            result = &mut send_prompt => InputStep::Written(result),
             () = &mut *cancellation => InputStep::Cancelled,
             () = tokio::time::sleep_until(deadline) => InputStep::TimedOut,
-            result = &mut send_prompt => InputStep::Written(result),
         }
     };
     let input_error = match input_step {
