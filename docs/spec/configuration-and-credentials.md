@@ -171,7 +171,7 @@ hub composition still configures only Anthropic targets. The first subsequent
 turn resolves and pins its own provider target and credential reference at its
 model-call boundary. A prepared or in-flight predecessor retains its pins. This
 re-establishes credential affinity where the new defaults take effect and keeps
-provider prompt-cache prefixes stable for work already in progress (INV-042).
+provider prompt-cache prefixes stable for work already in progress (INV-046).
 
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider

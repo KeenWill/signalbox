@@ -653,12 +653,12 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
     runtime.stop().await
 }
 
-/// S30 / INV-008 / INV-012 / INV-042: version six maps one complete replacement
+/// S33 / INV-008 / INV-012 / INV-046: version six maps one complete replacement
 /// request through the durable command boundary and validates catalog input
 /// before claiming a new command identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s30_inv008_inv012_inv042_process_runtime_replaces_session_model_defaults()
+async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_defaults()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -739,12 +739,12 @@ async fn s30_inv008_inv012_inv042_process_runtime_replaces_session_model_default
     runtime.stop().await
 }
 
-/// S30 / INV-012 / INV-033 / INV-042: a durable submit receipt remains
+/// S33 / INV-012 / INV-033 / INV-046: a durable submit receipt remains
 /// replayable by its original protocol after later history raises the selected
 /// session's minimum representable version; an unseen command remains gated.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s30_inv012_inv033_inv042_submit_replay_precedes_mutable_history_gate()
+async fn s33_inv012_inv033_inv046_submit_replay_precedes_mutable_history_gate()
 -> Result<(), Box<dyn Error>> {
     let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
     let runtime = RunningRuntime::start().await?;

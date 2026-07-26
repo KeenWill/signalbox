@@ -3691,7 +3691,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_inv042_version_six_adds_forward_only_defaults_replacement()
+    fn inv033_inv046_version_six_adds_forward_only_defaults_replacement()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_client_malformed(
             r#"{"version":5,"request_id":"6","request":{"type":"replace_session_defaults","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","expected_defaults_version":"3","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true}}"#,

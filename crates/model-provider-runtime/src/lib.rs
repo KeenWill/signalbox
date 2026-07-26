@@ -831,11 +831,11 @@ mod tests {
         );
     }
 
-    /// S30 / INV-042: the provider bridge renders the durable identity boundary
+    /// S33 / INV-046: the provider bridge renders the durable identity boundary
     /// as the exact injected user-role session event selected by the recorded
     /// context-lifecycle decision.
     #[test]
-    fn s30_inv042_model_identity_boundary_is_an_injected_user_message() {
+    fn s33_inv046_model_identity_boundary_is_an_injected_user_message() {
         let source = source(12);
         let defaults_version = SessionConfigurationDefaultsVersion::try_from_u64(3)
             .expect("the fixture epoch is positive");

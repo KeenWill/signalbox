@@ -8415,12 +8415,12 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
     Ok(())
 }
 
-/// S30 / INV-008 / INV-015 / INV-042: replacing defaults while a turn is
+/// S33 / INV-008 / INV-015 / INV-046: replacing defaults while a turn is
 /// active leaves that turn bound to its accepted epoch, while the next origin
 /// freezes the successor and starts behind an injected model-identity entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s30_inv008_inv015_inv042_mid_session_model_switch_is_forward_only()
+async fn s33_inv008_inv015_inv046_mid_session_model_switch_is_forward_only()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x731));

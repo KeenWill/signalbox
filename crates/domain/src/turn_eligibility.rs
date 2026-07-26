@@ -9563,11 +9563,11 @@ mod tests {
         );
     }
 
-    /// S30 / INV-015 / INV-042: an actual frozen direct-model transition
+    /// S33 / INV-015 / INV-046: an actual frozen direct-model transition
     /// inserts exactly one typed identity boundary between the predecessor
     /// terminal frontier and the successor origin.
     #[test]
-    fn s30_inv015_inv042_model_transition_extends_frontier_before_origin() {
+    fn s33_inv015_inv046_model_transition_extends_frontier_before_origin() {
         let session = current_session();
         let predecessor = accepted_origin(1);
         let successor = accepted_origin(2);
@@ -9670,10 +9670,10 @@ mod tests {
         );
     }
 
-    /// INV-015 / INV-042: a durable legacy marker admits only a start whose
+    /// INV-015 / INV-046: a durable legacy marker admits only a start whose
     /// frontier was committed before model-identity boundaries existed.
     #[test]
-    fn inv015_inv042_legacy_start_grandfathers_its_historical_frontier() {
+    fn inv015_inv046_legacy_start_grandfathers_its_historical_frontier() {
         let session = current_session();
         let predecessor = accepted_origin(1);
         let active = accepted_origin(2);

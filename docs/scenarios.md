@@ -434,9 +434,11 @@ those tests.
 
 - **User intent:** Trust current state despite delayed or retried transport
   delivery.
-- **Durable commands:** Validate result envelope against tool-attempt identity
-  and dispatch generation; record duplicate/stale evidence if audit policy
-  requires, without applying it again.
+- **Durable commands:** For daemon-local execution, validate the result envelope
+  against the authorized tool-attempt dispatch correlation. For runner
+  execution, additionally validate the exact runner lease identity, runner
+  identity, tool name, and lease-lineage generation; record duplicate/stale
+  evidence if audit policy requires, without applying it again.
 - **State transitions:** Current work remains unchanged; a first valid current
   result may advance exactly once.
 - **Transient updates:** Runner acknowledgement may state “duplicate” or
@@ -445,7 +447,7 @@ those tests.
   fencing; runner retries delivery until acknowledged.
 - **Failure behavior:** A stale success cannot overwrite a newer failure,
   result, cancellation, or reconciliation state.
-- **Required invariants:** INV-011, INV-012, INV-021.
+- **Required invariants:** INV-011, INV-012, INV-021, INV-043.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   result acknowledgement, compatibility, and subscriber observation remain
   [open](open-questions.md#scheduling-and-runners): the retired protocol designs
@@ -530,7 +532,7 @@ those tests.
 - **Failure behavior:** Runner unavailability is visible and does not silently
   move locality-sensitive work. Stale results fail fencing.
 - **Required invariants:** INV-011, INV-019, INV-021–INV-026.
-- **Remaining questions:** Pinning/affinity, multi-runner turns, result-size
+- **Remaining questions:** Durable lease/affinity orchestration, result-size
   handling, and local MCP capability discovery.
 
 ## S17 — Fork from previous transcript state
@@ -952,7 +954,106 @@ those tests.
   a general artifact aggregate remains
   [open](open-questions.md#general-purpose-artifacts).
 
-## S30 — Change the model during a session
+## S30 — Enroll a runner and pin a session
+
+- **User intent:** Target either one exact runner or a capability class and know
+  which logical runner, working directory, tools, credential profile, and
+  workspace boundary the session actually received.
+- **Durable commands:** A later application stack records logical enrollment and
+  validates the runner's advertised names against active enrollment and the
+  daemon catalog. Session creation records its class-or-identity selector,
+  optional working directory, optional credential-profile selection, and
+  workspace requirement. The first runner execution records one exact validated
+  registration, pins that runner, and creates any requested initial
+  credential-profile grant from that exact registration.
+- **State transitions:** Enrollment active → validated registration; placement
+  unpinned → pinned on the first eligible runner. The domain foundation in
+  [runner protocol and placement](spec/runner-protocol.md) implements these
+  transitions without transport or storage.
+- **Transient updates:** Connection and registration progress are not
+  enrollment, placement, or approval authority.
+- **Owning component:** The daemon owns enrollment and policy; the runner
+  reports availability; session placement owns affinity.
+- **Failure behavior:** Revoked enrollment, unknown or disallowed catalog
+  claims, selector mismatch, unavailable credential profile, missing workspace
+  capability, or a second ordinary runner fails explicitly without changing
+  placement. Hardware or network changes never derive a new identity implicitly.
+- **Required invariants:** INV-001, INV-002, INV-022, INV-023, INV-024, INV-035,
+  INV-042, INV-044, INV-045.
+- **Remaining questions:** Authentication exchange, store transactions,
+  streaming transport, application session creation, and client presentation
+  remain under
+  [runner authentication](open-questions.md#identity-credentials-and-resource-governance)
+  and [runner transport](open-questions.md#protocols-and-persistence).
+
+## S31 — Recover a lost runner lease
+
+- **User intent:** Resume work that is known safe to repeat without silently
+  duplicating a side effect.
+- **Durable commands:** A later store stack persists an offered lease before
+  streaming it, then persists its exact runner/generation claim before
+  acknowledging execution capability or accepting a result. Domain transition
+  inputs retain the runner, lease, physical tool attempt, session, tool,
+  declaration-derived effect class, and lease-lineage generation. A fresh
+  physical attempt begins at its own first tool-dispatch generation.
+- **State transitions:** An unclaimed lost lease advances to a checked successor
+  generation for every class while retaining the never-executed attempt. A
+  claimed lost pure or idempotent lease produces re-lease authority that
+  requires a fresh physical attempt identity. A claimed lost side-effecting
+  lease produces crash-classification authority and cannot produce re-lease
+  authority.
+- **Transient updates:** Connection loss, reconnect, and repeated frames do not
+  themselves advance the lease.
+- **Owning component:** The daemon owns lease and physical-attempt outcomes; the
+  runner carries only correlated offers, claims, and observations.
+- **Failure behavior:** A stale generation, wrong runner, wrong attempt,
+  duplicate completion, or exhausted generation fails closed. Side-effecting
+  loss follows the existing ambiguity and reconciliation law and is never
+  converted to ordinary tool output or silently dispatched again.
+- **Required invariants:** INV-004, INV-006, INV-011, INV-021, INV-024–INV-026,
+  INV-034, INV-043.
+- **Remaining questions:** Store schema and transactions, exact reconnect
+  inventory, transport framing, heartbeat, and stale-evidence retention remain
+  in [runner transport](open-questions.md#protocols-and-persistence).
+
+## S32 — Replace a lost runner and credential grant
+
+- **User intent:** Continue a pinned session on an explicitly selected
+  replacement while ensuring the model learns the changed logical runner,
+  directory, tools, credential profile, and workspace.
+- **Durable commands:** A later owner command marks the runner lost and supplies
+  one complete validated replacement placement. When the placement selects a
+  credential profile, runner replacement consumes the prior grant and creates
+  its checked successor revision in that same replacement. A separate
+  credential-profile replacement changes the selected profile on the same pinned
+  runner. Each transition produces exact before-and-after change facts for a
+  later injected semantic message and frontier extension.
+- **State transitions:** Pinned → runner lost → explicitly replaced and pinned
+  at the checked successor revision. Active or revoked prior credential grant →
+  checked active successor grant during runner replacement; the consumed prior
+  revision remains terminal. On the same pinned runner, active credential grant
+  → replaced active grant or revoked terminal grant. A repository-worktree
+  requirement creates a new runner-owned provisioned workspace; the old runner's
+  workspace is never inherited.
+- **Transient updates:** UI progress and connection discovery are not
+  replacement authority.
+- **Owning component:** The daemon validates and records owner intent; the
+  selected runner provisions and cleans its workspace; context assembly later
+  appends the typed placement-change message.
+- **Failure behavior:** Automatic migration is absent. An ineligible runner,
+  stale placement or grant revision, unavailable profile, wider tool set,
+  missing workspace capability, or attempt to reactivate a revoked grant fails
+  unchanged. Revocation gates later lease creation but does not yank or rewrite
+  an already offered lease.
+- **Required invariants:** INV-005, INV-008, INV-024–INV-026, INV-035, INV-036,
+  INV-042, INV-044, INV-045.
+- **Remaining questions:** Owner command shape, atomic store boundaries, exact
+  injected semantic content, cleanup recovery, and recovery when no eligible
+  replacement exists remain under
+  [scheduling and runners](open-questions.md#scheduling-and-runners) and
+  [tool safety](open-questions.md#tool-safety).
+
+## S33 — Change the model during a session
 
 - **User intent:** Choose a different configured model for future conversation
   without changing work already accepted or in progress.
@@ -973,7 +1074,7 @@ those tests.
 - **Failure behavior:** Missing session, stale or exhausted epoch, conflicting
   command reuse, unknown catalog selection, and commit ambiguity retain their
   distinct typed outcomes. Exact replay returns the first recorded result.
-- **Required invariants:** INV-008, INV-012, INV-014, INV-015, INV-033, INV-042.
+- **Required invariants:** INV-008, INV-012, INV-014, INV-015, INV-033, INV-046.
 - **Remaining questions:** Richer client model discovery and non-Anthropic hub
   composition remain outside this scenario.
 

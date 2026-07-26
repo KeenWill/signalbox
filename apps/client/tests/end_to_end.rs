@@ -242,11 +242,11 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     Ok(())
 }
 
-/// S30 / INV-008 / INV-042: the terminal model verb observes the complete current
+/// S33 / INV-008 / INV-046: the terminal model verb observes the complete current
 /// defaults facts before sending one recoverable replacement command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s30_inv008_inv042_terminal_client_installs_a_forward_only_model_defaults_epoch()
+async fn s33_inv008_inv046_terminal_client_installs_a_forward_only_model_defaults_epoch()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
