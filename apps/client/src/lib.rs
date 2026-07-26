@@ -1622,10 +1622,16 @@ mod tests {
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::ListSessionMetadata { page_size, .. } if page_size.value() == 1
-            ));
+                &ClientRequest::ListSessionMetadata {
+                    required_tags: Vec::new(),
+                    title_contains: None,
+                    include_archived: false,
+                    page_size: CanonicalU64::new(1),
+                    after_session_id: None,
+                }
+            );
             let frame = |message| {
                 ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
                     .map_err(io::Error::other)

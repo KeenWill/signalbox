@@ -4,7 +4,9 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat, ModelSelection,
+    CanonicalU64, CanonicalUuid, CommandId, ConversationImportFormat,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
 };
 use uuid::Uuid;
 
@@ -315,6 +317,40 @@ pub(crate) fn parse(
                     "search requires distinct --tag values",
                 )));
             }
+            if arguments.tags.len() > MAX_SESSION_METADATA_REQUIRED_TAGS {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::TooManyValues,
+                    format!(
+                        "search admits at most {MAX_SESSION_METADATA_REQUIRED_TAGS} --tag values"
+                    ),
+                )));
+            }
+            if arguments
+                .tags
+                .iter()
+                .any(|tag| tag.len() > MAX_SESSION_METADATA_INDEXED_UTF8_BYTES)
+            {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "each --tag value carries at most \
+                         {MAX_SESSION_METADATA_INDEXED_UTF8_BYTES} UTF-8 bytes"
+                    ),
+                )));
+            }
+            let filter_utf8_bytes = arguments.tags.iter().map(String::len).fold(
+                arguments.title.as_deref().map_or(0, str::len),
+                usize::saturating_add,
+            );
+            if filter_utf8_bytes > MAX_SESSION_METADATA_TOTAL_UTF8_BYTES {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "the --title query and --tag values carry at most \
+                         {MAX_SESSION_METADATA_TOTAL_UTF8_BYTES} UTF-8 bytes together"
+                    ),
+                )));
+            }
             Command::Search(SessionMetadataPageRequest {
                 required_tags: arguments.tags,
                 title_contains: arguments.title,
@@ -421,7 +457,11 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
 mod tests {
     use std::{ffi::OsString, path::Path};
 
-    use signalbox_process_protocol::{CanonicalU64, CanonicalUuid, ConversationImportFormat};
+    use signalbox_process_protocol::{
+        CanonicalU64, CanonicalUuid, ConversationImportFormat,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+    };
     use uuid::Uuid;
 
     use super::{
@@ -582,6 +622,54 @@ mod tests {
     #[test]
     fn search_rejects_a_repeated_tag_before_socket_use() {
         assert!(parse(["search", "--tag", "daily", "--tag", "daily"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_more_required_tags_than_the_process_filter_admits() {
+        let admitted = search_requiring_tags(MAX_SESSION_METADATA_REQUIRED_TAGS);
+        let one_tag_beyond = search_requiring_tags(MAX_SESSION_METADATA_REQUIRED_TAGS + 1);
+
+        assert!(parse(admitted).is_ok());
+        assert!(parse(one_tag_beyond).is_err());
+    }
+
+    #[test]
+    fn search_rejects_a_required_tag_beyond_the_indexed_byte_bound() {
+        let admitted = "t".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES);
+        let one_byte_beyond = "t".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1);
+
+        assert!(parse(["search", "--tag", admitted.as_str()].map(Into::into)).is_ok());
+        assert!(parse(["search", "--tag", one_byte_beyond.as_str()].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_filter_text_beyond_the_aggregate_byte_bound() {
+        let whole_bound_title = "t".repeat(MAX_SESSION_METADATA_TOTAL_UTF8_BYTES);
+
+        assert!(parse(["search", "--title", whole_bound_title.as_str()].map(Into::into)).is_ok());
+        assert!(
+            parse(
+                [
+                    "search",
+                    "--title",
+                    whole_bound_title.as_str(),
+                    "--tag",
+                    "daily",
+                ]
+                .map(Into::into)
+            )
+            .is_err()
+        );
+    }
+
+    /// One `search` invocation requiring the given number of distinct tags.
+    fn search_requiring_tags(tags: usize) -> Vec<OsString> {
+        let mut values = vec![OsString::from("search")];
+        for tag in 0..tags {
+            values.push(OsString::from("--tag"));
+            values.push(OsString::from(tag.to_string()));
+        }
+        values
     }
 
     #[test]
