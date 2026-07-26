@@ -185,6 +185,11 @@ async fn inv_035_split_authorization_value_before_final_text_is_redacted() {
 
     assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(streamed.contains("[redacted]"));
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text("[redacted]".to_string())],
+        "terminal completion content must carry the stateful stream redaction"
+    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -1008,6 +1013,39 @@ async fn completion_after_an_incomplete_stdin_upload_is_boundary_loss() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn cancelled_completion_after_an_incomplete_stdin_upload_is_boundary_loss() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let executable = stderr_holding_incomplete_upload_cli(temporary.path());
+    let runtime = runtime(temporary.path(), executable);
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-stderr-wait-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+    let loss = boundary_loss(&report.evidence);
+    let failure = transport_failed(&loss.cause);
+
+    assert!(
+        failure
+            .detail
+            .contains("before the full request upload completed")
+    );
+    assert_eq!(
+        loss.usage,
+        TokenUsage {
+            input_tokens: Some(fixtures::INPUT_TOKENS),
+            output_tokens: Some(fixtures::OUTPUT_TOKENS),
+            cache_creation_input_tokens: Some(fixtures::CACHE_CREATION_INPUT_TOKENS),
+            cache_read_input_tokens: Some(fixtures::CACHE_READ_INPUT_TOKENS),
+        },
+        "the demoted nominal completion still carries its observed usage"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn cancellation_kills_descendants_after_the_group_leader_exits() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let mut config = CodexCliConfig::new(
@@ -1746,6 +1784,50 @@ fn fake_cli() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-codex-cli"))
 }
 
+/// Scripts the reproduced launder-by-cancellation sequence: refuse the
+/// request upload, emit a nominal completion, close stdout, then hold stderr
+/// open so cancellation arrives while the adapter waits on stderr. The
+/// readiness marker is written only after stdout and stdin are closed and a
+/// settling second has passed, so cancellation cannot fire before the adapter
+/// has consumed the terminal marker and parked in its stderr wait.
+#[cfg(unix)]
+fn stderr_holding_incomplete_upload_cli(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let envelope_text = format!(
+        r#"{{\"outcome\":\"completed\",\"text\":\"{}\",\"tool_calls\":[]}}"#,
+        fixtures::BUFFERED_ANSWER
+    );
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' '{{"type":"thread.started","thread_id":"{thread_id}"}}'
+printf '%s\n' '{{"type":"turn.started"}}'
+printf '%s\n' '{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{envelope_text}"}}}}'
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":{input},"cached_input_tokens":{cache_read},"cache_write_input_tokens":{cache_write},"output_tokens":{output},"reasoning_output_tokens":3}}}}'
+exec 1>&-
+exec 0<&-
+sleep 1
+printf 'ready\n' > fake-codex-stderr-wait-ready
+sleep 60
+"#,
+        thread_id = fixtures::THREAD_ID,
+        envelope_text = envelope_text,
+        input = fixtures::INPUT_TOKENS,
+        cache_read = fixtures::CACHE_READ_INPUT_TOKENS,
+        cache_write = fixtures::CACHE_CREATION_INPUT_TOKENS,
+        output = fixtures::OUTPUT_TOKENS,
+    );
+    let executable = directory.join("stderr-holding-codex");
+    std::fs::write(&executable, script).expect("the stderr-holding fake CLI is written");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("the stderr-holding fake CLI has metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions)
+        .expect("the stderr-holding fake CLI is executable");
+    executable
+}
+
 #[cfg(unix)]
 fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -1821,12 +1903,43 @@ fn assert_recorded_process_group_exited(_path: std::path::PathBuf) {}
 #[cfg(unix)]
 fn process_group_exists(process_group: rustix::process::Pid) -> bool {
     rustix::process::test_kill_process_group(process_group).is_ok()
+        && process_group_has_live_member(process_group)
+}
+
+/// A host whose PID 1 does not promptly reap orphans can hold a fully killed
+/// group as unreaped zombies that still accept the signal probe above; only a
+/// member in a non-zombie state counts as alive.
+#[cfg(target_os = "linux")]
+fn process_group_has_live_member(process_group: rustix::process::Pid) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+            proc_stat_process_group(&stat) == Some(process_group.as_raw_nonzero().get())
+                && !proc_stat_is_zombie(&stat)
+        })
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_live_member(_process_group: rustix::process::Pid) -> bool {
+    true
 }
 
 #[cfg(target_os = "linux")]
 fn proc_stat_is_zombie(stat: &str) -> bool {
     stat.rsplit_once(") ")
         .is_some_and(|(_, fields)| fields.starts_with("Z "))
+}
+
+/// Reads the process-group field of one `/proc/<pid>/stat` line: the second
+/// field after the parenthesized command, whose own closing parenthesis is
+/// found from the right because the command may itself contain one.
+#[cfg(target_os = "linux")]
+fn proc_stat_process_group(stat: &str) -> Option<i32> {
+    let (_, fields) = stat.rsplit_once(") ")?;
+    fields.split(' ').nth(2)?.parse().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -1839,6 +1952,27 @@ fn linux_proc_stat_zombie_is_an_exited_process_state() {
 #[test]
 fn linux_proc_stat_running_is_not_an_exited_process_state() {
     assert!(!proc_stat_is_zombie("42 (sleep) S 1 42 42 0"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_names_its_process_group() {
+    assert_eq!(proc_stat_process_group("42 (sleep) Z 1 42 42 0"), Some(42));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_proc_stat_group_parse_survives_a_parenthesized_command() {
+    assert_eq!(
+        proc_stat_process_group("42 (watch (x)) S 1 42 42 0"),
+        Some(42)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_own_process_group_has_a_live_member() {
+    assert!(process_group_has_live_member(rustix::process::getpgrp()));
 }
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {

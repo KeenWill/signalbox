@@ -319,6 +319,7 @@ pub(crate) struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     pending: Option<PendingStreamText<C>>,
     suppressing: bool,
+    terminal_text_capture: Option<String>,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -327,7 +328,19 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             inner,
             pending: None,
             suppressing: false,
+            terminal_text_capture: None,
         }
+    }
+
+    /// Starts recording every emitted final-text byte, so terminal evidence
+    /// can carry exactly the stateful cross-fragment redaction the streamed
+    /// deltas received instead of a stateless re-redaction of the raw text.
+    pub(crate) fn begin_terminal_text_capture(&mut self) {
+        self.terminal_text_capture = Some(String::new());
+    }
+
+    pub(crate) fn take_terminal_text_capture(&mut self) -> String {
+        self.terminal_text_capture.take().unwrap_or_default()
     }
 
     fn flush_boundary(&mut self) {
@@ -392,6 +405,11 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         if text.is_empty() {
             return;
         }
+        if field == StreamField::Text
+            && let Some(capture) = &mut self.terminal_text_capture
+        {
+            capture.push_str(&text);
+        }
         let fact = match field {
             StreamField::Text => ObservationFact::TextDelta { index, text },
             StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
@@ -417,12 +435,18 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             let mut combined = pending.text.clone();
             combined.push_str(&text);
             if stream_candidate_starts_at_zero(&combined) {
-                pending.fragments.push(StreamFragment {
-                    field,
-                    index,
-                    correlation,
-                    text,
-                });
+                // An empty delta extends neither the held candidate nor any
+                // eventual emission; retaining a fragment for it would grow
+                // held metadata without bound, since the pending-byte cap
+                // below measures only text bytes.
+                if !text.is_empty() {
+                    pending.fragments.push(StreamFragment {
+                        field,
+                        index,
+                        correlation,
+                        text,
+                    });
+                }
                 if let Some(unsafe_start) = unsafe_stream_suffix_start(&combined) {
                     if unsafe_start == 0 {
                         pending.text = combined;
@@ -850,6 +874,72 @@ mod tests {
                     correlation: 7_u8,
                     fact: ObservationFact::TextDelta {
                         index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
+    /// Plumbing only: streams `count` empty reasoning items at ascending
+    /// indexes after the caller's held fragment.
+    fn observe_empty_reasoning_items(sink: &mut RedactingSink<'_, u8>, count: u32) {
+        for index in 1..=count {
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ThinkingDelta {
+                    index,
+                    text: String::new(),
+                },
+            });
+        }
+    }
+
+    /// INV-035: empty streamed items behind a held credential candidate
+    /// cannot grow retained fragment metadata without bound.
+    #[test]
+    fn inv_035_stream_redaction_bounds_held_fragments_across_empty_items() {
+        let empty_items = 1024_u32;
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::ThinkingDelta {
+                    index: 0,
+                    text: "sk-".to_string(),
+                },
+            });
+            observe_empty_reasoning_items(&mut sink, empty_items);
+            assert_eq!(
+                sink.pending.as_ref().map(|pending| pending.fragments.len()),
+                Some(1),
+                "empty deltas must not extend held-fragment retention"
+            );
+            sink.observe(Observation {
+                correlation: 7_u8,
+                fact: ObservationFact::TextDelta {
+                    index: empty_items + 1,
+                    text: "held-secret".to_string(),
+                },
+            });
+            sink.finish();
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::ThinkingDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: empty_items + 1,
                         text: REDACTED.to_string(),
                     },
                 },

@@ -584,7 +584,15 @@ async fn execute_process<C: Clone + Send + Sync>(
             let cleanup_grace = remaining_interrupt_grace(prepared.interrupt_grace, deadline);
             interrupt_then_kill(&mut child, cleanup_grace).await;
             abort_stderr_task(stderr_task).await;
-            let evidence = decoder.finish(&mut redacting_sink);
+            // Cancellation does not launder an incomplete request upload: a
+            // nominal completion still demotes to boundary loss exactly as on
+            // the normal exit path below, because the adapter cannot prove the
+            // full authorized frontier reached the CLI.
+            let evidence = if let Some(error) = input_error {
+                decoder.boundary_loss_unless_provider_failure(incomplete_upload_cause(&error))
+            } else {
+                decoder.finish(&mut redacting_sink)
+            };
             redacting_sink.finish();
             return evidence;
         },
@@ -655,11 +663,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     match status {
         Ok(status) if status.success() => {
             let evidence = if let Some(error) = input_error {
-                decoder.boundary_loss_unless_provider_failure(LossCause::TransportFailed(
-                    TransportFacts::new(format!(
-                        "Codex stdin closed before the full request upload completed: {error}"
-                    )),
-                ))
+                decoder.boundary_loss_unless_provider_failure(incomplete_upload_cause(&error))
             } else {
                 decoder.finish(&mut redacting_sink)
             };
@@ -684,6 +688,12 @@ async fn execute_process<C: Clone + Send + Sync>(
             ))))
         }
     }
+}
+
+fn incomplete_upload_cause(error: &std::io::Error) -> LossCause {
+    LossCause::TransportFailed(TransportFacts::new(format!(
+        "Codex stdin closed before the full request upload completed: {error}"
+    )))
 }
 
 fn stderr_result(result: Result<std::io::Result<String>, tokio::task::JoinError>) -> String {

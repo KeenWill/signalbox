@@ -12,7 +12,7 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
-use crate::redaction::{redact_json, redact_text};
+use crate::redaction::{RedactingSink, redact_json, redact_text};
 use crate::status::classify_error;
 use crate::translate::{ToolRequirement, TranslatedOperation};
 use crate::wire::{
@@ -169,7 +169,7 @@ impl<C: Clone> EventDecoder<C> {
         Ok(())
     }
 
-    pub(crate) fn finish(self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
+    pub(crate) fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         match self.terminal {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
                 provider_error(self.exchange, self.usage, &message)
@@ -220,7 +220,7 @@ impl<C: Clone> EventDecoder<C> {
         self.terminal.is_some()
     }
 
-    fn completed(mut self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
+    fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         let Some(agent_message) = self.agent_message.take() else {
             return boundary_loss(
                 self.exchange,
@@ -252,7 +252,7 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
-        let content = match self.decode_content(&envelope) {
+        let mut content = match self.decode_content(&envelope) {
             Ok(content) => content,
             Err(detail) => {
                 return boundary_loss(
@@ -267,6 +267,9 @@ impl<C: Clone> EventDecoder<C> {
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
             EnvelopeOutcome::Completed => FinishReason::ToolUse,
         };
+        if self.delivery == DeliveryMode::Streamed {
+            sink.begin_terminal_text_capture();
+        }
         if let Err(detail) = self.emit_completion_observations(
             sink,
             &content,
@@ -278,6 +281,21 @@ impl<C: Clone> EventDecoder<C> {
                 self.usage,
                 LossCause::ResponseUnintelligible { detail },
             );
+        }
+        if self.delivery == DeliveryMode::Streamed {
+            // The usage barrier inside the observation emission above flushed
+            // every held lookbehind fragment, so the capture now holds the
+            // stateful cross-fragment redaction of the final text. Terminal
+            // evidence carries exactly those bytes; an independent stateless
+            // re-redaction of the raw text would miss a credential value whose
+            // marker arrived in an earlier fragment.
+            let captured = sink.take_terminal_text_capture();
+            if let Some(AssistantPart::Text(text)) = content
+                .iter_mut()
+                .find(|part| matches!(part, AssistantPart::Text(_)))
+            {
+                *text = captured;
+            }
         }
 
         match envelope.outcome {
@@ -392,7 +410,7 @@ impl<C: Clone> EventDecoder<C> {
 
     fn emit_completion_observations(
         &mut self,
-        sink: &mut (dyn ObservationSink<C> + Send),
+        sink: &mut RedactingSink<'_, C>,
         content: &[AssistantPart],
         raw_text: &str,
         finish: FinishReason,
