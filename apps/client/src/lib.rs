@@ -72,7 +72,10 @@ async fn execute(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), ClientError> {
-    let input = if matches!(arguments.command, Command::Send { .. }) {
+    let input = if matches!(
+        arguments.command,
+        Command::Send { .. } | Command::Reconcile { .. }
+    ) {
         Some(read_input(stdin)?)
     } else {
         None
@@ -84,7 +87,8 @@ async fn execute(
         | Command::Send { .. }
         | Command::Model { .. }
         | Command::Transcript { .. }
-        | Command::Follow { .. } => None,
+        | Command::Follow { .. }
+        | Command::Reconcile { .. } => None,
     };
     let system_prompt_text = match &arguments.command {
         Command::Create {
@@ -128,7 +132,7 @@ async fn execute(
             command_id,
             defaults_version,
         } => {
-            let input = input.ok_or(ClientError::Input("send input was not read"))?;
+            let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
             send(
                 &mut client,
                 &mut output,
@@ -176,6 +180,24 @@ async fn execute(
         Command::Import { format, .. } => {
             let source = import_source.ok_or(ClientError::Input("import source was not read"))?;
             import_conversation(&mut client, &mut output, format, source).await
+        }
+        Command::Reconcile {
+            session_id,
+            turn_id,
+            command_id,
+            defaults_version,
+        } => {
+            let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
+            reconcile(
+                &mut client,
+                &mut output,
+                session_id,
+                turn_id,
+                command_id,
+                defaults_version,
+                input,
+            )
+            .await
         }
     }
 }
@@ -264,17 +286,21 @@ fn read_input(stdin: &mut dyn Read) -> Result<String, ClientError> {
         .take((MAX_INPUT_CONTENT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.is_empty() {
-        return Err(ClientError::Input("send input must not be empty"));
+        return Err(ClientError::Input(
+            "standard-input content must not be empty",
+        ));
     }
     if bytes.len() > MAX_INPUT_CONTENT_BYTES {
         return Err(ClientError::Input(
-            "send input exceeds the 1 MiB UTF-8 byte limit",
+            "standard-input content exceeds the 1 MiB UTF-8 byte limit",
         ));
     }
     let text = String::from_utf8(bytes)
-        .map_err(|_| ClientError::Input("send input must be valid UTF-8"))?;
+        .map_err(|_| ClientError::Input("standard-input content must be valid UTF-8"))?;
     if text.contains('\0') {
-        return Err(ClientError::Input("send input must not contain U+0000"));
+        return Err(ClientError::Input(
+            "standard-input content must not contain U+0000",
+        ));
     }
     Ok(text)
 }
@@ -560,6 +586,65 @@ async fn send(
             &command_id.into_uuid().hyphenated().to_string(),
         )?;
     }
+    let defaults_version =
+        resolve_defaults_version(client, output, session_id, defaults_version).await?;
+
+    let turn_id = submit_input(
+        client,
+        command_id,
+        session_id,
+        InputContent::new(content),
+        defaults_version,
+    )
+    .await?;
+
+    await_and_report_turn(client, output, session_id, turn_id).await
+}
+
+/// Supplies the owner reconciliation decision a turn parked on an ambiguous
+/// model call requires, then continues the session with the given content.
+///
+/// The parked turn terminalizes as reconciliation-required — its ambiguity is
+/// recorded, never resolved into a fabricated outcome — and the content becomes
+/// the immediate successor turn this verb then follows to its own terminal.
+async fn reconcile(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    command_id: Option<CommandId>,
+    defaults_version: Option<CanonicalU64>,
+    content: String,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let defaults_version =
+        resolve_defaults_version(client, output, session_id, defaults_version).await?;
+
+    let successor_turn_id = reconcile_turn(
+        client,
+        command_id,
+        session_id,
+        turn_id,
+        InputContent::new(content),
+        defaults_version,
+    )
+    .await?;
+
+    await_and_report_turn(client, output, session_id, successor_turn_id).await
+}
+
+async fn resolve_defaults_version(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    defaults_version: Option<CanonicalU64>,
+) -> Result<CanonicalU64, ClientError> {
     let defaults_version = match defaults_version {
         Some(version) => version,
         None => {
@@ -575,16 +660,15 @@ async fn send(
         }
     };
     output.recovery_value("defaults_version", &defaults_version.value().to_string())?;
+    Ok(defaults_version)
+}
 
-    let turn_id = submit_input(
-        client,
-        command_id,
-        session_id,
-        InputContent::new(content),
-        defaults_version,
-    )
-    .await?;
-
+async fn await_and_report_turn(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+) -> Result<(), ClientError> {
     match await_turn_terminal(client, session_id, turn_id).await? {
         TurnTerminal::Completed => {
             let mut snapshot = transcript(client, session_id).await?;
@@ -631,6 +715,38 @@ async fn submit_input(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("submit returned an unexpected response").mutation()),
+    }
+}
+
+async fn reconcile_turn(
+    client: &mut ProcessClient,
+    command_id: CommandId,
+    session_id: CanonicalUuid,
+    expected_active_turn_id: CanonicalUuid,
+    content: InputContent,
+    defaults_version: CanonicalU64,
+) -> Result<CanonicalUuid, ClientError> {
+    let mut connection = client
+        .mutation_request(ClientRequest::ReconcileTurn {
+            command_id,
+            session_id,
+            expected_active_turn_id,
+            content,
+            expected_defaults_version: defaults_version,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::InputSubmitted {
+            session_id: submitted_session,
+            turn_id,
+            ..
+        } if submitted_session == session_id => Ok(turn_id),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("reconcile returned an unexpected response").mutation()),
     }
 }
 
@@ -1067,29 +1183,29 @@ mod tests {
 
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
-        SnapshotSelection, TurnTerminal, create, model_call_recovery_transition, read_input, run,
-        socket_path, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        SnapshotSelection, TurnTerminal, create, model_call_recovery_transition, read_input,
+        reconcile_turn, run, socket_path, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
     #[test]
-    fn empty_send_input_is_rejected() {
+    fn empty_standard_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(Vec::<u8>::new())).is_err());
     }
 
     #[test]
-    fn nul_in_send_input_is_rejected() {
+    fn nul_in_standard_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(b"before\0after".to_vec())).is_err());
     }
 
     #[test]
-    fn oversized_send_input_is_rejected() {
+    fn oversized_standard_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(vec![b'a'; MAX_INPUT_CONTENT_BYTES + 1])).is_err());
     }
 
     #[test]
-    fn exact_limit_send_input_is_accepted() {
+    fn exact_limit_standard_input_is_accepted() {
         let exact = vec![b'a'; MAX_INPUT_CONTENT_BYTES];
         assert_eq!(
             read_input(&mut Cursor::new(exact.clone()))
@@ -1542,6 +1658,63 @@ mod tests {
         )
         .await?;
         assert_eq!(submitted_turn, turn_id);
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-033: the reconciliation verb names the exact parked turn on the
+    /// wire and returns the accepted successor turn.
+    #[tokio::test]
+    async fn reconcile_turn_names_the_parked_turn_and_returns_its_successor()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let parked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert!(matches!(
+                request.request(),
+                ClientRequest::ReconcileTurn {
+                    session_id: requested_session,
+                    expected_active_turn_id: requested_turn,
+                    ..
+                } if *requested_session == session_id && *requested_turn == parked_turn_id
+            ));
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::InputSubmitted {
+                    session_id,
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                    acceptance_position: CanonicalU64::new(2),
+                    turn_id: successor_turn_id,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let accepted_successor = reconcile_turn(
+            &mut client,
+            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            session_id,
+            parked_turn_id,
+            InputContent::new(String::from("continue after reconciliation")),
+            CanonicalU64::new(1),
+        )
+        .await?;
+        assert_eq!(accepted_successor, successor_turn_id);
         server.await??;
         Ok(())
     }

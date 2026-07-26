@@ -8,7 +8,8 @@ in PR #227 (`agent/review-workflow-persistence`); the metadata command issuer
 proof was verified through PR #265 (`agent/tool-batch-tier0`); the
 `apps/signalboxd` migration-invocation home was verified through PR #258
 (`agent/signalboxd-rename`); the model-identity frontier shape was verified
-through PR #272 (`agent/mid-session-model`). This page covers the Postgres
+through PR #272 (`agent/mid-session-model`); the session system-prompt columns
+were verified through PR #286 (`agent/session-system-prompt`). This page covers the Postgres
 representation in `crates/persistence` (source and migrations), migration
 discipline, durable command storage and replay equality, the fail-closed
 reconstitution boundary, the lock protocol, pending-steering durable state, the
@@ -127,6 +128,14 @@ Implemented table families (across the forward-only migrations):
 
 Representation rules, all enforced in the schema:
 
+- Migration `202607280301` adds the optional bounded `system_prompt` column to
+  `session_defaults_version` and the three defaults-bearing command tables,
+  each guarded by the 1,048,576-UTF-8-byte and nonempty CHECK constraints and,
+  on command tables, a version-three gate. A generated exact-encoding SHA-256
+  digest column joins the selection key and the command/defaults agreement
+  foreign keys, because megabyte text cannot join a btree key; the empty bytea
+  stands for an absent prompt so a `MATCH SIMPLE` member never skips
+  enforcement ([sessions-and-transcript](sessions-and-transcript.md)).
 - Migration `202607280201` adds the closed `model_identity_changed`
   semantic-entry payload, whose turn, positive defaults epoch, and direct
   selection are total only for that kind. Deferred checks bind it to the named
@@ -273,9 +282,10 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`) and a
 kind-scoped `storage_version`. Defaults-bearing create, imported-create, and
-replace-defaults records write version 2 and reconstitute version 1 with the
-disabled dangerous-tool posture, while metadata, submit, and decision records
-use version 1. Each kind has one typed subordinate record keyed by `command_id`
+replace-defaults records write version 3; they reconstitute version 1 with the
+disabled dangerous-tool posture, and versions 1 and 2 with no system prompt —
+a pre-version-three row carrying one fails closed in both the schema and every
+Rust reader. Metadata, submit, and decision records use version 1. Each kind has one typed subordinate record keyed by `command_id`
 that stores every caller-supplied semantic field in typed, `CHECK`-constrained
 columns, plus the terminal `applied`/`rejected` result and its typed result
 fields; result-shape `CHECK` constraints tie each rejection kind to exactly its

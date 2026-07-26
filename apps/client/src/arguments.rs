@@ -46,6 +46,12 @@ pub(crate) enum Command {
         format: ConversationImportFormat,
         path: PathBuf,
     },
+    Reconcile {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        command_id: Option<CommandId>,
+        defaults_version: Option<CanonicalU64>,
+    },
 }
 
 #[derive(Debug)]
@@ -99,6 +105,9 @@ enum CliCommand {
     Follow(SessionArguments),
     /// Import one Claude Code session or Codex rollout JSONL file.
     Import(ImportArguments),
+    /// Reconcile a turn parked on an ambiguous model call and continue with
+    /// standard-input content.
+    Reconcile(ReconcileArguments),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -198,6 +207,32 @@ struct ModelArguments {
     /// Install the replacement epoch without a session system prompt.
     #[arg(long)]
     clear_system_prompt: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ReconcileArguments {
+    /// Session whose active turn is parked awaiting reconciliation.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Exact parked turn observed in the session transcript.
+    #[arg(value_name = "TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(
+        long,
+        value_name = "UUID",
+        requires = "defaults_version",
+        value_parser = command_id
+    )]
+    command_id: Option<CommandId>,
+    /// Exact defaults version paired with a recovery command identity.
+    #[arg(
+        long,
+        value_name = "DECIMAL",
+        requires = "command_id",
+        value_parser = canonical_u64
+    )]
+    defaults_version: Option<CanonicalU64>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -314,6 +349,12 @@ pub(crate) fn parse(
             },
             path: arguments.path,
         },
+        CliCommand::Reconcile(arguments) => Command::Reconcile {
+            session_id: arguments.session_id,
+            turn_id: arguments.turn_id,
+            command_id: arguments.command_id,
+            defaults_version: arguments.defaults_version,
+        },
     };
     Ok(ParseOutcome::Run(Arguments {
         socket: parsed.socket,
@@ -427,6 +468,26 @@ mod tests {
                 },
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn reconcile_binds_both_the_session_and_the_parked_turn() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let turn = "00000000-0000-0000-0000-000000000002";
+
+        assert!(parse(["reconcile", session].map(Into::into)).is_err());
+        assert!(matches!(
+            parse(["reconcile", session, turn].map(Into::into)),
+            Ok(ParseOutcome::Run(Arguments {
+                command: Command::Reconcile {
+                    session_id,
+                    turn_id,
+                    command_id: None,
+                    defaults_version: None,
+                },
+                ..
+            })) if session_id.to_string() == session && turn_id.to_string() == turn
         ));
     }
 

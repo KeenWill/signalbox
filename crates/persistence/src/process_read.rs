@@ -284,6 +284,20 @@ impl ProcessFailedTerminalModelCall {
     }
 }
 
+/// Whether a session can owe an owner reconciliation decision right now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessModelCallRecoveryPrecondition {
+    /// No such session exists in this snapshot.
+    SessionAbsent,
+    /// The session exists but no active turn is parked on a model call.
+    NoParkedTurn,
+    /// The session's active turn is parked on this exact ambiguous call.
+    Parked {
+        /// The active turn holding the slot until reconciliation.
+        turn: TurnId,
+    },
+}
+
 /// Authoritative lifecycle state for one projected turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTurnState {
@@ -1089,6 +1103,44 @@ impl ProcessReadRepository {
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
+    }
+
+    /// Reads whether the session exists and, when it does, whether its active
+    /// turn is parked on the model-call recovery wait.
+    ///
+    /// This narrow read lets a process adapter refuse a reconciliation request
+    /// whose named turn owes no owner decision, before recording a durable
+    /// command. It is a precondition, never authority: the authoritative
+    /// transaction revalidates the exact expected active turn under the
+    /// session lock, and an ended attempt never returns to a live phase, so an
+    /// admitted wait can only stay parked or terminalize before that
+    /// transaction runs. An absent session is reported separately so the
+    /// adapter can leave that case to the authoritative transaction's own
+    /// typed rejection instead of collapsing it into a missing wait.
+    pub async fn model_call_recovery_precondition(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<ProcessModelCallRecoveryPrecondition, ProcessReadError> {
+        let row: Option<(bool, Option<Uuid>)> = sqlx::query_as(
+            "SELECT TRUE,
+                    (SELECT turn_id
+                       FROM turn_lifecycle
+                      WHERE session_id = session.session_id
+                        AND state_kind = 'active'
+                        AND active_phase_kind = 'awaiting_model_call_recovery')
+               FROM session
+              WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            None => ProcessModelCallRecoveryPrecondition::SessionAbsent,
+            Some((_, None)) => ProcessModelCallRecoveryPrecondition::NoParkedTurn,
+            Some((_, Some(turn))) => ProcessModelCallRecoveryPrecondition::Parked {
+                turn: TurnId::from_uuid(turn),
+            },
+        })
     }
 
     /// Reads one complete transcript snapshot, or `None` only when the session

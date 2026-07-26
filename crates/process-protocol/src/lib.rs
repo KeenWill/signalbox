@@ -36,11 +36,14 @@ pub const CONVERSATION_IMPORT_PROTOCOL_VERSION: u64 = 5;
 /// The forward-only session-defaults replacement protocol version.
 pub const MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION: u64 = 6;
 
+/// The owner turn-reconciliation protocol version.
+pub const TURN_RECONCILIATION_PROTOCOL_VERSION: u64 = 7;
+
 /// The session system-prompt protocol version.
 ///
-/// Versions seven and eight are reserved by the in-flight turn-reconciliation
-/// and turn-control stacks and are not admitted by this implementation; a
-/// frame naming either receives the ordinary unsupported-version error.
+/// Version eight is reserved by the in-flight turn-control stack and is not
+/// admitted by this implementation; a frame naming it receives the ordinary
+/// unsupported-version error.
 pub const SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION: u64 = 9;
 
 /// One admitted process-protocol version.
@@ -58,8 +61,10 @@ pub enum ProtocolVersion {
     Five,
     /// Forward-only session-defaults replacement vocabulary.
     Six,
-    /// Session system-prompt vocabulary. Versions seven and eight remain
-    /// reserved by in-flight stacks and have no variant here.
+    /// Owner turn-reconciliation vocabulary.
+    Seven,
+    /// Session system-prompt vocabulary. Version eight remains reserved by an
+    /// in-flight stack and has no variant here.
     Nine,
 }
 
@@ -73,6 +78,7 @@ impl ProtocolVersion {
             Self::Four => SESSION_METADATA_PROTOCOL_VERSION,
             Self::Five => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::Seven => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::Nine => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
         }
     }
@@ -85,6 +91,7 @@ impl ProtocolVersion {
             SESSION_METADATA_PROTOCOL_VERSION => Some(Self::Four),
             CONVERSATION_IMPORT_PROTOCOL_VERSION => Some(Self::Five),
             MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
+            TURN_RECONCILIATION_PROTOCOL_VERSION => Some(Self::Seven),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION => Some(Self::Nine),
             _ => None,
         }
@@ -1060,6 +1067,24 @@ pub enum ClientRequest {
         /// Exact complete source bytes.
         source: ConversationImportSource,
     },
+    /// Reconcile the exact active turn parked on an ambiguous model call.
+    ///
+    /// The named turn must be the session's active turn and must be parked in
+    /// the model-call recovery wait. The request supplies the owner interrupt
+    /// authority that turn's terminal disposition requires and carries the
+    /// successor input the session continues with.
+    ReconcileTurn {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// The turn the caller observed parked awaiting reconciliation.
+        expected_active_turn_id: CanonicalUuid,
+        /// Exact owner text for the immediate successor turn.
+        content: InputContent,
+        /// Caller-observed defaults version.
+        expected_defaults_version: CanonicalU64,
+    },
 }
 
 impl ClientRequest {
@@ -1070,6 +1095,7 @@ impl ClientRequest {
             | Self::ReplaceSessionMetadata { .. } => SESSION_METADATA_PROTOCOL_VERSION,
             Self::ImportConversation { .. } => CONVERSATION_IMPORT_PROTOCOL_VERSION,
             Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ReconcileTurn { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::ReadSessionDefaults { .. } => SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION,
             Self::CreateSession { .. }
             | Self::ListSessions {}
@@ -1267,6 +1293,34 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// The caller named a turn that no longer holds the session slot.
+    ActiveTurnMismatch {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Turn the caller expected to be active.
+        expected_active_turn_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+    },
+    /// No turn held the session slot when the caller named one.
+    NoActiveTurn {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Turn the caller expected to be active.
+        expected_active_turn_id: CanonicalUuid,
+    },
+    /// The named turn is not parked on the model-call recovery wait, so no
+    /// reconciliation decision is owed for it.
+    ///
+    /// This precondition is refused before a durable command is recorded; a
+    /// caller that races the authoritative state instead receives one of the
+    /// recorded rejections above.
+    TurnNotAwaitingReconciliation {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Turn the caller named.
+        turn_id: CanonicalUuid,
+    },
     /// The caller observed stale defaults.
     DefaultsVersionMismatch {
         /// Target session.
@@ -1303,6 +1357,9 @@ impl RejectionDetail {
     const fn minimum_protocol_version(self) -> u64 {
         match self {
             Self::DefaultsVersionExhausted { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
+            Self::ActiveTurnMismatch { .. }
+            | Self::NoActiveTurn { .. }
+            | Self::TurnNotAwaitingReconciliation { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::SessionNotFound { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::DefaultsVersionMismatch { .. }
@@ -2591,7 +2648,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, and 9",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, and 9",
             ),
         }
     }
@@ -2800,7 +2857,7 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6" | "9") {
+    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "9") {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
@@ -2909,6 +2966,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "4" => Some(ProtocolVersion::Four),
         "5" => Some(ProtocolVersion::Five),
         "6" => Some(ProtocolVersion::Six),
+        "7" => Some(ProtocolVersion::Seven),
         "9" => Some(ProtocolVersion::Nine),
         _ => None,
     }
@@ -3045,7 +3103,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, 6, and 9")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, and 9")
         );
     }
 
@@ -3055,7 +3113,7 @@ mod tests {
             r#"{"future":"#.repeat(payload_depth),
             "}".repeat(payload_depth)
         );
-        format!("{{\"version\":7,\"request_id\":\"9\",\"request\":{payload}}}")
+        format!("{{\"version\":8,\"request_id\":\"9\",\"request\":{payload}}}")
     }
 
     #[track_caller]
@@ -3244,7 +3302,7 @@ mod tests {
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
         assert_unsupported_version("-1");
-        assert_unsupported_version("7");
+        assert_unsupported_version("8");
         assert_unsupported_version("18446744073709551616");
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
@@ -3871,6 +3929,109 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: the reconciliation request is admitted only by version seven
+    /// and keeps its exact closed shape across one encode/decode round trip.
+    #[test]
+    fn inv033_version_seven_reconcile_turn_request_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::ReconcileTurn {
+            command_id: command(4)?,
+            session_id: uuid(6),
+            expected_active_turn_id: uuid(7),
+            content: InputContent::new(String::from("continue after reconciliation")),
+            expected_defaults_version: CanonicalU64::new(1),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Six,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Seven, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":7,\"request_id\":\"1\",\"request\":{\"type\":\"reconcile_turn\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
+             \"content\":\"continue after reconciliation\",\
+             \"expected_defaults_version\":\"1\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: version seven retains every earlier request unchanged.
+    #[test]
+    fn inv033_version_seven_retains_the_earlier_request_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Seven,
+            request(1)?,
+            ClientRequest::SubmitInput {
+                command_id: command(4)?,
+                session_id: uuid(6),
+                content: InputContent::new(String::from("ordinary work")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":7,"));
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: the reconciliation refusal and the stale-target rejection carry
+    /// their exact closed wire shapes.
+    #[test]
+    fn inv033_reconciliation_rejection_details_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the named turn is not awaiting reconciliation"),
+                detail: ErrorDetail::rejected(RejectionDetail::TurnNotAwaitingReconciliation {
+                    session_id: uuid(6),
+                    turn_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the named turn is not awaiting reconciliation","detail":{"type":"turn_not_awaiting_reconciliation","session_id":"00000000-0000-0000-0000-000000000006","turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the expected active turn is stale"),
+                detail: ErrorDetail::rejected(RejectionDetail::ActiveTurnMismatch {
+                    session_id: uuid(6),
+                    expected_active_turn_id: uuid(7),
+                    active_turn_id: uuid(8),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the expected active turn is stale","detail":{"type":"active_turn_mismatch","session_id":"00000000-0000-0000-0000-000000000006","expected_active_turn_id":"00000000-0000-0000-0000-000000000007","active_turn_id":"00000000-0000-0000-0000-000000000008"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("a racing decision already released the slot"),
+                detail: ErrorDetail::rejected(RejectionDetail::NoActiveTurn {
+                    session_id: uuid(6),
+                    expected_active_turn_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"a racing decision already released the slot","detail":{"type":"no_active_turn","session_id":"00000000-0000-0000-0000-000000000006","expected_active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )
+    }
+
     #[test]
     fn inv033_version_five_import_source_requires_canonical_padded_base64() {
         assert_client_malformed(
@@ -4004,7 +4165,7 @@ mod tests {
     #[test]
     fn inv033_inv046_version_nine_adds_the_bounded_session_system_prompt()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Versions seven and eight remain reserved by in-flight stacks.
+        // Version eight remains reserved by the in-flight turn-control stack.
         assert_unsupported_version("8");
 
         // The member is not admitted below version nine.
@@ -4235,15 +4396,15 @@ mod tests {
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
     }
 
-    /// INV-033: version nine is admitted while reserved versions seven and
-    /// eight stay outside the closed set.
+    /// INV-033: version nine is admitted while reserved version eight stays
+    /// outside the closed set.
     #[test]
-    fn inv033_reserved_versions_seven_and_eight_are_not_admitted() {
+    fn inv033_reserved_version_eight_is_not_admitted() {
         assert_eq!(
             ProtocolVersion::Nine.as_u64(),
             SESSION_SYSTEM_PROMPT_PROTOCOL_VERSION
         );
-        assert_eq!(ProtocolVersion::from_u64(7), None);
+        assert_eq!(ProtocolVersion::from_u64(7), Some(ProtocolVersion::Seven));
         assert_eq!(ProtocolVersion::from_u64(8), None);
         assert_eq!(ProtocolVersion::from_u64(9), Some(ProtocolVersion::Nine));
     }
