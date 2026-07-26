@@ -273,7 +273,7 @@ public enum SignalboxEventNormalizer {
         case .awaitingDecision:
             return .waitingForApproval
         case .completed:
-            return .succeeded
+            return .completed
         case .denied:
             return .denied
         case .closed, .recoveryRequired:

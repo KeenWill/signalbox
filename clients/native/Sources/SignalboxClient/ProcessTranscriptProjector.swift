@@ -371,12 +371,18 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .user(_, let turnID):
         return turnID == self.turnID(for: trigger)
       case .assistant(let turnID, let modelCallID):
-        guard
-          case .turnCompleted(let triggerTurnID, let triggerModelCallID, _, _) = trigger
-        else {
+        let producingCall: (turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID)?
+        switch trigger {
+        case .toolBatchTransition(let triggerTurnID, let triggerModelCallID, .proposed),
+          .turnCompleted(let triggerTurnID, let triggerModelCallID, _, _):
+          producingCall = (triggerTurnID, triggerModelCallID)
+        default:
+          producingCall = nil
+        }
+        guard let producingCall else {
           return false
         }
-        return turnID == triggerTurnID && modelCallID == triggerModelCallID
+        return turnID == producingCall.turnID && modelCallID == producingCall.modelCallID
       case .imported, .unknown:
         return false
       }

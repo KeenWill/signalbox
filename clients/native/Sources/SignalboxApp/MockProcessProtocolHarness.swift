@@ -190,17 +190,19 @@ private actor MockProcessProtocolState {
     }
     switch type {
     case "list_session_metadata":
-      let includeArchived = request["include_archived"] as? Bool ?? false
-      let selected =
-        sessions
-        .filter { includeArchived || !$0.archived }
-        .sorted { $0.id < $1.id }
+      let page = try metadataPage(request)
       var messages: [[String: Any]] = [["type": "session_metadata_page_start"]]
-      messages.append(contentsOf: selected.map(metadataSummary))
+      messages.append(contentsOf: page.sessions.map(metadataSummary))
+      let nextAfterSessionID: Any =
+        if let next = page.nextAfterSessionID {
+          next
+        } else {
+          NSNull()
+        }
       messages.append([
         "type": "session_metadata_page_end",
-        "session_count": String(selected.count),
-        "next_after_session_id": NSNull(),
+        "session_count": String(page.sessions.count),
+        "next_after_session_id": nextAfterSessionID,
       ])
       return try response(requestID: requestID, messages: messages)
     case "read_session_metadata":
@@ -255,6 +257,42 @@ private actor MockProcessProtocolState {
         ]
       )
     }
+  }
+
+  private func metadataPage(
+    _ request: [String: Any]
+  ) throws -> (sessions: [Session], nextAfterSessionID: String?) {
+    guard
+      let pageSizeText = request["page_size"] as? String,
+      let pageSize = Int(pageSizeText),
+      pageSize > 0
+    else {
+      throw MockProcessProtocolError.invalidRequest
+    }
+    let afterSessionID: String?
+    if request["after_session_id"] is NSNull {
+      afterSessionID = nil
+    } else if let after = request["after_session_id"] as? String {
+      afterSessionID = after
+    } else {
+      throw MockProcessProtocolError.invalidRequest
+    }
+    let includeArchived = request["include_archived"] as? Bool ?? false
+    let candidates =
+      sessions
+      .filter { includeArchived || !$0.archived }
+      .filter { session in
+        afterSessionID.map { after in after < session.id } ?? true
+      }
+      .sorted { $0.id < $1.id }
+    let page = Array(candidates.prefix(pageSize))
+    let nextAfterSessionID: String? =
+      if candidates.count > page.count {
+        page.last?.id
+      } else {
+        nil
+      }
+    return (page, nextAfterSessionID)
   }
 
   private func requiredSession(_ request: [String: Any]) throws -> Session {

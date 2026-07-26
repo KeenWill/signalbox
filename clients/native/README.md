@@ -16,18 +16,20 @@ WebSocket, or OpenAI-compatible surfaces.
   bounded-recovery states.
 - Project transcript snapshots into the existing timeline normalizer.
 - Preserve queued input separately until matching transcript content appears.
-- Submit one input at a time with the session's defaults version and retry only
-  an exact `commit_ambiguous` command, with a finite schedule; if that schedule
-  is exhausted, retain the prepared command identity while its composer draft is
-  unchanged and prepare a new identity after an edit.
+- Submit one exact, nonblank composer draft at a time with the session's
+  defaults version and retry only an exact `commit_ambiguous` command, with a
+  finite schedule; if that schedule is exhausted, retain the prepared command
+  identity while its composer draft is unchanged and prepare a new identity
+  after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Exercise the real v5 encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.
 
-The process protocol exposes no tool-decision operation. Tool cards therefore
-show observed state but never offer approve or deny controls. It also exposes no
-runner, template, monitor, artifact, or model-discovery catalog; those views and
+The process protocol exposes no tool-decision operation or successful-result
+discriminator. Tool cards therefore show observed results as neutral completed
+state and never offer approve or deny controls. It also exposes no runner,
+template, monitor, artifact, or model-discovery catalog; those views and
 new-session creation are explicit capability gates rather than fabricated client
 behavior.
 
@@ -96,10 +98,11 @@ Phase A closes the imported transport and synchronization findings: settings now
 install the tested socket client; every reconnect path is capped; deadlines are
 typed separately from heartbeat concerns; snapshot/stream ordering is owned by
 the synchronization machine; fallbacks preserve diagnostics; failed submission
-preserves the composer; one submission is in flight at a time; an unresolved
-ambiguous submission preserves its prepared command identity while the draft is
-unchanged; internal wire details do not become legacy `visible_to_user`
-failures; and no credential crosses a plaintext URL.
+preserves the exact composer text; one submission is in flight at a time; an
+unresolved ambiguous submission preserves its prepared command identity while
+the draft is unchanged; process results remain neutral unless the wire reports a
+failure; internal wire details do not become legacy `visible_to_user` failures;
+and no credential crosses a plaintext URL.
 
 The following work remains:
 

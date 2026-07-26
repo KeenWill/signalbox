@@ -1,6 +1,6 @@
 64b7b5c5230e9a202be7aa5d038b8e6cb8ce6e47eaa00511d76107c0fc5fd48c  iOS/iphone-17-pro/active-chat.png
 3c1264f3fc2ebba7e01e83febce56c0d809055de455888058b13f1ffe9eb04ab  iOS/iphone-17-pro/artifact-preview.png
-5908f50710f9d0fde887597dc6e2dffac26e1c2552d4ba31328167bc9955561d  iOS/iphone-17-pro/completed-tool.png
+7e5c90c010c3e6a0ec4d9314067cd8f69be64e5d6984e732d93aa7d3668e3ae7  iOS/iphone-17-pro/completed-tool.png
 73b3ce03aeba9b5b9f9e5abdcc8a68f1bf5c3a76afb13d20dd35843c8af43f03  iOS/iphone-17-pro/dark.png
 d9baeedcabaf722515e6687cbf7507e29ad7e4579a25a11e27254bec0247eeb9  iOS/iphone-17-pro/failed-tool.png
 1dfb780cd9823c5c0bf644fa238ae0a577f0818dc85358319a7bb4518b6cef54  iOS/iphone-17-pro/large-type.png
@@ -17,7 +17,7 @@ e26d8a8bfabbebbabe328a242eb393c01503471e3968827715e9255f81c04bb4  iOS/iphone-17-
 5b4a19fd1991bc2e10e82d5ee76ba8ce6876b9a131e29e07429d8aaf7ecf7592  iOS/iphone-17-pro/setup.png
 0276ad3a9b6f5ba88e5a0eedc24a5ae99f87c098b5f9813aff074fc87482b93d  iOS/iphone-17/active-chat.png
 ccc3ef7bc51807168e764033a904dbc3581daf8a13c46551f758acdcf44b88ab  iOS/iphone-17/artifact-preview.png
-5908f50710f9d0fde887597dc6e2dffac26e1c2552d4ba31328167bc9955561d  iOS/iphone-17/completed-tool.png
+73ee42953ffbc455537bb36cb19a61ee1749ec58de8b17a8607c962d689f6fff  iOS/iphone-17/completed-tool.png
 85661d6d95423d599400849aaf99b55ee4e43bd20858fcd93484f338571fec52  iOS/iphone-17/dark.png
 c4e15e34ed5ea99a8174d2502df4d38f57d2a1b766da6187669d8640fc78179f  iOS/iphone-17/failed-tool.png
 ef295ee004cd97731fe249f6c7769135cda5e8effbe532675e99705ba348e2c9  iOS/iphone-17/large-type.png
@@ -34,7 +34,7 @@ ed10da2be6f3ea8847e6bddd31f3f6c2df71f6e7bbd4ad1f6a619f72d6bb3709  iOS/iphone-17/
 6ddfb911844aa042e9f466fc616b666cc692c5419e5a9de3be47b6265832d256  iOS/iphone-17/setup.png
 f6fe18d407f39b38434569233ad19644d50c04e93658fcd5f306a027c5482731  iPadOS/ipad-air-13-inch-m4/active-chat.png
 211268c874b4c6bcdf0390a8ecf1b639a20d8f6ab64489ff4c6eb5f1d40a1559  iPadOS/ipad-air-13-inch-m4/artifact-preview.png
-cdec5c2f2d70fe228088984a2a424a14cf928befa20cbfb8ccc1539d97eb4659  iPadOS/ipad-air-13-inch-m4/completed-tool.png
+5e96bd1378c0d96ee4226ff29244f5ac4bfa6fa393c5cf5f431bc14b6f3d4e3f  iPadOS/ipad-air-13-inch-m4/completed-tool.png
 48ccdc5c99bd0b0d88d23824615429dfe84a5a42c8b6e5fa82d5b63015cb08e6  iPadOS/ipad-air-13-inch-m4/dark.png
 db21c7619f4c3c0f0e2943d57e564c982a6fb3ba5b7525d1deed1c9598face2a  iPadOS/ipad-air-13-inch-m4/failed-tool.png
 a7ec8ab8348ce2f2651f4e18ec2fab927229c4d37fa3519de491cbd7f60b1516  iPadOS/ipad-air-13-inch-m4/large-type.png
@@ -51,7 +51,7 @@ fc8f8483f04967950267fdaa88e9660087df9d8ccbfe7d5ace5ba572e7cada07  iPadOS/ipad-ai
 b700a359bbbe10f3b2d6cd434961127faf5753f4016dfc97604a069a6075a408  iPadOS/ipad-air-13-inch-m4/setup.png
 3b17436b669a209870e3731bfbc6652d77c852ffb4e9c79b79fb5f998dd70348  iPadOS/ipad-pro-11-inch-m5/active-chat.png
 31cbeeca68b9c0e2baeaa51106488ba5717004436530e60e3d7aeabae2021adf  iPadOS/ipad-pro-11-inch-m5/artifact-preview.png
-2d2db582eba9cf993a37b8d5932ba6ae70543b979ce6bb831db5f5d30f89c81a  iPadOS/ipad-pro-11-inch-m5/completed-tool.png
+35751af9cc9cf122b17bda3e6a36c2addc170a80643046b6d57296601c0f5742  iPadOS/ipad-pro-11-inch-m5/completed-tool.png
 4b2d2d8cce458b3aea9cdcf53ef23f0207c65073614f582eccd9b8f7770cc2c8  iPadOS/ipad-pro-11-inch-m5/dark.png
 061e1e0c005cb982fe6d1ad9a5409414570344896c7f54974a08dcbe0c53208a  iPadOS/ipad-pro-11-inch-m5/failed-tool.png
 7ab15604bc388222424644ac12a5ba90f6eeb96b9a8b4e08fdfd419fbaae4264  iPadOS/ipad-pro-11-inch-m5/large-type.png
@@ -68,7 +68,7 @@ a2841875509fb4e9073176891ceca665b85bd9b7fca03af9a9a44640fb3b2bd0  iPadOS/ipad-pr
 c7bb54bee293635b9af9787bec05ac2ecf882cea246ede684099e05a3c944f22  iPadOS/ipad-pro-11-inch-m5/setup.png
 fbb1931aef3a3d2e1b07f04dbfa3e5d0f000512bf2c878a1dad94ba3575ae93d  iPadOS/ipad-pro-13-inch-m5/active-chat.png
 0d85472544bbf08d8d79528ae703cab6bd5f7030ea00eb6e239c695210ab62cf  iPadOS/ipad-pro-13-inch-m5/artifact-preview.png
-5fb4081d0a5f8dbcc191faea02517a798cec21e32c14321af750eca764d9f927  iPadOS/ipad-pro-13-inch-m5/completed-tool.png
+b06c6bed6155807f68dc3e3086ed26d24cca26c8e58e0be387b155d77a8f50f1  iPadOS/ipad-pro-13-inch-m5/completed-tool.png
 7edd97f18b998a71e6b4b3e0e6ecdff509d0de3bda0a35ff4b00b1828a75dca8  iPadOS/ipad-pro-13-inch-m5/dark.png
 c3af3eca01d8ea5c6525233bfc12e4e75d01d8e05c686e21cbfa40aa2b36627d  iPadOS/ipad-pro-13-inch-m5/failed-tool.png
 2670be690eafcf163905b3db82a7da276d06a92cbd35a9a17ec92204a1a957cc  iPadOS/ipad-pro-13-inch-m5/large-type.png

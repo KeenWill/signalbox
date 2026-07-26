@@ -292,8 +292,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   func send() async {
-    let content = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !content.isEmpty, !isSubmitting, let service = serviceProvider() else {
+    let content = composerText
+    guard
+      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !isSubmitting,
+      let service = serviceProvider()
+    else {
       return
     }
     isSubmitting = true
@@ -404,7 +408,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       activity = .init(state: .completed, label: "Completed")
     case .turnFailed:
       activity = .init(state: .failed, label: "Failed")
-    case .turnRefused:
+    case .turnRefused(let turnID, _, _):
+      pendingInputs.removeAll { $0.turnID == turnID }
       activity = .init(state: .refused, label: "Refused")
     case .turnCancelled:
       activity = .init(state: .cancelled, label: "Cancelled")
