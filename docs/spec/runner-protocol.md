@@ -89,10 +89,12 @@ names, a credential policy naming an undeclared tool, or an internally
 inconsistent placement declaration rejects the complete catalog. Idempotent
 tools are runner-only because the daemon-local tool attempt model cannot carry
 their three-way retry classification; relational registration shape rejects an
-idempotent combined-locus row as well. Configuration-file parsing and
-replacement are later application work; the domain value is independent of TOML.
-Relational profile-approval rows apply the same checked `ToolName` shape while
-remaining independent of the runner's advertised subset.
+idempotent combined-locus row as well. Every relational tool selector requires
+its closed identity-or-capability-class discriminator and matching payload.
+Configuration-file parsing and replacement are later application work; the
+domain value is independent of TOML. Relational profile-approval rows apply the
+same checked `ToolName` shape while remaining independent of the runner's
+advertised subset.
 
 Each `RunnerToolDeclaration` contains:
 
@@ -239,9 +241,13 @@ tool and pinned runner before invoking lease reconstitution. After claimed
 retryable loss, the failed physical attempt leaves the tool-loop current-attempt
 projection before its fresh replacement is prepared and authorized; that fresh
 attempt becomes current before its successor lease generation is stored,
-avoiding a circular dependency between authorization and lease persistence. The
-single runner-initiated outbound stream, reconnect resynchronization, and exact
-wire correlations remain later stacks.
+avoiding a circular dependency between authorization and lease persistence.
+Committing a claimed retryable loss atomically retires its physical attempt
+without closing or suspending the executing batch: pure loss records known crash
+loss, while idempotent loss retains ambiguous physical-effect evidence.
+Side-effecting loss does not use this retry retirement path. The single
+runner-initiated outbound stream, reconnect resynchronization, and exact wire
+correlations remain later stacks.
 
 ## Session placement and affinity
 

@@ -5368,12 +5368,14 @@ impl ValidatedRunnerRegistration {
     ) -> Option<&CredentialProfilePolicy>;
     pub fn supports_workspace(&self, capability: WorkspaceCapability) -> bool;
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName>;
+    pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass>;
+    pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration>;
+    pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfilePolicy>;
+    pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_;
     pub fn reconstitute(
         enrollment: &RunnerEnrollment,
         input: ValidatedRunnerRegistrationReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
-    // Additional accessors expose exact class, tool, profile, and workspace
-    // inventories; reconstitution requires canonical enrollment.
 }
 
 pub struct RunnerGeneration(/* private NonZeroU64 */);

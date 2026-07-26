@@ -483,15 +483,18 @@ CREATE TABLE runner_registration_tool (
         ),
     CONSTRAINT runner_registration_tool_selector_shape
         CHECK (
-            (
-                selector_kind = 'identity'
-                AND selector_runner_id IS NOT NULL
-                AND selector_capability_class IS NULL
-            )
-            OR (
-                selector_kind = 'capability_class'
-                AND selector_runner_id IS NULL
-                AND selector_capability_class IS NOT NULL
+            selector_kind IS NOT NULL
+            AND (
+                (
+                    selector_kind = 'identity'
+                    AND selector_runner_id IS NOT NULL
+                    AND selector_capability_class IS NULL
+                )
+                OR (
+                    selector_kind = 'capability_class'
+                    AND selector_runner_id IS NULL
+                    AND selector_capability_class IS NOT NULL
+                )
             )
         ),
     CONSTRAINT runner_registration_tool_model_schema
@@ -2541,3 +2544,57 @@ CREATE TRIGGER runner_lease_events_are_guarded
 BEFORE INSERT ON runner_lease_event
 FOR EACH ROW
 EXECUTE FUNCTION guard_runner_lease_event();
+
+CREATE FUNCTION retire_runner_claimed_retry_attempt()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    lease runner_lease_generation%ROWTYPE;
+BEGIN
+    IF NEW.state_kind <> 'lost_claimed' THEN
+        RETURN NULL;
+    END IF;
+    SELECT * INTO lease
+     FROM runner_lease_generation
+     WHERE lease_id = NEW.lease_id
+       AND generation = NEW.generation;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'runner claimed loss lacks its lease generation'
+            USING ERRCODE = '23514';
+    END IF;
+    IF lease.effect_class = 'side_effecting' THEN
+        RETURN NULL;
+    END IF;
+    UPDATE tool_attempt
+       SET state_kind = 'terminal',
+           terminal_disposition_kind =
+                CASE lease.effect_class
+                    WHEN 'pure' THEN 'known_failed'
+                    ELSE 'ambiguous'
+                END,
+           error_kind =
+                CASE lease.effect_class
+                    WHEN 'pure' THEN 'crash_lost'
+                    ELSE NULL
+                END
+     WHERE attempt_id = lease.attempt_id
+       AND session_id = lease.session_id
+       AND state_kind = 'in_flight'
+       AND effect_class =
+            CASE lease.effect_class
+                WHEN 'pure' THEN 'effect_free'
+                ELSE 'external_effect'
+            END;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'runner retryable loss lacks its live physical attempt'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER runner_claimed_retry_retires_physical_attempt
+AFTER INSERT ON runner_lease_event
+FOR EACH ROW
+EXECUTE FUNCTION retire_runner_claimed_retry_attempt();

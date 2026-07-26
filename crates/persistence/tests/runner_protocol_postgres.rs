@@ -142,7 +142,10 @@ fn model_definition() -> RunnerToolModelDefinition {
     .expect("the fixture model definition is valid")
 }
 
-fn authorized(facts: PhysicalAttemptFacts) -> AuthorizedToolAttempt {
+fn authorized_with_effect(
+    facts: PhysicalAttemptFacts,
+    effect: ToolEffectClass,
+) -> AuthorizedToolAttempt {
     let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
         ToolAttemptDispatchCorrelationReconstitutionInput {
             session: SessionId::from_uuid(uuid(SESSION)),
@@ -159,7 +162,7 @@ fn authorized(facts: PhysicalAttemptFacts) -> AuthorizedToolAttempt {
         SessionId::from_uuid(uuid(SESSION)),
         TurnId::from_uuid(uuid(facts.turn)),
         TurnAttemptId::from_uuid(uuid(facts.turn + RELATED_IDENTITY_OFFSET)),
-        ToolEffectClass::EffectFree,
+        effect,
         ToolDispatchGeneration::first(),
         ToolAttemptReconstitutionState::InFlight,
     )
@@ -170,6 +173,10 @@ fn authorized(facts: PhysicalAttemptFacts) -> AuthorizedToolAttempt {
     };
     AuthorizedToolAttempt::reconstitute(attempt, dispatch)
         .expect("the canonical in-flight fixture authorizes")
+}
+
+fn authorized(facts: PhysicalAttemptFacts) -> AuthorizedToolAttempt {
+    authorized_with_effect(facts, ToolEffectClass::EffectFree)
 }
 
 fn offer_request() -> RunnerLeaseOfferRequest {
@@ -278,6 +285,35 @@ fn catalog() -> RunnerCatalog {
         [WorkspaceCapability::WorktreePerSession],
     )
     .expect("the fixture catalog is internally consistent")
+}
+
+fn idempotent_catalog() -> RunnerCatalog {
+    let inspect = RunnerToolDeclaration::new(
+        tool("inspect"),
+        model_definition(),
+        ToolPermissionDefault::Auto,
+        RunnerToolEffectClass::Idempotent,
+        ToolAdmissibleLoci::RunnerOnly {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
+    let policy = CredentialProfilePolicy::try_new(
+        profile(),
+        [(tool("inspect"), CredentialToolApproval::Automatic)],
+    )
+    .expect("the idempotent fixture profile references its declared tool");
+    let replacement_policy = CredentialProfilePolicy::try_new(
+        replacement_profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the idempotent replacement profile references its declared tool");
+    RunnerCatalog::try_new(
+        [class()],
+        [inspect],
+        [policy, replacement_policy],
+        [WorkspaceCapability::WorktreePerSession],
+    )
+    .expect("the idempotent fixture catalog is internally consistent")
 }
 
 fn advertisement() -> RunnerAdvertisement {
@@ -471,6 +507,28 @@ async fn insert_physical_attempt(
     Ok(())
 }
 
+async fn insert_external_physical_attempt(
+    pool: &PgPool,
+    facts: PhysicalAttemptFacts,
+) -> Result<(), sqlx::Error> {
+    insert_physical_attempt(pool, facts).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET effect_class = 'external_effect'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(facts.attempt))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn terminalize_physical_attempt(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
@@ -491,6 +549,28 @@ async fn terminalize_physical_attempt(
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn store_fixture_retryable_loss(
+    store: &RunnerProtocolStore,
+    pool: &PgPool,
+    lease: &RunnerLease,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         DISABLE TRIGGER tool_attempt_requires_approval",
+    )
+    .execute(pool)
+    .await?;
+    let stored = store.store_lease(lease).await;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_requires_approval",
+    )
+    .execute(pool)
+    .await?;
+    stored?;
     Ok(())
 }
 
@@ -1201,7 +1281,7 @@ async fn s31_inv004_inv043_request_cannot_start_second_lease_lineage() -> Result
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
-    store.store_lease(loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
     terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let second_lineage = pin
@@ -2812,8 +2892,15 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
     let loss = claimed
         .lose()
         .expect("claimed pure work may enter durable retry classification");
-    store.store_lease(loss.lost()).await?;
-    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
+    let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, error_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(&pool)
+    .await?;
     let retired_attempts: Vec<Uuid> = sqlx::query_scalar(
         "SELECT attempt_id
            FROM runner_current_tool_attempt
@@ -2832,8 +2919,92 @@ async fn s31_inv004_inv043_fresh_retry_attempt_is_current_before_successor_lease
     .fetch_all(&pool)
     .await?;
 
+    assert_eq!(
+        retired_facts,
+        (
+            "terminal".to_owned(),
+            Some("known_failed".to_owned()),
+            Some("crash_lost".to_owned())
+        )
+    );
     assert!(retired_attempts.is_empty());
     assert_eq!(fresh_attempts, vec![uuid(RETRY_PHYSICAL_ATTEMPT.attempt)]);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv004_inv043_idempotent_claimed_loss_retires_physical_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &idempotent_catalog(),
+        )
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/idempotent".to_owned())
+                .expect("the idempotent fixture directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the idempotent registration pins its external-effect attempt");
+    store.store_pin(&pin, &registration).await?;
+    let claimed = pin
+        .lease
+        .clone()
+        .claim(pin.lease.correlation())
+        .expect("the exact idempotent lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed idempotent work admits a checked retry");
+    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
+    let retired_facts: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, error_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(&pool)
+    .await?;
+    insert_external_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let fresh_attempt: Uuid = sqlx::query_scalar(
+        "SELECT attempt_id
+           FROM runner_current_tool_attempt
+          WHERE request_id = $1",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.request))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        retired_facts,
+        ("terminal".to_owned(), Some("ambiguous".to_owned()), None)
+    );
+    assert_eq!(fresh_attempt, uuid(RETRY_PHYSICAL_ATTEMPT.attempt));
     drop(pool);
     Ok(())
 }
@@ -2882,7 +3053,7 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         .expect("the exact lease fence claims");
     store.store_lease(&claimed).await?;
     let loss = claimed.lose().expect("the claimed pure lease may be lost");
-    store.store_lease(loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
     let lost = store
         .load_lease(
             RunnerLeaseId::from_uuid(uuid(LEASE)),
@@ -2890,7 +3061,6 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         )
         .await?
         .expect("the first generation is durable before the loss event");
-    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     let retry = pin
         .placement
@@ -2971,7 +3141,7 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
         .expect("the exact lease fence claims");
     store.store_lease(&claimed).await?;
     let loss = claimed.lose().expect("the claimed pure lease may be lost");
-    store.store_lease(loss.lost()).await?;
+    store_fixture_retryable_loss(&store, &pool, loss.lost()).await?;
 
     let error = sqlx::query(
         "INSERT INTO runner_lease_generation
@@ -2994,7 +3164,6 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     .expect_err("claimed retry cannot reuse its physical attempt identity");
 
     assert_check_violation(error);
-    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -3085,6 +3254,12 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         DISABLE TRIGGER tool_attempt_requires_approval",
+    )
+    .execute(&pool)
+    .await?;
     let mut valid_retry = pool.begin().await?;
     sqlx::query(
         "INSERT INTO runner_lease_generation
@@ -3154,7 +3329,12 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     .execute(&mut *valid_retry)
     .await?;
     valid_retry.commit().await?;
-    terminalize_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    sqlx::query(
+        "ALTER TABLE tool_attempt
+         ENABLE TRIGGER tool_attempt_requires_approval",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
@@ -3325,6 +3505,52 @@ async fn s30_inv042_idempotent_registration_tool_requires_runner_only_locus()
     .await?;
 
     assert_check_violation(invalid_locus);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_registration_tool_requires_selector_discriminator() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let stored = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_registration_tool
+         DISABLE TRIGGER runner_registration_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let missing_discriminator = sqlx::query(
+        "UPDATE runner_registration_tool
+            SET selector_kind = NULL
+          WHERE enrollment_id = $1
+            AND registration_revision = $2
+            AND tool_name = $3",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(stored.revision().get()))
+    .bind(tool("inspect").as_str())
+    .execute(&pool)
+    .await
+    .expect_err("a stored selector payload requires its closed discriminator");
+    sqlx::query(
+        "ALTER TABLE runner_registration_tool
+         ENABLE TRIGGER runner_registration_tool_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_check_violation(missing_discriminator);
     drop(pool);
     Ok(())
 }
