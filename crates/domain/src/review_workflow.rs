@@ -1025,18 +1025,22 @@ impl ReviewReferencedFindingEvidence {
         }
     }
 
-    /// Reconstitutes the exact reference facts frozen at event admission.
+    /// Reconstitutes independently authenticated eligible admission evidence.
     pub const fn try_reconstitute(
         reference: ReviewFindingRef,
         status: ReviewFindingStatus,
     ) -> Option<Self> {
-        if matches!(
-            status,
-            ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
-        ) {
-            Some(Self { reference, status })
-        } else {
-            None
+        match status {
+            ReviewFindingStatus::Open | ReviewFindingStatus::Accepted => {
+                Some(Self { reference, status })
+            }
+            ReviewFindingStatus::Rejected
+            | ReviewFindingStatus::Duplicate
+            | ReviewFindingStatus::Superseded
+            | ReviewFindingStatus::Stale
+            | ReviewFindingStatus::Posted
+            | ReviewFindingStatus::Fixed
+            | ReviewFindingStatus::BlockedWithReason => None,
         }
     }
 
