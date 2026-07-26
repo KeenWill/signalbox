@@ -1,20 +1,21 @@
 # Runner protocol and placement
 
-This page specifies the implemented runner-protocol domain foundation as
-verified against the implementing stack rooted at PR #259
-(`agent/runner-protocol`). It owns logical runner enrollment,
-daemon-authoritative catalog validation, runner leases, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
+This page specifies the implemented runner-protocol foundation. Its domain
+surface is verified against the implementing stack rooted at PR #259
+(`agent/runner-protocol`) through PR #260; its relational persistence clauses
+are verified against the runner-persistence PR stacked on PR #260. It owns
+logical runner enrollment, daemon-authoritative catalog validation, runner
+leases, session placement and affinity, credential-profile grants, and workspace
+requirements. The tool registry's common declarations remain owned by
+[tool loop](tool-loop.md); session transcript and frontier mechanics remain
+owned by [sessions and transcript](sessions-and-transcript.md); physical tool
+attempts remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant catalog](../invariants.md).
 
-The verified surface in this stack is domain-only. There is no runner binary,
-store adapter, transport message, streaming connection, authentication
-handshake, or network code. Those implementation edges are listed under
-[Open edges](#open-edges).
+The verified surface includes the domain aggregates and their PostgreSQL store
+adapter. There is no runner binary, transport message, streaming connection,
+authentication handshake, or network code. Those implementation edges are listed
+under [Open edges](#open-edges).
 
 ## Identity, enrollment, and registration
 
@@ -33,6 +34,13 @@ an authentication secret. Enrollment is either active or revoked. Revocation is
 terminal and makes later registration invalid. Complete reconstitution rejects
 mismatched enrollment, runner, authentication, allowed class inventory, or
 lifecycle state rather than repairing it.
+
+The relational projection stores the typed enrollment, its exact allowed-class
+inventory, and append-only active-or-revoked audit evidence. Runner identity and
+authentication-reference identity each remain one-to-one with the logical
+enrollment. Registration insertion locks and reads that canonical enrollment;
+revocation and re-registration therefore cannot race to admit availability under
+revoked authority.
 
 A registration carries availability claims only:
 
@@ -105,6 +113,14 @@ satisfy also rejects the complete advertisement. The resulting
 with daemon-owned policy. A runner can therefore neither self-widen its tool
 surface nor replace confirmation with automatic approval (INV-042).
 
+Every successful advertisement is retained as one append-only validation
+revision: exact advertised classes, tool declarations and selectors,
+credential-profile names and applicable pair policies, and workspace
+capabilities. Deferred inventory checks reject partial revisions at commit.
+Loads join the canonical enrollment and every normalized satellite, then invoke
+domain reconstitution; a missing or cross-wired enrollment, selector, policy
+pair, or declared inventory fails closed.
+
 ## Effect classes and runner leases
 
 Every tool declaration has exactly one effect class and there is no default:
@@ -152,8 +168,18 @@ attempt's outcome (INV-004, INV-025, INV-026, INV-043).
 The lease aggregate contains no channel handle or process-local connection
 state. A reconnecting registration cannot recreate, complete, or discard a lease
 from an advertisement. Why: the held streaming channel is transport, not lease
-or claim authority. Store mapping, the single runner-initiated outbound stream,
-reconnect resynchronization, and exact wire correlations are later stacks.
+or claim authority.
+
+The store retains each offered generation and its monotonic claimed, completed,
+or lost events. An offer references the current pinned placement, exact
+validated registration tool, canonical physical tool attempt, and optional
+active grant pair. Relational triggers reject a stale placement, revoked
+enrollment or grant, mismatched tool or effect, non-successor generation,
+attempt reuse after claimed safe work, and every retry after claimed
+side-effecting loss. Loads independently join the physical-attempt tool and
+pinned runner before invoking lease reconstitution. The single runner-initiated
+outbound stream, reconnect resynchronization, and exact wire correlations remain
+later stacks.
 
 ## Session placement and affinity
 
@@ -189,10 +215,13 @@ workspace. It advances a positive placement revision and returns one
 `RunnerPlacementChange` value carrying the complete before-and-after placement
 facts needed for a later frontier-extending injected message. Reconstitution
 rejects an unpinned revision other than one, a pinned or lost state that does
-not match its current request and validated capabilities. Durable
-replacement-history verification belongs to the later persistence projection;
-this domain aggregate accepts every positive revision because each is reachable
-through checked successor transitions.
+not match its current request and validated capabilities. The store retains
+append-only created, pinned, runner-lost, runner-replaced, and profile-replaced
+records behind one current pointer. Relational transition checks require
+contiguous event history, exact revision succession, unchanged affinity facts at
+runner loss, and profile-only changes for profile replacement. Reconstitution
+reads the current record with its exact validated registration and tool
+inventory.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -239,8 +268,12 @@ offered is already dispatched and completes or crash-classifies normally;
 revocation neither rewrites nor cancels it. A revoked grant cannot become active
 again. Complete reconstitution checks an independently authoritative expected
 session and rejects foreign runner facts, a profile absent from the validated
-registration, or a tool set wider than the advertisement. Durable revision
-history and atomic store dispatch gating remain persistence work (INV-045).
+registration, or a tool set wider than the advertisement. The store retains
+normalized grant snapshots and append-only issued, replaced, and revoked audit
+events. Grant relations contain only profile names, tool names, pair approval
+posture, and typed audit correlations: there is no credential-value or generic
+payload column. Lease insertion joins the current unrevoked grant and exact
+tool/profile pair atomically with dispatch authorization (INV-035, INV-045).
 
 ## Workspace provisioning
 
@@ -258,9 +291,9 @@ the later runner workspace stack.
 
 ## Open edges
 
-- Runner transport, authentication exchange, durable registration and lease
-  storage, reconnect recovery, compatibility, and result envelopes are recorded
-  in [Protocols and persistence](../open-questions.md#protocols-and-persistence)
+- Runner transport, authentication exchange, reconnect recovery, compatibility,
+  and result envelopes are recorded in
+  [Protocols and persistence](../open-questions.md#protocols-and-persistence)
   and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Frontier injection, runner-loss recovery beyond explicit replacement, and

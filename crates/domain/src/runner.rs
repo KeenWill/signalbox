@@ -257,6 +257,12 @@ impl CredentialProfilePolicy {
             .copied()
             .unwrap_or(CredentialToolApproval::SessionPolicy)
     }
+
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)> {
+        self.approvals
+            .iter()
+            .map(|(tool, approval)| (tool, *approval))
+    }
 }
 
 /// Closed workspace capabilities advertised by runners.
@@ -402,6 +408,10 @@ impl RunnerEnrollment {
 
     pub const fn state(&self) -> RunnerEnrollmentState {
         self.state
+    }
+
+    pub fn allowed_classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
+        self.allowed_classes.iter()
     }
 
     pub fn revoke(mut self) -> Result<Self, RunnerDomainError> {
@@ -570,6 +580,57 @@ impl ValidatedRunnerRegistration {
     pub fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
         self.tools.keys()
     }
+
+    pub fn classes(&self) -> impl Iterator<Item = &RunnerCapabilityClass> {
+        self.classes.iter()
+    }
+
+    pub fn tools(&self) -> impl Iterator<Item = &RunnerToolDeclaration> {
+        self.tools.values()
+    }
+
+    pub fn profiles(&self) -> impl Iterator<Item = &CredentialProfilePolicy> {
+        self.profiles.values()
+    }
+
+    pub fn workspaces(&self) -> impl Iterator<Item = WorkspaceCapability> + '_ {
+        self.workspaces.iter().copied()
+    }
+
+    pub fn reconstitute(
+        enrollment: &RunnerEnrollment,
+        input: ValidatedRunnerRegistrationReconstitutionInput,
+    ) -> Result<Self, RunnerDomainError> {
+        if enrollment.enrollment != input.enrollment
+            || enrollment.runner != input.runner
+            || enrollment.authentication != input.authentication
+        {
+            return Err(RunnerDomainError::CorruptStoredFacts);
+        }
+        let advertisement = RunnerAdvertisement::new(
+            input.classes.clone(),
+            input.tools.iter().map(|tool| tool.name.clone()),
+            input.profiles.iter().map(|profile| profile.name.clone()),
+            input.workspaces.clone(),
+        );
+        let catalog =
+            RunnerCatalog::try_new(input.classes, input.tools, input.profiles, input.workspaces)?;
+        enrollment
+            .register(advertisement, &catalog)
+            .map_err(|_| RunnerDomainError::CorruptStoredFacts)
+    }
+}
+
+/// Complete validated-registration facts loaded from canonical storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedRunnerRegistrationReconstitutionInput {
+    pub enrollment: RunnerEnrollmentId,
+    pub runner: RunnerId,
+    pub authentication: RunnerAuthenticationId,
+    pub classes: BTreeSet<RunnerCapabilityClass>,
+    pub tools: Vec<RunnerToolDeclaration>,
+    pub profiles: Vec<CredentialProfilePolicy>,
+    pub workspaces: BTreeSet<WorkspaceCapability>,
 }
 
 /// Positive runner lease, placement, or grant generation.
@@ -682,6 +743,18 @@ impl RunnerLease {
         self.credential_authorization.as_ref()
     }
 
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    pub const fn effect(&self) -> RunnerToolEffectClass {
+        self.effect
+    }
+
     pub fn claim(mut self, correlation: RunnerLeaseCorrelation) -> Result<Self, RunnerDomainError> {
         if self.state != RunnerLeaseState::Offered {
             return Err(RunnerDomainError::InvalidState);
@@ -740,10 +813,30 @@ impl RunnerLease {
     }
 
     pub fn reconstitute(input: RunnerLeaseReconstitutionInput) -> Result<Self, RunnerDomainError> {
-        if input.lease.correlation() != input.recorded_correlation {
+        let lease = Self {
+            lease: input.lease,
+            attempt: input.attempt,
+            session: input.session,
+            runner: input.runner,
+            tool: input.tool,
+            effect: input.effect,
+            credential_authorization: input.credential_authorization,
+            generation: input.generation,
+            state: input.state,
+        };
+        if lease.correlation() != input.recorded_correlation
+            || lease
+                .credential_authorization
+                .as_ref()
+                .is_some_and(|authorization| {
+                    authorization.session != lease.session
+                        || authorization.runner != lease.runner
+                        || authorization.tool != lease.tool
+                })
+        {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
-        Ok(input.lease)
+        Ok(lease)
     }
 }
 
@@ -761,7 +854,15 @@ struct ValidatedRunnerLeaseOffer {
 /// Complete lease projection plus independently stored fence facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerLeaseReconstitutionInput {
-    pub lease: RunnerLease,
+    pub lease: RunnerLeaseId,
+    pub attempt: ToolAttemptId,
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub tool: ToolName,
+    pub effect: RunnerToolEffectClass,
+    pub credential_authorization: Option<CredentialDispatchAuthorization>,
+    pub generation: RunnerGeneration,
+    pub state: RunnerLeaseState,
     pub recorded_correlation: RunnerLeaseCorrelation,
 }
 
@@ -779,6 +880,14 @@ pub enum RunnerLeaseLoss {
 }
 
 impl RunnerLeaseLoss {
+    pub const fn lost(&self) -> &RunnerLease {
+        match self {
+            Self::RetryPermitted { lost, .. } | Self::CrashClassificationRequired { lost, .. } => {
+                lost
+            }
+        }
+    }
+
     pub const fn retry(&self) -> Option<&RunnerLeaseRetryAuthority> {
         match self {
             Self::RetryPermitted { retry, .. } => Some(retry),
@@ -882,6 +991,14 @@ impl SessionRunnerPlacement {
 
     pub const fn revision(&self) -> RunnerGeneration {
         self.revision
+    }
+
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub const fn request(&self) -> &SessionRunnerPlacementRequest {
+        &self.request
     }
 
     pub fn pin(
@@ -1078,25 +1195,33 @@ impl SessionRunnerPlacement {
     }
 
     pub fn reconstitute(
-        self,
+        input: SessionRunnerPlacementReconstitutionInput,
         registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError> {
-        match &self.state {
-            SessionRunnerPlacementState::Unpinned if self.revision == RunnerGeneration::one() => {
-                Ok(self)
+        let placement = Self {
+            session: input.session,
+            revision: input.revision,
+            request: input.request,
+            state: input.state,
+        };
+        match &placement.state {
+            SessionRunnerPlacementState::Unpinned
+                if placement.revision == RunnerGeneration::one() =>
+            {
+                Ok(placement)
             }
             SessionRunnerPlacementState::Pinned(stored)
             | SessionRunnerPlacementState::RunnerLost(stored) => {
                 let registration = registration.ok_or(RunnerDomainError::CorruptStoredFacts)?;
                 let checked = validate_placement(
-                    self.session,
-                    &self.request,
+                    placement.session,
+                    &placement.request,
                     registration,
                     stored.working_directory.clone(),
                     stored.workspace.clone(),
                 )?;
                 if checked == *stored {
-                    Ok(self)
+                    Ok(placement)
                 } else {
                     Err(RunnerDomainError::CorruptStoredFacts)
                 }
@@ -1104,6 +1229,15 @@ impl SessionRunnerPlacement {
             _ => Err(RunnerDomainError::CorruptStoredFacts),
         }
     }
+}
+
+/// Complete placement facts loaded from one canonical durable revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRunnerPlacementReconstitutionInput {
+    pub session: SessionId,
+    pub revision: RunnerGeneration,
+    pub request: SessionRunnerPlacementRequest,
+    pub state: SessionRunnerPlacementState,
 }
 
 struct ValidatedRunnerDispatch {
@@ -1264,6 +1398,24 @@ impl CredentialProfileGrant {
         &self.profile
     }
 
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    pub fn tools(&self) -> impl Iterator<Item = &ToolName> {
+        self.tools.iter()
+    }
+
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)> {
+        self.approvals
+            .iter()
+            .map(|(tool, approval)| (tool, *approval))
+    }
+
     fn authorization_for(
         &self,
         session: SessionId,
@@ -1338,27 +1490,39 @@ impl CredentialProfileGrant {
     }
 
     pub fn reconstitute(
-        self,
+        input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError> {
-        if self.session != expected_session {
+        if input.session != expected_session {
             return Err(RunnerDomainError::CorruptStoredFacts);
         }
         let checked = build_grant(
-            self.session,
-            self.revision,
+            input.session,
+            input.revision,
             registration,
-            self.profile.clone(),
-            self.tools.clone(),
-            self.state,
+            input.profile,
+            input.tools,
+            input.state,
         )?;
-        if checked == self {
-            Ok(self)
+        if checked.runner == input.runner && checked.approvals == input.approvals {
+            Ok(checked)
         } else {
             Err(RunnerDomainError::CorruptStoredFacts)
         }
     }
+}
+
+/// Complete credential-grant facts loaded from canonical storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfileGrantReconstitutionInput {
+    pub session: SessionId,
+    pub runner: RunnerId,
+    pub revision: RunnerGeneration,
+    pub profile: CredentialProfileName,
+    pub tools: BTreeSet<ToolName>,
+    pub approvals: BTreeMap<ToolName, CredentialToolApproval>,
+    pub state: CredentialProfileGrantState,
 }
 
 fn build_grant(
@@ -1907,7 +2071,15 @@ mod tests {
 
         assert_eq!(
             RunnerLease::reconstitute(RunnerLeaseReconstitutionInput {
-                lease,
+                lease: lease.lease,
+                attempt: lease.attempt,
+                session: lease.session,
+                runner: lease.runner,
+                tool: lease.tool,
+                effect: lease.effect,
+                credential_authorization: lease.credential_authorization,
+                generation: lease.generation,
+                state: lease.state,
                 recorded_correlation,
             }),
             Err(RunnerDomainError::CorruptStoredFacts)
@@ -2142,9 +2314,18 @@ mod tests {
         grant
             .approvals
             .insert(tool("inspect"), CredentialToolApproval::SessionPolicy);
+        let input = CredentialProfileGrantReconstitutionInput {
+            session: grant.session,
+            runner: grant.runner,
+            revision: grant.revision,
+            profile: grant.profile,
+            tools: grant.tools,
+            approvals: grant.approvals,
+            state: grant.state,
+        };
 
         assert_eq!(
-            grant.reconstitute(session_id(SESSION), &registration),
+            CredentialProfileGrant::reconstitute(input, session_id(SESSION), &registration),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }
@@ -2153,9 +2334,18 @@ mod tests {
     fn s32_inv045_grant_reconstitution_rejects_cross_wired_session() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
+        let input = CredentialProfileGrantReconstitutionInput {
+            session: grant.session,
+            runner: grant.runner,
+            revision: grant.revision,
+            profile: grant.profile,
+            tools: grant.tools,
+            approvals: grant.approvals,
+            state: grant.state,
+        };
 
         assert_eq!(
-            grant.reconstitute(session_id(SESSION + 1), &registration),
+            CredentialProfileGrant::reconstitute(input, session_id(SESSION + 1), &registration,),
             Err(RunnerDomainError::CorruptStoredFacts)
         );
     }

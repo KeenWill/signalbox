@@ -5295,7 +5295,13 @@ pub struct RunnerEnrollment { /* private */ }
 pub struct RunnerEnrollmentReconstitutionInput {
     /* public complete typed facts */
 }
+// enrollment accessors include allowed_classes().
 pub struct ValidatedRunnerRegistration { /* private */ }
+pub struct ValidatedRunnerRegistrationReconstitutionInput {
+    /* public complete typed catalog-validation facts */
+}
+// validated-registration accessors expose exact class, tool, profile, and
+// workspace inventories; reconstitution requires canonical enrollment.
 
 pub struct RunnerGeneration(/* private NonZeroU64 */);
 pub struct RunnerLeaseCorrelation {
@@ -5336,6 +5342,7 @@ pub enum RunnerLeaseLoss {
     },
 }
 pub struct RunnerLeaseRetryAuthority { /* private */ }
+// RunnerLeaseLoss exposes lost(), retry(), and crash_attempt().
 
 pub enum WorkingDirectorySelection {
     RunnerDefault,
@@ -5362,6 +5369,9 @@ pub enum SessionRunnerPlacementState {
     RunnerLost(PinnedRunnerPlacement),
 }
 pub struct SessionRunnerPlacement { /* private */ }
+pub struct SessionRunnerPlacementReconstitutionInput {
+    /* public complete typed placement facts */
+}
 impl SessionRunnerPlacement {
     // placement is the only producer of initial and retry lease offers
     pub fn pin(
@@ -5405,8 +5415,12 @@ pub enum CredentialProfileGrantState {
     Revoked,
 }
 pub struct CredentialProfileGrant { /* private */ }
+pub struct CredentialProfileGrantReconstitutionInput {
+    /* public complete typed grant and approval facts */
+}
 impl CredentialProfileGrant {
-    // accessors: state(), revision(), profile()
+    // accessors: state(), revision(), profile(), session(), runner(), tools(),
+    //   approvals()
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
         self,
@@ -5455,8 +5469,8 @@ pub struct CredentialProfileChange {
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 41                   |
-| **signalbox-domain total**                         | **410 (+1 free fn)** |
+| domain: runner                                     | 44                   |
+| **signalbox-domain total**                         | **413 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

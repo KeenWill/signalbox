@@ -121,17 +121,18 @@ pub use replace_session_defaults::{
 };
 pub use runner::{
     CredentialDispatchAuthorization, CredentialProfileChange, CredentialProfileGrant,
-    CredentialProfileGrantReplacement, CredentialProfileGrantState, CredentialProfileName,
-    CredentialProfilePlacementReplacement, CredentialProfilePolicy, CredentialToolApproval,
-    PinnedRunnerPlacement, ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass,
-    RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentReconstitutionInput,
-    RunnerEnrollmentState, RunnerGeneration, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseLoss,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseState,
-    RunnerPlacementChange, RunnerPlacementReplacement, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerWorkingDirectory, SessionRunnerPin, SessionRunnerPlacement,
+    CredentialProfileGrantReconstitutionInput, CredentialProfileGrantReplacement,
+    CredentialProfileGrantState, CredentialProfileName, CredentialProfilePlacementReplacement,
+    CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
+    RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
+    RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseReconstitutionInput,
+    RunnerLeaseRetryAuthority, RunnerLeaseState, RunnerPlacementChange, RunnerPlacementReplacement,
+    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerWorkingDirectory,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
-    WorkspaceRepositoryKey, WorkspaceRequirement,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRepositoryKey, WorkspaceRequirement,
 };
 pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
