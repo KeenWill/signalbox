@@ -10,7 +10,9 @@ use reqwest::{
 };
 use signalbox_model_runtime::CredentialValue;
 
-use crate::web_fetch::{PublicDestinationClientError, public_destination_client};
+use crate::web_fetch::{
+    PublicDestinationClientError, has_more_response_bytes, public_destination_client,
+};
 
 use super::result::absolute_https_url;
 use super::{
@@ -433,7 +435,8 @@ impl GitHubCodeHostTransport {
             .await
             .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
         ensure_expected_status(response.status(), StatusCode::OK)?;
-        let (bytes, completeness) = read_bounded(response, MAX_JOB_LOG_BYTES).await?;
+        let (bytes, completeness) =
+            read_bounded(response.bytes_stream(), MAX_JOB_LOG_BYTES).await?;
         let (text, completeness) = bounded_lossy_text(&bytes, completeness);
         let result = CiJobLogResult::try_new(arguments.job_id(), text, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
@@ -568,7 +571,8 @@ impl GitHubCodeHostTransport {
         } else {
             CodeHostResultCompleteness::Complete
         };
-        let (body, body_completeness) = read_bounded(response, MAX_JSON_RESPONSE_BYTES).await?;
+        let (body, body_completeness) =
+            read_bounded(response.bytes_stream(), MAX_JSON_RESPONSE_BYTES).await?;
         if body_completeness == CodeHostResultCompleteness::Truncated {
             return Err(CodeHostTransportFailure::ResponseTooLarge);
         }
@@ -623,27 +627,28 @@ impl fmt::Display for GitHubCodeHostConstructionError {
 
 impl Error for GitHubCodeHostConstructionError {}
 
-async fn read_bounded(
-    response: Response,
+async fn read_bounded<S, B, E>(
+    mut stream: S,
     limit: usize,
-) -> Result<(Vec<u8>, CodeHostResultCompleteness), CodeHostTransportFailure> {
+) -> Result<(Vec<u8>, CodeHostResultCompleteness), CodeHostTransportFailure>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+{
     let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
+        let chunk = chunk.as_ref();
         let remaining = limit.saturating_sub(body.len());
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
             return Ok((body, CodeHostResultCompleteness::Truncated));
         }
-        body.extend_from_slice(&chunk);
+        body.extend_from_slice(chunk);
         if body.len() == limit {
-            let completeness = if stream
-                .next()
+            let completeness = if has_more_response_bytes(&mut stream)
                 .await
-                .transpose()
                 .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
-                .is_some()
             {
                 CodeHostResultCompleteness::Truncated
             } else {
@@ -1060,6 +1065,39 @@ mod tests {
         assert_eq!(
             classify_public_destination_error(PublicDestinationClientError::Infrastructure),
             CodeHostTransportFailure::DispatchUnknown
+        );
+    }
+
+    /// An exactly-capped body followed only by an empty frame retained every
+    /// byte GitHub sent, so no content was discarded.
+    #[tokio::test]
+    async fn exact_cap_body_with_empty_trailing_frame_is_complete() {
+        const LIMIT: usize = 4;
+        let stream = futures_util::stream::iter([
+            Ok::<Vec<u8>, std::convert::Infallible>(vec![b'l'; LIMIT]),
+            Ok(Vec::new()),
+        ]);
+
+        assert_eq!(
+            read_bounded(stream, LIMIT).await,
+            Ok((vec![b'l'; LIMIT], CodeHostResultCompleteness::Complete))
+        );
+    }
+
+    /// An exactly-capped body followed by further content is truncated, so the
+    /// empty-frame allowance cannot hide discarded bytes.
+    #[tokio::test]
+    async fn exact_cap_body_with_further_content_is_truncated() {
+        const LIMIT: usize = 4;
+        let stream = futures_util::stream::iter([
+            Ok::<Vec<u8>, std::convert::Infallible>(vec![b'l'; LIMIT]),
+            Ok(Vec::new()),
+            Ok(vec![b'x']),
+        ]);
+
+        assert_eq!(
+            read_bounded(stream, LIMIT).await,
+            Ok((vec![b'l'; LIMIT], CodeHostResultCompleteness::Truncated))
         );
     }
 

@@ -304,7 +304,11 @@ async fn fetch_with_client(
         .ok_or(WebFetchTransportFailure::DispatchUnknown)
 }
 
-async fn has_more_response_bytes<S, B, E>(stream: &mut S) -> Result<bool, WebFetchTransportFailure>
+/// Whether a body stream still holds content after an exact-cap read. Empty
+/// trailing frames are legal and are not evidence that bytes were discarded.
+pub(crate) async fn has_more_response_bytes<S, B, E>(
+    stream: &mut S,
+) -> Result<bool, WebFetchTransportFailure>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
