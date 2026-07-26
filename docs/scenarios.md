@@ -1093,10 +1093,10 @@ those tests.
   bridge sets the runtime operation's system instructions on every call it
   prepares. A prompt-only replacement appends no semantic transcript entry.
 - **Transient updates:** None.
-- **Owning component:** The domain owns the bounded prompt value and epoch
-  laws; Postgres stores and constrains it, including digest-keyed
-  command/defaults agreement; protocol version nine and the terminal
-  create/model verbs expose the owner surface.
+- **Owning component:** The domain owns the bounded prompt value and epoch laws;
+  Postgres stores and constrains it, including digest-keyed command/defaults
+  agreement; protocol version nine and the terminal create/model verbs expose
+  the owner surface.
 - **Failure behavior:** An empty, U+0000-bearing, or over-bound prompt fails
   before any command identity is claimed. A pre-version-nine replacement
   targeting a session whose current epoch carries a prompt is refused as

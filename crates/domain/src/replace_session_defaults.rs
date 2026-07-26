@@ -997,10 +997,8 @@ mod tests {
                 command.replacement().model(),
                 command.replacement().dangerous_tool_auto_approval(),
                 Some(
-                    crate::SessionSystemPrompt::try_new(String::from(
-                        "exact session instructions",
-                    ))
-                    .expect("test prompt is admissible"),
+                    crate::SessionSystemPrompt::try_new(String::from("exact session instructions"))
+                        .expect("test prompt is admissible"),
                 ),
             ),
             ..matching.clone()

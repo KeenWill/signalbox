@@ -2857,7 +2857,10 @@ fn probe_header(
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if !matches!(version_spelling, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "9") {
+    if !matches!(
+        version_spelling,
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "9"
+    ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,

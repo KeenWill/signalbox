@@ -1238,12 +1238,24 @@ async fn handle_read_session_defaults<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let named_version = match defaults_version {
+        None => None,
+        Some(value) => match SessionConfigurationDefaultsVersion::try_from_u64(value.value()) {
+            Some(version) => Some(version),
+            None => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
+        },
+    };
     let repository = ProcessReadRepository::new(pool.clone());
     match repository
-        .read_session_defaults(
-            SessionId::from_uuid(session_id.into_uuid()),
-            defaults_version.map(|value| value.value()),
-        )
+        .read_session_defaults(SessionId::from_uuid(session_id.into_uuid()), named_version)
         .await
     {
         Ok(ProcessSessionDefaultsRead::Read(read)) => {
@@ -3325,6 +3337,7 @@ impl ProtocolError {
                 2 => "the selected session requires protocol version 2",
                 3 => "the selected session requires protocol version 3",
                 6 => "the selected session requires protocol version 6",
+                9 => "the selected session requires protocol version 9",
                 _ => "the protocol version is unsupported",
             },
             detail: ErrorDetail::none(),
@@ -3337,7 +3350,7 @@ impl ProtocolError {
             message: match code {
                 ErrorCode::MalformedFrame => "the protocol frame is malformed",
                 ErrorCode::UnsupportedVersion => {
-                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4, 5, 6, 7"
+                    "the protocol version is unsupported; supported versions: 1, 2, 3, 4, 5, 6, 7, 9"
                 }
                 ErrorCode::InvalidRequest => "the request values are invalid",
                 ErrorCode::NotFound => "the requested session was not found",

@@ -8,9 +8,9 @@ content, and actor attribution. It was verified against the implementing stack
 through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`), and the session system prompt through PR #286
-(`agent/session-system-prompt`). The imported-conversation record and converter are
-owned by [conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+(`agent/session-system-prompt`). The imported-conversation record and converter
+are owned by [conversation-import](conversation-import.md). Where a law is cited
+as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
 mechanics owned by another decision are summarized, the owning sibling page is
 linked inline.
 
@@ -237,26 +237,26 @@ truncating or rewriting, and equality is the exact ordered scalar sequence.
 Absence is typed `None`, never empty text. `CreateSession` and
 `CreateSessionFromImportedFrontier` carry the optional prompt inside their
 complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only
-mutation, template, or named profile; the
+only as part of the complete successor epoch — there is no prompt-only mutation,
+template, or named profile; the
 [bound-and-placement decision](../decisions.md#2026-07-26--bound-the-session-system-prompt-as-a-defaults-epoch-value)
 records the capacity and epoch-placement choice. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
 durable epoch and command columns (migration
-`202607280301_session_system_prompt.sql`), and command/defaults schema
-agreement extends through a generated exact-encoding SHA-256 digest column
-because megabyte text cannot join a btree key.
+`202607280301_session_system_prompt.sql`), and command/defaults schema agreement
+extends through a generated exact-encoding SHA-256 digest column because
+megabyte text cannot join a btree key.
 
 The immutable epoch row is the prompt's single content authority. Origin
 acceptance keeps freezing only the epoch; per-turn origin rows copy no prompt
 text, and model-call preparation reads the prompt through the calling turn's
 frozen defaults version — including a reclassified-steering origin's inherited
 version — so every call the turn prepares sets `ModelOperation.system` to
-exactly that epoch's prompt, or none. A replacement that changes only the
-system prompt appends no semantic transcript entry: the new instructions reach
-the provider whole and out of band on the successor turn's calls, and the
-turn's frozen epoch already records durably which prompt governed it, as
-recorded by the
+exactly that epoch's prompt, or none. A replacement that changes only the system
+prompt appends no semantic transcript entry: the new instructions reach the
+provider whole and out of band on the successor turn's calls, and the turn's
+frozen epoch already records durably which prompt governed it, as recorded by
+the
 [no-transcript-boundary decision](../decisions.md#2026-07-26--deliver-system-prompt-changes-without-a-transcript-boundary).
 The `ModelIdentityChanged` boundary below remains keyed to the frozen direct
 model selection alone.
@@ -386,9 +386,9 @@ flag, title, tags, archive state, and optional last-writer stamp; attributes
 remain available through the single-session metadata read, and the current
 epoch's optional system prompt is deliberately absent from list rows — the
 process boundary's single-session defaults read
-([process-protocol](process-protocol.md)) returns it exactly. A query has an exact
-tag set of at most 256 members, optional exact case-sensitive title substring,
-`include_archived`, a page size from 1 through 100, and an exclusive
+([process-protocol](process-protocol.md)) returns it exactly. A query has an
+exact tag set of at most 256 members, optional exact case-sensitive title
+substring, `include_archived`, a page size from 1 through 100, and an exclusive
 `after_session_id` cursor. Required tags use the metadata tag rules, a present
 title substring is nonempty and rejects U+0000, and all filter strings together
 carry at most 262,144 UTF-8 bytes:

@@ -19,8 +19,8 @@ composition surface. The repository already has a forward-only defaults-epoch
 mechanism, a bounded-user-content precedent at 1,048,576 UTF-8 bytes, and the
 rule that large content has exactly one authoritative copy.
 
-**Decision.** Session defaults gain one optional bounded system prompt:
-nonempty exact Unicode text, no U+0000, at most 1,048,576 UTF-8 bytes —
+**Decision.** Session defaults gain one optional bounded system prompt: nonempty
+exact Unicode text, no U+0000, at most 1,048,576 UTF-8 bytes —
 `SessionSystemPrompt::MAX_UTF8_BYTES`, mirroring the accepted-input bound —
 checked at construction and by storage CHECK constraints. The prompt is set at
 creation and replaced only through `ReplaceSessionDefaults` epochs, so INV-046's
@@ -39,17 +39,16 @@ special-case bound would invent a second content ceiling without a reason.
 
 **Affects.** `SessionConfigurationDefaults` and every command carrying it,
 defaults storage and its agreement keys (migration
-`202607280301_session_system_prompt.sql`), the provider bridge, process
-protocol version nine, and
-[sessions and transcript](spec/sessions-and-transcript.md).
+`202607280301_session_system_prompt.sql`), the provider bridge, process protocol
+version nine, and [sessions and transcript](spec/sessions-and-transcript.md).
 
 ## 2026-07-26 — Deliver system-prompt changes without a transcript boundary
 
-**Context.** A mid-session model change appends a durable
-`ModelIdentityChanged` entry rendered into the conversation as an injected
-user-role event, because the recorded direction requires the new model to learn
-its identity through the frontier. A system-prompt change raised the same
-question: should the successor turn's frontier carry a boundary entry?
+**Context.** A mid-session model change appends a durable `ModelIdentityChanged`
+entry rendered into the conversation as an injected user-role event, because the
+recorded direction requires the new model to learn its identity through the
+frontier. A system-prompt change raised the same question: should the successor
+turn's frontier carry a boundary entry?
 
 **Decision.** No semantic entry is appended when a replacement changes only the
 system prompt. The prompt reaches the provider out of band as

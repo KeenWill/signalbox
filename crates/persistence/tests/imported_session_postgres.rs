@@ -303,7 +303,10 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
     .bind(Uuid::from_u128(0x302))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(versions, (2, 2));
+    // The defaults-bearing command families write kind-scoped storage
+    // version three since the session system prompt joined the payload
+    // (docs/spec/persistence-protocol.md).
+    assert_eq!(versions, (3, 3));
     Ok(())
 }
 

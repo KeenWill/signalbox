@@ -9,7 +9,10 @@
 //! per-turn resources, and interpreting-policy selections are unavailable
 //! baseline capabilities, not latent optional fields. The `Scope` section
 //! on [`EffectiveConfiguration`] lists what these pure values deliberately
-//! omit.
+//! omit. The optional bounded [`SessionSystemPrompt`] lives on the session
+//! defaults value, not in per-turn effective configuration: turns freeze
+//! only the epoch version and calls read the prompt through it
+//! (`docs/spec/sessions-and-transcript.md`).
 
 use crate::DangerousToolAutoApproval;
 
@@ -691,7 +694,10 @@ mod tests {
 
         let with_null = SessionSystemPrompt::try_new(String::from("a\u{0}b"))
             .expect_err("PostgreSQL text cannot store U+0000");
-        assert_eq!(with_null.failure(), SessionSystemPromptFailure::ContainsNull);
+        assert_eq!(
+            with_null.failure(),
+            SessionSystemPromptFailure::ContainsNull
+        );
         assert_eq!(with_null.into_parts().0, "a\u{0}b");
     }
 

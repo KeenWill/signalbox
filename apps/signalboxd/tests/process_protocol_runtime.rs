@@ -2188,14 +2188,14 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     runtime.stop().await
 }
 
-/// S34 / INV-008 / INV-012 / INV-033 / INV-046: version nine creates a
+/// S34 / INV-012 / INV-033 / INV-046: version nine creates a
 /// prompted session, reads exact current and named defaults epochs, replaces
 /// the prompt forward-only with the complete installed echo, and gates a
 /// pre-nine replacement while the current epoch carries a prompt without
 /// claiming its command identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s34_inv008_inv012_inv033_inv046_process_runtime_carries_the_session_system_prompt()
+async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_prompt()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;

@@ -954,18 +954,9 @@ impl ProcessReadRepository {
     pub async fn read_session_defaults(
         &self,
         session: SessionId,
-        version: Option<u64>,
+        version: Option<signalbox_domain::SessionConfigurationDefaultsVersion>,
     ) -> Result<ProcessSessionDefaultsRead, ProcessReadError> {
-        let named = version
-            .map(|value| {
-                if value == 0 {
-                    return Err(ProcessReadError::from(
-                        ProcessReadCorruption::InvalidOrdinal("requested defaults version"),
-                    ));
-                }
-                Ok(Decimal::from(value))
-            })
-            .transpose()?;
+        let named = version.map(|value| Decimal::from(value.as_u64()));
         let row = sqlx::query(
             "SELECT
                 session_row.session_id,

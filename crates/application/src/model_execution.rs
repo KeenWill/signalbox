@@ -2750,9 +2750,14 @@ mod tests {
         .expect("the baseline origin-only frontier renders");
         assert_eq!(prompted.system_prompt(), Some(prompt.as_str()));
 
-        let promptless =
-            PreparedModelOperation::render(request, credential_reference(), None, Box::new([]), &[])
-                .expect("the baseline origin-only frontier renders");
+        let promptless = PreparedModelOperation::render(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &[],
+        )
+        .expect("the baseline origin-only frontier renders");
         assert_eq!(promptless.system_prompt(), None);
     }
 

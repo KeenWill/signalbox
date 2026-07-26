@@ -796,7 +796,7 @@ pub enum CreateSessionPreparationFailure {
 #[derive(Clone, Debug)]
 pub struct CreateSessionPreparationError {
     session: SessionId,
-    command: CreateSession,
+    command: Box<CreateSession>,
     failure: CreateSessionPreparationFailure,
 }
 
@@ -818,7 +818,7 @@ impl CreateSessionPreparationError {
 
     /// Returns all unchanged preparation inputs and the failure.
     pub fn into_parts(self) -> (SessionId, CreateSession, CreateSessionPreparationFailure) {
-        (self.session, self.command, self.failure)
+        (self.session, *self.command, self.failure)
     }
 }
 
@@ -842,7 +842,7 @@ impl CreateSession {
             ) => {
                 return Err(CreateSessionPreparationError {
                     session,
-                    command: self,
+                    command: Box::new(self),
                     failure: CreateSessionPreparationFailure::TranscriptAncestryUnavailable,
                 });
             }

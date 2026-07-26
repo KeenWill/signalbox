@@ -19,9 +19,8 @@ were verified through PR #258 (`agent/signalboxd-rename`); the
 [provider-target identity](#provider-target-identity) rule and the sanitized
 model-call cause codes were verified through PR #280
 (`agent/provider-identity-normalization`); the session system prompt on the
-prepared operation was verified through PR #286
-(`agent/session-system-prompt`). Invariant tags cite
-[docs/invariants.md](../invariants.md).
+prepared operation was verified through PR #286 (`agent/session-system-prompt`).
+Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -550,8 +549,8 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
-- The one system-prompt source is the calling turn's frozen defaults epoch:
-  the prepare transaction loads that epoch's optional bounded prompt, rendering
+- The one system-prompt source is the calling turn's frozen defaults epoch: the
+  prepare transaction loads that epoch's optional bounded prompt, rendering
   binds it onto the prepared operation, and the bridge sets the runtime
   operation's `ModelOperation::system` field from it on every call
   (`crates/model-runtime/src/operation.rs`), exactly or `None`

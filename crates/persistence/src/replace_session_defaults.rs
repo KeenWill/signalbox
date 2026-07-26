@@ -808,7 +808,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ReplaceSessionDefaultsRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1 | 2 | 3) {
+    if matches!(actual, 1..=3) {
         Ok(actual)
     } else {
         Err(ReplaceSessionDefaultsCorruption::Unsupported {

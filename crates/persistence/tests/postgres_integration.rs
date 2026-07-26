@@ -49,14 +49,13 @@ use signalbox_domain::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionSystemPrompt,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    SessionSystemPrompt, StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities,
+    SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolCallProposal, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolResultContent, ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
+    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -17989,21 +17988,30 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     // The process defaults read selects the current promptless epoch, the
     // exact named prompted epoch, and types both absences.
     let read = ProcessReadRepository::new(pool.clone());
-    let ProcessSessionDefaultsRead::Read(current) = read.read_session_defaults(session, None).await?
+    let ProcessSessionDefaultsRead::Read(current) =
+        read.read_session_defaults(session, None).await?
     else {
         panic!("the current defaults epoch must read");
     };
     assert_eq!(current.version().as_u64(), 2);
     assert_eq!(current.defaults(), &promptless_defaults);
-    let ProcessSessionDefaultsRead::Read(named) =
-        read.read_session_defaults(session, Some(1)).await?
+    let ProcessSessionDefaultsRead::Read(named) = read
+        .read_session_defaults(
+            session,
+            SessionConfigurationDefaultsVersion::try_from_u64(1),
+        )
+        .await?
     else {
         panic!("the named prompted epoch must read");
     };
     assert_eq!(named.version().as_u64(), 1);
     assert_eq!(named.defaults(), &prompted_defaults);
     assert_eq!(
-        read.read_session_defaults(session, Some(9)).await?,
+        read.read_session_defaults(
+            session,
+            SessionConfigurationDefaultsVersion::try_from_u64(9),
+        )
+        .await?,
         ProcessSessionDefaultsRead::VersionNotFound
     );
     assert_eq!(
@@ -18073,8 +18081,8 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     // digest disagrees with the installed epoch cannot commit.
     let mut disagreeing = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO durable_command (command_id, command_kind, storage_version)
-         VALUES ($1, 'replace_session_defaults', 3)",
+        "INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'replace_session_defaults', 3, now())",
     )
     .bind(Uuid::from_u128(0xa58))
     .execute(&mut *disagreeing)
@@ -18100,11 +18108,10 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
         .commit()
         .await
         .expect_err("a prompt-digest disagreement cannot commit");
-    let disagreement_code = match &disagreement {
-        sqlx::Error::Database(error) => error.code(),
-        other => panic!("unexpected digest-disagreement failure: {other:?}"),
+    let sqlx::Error::Database(disagreement_error) = &disagreement else {
+        panic!("unexpected digest-disagreement failure: {disagreement:?}");
     };
-    assert_eq!(disagreement_code.as_deref(), Some("23503"));
+    assert_eq!(disagreement_error.code().as_deref(), Some("23503"));
 
     pool.close().await;
     drop(container);
