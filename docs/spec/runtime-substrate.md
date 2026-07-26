@@ -513,13 +513,13 @@ equals the supported version, and an unreadable, unparsable, or mismatched
 version fails the smoke rather than skipping it. Why: evidence recorded against
 a version that never ran is worse than no evidence. The smoke then asserts only
 the protocol surfaces a version bump moves — the thread identifier reaching the
-exchange facts, the terminal usage counters, and the final agent message
-decoding as the response envelope — and nothing about answer quality. It never
-runs on a pull-request event, so no fork can reach its credentials; it is
-dispatched manually, including against a pin-bump branch to verify that bump
-before it lands, and runs automatically on `main` only when the pin manifest
-changes. The model dispatch itself still performs no version probe: this check
-lives in the smoke, never in the hot path.
+exchange facts, the terminal usage counters, and the response envelope decoding
+as a completed or refused terminal outcome — and nothing about answer quality.
+It never runs on a pull-request event, so no fork can reach its credentials; it
+is dispatched manually, including against a pin-bump branch to verify that bump
+before it lands, and runs automatically on `main` only when the pin manifest or
+its committed lockfile changes. The model dispatch itself still performs no
+version probe: this check lives in the smoke, never in the hot path.
 
 The smoke authenticates the CLI through its own non-interactive API-key login,
 piped from an environment-scoped secret into the CLI's credential store, which

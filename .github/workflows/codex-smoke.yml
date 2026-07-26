@@ -9,7 +9,7 @@
 # request must never be able to reach the credential, and no path in this file
 # runs fork-authored code. The two triggers are `workflow_dispatch`, which
 # GitHub restricts to accounts with write access, and `push` to `main` limited
-# to the pin manifest and this workflow. The credential lives only in the
+# to the pin manifest and lockfile. The credential lives only in the
 # `codex-smoke` environment below, so it is unavailable to any other workflow
 # and to any run this environment's protection rules have not admitted; it is
 # read once, from `secrets.*`, into the single step that pipes it to the CLI's
@@ -29,7 +29,6 @@ on:
     paths:
       - "tooling/codex-cli/package.json"
       - "tooling/codex-cli/package-lock.json"
-      - ".github/workflows/codex-smoke.yml"
 
 permissions:
   contents: read
