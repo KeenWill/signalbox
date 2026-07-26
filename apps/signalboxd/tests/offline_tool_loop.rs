@@ -950,40 +950,19 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
     }
 }
 
-fn redact_offline_credential(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::String(text) => {
-            *text = text.replace(
-                std::str::from_utf8(OFFLINE_CODE_HOST_TOKEN)
-                    .expect("fixture credential is valid UTF-8"),
-                "[redacted]",
-            );
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                redact_offline_credential(value);
-            }
-        }
-        serde_json::Value::Object(object) => {
-            for value in object.values_mut() {
-                redact_offline_credential(value);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
-    }
-}
-
+/// Runs one code-host tool through the durable loop against a mocked
+/// transport. `expected_result` is the persisted tool-result JSON stated
+/// independently of the serializer under test.
 async fn code_host_tool_completes_offline(
     name: &'static str,
     arguments: String,
     result: CodeHostResult,
+    expected_result: serde_json::Value,
     expected_operation: ExpectedCodeHostOperation,
     approval: ExpectedCodeHostApproval,
 ) -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let web = OfflineWebTransport::unused();
-    let mut expected_result = result.clone().into_json_value();
-    redact_offline_credential(&mut expected_result);
     let code_host = RecordingCodeHostTransport::responding(result);
     let (tool_catalog, tool_executor) = DaemonTools::try_new(
         || SystemTime::UNIX_EPOCH,
@@ -1646,6 +1625,18 @@ async fn tier_one_change_request_summary_completes_offline_tool_loop() -> Result
         CHANGE_REQUEST_SUMMARY_NAME,
         serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
         summary_result(),
+        serde_json::json!({
+            "author": "reviewer",
+            "base_ref": "main",
+            "body": "bounded body",
+            "draft": false,
+            "head_ref": "feature",
+            "head_revision": "0123456789abcdef0123456789abcdef01234567",
+            "number": 17,
+            "state": "open",
+            "title": "summary [redacted]",
+            "url": "https://github.example/owner/repository/pull/17",
+        }),
         ExpectedCodeHostOperation::Summary {
             repository: "owner/repository",
             number: 17,
@@ -1664,6 +1655,15 @@ async fn tier_one_change_request_changed_files_completes_offline_tool_loop()
         CHANGE_REQUEST_CHANGED_FILES_NAME,
         serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
         changed_files_result(),
+        serde_json::json!({
+            "files": [{
+                "additions": 7,
+                "deletions": 2,
+                "path": "src/lib.rs",
+                "status": "modified",
+            }],
+            "truncated": false,
+        }),
         ExpectedCodeHostOperation::ChangedFiles {
             repository: "owner/repository",
             number: 17,
@@ -1687,6 +1687,15 @@ async fn tier_one_change_request_file_patch_completes_offline_tool_loop()
         })
         .to_string(),
         file_patch_result(),
+        serde_json::json!({
+            "file": {
+                "additions": 7,
+                "deletions": 2,
+                "path": "src/lib.rs",
+                "status": "modified",
+            },
+            "patch": "@@ -1 +1 @@\n-old\n+new",
+        }),
         ExpectedCodeHostOperation::FilePatch {
             repository: "owner/repository",
             number: 17,
@@ -1710,6 +1719,17 @@ async fn tier_one_change_request_checks_status_completes_offline_tool_loop()
         })
         .to_string(),
         checks_status_result(),
+        serde_json::json!({
+            "checks": [{
+                "conclusion": "success",
+                "id": 9001,
+                "name": "validate",
+                "status": "completed",
+                "url": "https://github.example/check/9001",
+            }],
+            "revision": "0123456789abcdef0123456789abcdef01234567",
+            "truncated": false,
+        }),
         ExpectedCodeHostOperation::ChecksStatus {
             repository: "owner/repository",
             revision: "0123456789abcdef0123456789abcdef01234567",
@@ -1734,6 +1754,7 @@ async fn tier_one_change_request_comment_completes_offline_tool_loop() -> Result
         })
         .to_string(),
         comment_result(),
+        serde_json::json!({"id": 8001, "url": "https://github.example/comment/8001"}),
         ExpectedCodeHostOperation::Comment {
             repository: "owner/repository",
             number: 17,
@@ -1753,6 +1774,23 @@ async fn tier_one_change_request_review_threads_completes_offline_tool_loop()
         CHANGE_REQUEST_REVIEW_THREADS_NAME,
         serde_json::json!({"number": 17, "repository": "owner/repository"}).to_string(),
         review_threads_result(),
+        serde_json::json!({
+            "threads": [{
+                "comments": [{
+                    "author": "reviewer",
+                    "body": "please adjust",
+                    "id": "PRRC_comment",
+                    "url": "https://github.example/comment/7001",
+                }],
+                "comments_truncated": false,
+                "id": "PRRT_thread",
+                "line": 12,
+                "outdated": false,
+                "path": "src/lib.rs",
+                "resolved": false,
+            }],
+            "truncated": false,
+        }),
         ExpectedCodeHostOperation::ReviewThreads {
             repository: "owner/repository",
             number: 17,
@@ -1772,6 +1810,7 @@ async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
         CHANGE_REQUEST_THREAD_REPLY_NAME,
         serde_json::json!({"body": "fixed offline", "thread_id": "PRRT_thread"}).to_string(),
         thread_reply_result(),
+        serde_json::json!({"id": "PRRC_reply", "url": "https://github.example/comment/7002"}),
         ExpectedCodeHostOperation::ThreadReply {
             thread_id: "PRRT_thread",
             body: "fixed offline",
@@ -1791,6 +1830,7 @@ async fn tier_one_change_request_thread_resolve_completes_offline_tool_loop()
         CHANGE_REQUEST_THREAD_RESOLVE_NAME,
         serde_json::json!({"thread_id": "PRRT_thread"}).to_string(),
         thread_resolve_result(),
+        serde_json::json!({"resolved": true, "thread_id": "PRRT_thread"}),
         ExpectedCodeHostOperation::ThreadResolve {
             thread_id: "PRRT_thread",
         },
@@ -1808,6 +1848,7 @@ async fn tier_one_change_request_ci_job_log_completes_offline_tool_loop()
         CHANGE_REQUEST_CI_JOB_LOG_NAME,
         serde_json::json!({"job_id": 9001, "repository": "owner/repository"}).to_string(),
         ci_job_log_result(),
+        serde_json::json!({"job_id": 9001, "text": "offline job log", "truncated": false}),
         ExpectedCodeHostOperation::CiJobLog {
             repository: "owner/repository",
             job_id: 9001,
@@ -1827,6 +1868,7 @@ async fn tier_one_change_request_rerun_failed_jobs_completes_offline_tool_loop()
         CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME,
         serde_json::json!({"repository": "owner/repository", "run_id": 7001}).to_string(),
         rerun_failed_jobs_result(),
+        serde_json::json!({"run_id": 7001}),
         ExpectedCodeHostOperation::RerunFailedJobs {
             repository: "owner/repository",
             run_id: 7001,
