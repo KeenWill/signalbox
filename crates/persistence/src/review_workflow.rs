@@ -980,6 +980,13 @@ impl ReviewWorkflowStore {
             _ => None,
         }
         .transpose()?;
+        if let Some(event) = posted_event.as_ref() {
+            let finding = vec![event.finding().finding().into_uuid()];
+            sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
+                .bind(&finding)
+                .fetch_all(&mut *transaction)
+                .await?;
+        }
         if posted_event.is_none()
             && let ReviewExternalLinkAssociation::Finding(reference) = next.association()
         {
@@ -1169,9 +1176,22 @@ impl ReviewWorkflowStore {
         pass: ReviewPassEvidence,
         run: ReviewRunEvidence,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
-        let Some(current) = self.load_external_link(link).await? else {
+        let Some(_) = self.load_external_link(link).await? else {
             return Ok(None);
         };
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(link.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let current = Self::load_external_link_on_connection(&mut transaction, link)
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("locked reservation disappeared"),
+                )
+            })?;
         let blocked = current
             .clone()
             .block_publication(pass.clone(), run)
@@ -1221,8 +1241,13 @@ impl ReviewWorkflowStore {
             _ => None,
         };
         if let Some(event) = blocked_event.as_ref() {
+            let finding = vec![event.finding().finding().into_uuid()];
+            sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
+                .bind(&finding)
+                .fetch_all(&mut *transaction)
+                .await?;
             let current_finding = self
-                .load_finding(event.finding().finding())
+                .load_finding_on_connection(&mut transaction, event.finding().finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1236,11 +1261,6 @@ impl ReviewWorkflowStore {
                 ))
             })?;
         }
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
-            .bind(link.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
         if sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
@@ -1259,7 +1279,7 @@ impl ReviewWorkflowStore {
             None => bind_pass_result(&mut transaction, &pass).await?,
         }
         commit_mutation(transaction).await?;
-        self.load_external_link(blocked.id()).await
+        Ok(Some(blocked))
     }
 
     /// Loads and validates a reservation, optional attachment, and observations.
@@ -1410,7 +1430,8 @@ impl ReviewWorkflowStore {
                     pass_run.state_pass_id AS pass_run_state_pass_id,
                     attachment.external_object_key,
                     object_identity.logical_target_id
-                        AS canonical_object_target_id
+                        AS canonical_object_target_id,
+                    object_identity.object_identity_count
                FROM review_external_link_attachment AS attachment
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = attachment.pass_id
@@ -1419,11 +1440,26 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_run AS pass_run
                  ON pass_run.run_id = pass.run_id
                 AND pass_run.target_id = pass.target_id
-               LEFT JOIN review_external_object_identity AS object_identity
-                 ON object_identity.provider_key = attachment.provider_key
-                AND object_identity.object_kind = attachment.object_kind
-                AND object_identity.external_object_key =
-                    attachment.external_object_key
+               LEFT JOIN LATERAL (
+                    SELECT
+                        count(*) AS object_identity_count,
+                        (array_agg(
+                            identity.logical_target_id
+                            ORDER BY identity.logical_target_id
+                        ))[1] AS logical_target_id
+                      FROM review_external_object_identity AS identity
+                     WHERE identity.identity_digest = md5(
+                               attachment.provider_key
+                                   || chr(31)
+                                   || attachment.object_kind
+                                   || chr(31)
+                                   || attachment.external_object_key
+                           )
+                       AND identity.provider_key = attachment.provider_key
+                       AND identity.object_kind = attachment.object_kind
+                       AND identity.external_object_key =
+                           attachment.external_object_key
+               ) AS object_identity ON TRUE
               WHERE attachment.external_link_id = $1",
         )
         .bind(link.into_uuid())
@@ -1431,6 +1467,14 @@ impl ReviewWorkflowStore {
         .await?;
         let attachment = match attachment {
             Some(row) => {
+                if row.try_get::<i64, _>("object_identity_count")? != 1 {
+                    return Err(corruption(
+                        "review_external_link_attachment",
+                        String::from(
+                            "external object identity must have exactly one canonical row",
+                        ),
+                    ));
+                }
                 require_joined_reference(
                     &row,
                     "canonical_attachment_pass_id",
@@ -1478,46 +1522,54 @@ impl ReviewWorkflowStore {
         let observation_rows = sqlx::query(
             "SELECT observation.external_link_id,
                     observation.observation_ordinal,
-                    observation.pass_run_id, observation.pass_id,
+                    observation.pass_run_id,
+                    observation.pass_run_id AS run_id,
+                    observation.pass_id,
                     observation.target_id, observation.object_state,
                     pass.pass_id AS canonical_observation_pass_id,
-                    pass.pass_kind, pass.state_kind AS pass_state_kind,
-                    pass.turn_id AS pass_turn_id,
-                    pass.output_frontier_id AS pass_output_frontier_id,
-                    pass.result_kind AS pass_result_kind,
-                    pass.result_finding_id
-                        AS pass_result_finding_id,
-                    pass.result_finding_run_id
-                        AS pass_result_finding_run_id,
-                    pass.result_finding_pass_id
-                        AS pass_result_finding_pass_id,
-                    pass.result_event_ordinal
-                        AS pass_result_event_ordinal,
-                    pass.result_event_kind AS pass_result_event_kind,
-                    pass.result_reason AS pass_result_reason,
-                    pass.result_referenced_finding_id
-                        AS pass_result_referenced_finding_id,
-                    pass.result_referenced_finding_run_id
-                        AS pass_result_referenced_finding_run_id,
-                    pass.result_referenced_finding_pass_id
-                        AS pass_result_referenced_finding_pass_id,
-                    pass.result_referenced_finding_status
-                        AS pass_result_referenced_finding_status,
-                    pass.result_external_link_id
-                        AS pass_result_external_link_id,
-                    pass.result_external_object_key
-                        AS pass_result_external_object_key,
-                    pass.result_observation_state
-                        AS pass_result_observation_state,
-                    pass_run.run_id AS canonical_observation_run_id,
-                    pass_run.workflow_kind AS pass_workflow_kind,
+                    pass.pass_kind, pass.state_kind,
+                    pass.session_id AS pass_session_id,
+                    pass.accepted_input_id, pass.origin_turn_id,
+                    pass.turn_id, pass.output_frontier_id,
+                    pass.result_kind, pass.result_finding_id,
+                    pass.result_finding_run_id,
+                    pass.result_finding_pass_id,
+                    pass.result_event_ordinal, pass.result_event_kind,
+                    pass.result_reason,
+                    pass.result_referenced_finding_id,
+                    pass.result_referenced_finding_run_id,
+                    pass.result_referenced_finding_pass_id,
+                    pass.result_referenced_finding_status,
+                    pass.result_external_link_id,
+                    pass.result_external_object_key,
+                    pass.result_observation_state,
+                    pass_run.run_id AS canonical_run_id,
+                    pass_run.target_id AS canonical_run_target_id,
+                    pass_run.workflow_kind AS run_workflow_kind,
                     pass_run.policy_version AS pass_policy_version,
                     pass_run.minimum_judge_confidence
                         AS pass_minimum_judge_confidence,
                     pass_run.minimum_publication_confidence
                         AS pass_minimum_publication_confidence,
-                    pass_run.state_kind AS pass_run_state_kind,
-                    pass_run.state_pass_id AS pass_run_state_pass_id
+                    pass_run.state_kind AS run_state_kind,
+                    pass_run.state_pass_id AS run_state_pass_id,
+                    canonical_target.target_id AS canonical_target_id,
+                    canonical_input.session_id
+                        AS accepted_input_session_id,
+                    canonical_input.origin_turn_id
+                        AS accepted_input_origin_turn_id,
+                    canonical_origin_turn.turn_id
+                        AS canonical_origin_turn_id,
+                    canonical_turn.turn_id AS evidence_turn_id,
+                    canonical_turn.session_id AS turn_session_id,
+                    canonical_turn.origin_accepted_input_id
+                        AS turn_accepted_input_id,
+                    canonical_turn.state_kind AS turn_state_kind,
+                    canonical_turn.terminal_disposition_kind
+                        AS turn_terminal_disposition_kind,
+                    canonical_turn.terminal_frontier_id
+                        AS turn_terminal_frontier_id,
+                    produced_findings.produced_finding_count
                FROM review_external_link_observation AS observation
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = observation.pass_id
@@ -1526,6 +1578,25 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_run AS pass_run
                  ON pass_run.run_id = pass.run_id
                 AND pass_run.target_id = pass.target_id
+               LEFT JOIN review_target AS canonical_target
+                 ON canonical_target.target_id = pass.target_id
+               LEFT JOIN accepted_input AS canonical_input
+                 ON canonical_input.accepted_input_id =
+                    pass.accepted_input_id
+               LEFT JOIN turn_lifecycle AS canonical_origin_turn
+                 ON canonical_origin_turn.turn_id = pass.origin_turn_id
+                AND canonical_origin_turn.session_id = pass.session_id
+                AND canonical_origin_turn.origin_accepted_input_id =
+                    pass.accepted_input_id
+               LEFT JOIN turn_lifecycle AS canonical_turn
+                 ON canonical_turn.turn_id = pass.turn_id
+               LEFT JOIN LATERAL (
+                   SELECT count(*) AS produced_finding_count
+                     FROM review_finding AS produced
+                    WHERE produced.producing_pass_id = pass.pass_id
+                      AND produced.run_id = pass.run_id
+                      AND produced.target_id = pass.target_id
+               ) AS produced_findings ON true
               WHERE observation.external_link_id = $1
               ORDER BY observation.observation_ordinal",
         )
@@ -1542,20 +1613,58 @@ impl ReviewWorkflowStore {
             )?;
             require_joined_reference(
                 &row,
-                "canonical_observation_run_id",
+                "canonical_run_id",
                 "review_external_link_observation",
                 "observing run row is missing",
             )?;
-            let pass_id = pass_id(row.try_get("pass_id")?);
-            let pass = load_pass_on_connection(connection, pass_id)
-                .await?
-                .ok_or_else(|| {
-                    corruption(
-                        "review_external_link_observation",
-                        String::from("observing pass row is missing"),
-                    )
-                })?
-                .evidence();
+            require_joined_reference(
+                &row,
+                "canonical_target_id",
+                "review_external_link_observation",
+                "observing target row is missing",
+            )?;
+            if row.try_get::<i64, _>("produced_finding_count")? != 0 {
+                return Err(corruption(
+                    "review_external_link_observation",
+                    String::from("observing pass unexpectedly produced findings"),
+                ));
+            }
+            let turn_evidence = decode_pass_turn_evidence(&row)?;
+            let pass = reconstitute_pass(&row, turn_evidence, Vec::new())?;
+            require_joined_reference(
+                &row,
+                "canonical_origin_turn_id",
+                "review_external_link_observation",
+                "observing pass origin turn row is missing",
+            )?;
+            let policy = decode_review_policy(
+                &row,
+                "pass_policy_version",
+                "pass_minimum_judge_confidence",
+                "pass_minimum_publication_confidence",
+                "review_external_link_observation",
+            )?;
+            let pass = ReviewPassEvidence::from_pass(&pass, policy);
+            ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
+                pass.reference().run(),
+                decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
+                policy,
+                decode_run_state(
+                    pass.reference().run(),
+                    &row.try_get::<String, _>("run_state_kind")?,
+                    row.try_get("run_state_pass_id")?,
+                )?,
+                Some(pass.clone()),
+            ))
+            .map_err(|error| {
+                corruption(
+                    "review_external_link_observation",
+                    format!(
+                        "observing run contradicts its pass projection: {:?}",
+                        error.failure()
+                    ),
+                )
+            })?;
             observations.push(decode_external_link_observation(&row, pass)?);
         }
         let claims = load_external_link_claims_on_connection(connection, link).await?;
@@ -1883,7 +1992,7 @@ async fn load_produced_findings_on_connection(
     let sealed_count: Option<i32> = pass_row.try_get("finding_count")?;
 
     let member_rows = sqlx::query(
-        "SELECT member.target_id, member.finding_run_id,
+        "SELECT member.result_ordinal, member.target_id, member.finding_run_id,
                 member.finding_pass_id, member.finding_id,
                 finding.finding_id AS canonical_finding_id
            FROM review_pass_produced_finding AS member
@@ -1897,16 +2006,32 @@ async fn load_produced_findings_on_connection(
     )
     .bind(pass.into_uuid())
     .fetch_all(&mut *connection)
-    .await?
-    .into_iter()
-    .map(|row| {
+    .await?;
+    let mut members = Vec::with_capacity(member_rows.len());
+    for (index, row) in member_rows.into_iter().enumerate() {
+        let ordinal = positive_u32(
+            row.try_get("result_ordinal")?,
+            "review_pass_produced_finding",
+        )?;
+        let expected = u32::try_from(index + 1).map_err(|_| {
+            corruption(
+                "review_pass_produced_finding",
+                String::from("finding inventory ordinal overflow"),
+            )
+        })?;
+        if ordinal != expected {
+            return Err(corruption(
+                "review_pass_produced_finding",
+                String::from("finding inventory ordinals are not contiguous"),
+            ));
+        }
         require_joined_reference(
             &row,
             "canonical_finding_id",
             "review_pass_produced_finding",
             "inventory member has no canonical finding",
         )?;
-        Ok(ReviewFindingRef::new(
+        members.push(ReviewFindingRef::new(
             ReviewPassRef::new(
                 ReviewRunRef::new(
                     target_id(row.try_get("target_id")?),
@@ -1915,9 +2040,9 @@ async fn load_produced_findings_on_connection(
                 pass_id(row.try_get("finding_pass_id")?),
             ),
             finding_id(row.try_get("finding_id")?),
-        ))
-    })
-    .collect::<Result<Vec<_>, ReviewWorkflowStoreError>>()?;
+        ));
+    }
+    let member_rows = members;
     let canonical = sqlx::query(
         "SELECT target_id, run_id, producing_pass_id, finding_id
            FROM review_finding
@@ -3262,12 +3387,12 @@ fn decode_external_link_observation(
         pass.clone(),
         ReviewRunEvidence::new(
             reference.run(),
-            decode_workflow_kind(&row.try_get::<String, _>("pass_workflow_kind")?)?,
+            decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
             pass.policy(),
             decode_run_state(
                 reference.run(),
-                &row.try_get::<String, _>("pass_run_state_kind")?,
-                row.try_get("pass_run_state_pass_id")?,
+                &row.try_get::<String, _>("run_state_kind")?,
+                row.try_get("run_state_pass_id")?,
             )?,
         ),
         decode_external_object_state(&row.try_get::<String, _>("object_state")?)?,

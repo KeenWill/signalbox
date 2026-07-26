@@ -3,7 +3,8 @@
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
 (`agent/review-process-amendments`); the migration inventory was verified
-through PR #254 (`agent/fix-parked-approval-interrupt`); the `apps/signalboxd`
+through PR #254 (`agent/fix-parked-approval-interrupt`) and was verified again
+in PR #227 (`agent/review-workflow-persistence`); the `apps/signalboxd`
 migration-invocation home was verified through PR #258
 (`agent/signalboxd-rename`). This page covers the Postgres representation in
 `crates/persistence` (source and migrations), migration discipline, durable
@@ -53,7 +54,7 @@ remains at SQLx defaults until an operational slice selects limits.
 
 Schema change is a forward-only, versioned SQL file set in
 `crates/persistence/migrations/` — twenty-eight files, `202607180001` through
-`202607280001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`202607280002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency

@@ -2236,6 +2236,32 @@ async fn inv040_pass_loader_rejects_incomplete_finding_inventory() -> Result<(),
     .execute(&pool)
     .await?;
     sqlx::query(
+        "UPDATE review_pass_produced_finding
+            SET result_ordinal = 2
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    let ordinal_error = fixture
+        .store
+        .load_pass(fixture.pass.pass())
+        .await
+        .expect_err("non-contiguous inventory ordinals must fail pass loading closed");
+    let ReviewWorkflowStoreError::Corruption(ordinal_error) = ordinal_error else {
+        panic!("expected typed produced-finding ordinal corruption");
+    };
+    assert_eq!(ordinal_error.aggregate(), "review_pass_produced_finding");
+    assert!(ordinal_error.detail().contains("ordinals"));
+    sqlx::query(
+        "UPDATE review_pass_produced_finding
+            SET result_ordinal = 1
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "DELETE FROM review_pass_produced_finding
           WHERE pass_id = $1",
     )
@@ -3526,6 +3552,17 @@ async fn inv040_inv041_review_lookup_indexes_are_pinned() -> Result<(), Box<dyn 
     .fetch_one(&pool)
     .await?;
     assert!(attachment_identity_index.contains("(identity_digest, target_id)"));
+
+    let blocked_link_index: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = 'public'
+            AND indexname = 'review_finding_event_blocked_link_index'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(blocked_link_index.contains("(external_link_id)"));
+    assert!(blocked_link_index.contains("event_kind = 'blocked_with_reason'"));
     Ok(())
 }
 
@@ -4467,6 +4504,51 @@ async fn inv041_external_link_load_rejects_missing_attachment_run() -> Result<()
             AND external_object_key = 'comment-746'",
     )
     .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_external_object_identity
+         DISABLE TRIGGER review_external_object_identity_insert_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_external_object_identity
+         DISABLE TRIGGER review_external_identity_attachment_is_required",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_external_object_identity
+            (provider_key, object_kind, external_object_key, logical_target_id)
+         VALUES (
+            'example-code-host', 'review_comment', 'comment-746', $1
+         )",
+    )
+    .bind(unrelated_target.id().into_uuid())
+    .execute(&pool)
+    .await?;
+    let duplicate_error = fixture
+        .store
+        .load_external_link(link)
+        .await
+        .expect_err("duplicate external-object identities must fail loading closed");
+    let ReviewWorkflowStoreError::Corruption(duplicate_error) = duplicate_error else {
+        panic!("expected typed external-object identity multiplicity corruption");
+    };
+    assert_eq!(
+        duplicate_error.aggregate(),
+        "review_external_link_attachment"
+    );
+    assert!(duplicate_error.detail().contains("exactly one"));
+    sqlx::query(
+        "DELETE FROM review_external_object_identity
+          WHERE provider_key = 'example-code-host'
+            AND object_kind = 'review_comment'
+            AND external_object_key = 'comment-746'
+            AND logical_target_id = $1",
+    )
+    .bind(unrelated_target.id().into_uuid())
     .execute(&pool)
     .await?;
 
@@ -5868,6 +5950,108 @@ async fn inv041_attachment_returns_claim_committed_while_waiting() -> Result<(),
         Some(expected),
         "the returned aggregate must retain the claim committed while waiting"
     );
+    Ok(())
+}
+
+/// INV-041: direct attachment and publication-block writers serialize through
+/// the reservation root, so the later block observes the winning attachment.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_schema_serializes_attachment_and_publication_block() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let attaching_pass =
+        insert_fixture_pass(&fixture, 0x7d0, ReviewPassKind::ImportExternalContext).await;
+    let blocked_pass = insert_fixture_pass(&fixture, 0x7d1, ReviewPassKind::Publish).await;
+    succeed_fixture_passes(&pool, &fixture.store, &[attaching_pass]).await;
+    let (_, blocked_turn) = start_review_pass(&fixture.store, blocked_pass).await;
+    synthetically_terminalize_turn(&pool, blocked_turn, "reconciliation_required").await;
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x7d2));
+    fixture
+        .store
+        .reserve_external_link(
+            ReviewExternalLink::try_reserve(
+                link,
+                ReviewExternalLinkAssociation::Target(fixture.target),
+                key("example-code-host"),
+                ReviewExternalObjectKind::ReviewComment,
+                &fixture.target_snapshot,
+            )
+            .expect("reservation matches the target"),
+        )
+        .await?;
+
+    let mut blocking = pool.begin().await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET state_kind = 'blocked'
+          WHERE pass_id = $1",
+    )
+    .bind(blocked_pass.pass().into_uuid())
+    .execute(&mut *blocking)
+    .await?;
+    sqlx::query(
+        "UPDATE review_run
+            SET state_kind = 'blocked',
+                state_pass_id = $2
+          WHERE run_id = $1",
+    )
+    .bind(blocked_pass.run().run().into_uuid())
+    .bind(blocked_pass.pass().into_uuid())
+    .execute(&mut *blocking)
+    .await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_publication_blocked',
+                result_reason =
+                    'provider acknowledgement requires reconciliation',
+                result_external_link_id = $2
+          WHERE pass_id = $1",
+    )
+    .bind(blocked_pass.pass().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&mut *blocking)
+    .await?;
+
+    let mut attaching = pool.begin().await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_attachment',
+                result_external_link_id = $2,
+                result_external_object_key = 'comment-7d2'
+          WHERE pass_id = $1",
+    )
+    .bind(attaching_pass.pass().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&mut *attaching)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_external_link_attachment
+            (external_link_id, target_id, pass_run_id, pass_id,
+             provider_key, object_kind, external_object_key)
+         VALUES (
+             $1, $2, $3, $4,
+             'example-code-host', 'review_comment', 'comment-7d2'
+         )",
+    )
+    .bind(link.into_uuid())
+    .bind(fixture.target.into_uuid())
+    .bind(attaching_pass.run().run().into_uuid())
+    .bind(attaching_pass.pass().into_uuid())
+    .execute(&mut *attaching)
+    .await?;
+
+    let committing_block = tokio::spawn(async move { blocking.commit().await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "deferred publication-block validation waits for the attachment root lock"
+    );
+    attaching.commit().await?;
+    let block_error = committing_block
+        .await
+        .expect("blocking commit task remains live")
+        .expect_err("the later block must observe and reject the attachment");
+    assert_sqlstate(&block_error, "23514");
     Ok(())
 }
 
