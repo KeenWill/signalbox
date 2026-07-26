@@ -18,10 +18,8 @@ code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were
-verified through PR #285 (`agent/dev-instance-code-host-credential`). The finite
-startup scan and removal of the superseded steering blocker were verified
-through PR #290 (`agent/audit-fix-startup-blocker`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag.
+verified through PR #285 (`agent/dev-instance-code-host-credential`). Invariant
+law lives in [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
 
