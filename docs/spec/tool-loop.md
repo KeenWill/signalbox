@@ -128,13 +128,25 @@ two independently durable commands, not one atomic deny-and-end command; after
 decision progression opens execution, the ordinary dispatch-gate race between
 remaining tool work and the interrupt applies.
 
-## Registry and effect metadata
+## Registry, placement, and effect metadata
 
 The application `ToolCatalog` port supplies immutable `ToolDefinition` values:
 name, model-facing description, argument JSON Schema, permission default (`Auto`
-or `Confirm`), and effect class (`EffectFree` or `ExternalEffect`). hubd wires
-the only implemented catalog as one process-lifetime immutable compiled value.
-Catalog lookup and iteration are ports rather than a static global, but runtime
+or `Confirm`), one required effect class, and one nonempty set of admissible
+loci. The effect classes are `Pure`, `Idempotent`, and `SideEffecting`, with no
+default. Pure implies idempotent; idempotent work may change state but is safe
+to repeat. Admissible loci are `DaemonOnly`, `RunnerOnly { selector }`, or
+`DaemonOrRunner { selector }`. The latter prefers the session's attached runner
+when it satisfies the selector and currently advertises the tool, falling back
+to daemon-local execution. Declarations are static per tool; a model or runner
+cannot select another locus per call. The typed placement and runner-dispatch
+law is owned by [runner protocol and placement](runner-protocol.md).
+
+The current daemon-local application catalog remains one process-lifetime
+immutable compiled value. Its existing `EffectFree` declaration is the `Pure`
+class, and its existing `ExternalEffect` declaration is the `SideEffecting`
+class; no current tool declares `Idempotent` or runner admissibility. Catalog
+lookup and iteration are ports rather than a static global, but runtime
 rebinding and deployment compatibility for outstanding requests are not
 implemented; they require the durable definition-revision decision recorded
 under Open edges.
@@ -156,13 +168,17 @@ executor boundary; the sentinel is not a claim that an unknown tool is safe to
 run. A declaration added or removed after the request was recorded does not
 rewrite its name or arguments.
 
-Effect class controls crash classification, not permission identity. A
-crash-lost prepared attempt, or an in-flight attempt declared `EffectFree`,
-closes `KnownFailed` and fails the current turn honestly; version one performs
-no automatic retry. A crash-lost in-flight `ExternalEffect` attempt closes
-`Ambiguous`, ends the abandoned turn attempt `Lost`, and parks the turn in
-`AwaitingRecoveryDecision` naming that exact tool attempt (INV-025, INV-026,
-INV-034).
+Effect class controls crash classification, not permission identity. In the
+current daemon-local executor, a crash-lost prepared attempt, or an in-flight
+attempt declared `Pure` or `Idempotent`, closes `KnownFailed` and fails the
+current turn honestly; version one performs no automatic local retry. A
+crash-lost in-flight `SideEffecting` attempt closes `Ambiguous`, ends the
+abandoned turn attempt `Lost`, and parks the turn in `AwaitingRecoveryDecision`
+naming that exact tool attempt (INV-025, INV-026, INV-034). Runner lease loss
+uses the separate re-lease law in
+[runner protocol and placement](runner-protocol.md#effect-classes-and-runner-leases);
+re-leasing one fenced runner attempt is not the current local executor
+fabricating a new physical attempt.
 
 ## Serialized staged execution
 
@@ -474,8 +490,12 @@ version constant.
   requests are recorded in [Tool safety](../open-questions.md#tool-safety).
 - Tool-attempt retry and ambiguous-wait resolution are recorded in
   [Tool safety](../open-questions.md#tool-safety).
-- Runner placement, authentication, and protocol are recorded under
-  [Scheduling and runners](../open-questions.md#scheduling-and-runners) and
+- Runner placement and domain lease law are owned by
+  [runner protocol and placement](runner-protocol.md); its later transport,
+  persistence, and authentication edges remain recorded under
+  [Scheduling and runners](../open-questions.md#scheduling-and-runners),
+  [Protocols and persistence](../open-questions.md#protocols-and-persistence),
+  and
   [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
 - Client approval presentation is recorded under
   [Client scope](../open-questions.md#client-scope).

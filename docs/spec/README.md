@@ -24,6 +24,7 @@ linked, never restated.
 - [Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md)
 - [Model-call execution](model-call-execution.md)
 - [Tool loop](tool-loop.md)
+- [Runner protocol and placement](runner-protocol.md)
 - [Review workflows](review-workflows.md)
 - [Persistence protocol](persistence-protocol.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)

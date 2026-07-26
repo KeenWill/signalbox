@@ -174,30 +174,41 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 Dispatch fencing and initial scheduler mechanics are decided, specified in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md); the
-questions below remain open.
+runner identity, catalog, lease, placement, credential-grant, and workspace
+domain laws are specified in
+[runner protocol and placement](spec/runner-protocol.md). The questions below
+remain open.
 
-- **Runner capability, evidence, and placement model.** Leaning: typed core
-  properties with explicit evidence levels; effective guarantees never stronger
-  than supporting evidence. Blocks the runner protocol. (S05–S16)
-- **Runner pinning and workspace affinity.** Leaning: explicit session/turn
-  pinning where locality matters, with observable failure. Blocks workspace
-  tools. (S05–S16)
-- **Multiple runners in one turn.** Leaning: at most one selected runner
-  initially, counting hub-local tools separately. Constrains version one.
-  (S13–S16)
-- **Runner result protocol.** The exact runner wire envelope must bind each
-  result to its tool attempt and authorized dispatch generation or equivalent
-  fence. Duplicate/stale acknowledgements, compatibility, subscriber
-  observation, and retention of rejected evidence remain undecided. Blocks
-  runner result delivery. (S05, S06, S12–S16)
+- **Runner loss recovery beyond explicit replacement.** The domain foundation
+  makes loss observable, forbids automatic migration, and emits complete
+  replacement-change facts. The owner command, application transaction, injected
+  semantic-message shape, client presentation, and recovery options when no
+  eligible replacement exists remain undecided. Blocks executable replacement
+  and frontier extension. (S30, S32)
+- **Lease and affinity orchestration.** One session is pinned to one runner
+  after first execution, while daemon-local tools remain separately admissible.
+  Scheduler ordering between attachment, credential authorization, workspace
+  provisioning, lease creation, runner loss, and explicit replacement remains
+  undecided. Blocks runner dispatch. (S16, S30–S32)
+- **MCP placement.** A future daemon-side MCP client may centralize shared
+  servers and a future runner-side host may execute sandbox-local servers. Exact
+  catalog declaration, lifecycle, credential, and compatibility semantics are
+  deferred to the MCP pass; no MCP locus exists today. Blocks MCP tools.
+- **Runner reconnect and result orchestration.** The domain fence binds lease,
+  runner, physical tool attempt, and dispatch generation. Exact reconnect
+  inventory, duplicate/stale acknowledgement handling, subscriber observation,
+  and retention of rejected evidence remain undecided with the wire and store
+  stack. Blocks runner result delivery. (S05, S06, S12, S16, S31)
 
 ## Tool safety
 
-- **Future tool-attempt retry.** Version one never automatically retries a
-  prepared, known-failed, crash-lost, or ambiguous tool attempt. Any later
-  owner-command retry needs effect/evidence eligibility, duplicate-risk,
-  idempotency-key, resource-limit, and audit decisions. Blocks tool retry
-  features. (S05, S06)
+- **Future tool-attempt retry.** Version one never automatically creates another
+  physical attempt after a prepared, known-failed, crash-lost, or ambiguous tool
+  attempt. The runner foundation separately permits re-leasing the same physical
+  attempt after lease loss when its effect class is pure or idempotent. Any
+  later owner command that creates another attempt needs effect/evidence
+  eligibility, duplicate-risk, idempotency-key, resource-limit, and audit
+  decisions. Blocks tool retry features. (S05, S06, S31)
 - **Ambiguous tool-wait resolution.** Version one can preserve the exact
   external-effect attempt and terminalize through a proof-bearing interrupt. Who
   may record resolving evidence, how an exact accepted-risk continuation is
@@ -209,6 +220,11 @@ questions below remain open.
   advertised schema, permission default, effect class, validator, and executor
   revision are pinned and compared. Blocks runtime catalog mutation and safe
   rebinding across outstanding requests.
+- **Runner-catalog file and reload lifecycle.** The runner domain validates an
+  owner catalog independently of representation. TOML schema, configuration
+  path, startup/reload behavior, revision identity, change audit, and safe
+  rebinding of active registrations remain undecided. Blocks configured runner
+  catalogs.
 - **Execution-strategy configuration placement.** Version one serializes tool
   attempts without exposing a knob. Whether a later serial/concurrent choice is
   a deployment, session-default, per-turn, or executor-selection value remains
@@ -233,6 +249,11 @@ questions below remain open.
 - **Ambient-user runner behavior.** Leaning: explicit selection and visible
   boundary, likely stricter policy for material effects. Blocks the ambient
   runner. (S13)
+- **Workspace provisioning and cleanup recovery.** The domain fixes
+  worktree-per-session capability, runner ownership, and cross-runner
+  noninheritance. Repository acquisition, worktree naming, filesystem
+  containment, cleanup timing, crash recovery, and leaked-workspace reporting
+  remain undecided. Blocks executable workspace provisioning. (S32)
 
 ## Identity, credentials, and resource governance
 
@@ -244,9 +265,18 @@ questions below remain open.
 - **Owner client authentication and revocation.** Keep the hub's authorization
   model single-owner while choosing a remotely safe authentication boundary.
   Blocks any remote client. (S01, S10, S24, S25)
-- **Runner enrollment, authentication, and revocation.** Strong runner identity
-  distinct from capability claims, with rotation. Blocks remote runners. (S05,
-  S06, S12–S16)
+- **Runner authentication exchange, rotation, and recovery.** Enrollment,
+  runner, and authentication-reference identities plus terminal enrollment
+  revocation are fixed by
+  [runner protocol and placement](spec/runner-protocol.md). Credential format,
+  bootstrap delivery, proof exchange, rotation overlap, compromise recovery,
+  channel binding, and authentication failure audit remain undecided. Blocks
+  remote runners. (S05, S06, S12–S16, S30–S32)
+- **Credential-scoped runner classes.** Credential profiles are selected only
+  after targeting a runner that advertised them. Whether a capability-class
+  selector may itself require a profile, and how availability changes affect
+  class membership, remains undecided. Blocks profile-aware dynamic runner
+  pools. (S30, S32)
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
@@ -287,6 +317,13 @@ questions below remain open.
   snapshot and durable-update semantics are defined by
   [process-protocol](spec/process-protocol.md), while transient model-update
   streaming remains open below. (S02, S24)
+- **Runner transport and durable store.** The accepted boundary requires one
+  runner-initiated held outbound streaming connection, no runner inbound
+  listener, and durable registration, lease, claim, and result authority
+  independent of the channel. Exact transport technology, framing,
+  authentication binding, compatibility version, backpressure, heartbeat, store
+  schema, transactions, reconnect snapshot, and stale-evidence retention remain
+  undecided. Blocks the runner binary and remote dispatch. (S12, S16, S30–S32)
 - **Compatibility beyond the retained process-protocol versions.** Versions one
   through four have their owning [specification](spec/process-protocol.md). A
   future compatibility window, negotiation scheme, and generated-client policy

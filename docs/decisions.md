@@ -1,5 +1,141 @@
 # Decision log
 
+## 2026-07-25 — Keep runner credentials local and daemon policy authoritative
+
+**Context.** Sessions need to select machine-local credentials without sending
+their values through a daemon-controlled runner channel. Tool-only approval
+cannot distinguish a read-only credential from an administrator credential for
+the same operation. Profile rotation and revocation also need inspectable
+forward behavior without altering work already executing.
+
+**Decision.** A runner holds named credential profiles provisioned out of band;
+credential values have no runner-protocol domain representation and never cross
+that protocol. The daemon owns profile-name validation, session selection,
+durable grant and audit facts, and approval posture for exact
+`(tool, credential profile)` pairs. `Automatic` is available only through an
+exact catalog pair; absence selects the existing session policy. Session
+creation snapshots the selected profile and advertised tool inventory.
+Replacement is a checked forward-only complete snapshot that emits typed change
+facts for later frontier injection. Revocation gates future dispatch
+authorization but does not cancel or rewrite an already claimed lease.
+
+**Rejected alternatives.** Sending values from the daemon creates a second
+credential-distribution system. Letting a runner advertise approval posture
+permits self-widening. Tool-only approval ignores credential scope. Mutating an
+active snapshot hides which profile authorized earlier work. Yank-on-revocation
+cannot honestly establish whether an in-flight external effect occurred.
+
+**Affects.** `CredentialProfileName`, runner catalog policy,
+`CredentialProfileGrant`, session placement, approval resolution, INV-035 and
+INV-045, the [runner-protocol specification](spec/runner-protocol.md), and later
+application, persistence, and transport stacks.
+
+## 2026-07-25 — Pin a session after first runner execution
+
+**Context.** A session may select either a capability class or exact runner and
+may request a working directory or repository workspace. After execution,
+workspace and ambient process state make another runner with the same declared
+class non-equivalent. Silent rescheduling would change both the execution
+boundary and the model's available tools without extending conversation context.
+
+**Decision.** Session placement begins with a class-or-identity selector,
+working-directory selection, optional credential profile, and workspace
+requirement. The first eligible execution pins the exact runner and its
+validated capability snapshot. Ordinary dispatch cannot move the session. Runner
+loss is explicit and disables future leasing. Owner-directed replacement checks
+one complete new placement, advances a positive revision, and emits complete
+before-and-after change facts for mandatory later frontier injection. A
+repository workspace requires the runner-advertised `WorktreePerSession`
+capability; its provisioned path is runner-owned and a replacement cannot
+inherit it across runners.
+
+**Rejected alternatives.** Re-evaluating a class before every call permits
+silent migration. Pinning only a working-directory string treats paths on
+different runners as the same workspace. Automatic failover hides changed tools,
+credentials, and filesystem state. Daemon-owned cleanup crosses the placement
+boundary and cannot clean a disconnected runner reliably.
+
+**Affects.** `SessionRunnerPlacement`, workspace requirement and provisioning
+types, runner replacement change facts, INV-044, S30 and S32, the
+[runner-protocol specification](spec/runner-protocol.md), and later context
+assembly and runner-workspace stacks.
+
+## 2026-07-25 — Make effect class control runner re-leasing
+
+**Context.** Runner dispatch adds a loss boundary after work has been offered or
+claimed. The current two-way effect metadata distinguishes no-effect from
+possibly external effect, but cannot express state-changing work that is safe to
+repeat. Treating every disconnect alike either strands safe work or silently
+duplicates unsafe work.
+
+**Decision.** Every tool declaration has exactly one required effect class:
+`Pure`, `Idempotent`, or `SideEffecting`; pure implies idempotent. Tool
+placement is one nonempty typed value: `DaemonOnly`, `RunnerOnly { selector }`,
+or `DaemonOrRunner { selector }`, with the attached eligible runner preferred in
+the combined case. Runner leases bind an exact runner, physical tool attempt,
+and positive dispatch generation. Loss before claim may advance every class.
+Loss after claim produces re-lease authority only for pure or idempotent work;
+side-effecting loss produces exact crash-classification authority and cannot
+produce re-lease authority. Undeclared advertised tools are rejected; an
+untrusted pre-validation boundary classifies an absent effect declaration as
+side-effecting.
+
+The later runner transport uses one runner-initiated held outbound streaming
+connection and runners accept no inbound connection. The channel carries offers,
+claims, and results but is never their authority: registration and lease
+aggregates are independent of connection state, and later persistence must
+reconstitute them before reconnect synchronization.
+
+**Rejected alternatives.** A default effect class hides missing policy. Treating
+all state-changing work as ambiguous throws away idempotency. Re-leasing side
+effects on disconnect risks duplication. One boolean `runner_allowed` cannot
+state daemon fallback or its selector. Per-call model-selected placement permits
+a call to widen the registry. Treating the stream as truth loses claims on
+reconnect.
+
+**Affects.** `ToolEffectClass`, `ToolAdmissibleLoci`, runner leases, INV-021,
+INV-025, INV-026, INV-043, S12, S16 and S31, the [tool-loop](spec/tool-loop.md)
+and [runner-protocol](spec/runner-protocol.md) specifications, and later store
+and wire stacks.
+
+## 2026-07-25 — Give logical enrollments daemon-validated advertisements
+
+**Context.** Runners range from long-lived owner-machine processes to ephemeral
+processes created shortly before registration. Hardware fingerprints cannot
+provide stable identity for both. A runner must advertise current tools,
+credential-profile names, and workspace capabilities, but trusting those claims
+as policy would let re-registration widen authorization or weaken approval.
+
+**Decision.** A runner identity is logical and enrollment-issued, never derived
+from hardware or network properties. Enrollment binds distinct enrollment,
+runner, and opaque authentication-reference identities plus owner-allowed
+capability classes, and has terminal revocation. Registration carries
+availability names only. The complete advertisement is validated against the
+active enrollment and one daemon-side owner-editable catalog parsed into typed
+domain. Unknown or disallowed claims reject registration. The validated result
+attaches daemon declarations for permission, placement, effect, credential-pair
+approval, and workspace capability; re-registration can change availability but
+carries no field capable of changing that policy.
+
+Catalog keys admit at most 64 UTF-8 bytes and use the portable ASCII vocabulary
+letters, digits, dot, underscore, and hyphen, beginning with a letter or digit.
+Working-directory and repository keys retain exact bounded UTF-8 without
+host-platform parsing in the domain. Catalog file syntax, authentication
+exchange, rotation, and durable registration storage are later boundaries.
+
+**Rejected alternatives.** Hardware fingerprints exclude ephemeral runners and
+silently change identity when machines are replaced. Hostnames and network
+addresses are neither stable nor authentication. Trusting full declarations from
+advertisements lets runners self-authorize. Silently dropping unknown claims
+makes a registration appear healthier than the runner's actual configuration.
+Embedding TOML or host path semantics in domain values crosses representation
+boundaries.
+
+**Affects.** Runner identities, enrollment, advertised and validated catalogs,
+INV-001 and INV-042, S30, the
+[runner-protocol specification](spec/runner-protocol.md), and later
+configuration, authentication, persistence, and transport stacks.
+
 An append-only, dated record of recorded decisions, newest first. Each entry
 states context, the decision, rejected alternatives, and what it affects, in
 roughly ten to twenty lines. Foundation-weight changes — changing normative
