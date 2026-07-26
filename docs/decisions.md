@@ -42,6 +42,7 @@ discard the existing serial operational shape without a demonstrated need.
 end-to-end test surfaces, plus the conversation-import specification. The
 process protocol, application service, persistence schema, and migrations are
 unchanged.
+
 ## 2026-07-26 — Derive daemon tool schemas from their argument types
 
 **Context.** Each daemon tool declared its model-facing JSON Schema as a
