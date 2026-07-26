@@ -10,7 +10,7 @@ use std::time::Duration;
 /// credential value.
 #[derive(Debug, Clone)]
 pub struct CodexCliConfig {
-    /// Locally installed Codex executable.
+    /// Absolute path to the locally installed Codex executable.
     pub executable: PathBuf,
     /// Existing directory used as the CLI's working root.
     pub working_directory: PathBuf,

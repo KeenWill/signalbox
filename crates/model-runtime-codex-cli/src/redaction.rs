@@ -6,10 +6,11 @@ const REDACTED: &str = "[redacted]";
 
 pub(crate) fn redact_text(text: &str) -> String {
     let mut sanitized = text.to_string();
+    for marker in ["authorization=", "authorization:", "cookie=", "cookie:"] {
+        sanitized = redact_line_value(&sanitized, marker);
+    }
     for marker in [
         "bearer ",
-        "authorization=",
-        "authorization:",
         "\"authorization\":",
         "api_key=",
         "api-key=",
@@ -35,8 +36,6 @@ pub(crate) fn redact_text(text: &str) -> String {
         "credential=",
         "credential:",
         "\"credential\":",
-        "cookie=",
-        "cookie:",
         "\"cookie\":",
         "id_token=",
         "id_token:",
@@ -142,6 +141,30 @@ fn redact_after_marker(text: &str, marker: &str) -> String {
     output
 }
 
+fn redact_line_value(text: &str, marker: &str) -> String {
+    let mut remaining = text;
+    let mut output = String::with_capacity(text.len());
+    while let Some(index) = find_ascii_case_insensitive(remaining, marker) {
+        let value_start = index + marker.len();
+        output.push_str(&remaining[..value_start]);
+        let whitespace = remaining[value_start..]
+            .chars()
+            .take_while(|character| {
+                character.is_whitespace() && *character != '\r' && *character != '\n'
+            })
+            .map(char::len_utf8)
+            .sum::<usize>();
+        output.push_str(&remaining[value_start..value_start + whitespace]);
+        output.push_str(REDACTED);
+        let value_end = remaining[value_start + whitespace..]
+            .find(['\r', '\n'])
+            .map_or(remaining.len(), |length| value_start + whitespace + length);
+        remaining = &remaining[value_end..];
+    }
+    output.push_str(remaining);
+    output
+}
+
 fn find_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
     text.as_bytes()
         .windows(needle.len())
@@ -174,6 +197,9 @@ mod tests {
     const JSON_CREDENTIAL_VALUE: &str = "third-sensitive-value";
     const NESTED_CREDENTIAL_VALUE: &str = "sensitive-refresh-value";
     const AUTHORIZATION_VALUE: &str = "opaque-authorization-value";
+    const BASIC_AUTHORIZATION_VALUE: &str = "dXNlcjpwYXNz";
+    const COOKIE_VALUE_ONE: &str = "sensitive-cookie-one";
+    const COOKIE_VALUE_TWO: &str = "sensitive-cookie-two";
     const JWT_SHAPED_VALUE: &str = "eyJsensitive.jwt.value";
 
     /// INV-035: credential-shaped text never leaves the CLI adapter.
@@ -183,7 +209,10 @@ mod tests {
             "Authorization BEARER {CREDENTIAL_SHAPED_VALUE} and \
              API_KEY=\"{QUOTED_CREDENTIAL_VALUE}\" with \
              {{\"REFRESH_TOKEN\":\"{JSON_CREDENTIAL_VALUE}\"}}, \
-             Authorization: {AUTHORIZATION_VALUE}, and {JWT_SHAPED_VALUE}"
+             Authorization: {AUTHORIZATION_VALUE}, and {JWT_SHAPED_VALUE}\n\
+             Authorization: Basic {BASIC_AUTHORIZATION_VALUE}\n\
+             Cookie: session={COOKIE_VALUE_ONE}; refresh={COOKIE_VALUE_TWO}\n\
+             safe-after-headers"
         );
         let output = redact_text(&fixture);
 
@@ -191,8 +220,12 @@ mod tests {
         assert!(!output.contains(QUOTED_CREDENTIAL_VALUE));
         assert!(!output.contains(JSON_CREDENTIAL_VALUE));
         assert!(!output.contains(AUTHORIZATION_VALUE));
+        assert!(!output.contains(BASIC_AUTHORIZATION_VALUE));
+        assert!(!output.contains(COOKIE_VALUE_ONE));
+        assert!(!output.contains(COOKIE_VALUE_TWO));
         assert!(!output.contains(JWT_SHAPED_VALUE));
         assert!(output.contains("[redacted]"));
+        assert!(output.contains("safe-after-headers"));
     }
 
     /// INV-035: credential-shaped JSON members are redacted recursively.

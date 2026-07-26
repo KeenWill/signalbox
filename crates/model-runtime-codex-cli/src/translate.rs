@@ -28,6 +28,7 @@ pub(crate) fn translate<C>(
             detail: error.to_string(),
         })
     })?;
+    validate_settings(operation)?;
 
     let messages = operation
         .messages
@@ -106,10 +107,11 @@ pub(crate) fn translate<C>(
          the JSON below. Return exactly the response envelope required by the supplied \
          output schema. `outcome` is `refused` only for a safety refusal. For ordinary \
          completion put response text in `text`. Propose caller-declared tools only in \
-         `tool_calls`, preserving their argument values as JSON objects. If \
-         `structured_output` is present, return exactly one tool call bearing its name \
-         and the contracted value as `arguments`. Honor `tool_choice` and the stated \
-         generation settings.\n\n{request_json}\n"
+         `tool_calls`; each `arguments` value is a string carrying exactly the tool's \
+         JSON argument object. If `structured_output` is present, return exactly one \
+         tool call bearing its name and the contracted value JSON-encoded in its \
+         `arguments` string. Honor `tool_choice` and the stated generation \
+         settings.\n\n{request_json}\n"
     )
     .into_bytes();
 
@@ -185,6 +187,35 @@ fn parse_object_schema(raw: &str, subject: &str) -> Result<Value, TranslationErr
         ));
     }
     Ok(schema)
+}
+
+fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), TranslationError> {
+    if operation.settings.max_output_tokens == 0 {
+        return Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: "max_output_tokens must be at least 1".to_string(),
+            },
+        ));
+    }
+    if let Some(value) = operation.settings.temperature
+        && !(0.0..=2.0).contains(&value)
+    {
+        return Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: "temperature must be a finite number from 0 through 2".to_string(),
+            },
+        ));
+    }
+    if let Some(value) = operation.settings.top_p
+        && !(0.0..=1.0).contains(&value)
+    {
+        return Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: "top_p must be a finite number from 0 through 1".to_string(),
+            },
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) enum TranslationError {

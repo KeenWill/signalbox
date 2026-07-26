@@ -1,6 +1,7 @@
 //! Values shared by the scripted executable and its process-level assertions.
 
 pub const THREAD_ID: &str = "thread-offline-1";
+pub const STREAM_ERROR_MESSAGE: &str = "quota exhausted for the active plan";
 pub const BUFFERED_ANSWER: &str = "buffered answer";
 pub const STREAMED_ANSWER: &str = "streamed answer";
 pub const REASONING_TEXT: &str = "considering";
@@ -27,3 +28,83 @@ pub const REDACTED_TOOL_ID_ONE: &str = "codex-redacted-call-1";
     reason = "process-only expected values share this module with the fake executable"
 )]
 pub const REDACTED_TOOL_ID_TWO: &str = "codex-redacted-call-2";
+
+/// Rejects what the live API's strict structured-output validation rejects,
+/// for the schema shapes the adapter's output schema uses (`properties` and
+/// array `items`): every object node must supply `additionalProperties:
+/// false` and must require every property it declares. The gated
+/// compatibility smoke observed the live rejection as `invalid_json_schema`
+/// with exactly this complaint, so the fake CLI applies the same rules to
+/// every spawn and this class of drift can no longer pass offline.
+pub fn strict_schema_violation(schema: &serde_json::Value) -> Option<String> {
+    violation_under(schema, &mut Vec::new())
+}
+
+fn violation_under(node: &serde_json::Value, context: &mut Vec<String>) -> Option<String> {
+    let object = node.as_object()?;
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+        if object.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
+            return Some(format!(
+                "In context=({}), 'additionalProperties' is required to be supplied and to be false.",
+                rendered_context(context)
+            ));
+        }
+        let required: Vec<&str> = object
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let properties = object
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        for name in properties
+            .map(|entries| entries.keys())
+            .into_iter()
+            .flatten()
+        {
+            if !required.contains(&name.as_str()) {
+                return Some(format!(
+                    "In context=({}), 'required' is required to be supplied and to include every key in 'properties'. Missing '{name}'.",
+                    rendered_context(context)
+                ));
+            }
+        }
+    }
+    if let Some(properties) = object
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, child) in properties {
+            context.push("properties".to_string());
+            context.push(name.clone());
+            let violation = violation_under(child, context);
+            context.pop();
+            context.pop();
+            if violation.is_some() {
+                return violation;
+            }
+        }
+    }
+    if let Some(items) = object.get("items") {
+        context.push("items".to_string());
+        let violation = violation_under(items, context);
+        context.pop();
+        if violation.is_some() {
+            return violation;
+        }
+    }
+    None
+}
+
+fn rendered_context(context: &[String]) -> String {
+    context
+        .iter()
+        .map(|segment| format!("'{segment}'"))
+        .collect::<Vec<_>>()
+        .join(",")
+}

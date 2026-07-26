@@ -1,7 +1,6 @@
 //! Codex JSONL and adapter-envelope wire types.
 
 use serde::Deserialize;
-use serde_json::value::RawValue;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ThreadStarted {
@@ -79,14 +78,27 @@ pub(crate) enum EnvelopeOutcome {
 pub(crate) struct EnvelopeToolCall {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) arguments: Box<RawValue>,
+    /// The tool's argument object as JSON **text**, not as inline JSON.
+    ///
+    /// Strict structured output rejects a free-form object — every object in
+    /// the schema must supply `additionalProperties: false` and require all
+    /// its properties — so unconstrained tool arguments are not expressible
+    /// as an object member. The envelope therefore carries the argument JSON
+    /// inside a string; the adapter parses and validates it and hands the
+    /// contained text onward, so the caller still receives the argument JSON
+    /// byte-verbatim when it is credential-shape clean.
+    pub(crate) arguments: String,
 }
 
 /// Schema passed to `codex exec --output-schema`.
 ///
-/// Every field is required to remain compatible with strict structured-output
-/// validation. Semantic constraints involving the caller's declared tools are
-/// checked by the adapter after decoding.
+/// Every object supplies `additionalProperties: false` and requires all its
+/// properties, which strict structured-output validation demands of every
+/// object node; the live API rejects any other shape as
+/// `invalid_json_schema`. That rule is also why `arguments` is a string
+/// carrying JSON text (see [`EnvelopeToolCall::arguments`]). Semantic
+/// constraints involving the caller's declared tools are checked by the
+/// adapter after decoding.
 pub(crate) const OUTPUT_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -109,8 +121,8 @@ pub(crate) const OUTPUT_SCHEMA: &str = r#"{
             "type": "string"
           },
           "arguments": {
-            "type": "object",
-            "additionalProperties": true
+            "type": "string",
+            "description": "The tool's argument object, encoded as a JSON string"
           }
         },
         "required": ["id", "name", "arguments"],

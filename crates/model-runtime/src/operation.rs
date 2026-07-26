@@ -112,8 +112,9 @@ pub struct ModelOperation<C> {
     pub settings: ModelSettings,
     /// Tools the model may propose calling.
     pub tools: Vec<ToolDefinition>,
-    /// How the provider may choose among the declared tools; ignored by
-    /// adapters when `tools` is empty and no output contract is set.
+    /// How the provider may choose among the declared tools. `AnyTool` is
+    /// ignored by adapters when `tools` is empty and no output contract is
+    /// set; a named choice must match a declared ordinary tool.
     pub tool_choice: ToolChoice,
     /// A structured-output contract the response must satisfy, when the
     /// caller demands typed output.
@@ -165,8 +166,7 @@ impl<C> ModelOperation<C> {
                 });
             }
         }
-        if (!self.tools.is_empty() || self.output_contract.is_some())
-            && let ToolChoice::Named(name) = &self.tool_choice
+        if let ToolChoice::Named(name) = &self.tool_choice
             && !self.tools.iter().any(|tool| &tool.name == name)
         {
             // An impossible choice is a locally knowable declaration error;
@@ -266,14 +266,6 @@ mod tests {
                 name: crate::ToolName::new("missing"),
             }
         );
-    }
-
-    #[test]
-    fn a_named_choice_without_tools_or_contract_is_ignored() {
-        let mut operation = operation();
-        operation.tool_choice = crate::ToolChoice::Named(crate::ToolName::new("unused"));
-
-        assert_eq!(operation.validate(), Ok(()));
     }
 
     #[test]

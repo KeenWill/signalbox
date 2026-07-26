@@ -4,13 +4,14 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
 mod fixtures;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
-    validate_argv()?;
+    let output_schema = validate_argv()?;
     if Path::new("fake-codex-block-stdin").exists() {
         std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
         std::thread::sleep(Duration::from_secs(60));
@@ -25,6 +26,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fixtures::THREAD_ID
     ));
     emit(r#"{"type":"turn.started"}"#);
+    if let Some(violation) = fixtures::strict_schema_violation(&output_schema) {
+        // The live API rejects a non-strict output schema before producing
+        // any model output, and the pinned CLI reports that rejection as a
+        // stream-level `error` event followed by its `turn.failed` lifecycle
+        // echo and a nonzero exit — the sequence the gated compatibility
+        // smoke observed for `invalid_json_schema`. Enforcing the same rules
+        // here keeps the offline corpus from accepting a schema the live API
+        // refuses.
+        unrecoverable(&format!(
+            "unexpected status 400 Bad Request: {{\"error\":{{\"type\":\"invalid_request_error\",\"code\":\"invalid_json_schema\",\"message\":\"{violation}\"}}}}"
+        ));
+    }
     match scenario.as_str() {
         "buffered_completed" => {
             envelope(&format!(
@@ -60,18 +73,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_message("message-last", "not a response envelope");
             completed();
         }
+        "deep_agent_message" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-deep","name":"{}","arguments":{}}}]}}"#,
+                fixtures::TOOL_NAME,
+                deeply_nested_arguments()
+            ));
+            completed();
+        }
         "tool_call" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-1","name":"{}","arguments":{}}}]}}"#,
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-1","name":"{}","arguments":"{}"}}]}}"#,
                 fixtures::TOOL_NAME,
-                fixtures::TOOL_ARGUMENTS
+                json_escape(fixtures::TOOL_ARGUMENTS)
+            ));
+            completed();
+        }
+        "tool_call_bad_arguments" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"not an argument object"}}]}}"#,
+                fixtures::TOOL_NAME
+            ));
+            completed();
+        }
+        "tool_call_deep_arguments" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-deep","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(&deeply_nested_arguments())
             ));
             completed();
         }
         "structured_output" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"structured-offline-1","name":"verdict","arguments":{{ "accepted" : {} }}}}]}}"#,
-                fixtures::STRUCTURED_ACCEPTED
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"structured-offline-1","name":"verdict","arguments":"{}"}}]}}"#,
+                json_escape(&format!(
+                    r#"{{ "accepted" : {} }}"#,
+                    fixtures::STRUCTURED_ACCEPTED
+                ))
             ));
             completed();
         }
@@ -105,22 +144,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "error_overloaded" => failed("provider overloaded"),
         "error_provider_internal" => failed("internal server error"),
         "error_unrecognized" => failed("future failure shape"),
+        "error_then_turn_failed" => unrecoverable(fixtures::STREAM_ERROR_MESSAGE),
+        "error_then_turn_completed" => {
+            emit_error(fixtures::STREAM_ERROR_MESSAGE);
+            completed();
+        }
         "no_terminal" => {
             envelope(r#"{"outcome":"completed","text":"not terminal","tool_calls":[]}"#);
         }
         "malformed_event" => emit("{not-json"),
         "redaction" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"Bearer {}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":{{"access_token":"{}","city":"Oslo"}}}}]}}"#,
+                r#"{{"outcome":"completed","text":"Bearer {}","tool_calls":[{{"id":"call-redaction","name":"{}","arguments":"{}"}}]}}"#,
                 fixtures::SENSITIVE_OUTPUT_TOKEN,
                 fixtures::TOOL_NAME,
-                fixtures::SENSITIVE_REFRESH_TOKEN
+                json_escape(&format!(
+                    r#"{{"access_token":"{}","city":"Oslo"}}"#,
+                    fixtures::SENSITIVE_REFRESH_TOKEN
+                ))
             ));
             completed();
         }
         "sensitive_tool_ids" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"{}","name":"{}","arguments":{{}}}},{{"id":"{}","name":"{}","arguments":{{}}}}]}}"#,
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"{}","name":"{}","arguments":"{{}}"}},{{"id":"{}","name":"{}","arguments":"{{}}"}}]}}"#,
                 fixtures::SENSITIVE_TOOL_ID_ONE,
                 fixtures::TOOL_NAME,
                 fixtures::SENSITIVE_TOOL_ID_TWO,
@@ -134,6 +181,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::BUFFERED_ANSWER
             ));
             completed_without_cache();
+        }
+        "completion_before_cancellation" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            std::fs::write("fake-codex-completion-ready", "ready\n")?;
+        }
+        "inherited_stderr" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()?;
         }
         "stderr_redaction" => {
             eprintln!(
@@ -163,7 +232,7 @@ fn record_spawn() -> std::io::Result<()> {
     writeln!(file, "spawn")
 }
 
-fn validate_argv() -> Result<(), Box<dyn std::error::Error>> {
+fn validate_argv() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().collect();
     std::fs::write("fake-codex-argv", arguments.join("\n"))?;
     let schema_index = arguments
@@ -173,11 +242,11 @@ fn validate_argv() -> Result<(), Box<dyn std::error::Error>> {
     let schema_path = arguments
         .get(schema_index + 1)
         .ok_or("missing output schema path")?;
-    let schema = std::fs::read_to_string(schema_path)?;
-    if !schema.contains(r#""outcome""#) {
+    let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(schema_path)?)?;
+    if schema["properties"]["outcome"].is_null() {
         return Err("unexpected output schema".into());
     }
-    Ok(())
+    Ok(schema)
 }
 
 fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -197,7 +266,7 @@ fn envelope(value: &str) {
 }
 
 fn agent_message(id: &str, value: &str) {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = json_escape(value);
     emit(&format!(
         r#"{{"type":"item.completed","item":{{"id":"{id}","type":"agent_message","text":"{escaped}"}}}}"#
     ));
@@ -221,11 +290,38 @@ fn completed_without_cache() {
     ));
 }
 
+fn deeply_nested_arguments() -> String {
+    let mut value = "{}".to_string();
+    for _ in 0..130 {
+        value = format!(r#"{{"nested":{value}}}"#);
+    }
+    value
+}
+
 fn failed(message: &str) -> ! {
     emit(&format!(
-        r#"{{"type":"turn.failed","error":{{"message":"{message}"}}}}"#
+        r#"{{"type":"turn.failed","error":{{"message":"{}"}}}}"#,
+        json_escape(message)
     ));
     std::process::exit(1);
+}
+
+/// The pinned CLI's observed failure sequencing: a stream-level `error`
+/// event first, then the `turn.failed` lifecycle echo, then a nonzero exit.
+fn unrecoverable(message: &str) -> ! {
+    emit_error(message);
+    failed(message)
+}
+
+fn emit_error(message: &str) {
+    emit(&format!(
+        r#"{{"type":"error","message":"{}"}}"#,
+        json_escape(message)
+    ));
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn emit(line: &str) {

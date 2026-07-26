@@ -16,7 +16,9 @@ use signalbox_model_runtime::{
     StructuredOutputContract, TerminalEvidence, TokenUsage, ToolChoice, ToolDefinition, ToolName,
     decode_structured,
 };
-use signalbox_model_runtime_codex_cli::{CodexCliConfig, CodexCliRuntime};
+use signalbox_model_runtime_codex_cli::{
+    CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
+};
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -153,6 +155,21 @@ async fn an_undecodable_last_agent_message_is_boundary_loss() {
 }
 
 #[tokio::test]
+async fn deeply_nested_decoded_envelope_is_boundary_loss() {
+    let result = execute_scenario(
+        "deep_agent_message",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause).contains("JSON nesting")
+    );
+}
+
+#[tokio::test]
 async fn tool_call_arguments_remain_verbatim() {
     let result = execute_scenario(
         "tool_call",
@@ -188,6 +205,73 @@ async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
         tool_proposal(&completed.content).arguments_json,
         fixtures::TOOL_ARGUMENTS
     );
+}
+
+/// Defect regression (found by the gated compatibility smoke): the envelope
+/// carries each tool call's argument object as JSON text inside a string,
+/// because strict structured output forbids a free-form object member. A
+/// string that does not hold JSON is unintelligible-response boundary loss,
+/// never completion material.
+#[tokio::test]
+async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
+    let result = execute_scenario(
+        "tool_call_bad_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments are not valid JSON")
+    );
+}
+
+/// The provider nesting bound applies to the argument text carried inside
+/// the envelope string, which the line-level and agent-message-level checks
+/// cannot see because string content does not nest the outer JSON.
+#[tokio::test]
+async fn over_deep_string_carried_tool_arguments_are_boundary_loss() {
+    let result = execute_scenario(
+        "tool_call_deep_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments: provider JSON exceeds")
+    );
+}
+
+/// Defect regression (found by the gated compatibility smoke): the live API
+/// rejected the adapter's original output schema as `invalid_json_schema`
+/// because its `arguments` member was a free-form object
+/// (`additionalProperties: true`). The fake CLI validates the output schema
+/// of every spawn with `fixtures::strict_schema_violation`; this pins that
+/// the validator still rejects the retired shape, so the offline corpus can
+/// never again accept a schema the live API refuses.
+#[test]
+fn the_strict_schema_validator_rejects_the_retired_free_form_arguments_object() {
+    let retired_arguments_member = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "arguments": {"type": "object", "additionalProperties": true}
+        },
+        "required": ["arguments"],
+        "additionalProperties": false
+    });
+
+    let violation = fixtures::strict_schema_violation(&retired_arguments_member)
+        .expect("strict validation must reject a free-form arguments object");
+
+    assert!(
+        violation.contains("'additionalProperties' is required to be supplied and to be false")
+    );
+    assert!(violation.contains("'arguments'"));
 }
 
 #[tokio::test]
@@ -355,6 +439,38 @@ async fn unknown_definitive_error_fails_closed() {
     assert_error_scenario("error_unrecognized", ProviderErrorKind::Unrecognized).await;
 }
 
+/// Defect regression (found by the gated compatibility smoke): the pinned
+/// CLI reports a failed exchange as a stream-level `error` event followed by
+/// its `turn.failed` lifecycle echo. The decoder accepts exactly that
+/// trailer and keeps the stream-level message, so the typed provider error
+/// is never downgraded to a post-terminal protocol violation.
+#[tokio::test]
+async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error() {
+    let result = execute_scenario(
+        "error_then_turn_failed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some(fixtures::STREAM_ERROR_MESSAGE)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// A trailer that contradicts the recorded stream-level error — here a
+/// `turn.completed` claiming success — still fails closed instead of being
+/// absorbed as lifecycle closure.
+#[tokio::test]
+async fn a_completion_trailer_after_a_stream_error_still_fails_closed() {
+    assert_error_scenario("error_then_turn_completed", ProviderErrorKind::Unrecognized).await;
+}
+
 #[tokio::test]
 async fn undecodable_event_fails_closed_as_unrecognized_provider_error() {
     assert_error_scenario("malformed_event", ProviderErrorKind::Unrecognized).await;
@@ -514,6 +630,33 @@ async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
 }
 
 #[tokio::test]
+async fn buffered_terminal_output_wins_over_simultaneous_cancellation() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "completion_before_cancellation",
+            DeliveryMode::Streamed,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-completion-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        completed(&report.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
 async fn whole_process_timeout_is_boundary_loss_without_respawn() {
     let result = execute_scenario_with_timeout(
         "hang",
@@ -571,6 +714,24 @@ async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
         "Codex CLI process exceeded its exchange timeout"
     );
     assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
+async fn inherited_stderr_cannot_extend_process_cleanup_past_deadline() {
+    let result = execute_scenario_with_timeout(
+        "inherited_stderr",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
 }
 
 /// INV-035: credential-shaped CLI text and tool JSON are redacted before
@@ -640,6 +801,105 @@ async fn non_object_structured_schema_fails_before_spawn() {
 
     assert!(unsupported_detail(failure).contains("must describe an object"));
     assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn undeclared_named_choice_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.tool_choice = ToolChoice::Named(ToolName::new("missing"));
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("no declared tool"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn zero_output_token_limit_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.max_output_tokens = 0;
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("at least 1"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn non_finite_temperature_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.temperature = Some(f64::NAN);
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("finite number"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[tokio::test]
+async fn out_of_domain_top_p_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.settings.top_p = Some(1.1);
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("from 0 through 1"));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
+#[test]
+fn relative_executable_is_rejected_at_construction() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let config = CodexCliConfig::new(
+        "codex",
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+
+    let error = CodexCliRuntime::new(config)
+        .expect_err("relative executable meaning would change under the child directory");
+
+    assert_eq!(error, CodexCliConstructionError::RelativeExecutable);
 }
 
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
@@ -818,7 +1078,7 @@ fn read_optional(path: std::path::PathBuf) -> String {
 }
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
-    CancellationSignal::when(async move {
+    let watcher = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if tokio::fs::read_to_string(&path)
@@ -833,7 +1093,12 @@ fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
             }
         })
         .await
-        .expect("the fake CLI records its spawn before cancellation");
+        .expect("the fake CLI records the awaited marker before cancellation");
+    });
+    CancellationSignal::when(async move {
+        watcher
+            .await
+            .expect("the cancellation-record watcher completes");
     })
 }
 

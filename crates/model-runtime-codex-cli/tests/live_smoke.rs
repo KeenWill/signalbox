@@ -59,7 +59,7 @@ const PROMPT: &str = "Reply with the single word: ready";
 #[tokio::test]
 #[ignore = "spends one real Codex CLI exchange; run only from the gated compatibility smoke"]
 async fn the_pinned_codex_cli_completes_one_exchange() {
-    let executable = variable_or(EXECUTABLE_VARIABLE, DEFAULT_EXECUTABLE);
+    let executable = absolute_executable(&variable_or(EXECUTABLE_VARIABLE, DEFAULT_EXECUTABLE));
     let model = variable_or(MODEL_VARIABLE, DEFAULT_MODEL);
 
     assert_pinned_version(&executable).await;
@@ -186,4 +186,34 @@ fn variable_or(name: &str, fallback: &str) -> String {
         Ok(value) if !value.trim().is_empty() => value,
         _ => fallback.to_string(),
     }
+}
+
+/// The adapter accepts only an absolute executable path, so the bare-command
+/// local default is resolved through `PATH` exactly once, here. CI is
+/// unaffected: the workflow always passes the absolute path of the binary
+/// installed from the pin manifest.
+fn absolute_executable(executable: &str) -> String {
+    let path = std::path::Path::new(executable);
+    if path.is_absolute() {
+        return executable.to_string();
+    }
+    if path.components().count() > 1 {
+        return std::env::current_dir()
+            .expect("the smoke process has a working directory")
+            .join(path)
+            .to_string_lossy()
+            .into_owned();
+    }
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&search)
+        .map(|directory| directory.join(executable))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "`{executable}` was not found on PATH; set {EXECUTABLE_VARIABLE} \
+                 to an absolute executable path"
+            )
+        })
+        .to_string_lossy()
+        .into_owned()
 }
