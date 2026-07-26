@@ -1176,9 +1176,22 @@ impl ReviewWorkflowStore {
         pass: ReviewPassEvidence,
         run: ReviewRunEvidence,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
-        let Some(current) = self.load_external_link(link).await? else {
+        let Some(_) = self.load_external_link(link).await? else {
             return Ok(None);
         };
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
+            .bind(link.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let current = Self::load_external_link_on_connection(&mut transaction, link)
+            .await?
+            .ok_or_else(|| {
+                corruption(
+                    "review_external_link",
+                    String::from("locked reservation disappeared"),
+                )
+            })?;
         let blocked = current
             .clone()
             .block_publication(pass.clone(), run)
@@ -1228,8 +1241,13 @@ impl ReviewWorkflowStore {
             _ => None,
         };
         if let Some(event) = blocked_event.as_ref() {
+            let finding = vec![event.finding().finding().into_uuid()];
+            sqlx::query(crate::lock_inventory::REVIEW_FINDINGS_TRANSITION)
+                .bind(&finding)
+                .fetch_all(&mut *transaction)
+                .await?;
             let current_finding = self
-                .load_finding(event.finding().finding())
+                .load_finding_on_connection(&mut transaction, event.finding().finding())
                 .await?
                 .ok_or_else(|| {
                     corruption(
@@ -1243,11 +1261,6 @@ impl ReviewWorkflowStore {
                 ))
             })?;
         }
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
-            .bind(link.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
         if sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
@@ -1266,7 +1279,7 @@ impl ReviewWorkflowStore {
             None => bind_pass_result(&mut transaction, &pass).await?,
         }
         commit_mutation(transaction).await?;
-        self.load_external_link(blocked.id()).await
+        Ok(Some(blocked))
     }
 
     /// Loads and validates a reservation, optional attachment, and observations.
@@ -1417,7 +1430,8 @@ impl ReviewWorkflowStore {
                     pass_run.state_pass_id AS pass_run_state_pass_id,
                     attachment.external_object_key,
                     object_identity.logical_target_id
-                        AS canonical_object_target_id
+                        AS canonical_object_target_id,
+                    object_identity.object_identity_count
                FROM review_external_link_attachment AS attachment
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = attachment.pass_id
@@ -1426,11 +1440,26 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_run AS pass_run
                  ON pass_run.run_id = pass.run_id
                 AND pass_run.target_id = pass.target_id
-               LEFT JOIN review_external_object_identity AS object_identity
-                 ON object_identity.provider_key = attachment.provider_key
-                AND object_identity.object_kind = attachment.object_kind
-                AND object_identity.external_object_key =
-                    attachment.external_object_key
+               LEFT JOIN LATERAL (
+                    SELECT
+                        count(*) AS object_identity_count,
+                        (array_agg(
+                            identity.logical_target_id
+                            ORDER BY identity.logical_target_id
+                        ))[1] AS logical_target_id
+                      FROM review_external_object_identity AS identity
+                     WHERE identity.identity_digest = md5(
+                               attachment.provider_key
+                                   || chr(31)
+                                   || attachment.object_kind
+                                   || chr(31)
+                                   || attachment.external_object_key
+                           )
+                       AND identity.provider_key = attachment.provider_key
+                       AND identity.object_kind = attachment.object_kind
+                       AND identity.external_object_key =
+                           attachment.external_object_key
+               ) AS object_identity ON TRUE
               WHERE attachment.external_link_id = $1",
         )
         .bind(link.into_uuid())
@@ -1438,6 +1467,14 @@ impl ReviewWorkflowStore {
         .await?;
         let attachment = match attachment {
             Some(row) => {
+                if row.try_get::<i64, _>("object_identity_count")? != 1 {
+                    return Err(corruption(
+                        "review_external_link_attachment",
+                        String::from(
+                            "external object identity must have exactly one canonical row",
+                        ),
+                    ));
+                }
                 require_joined_reference(
                     &row,
                     "canonical_attachment_pass_id",
@@ -1955,7 +1992,7 @@ async fn load_produced_findings_on_connection(
     let sealed_count: Option<i32> = pass_row.try_get("finding_count")?;
 
     let member_rows = sqlx::query(
-        "SELECT member.target_id, member.finding_run_id,
+        "SELECT member.result_ordinal, member.target_id, member.finding_run_id,
                 member.finding_pass_id, member.finding_id,
                 finding.finding_id AS canonical_finding_id
            FROM review_pass_produced_finding AS member
@@ -1969,16 +2006,32 @@ async fn load_produced_findings_on_connection(
     )
     .bind(pass.into_uuid())
     .fetch_all(&mut *connection)
-    .await?
-    .into_iter()
-    .map(|row| {
+    .await?;
+    let mut members = Vec::with_capacity(member_rows.len());
+    for (index, row) in member_rows.into_iter().enumerate() {
+        let ordinal = positive_u32(
+            row.try_get("result_ordinal")?,
+            "review_pass_produced_finding",
+        )?;
+        let expected = u32::try_from(index + 1).map_err(|_| {
+            corruption(
+                "review_pass_produced_finding",
+                String::from("finding inventory ordinal overflow"),
+            )
+        })?;
+        if ordinal != expected {
+            return Err(corruption(
+                "review_pass_produced_finding",
+                String::from("finding inventory ordinals are not contiguous"),
+            ));
+        }
         require_joined_reference(
             &row,
             "canonical_finding_id",
             "review_pass_produced_finding",
             "inventory member has no canonical finding",
         )?;
-        Ok(ReviewFindingRef::new(
+        members.push(ReviewFindingRef::new(
             ReviewPassRef::new(
                 ReviewRunRef::new(
                     target_id(row.try_get("target_id")?),
@@ -1987,9 +2040,9 @@ async fn load_produced_findings_on_connection(
                 pass_id(row.try_get("finding_pass_id")?),
             ),
             finding_id(row.try_get("finding_id")?),
-        ))
-    })
-    .collect::<Result<Vec<_>, ReviewWorkflowStoreError>>()?;
+        ));
+    }
+    let member_rows = members;
     let canonical = sqlx::query(
         "SELECT target_id, run_id, producing_pass_id, finding_id
            FROM review_finding

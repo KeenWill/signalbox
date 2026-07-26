@@ -2236,6 +2236,32 @@ async fn inv040_pass_loader_rejects_incomplete_finding_inventory() -> Result<(),
     .execute(&pool)
     .await?;
     sqlx::query(
+        "UPDATE review_pass_produced_finding
+            SET result_ordinal = 2
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    let ordinal_error = fixture
+        .store
+        .load_pass(fixture.pass.pass())
+        .await
+        .expect_err("non-contiguous inventory ordinals must fail pass loading closed");
+    let ReviewWorkflowStoreError::Corruption(ordinal_error) = ordinal_error else {
+        panic!("expected typed produced-finding ordinal corruption");
+    };
+    assert_eq!(ordinal_error.aggregate(), "review_pass_produced_finding");
+    assert!(ordinal_error.detail().contains("ordinals"));
+    sqlx::query(
+        "UPDATE review_pass_produced_finding
+            SET result_ordinal = 1
+          WHERE pass_id = $1",
+    )
+    .bind(fixture.pass.pass().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "DELETE FROM review_pass_produced_finding
           WHERE pass_id = $1",
     )
@@ -4478,6 +4504,45 @@ async fn inv041_external_link_load_rejects_missing_attachment_run() -> Result<()
             AND external_object_key = 'comment-746'",
     )
     .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE review_external_object_identity
+         DISABLE TRIGGER review_external_object_identity_insert_is_guarded",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_external_object_identity
+            (provider_key, object_kind, external_object_key, logical_target_id)
+         VALUES (
+            'example-code-host', 'review_comment', 'comment-746', $1
+         )",
+    )
+    .bind(unrelated_target.id().into_uuid())
+    .execute(&pool)
+    .await?;
+    let duplicate_error = fixture
+        .store
+        .load_external_link(link)
+        .await
+        .expect_err("duplicate external-object identities must fail loading closed");
+    let ReviewWorkflowStoreError::Corruption(duplicate_error) = duplicate_error else {
+        panic!("expected typed external-object identity multiplicity corruption");
+    };
+    assert_eq!(
+        duplicate_error.aggregate(),
+        "review_external_link_attachment"
+    );
+    assert!(duplicate_error.detail().contains("exactly one"));
+    sqlx::query(
+        "DELETE FROM review_external_object_identity
+          WHERE provider_key = 'example-code-host'
+            AND object_kind = 'review_comment'
+            AND external_object_key = 'comment-746'
+            AND logical_target_id = $1",
+    )
+    .bind(unrelated_target.id().into_uuid())
     .execute(&pool)
     .await?;
 
