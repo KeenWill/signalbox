@@ -85,7 +85,7 @@ async fn postgres_before_metadata_issuer()
         .await?;
     for migration in MIGRATOR
         .iter()
-        .take_while(|migration| migration.version < 202607280003)
+        .take_while(|migration| migration.version < 202607280202)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }

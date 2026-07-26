@@ -954,6 +954,9 @@ pub enum FrozenModelSelection {
         definition: FrozenAliasDefinition,
     },
 }
+impl FrozenModelSelection {
+    pub const fn selected_direct(self) -> DirectModelSelection;
+}
 
 pub enum ModelParameters {
     ProviderDefaults,
@@ -1928,6 +1931,7 @@ impl AcceptedInputTurnSchedulingRecord {
         source_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
+    pub fn without_legacy_model_identity_boundary(self) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
     // origin_delivery(), origin_configuration(), configuration_provenance(), state()
@@ -2141,11 +2145,13 @@ impl AcceptedInputSchedulingProjection {
 pub struct AcceptedInputTurnActivationIdentities { /* private */ }
 impl AcceptedInputTurnActivationIdentities {
     pub const fn new(
+        model_identity_entry: SemanticTranscriptEntryId,
         origin_entry: SemanticTranscriptEntryId,
         starting_frontier: ContextFrontierId,
         initial_attempt: TurnAttemptId,
     ) -> Self;
-    // accessors: origin_entry(), starting_frontier(), initial_attempt()
+    // accessors: model_identity_entry(), origin_entry(), starting_frontier(),
+    // initial_attempt()
 }
 
 pub struct ActivatedAcceptedInputTurn { /* private */ }
@@ -2162,16 +2168,18 @@ impl PreparedAcceptedInputTurnActivation {
         self,
     ) -> (
         ActivatedAcceptedInputTurn,
-        SemanticTranscriptEntry,
+        Box<[SemanticTranscriptEntry]>,
         ResolvedContextFrontierSnapshot,
     );
-    // accessors: turn(), origin_entry(), starting_snapshot(), start()
+    // accessors: turn(), origin_entry(), starting_entries(),
+    // starting_snapshot(), start()
 }
 
 pub enum AcceptedInputEligibilityFailure {
     ActiveTurnPresent { turn: TurnId },
     NoQueuedTurn,
     OriginEntryIdentityAlreadyExists,
+    ModelIdentityEntryIdentityAlreadyExists,
     StartingFrontierIdentityAlreadyExists,
     InitialAttemptIdentityAlreadyExists,
     InternalOriginFrontierConstructionFailed,
@@ -2825,6 +2833,11 @@ pub enum SemanticTranscriptEntryPayload {
     SteeringAcceptedInput {
         accepted_input: AcceptedInputId,
         source_turn: TurnId,
+    },
+    ModelIdentityChanged {
+        turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
     },
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
@@ -3983,6 +3996,11 @@ impl ModelCallCredentialReference {
 }
 
 pub enum ModelConversationMessage {
+    ModelIdentityChanged {
+        source: SemanticTranscriptEntryRef,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
+    },
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
@@ -4749,6 +4767,7 @@ pub trait ClassifyOperatorFailure {
 
 ```rust
 pub trait StartEligibleTurnIdGenerator {
+    fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_starting_frontier_id(&mut self) -> ContextFrontierId;
     fn next_initial_attempt_id(&mut self) -> TurnAttemptId;

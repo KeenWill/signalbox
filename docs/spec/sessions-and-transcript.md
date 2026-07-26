@@ -5,11 +5,13 @@ creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
 content, and actor attribution. It was verified against the implementing stack
-through PR #229 (`agent/session-metadata-protocol`). The imported-conversation
-record and converter are owned by [conversation-import](conversation-import.md).
-Where a law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the
-catalog of record; where mechanics owned by another decision are summarized, the
-owning sibling page is linked inline.
+through PR #229 (`agent/session-metadata-protocol`); the defaults-epoch and
+model-identity boundary were additionally verified through PR #272
+(`agent/mid-session-model`). The imported-conversation record and converter are
+owned by [conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+mechanics owned by another decision are summarized, the owning sibling page is
+linked inline.
 
 ## Session identity and creation provenance
 
@@ -200,7 +202,7 @@ dangerously named tool blanket
 model configuration are owned by
 [configuration-and-credentials](configuration-and-credentials.md); blanket
 semantics and per-turn freeze are owned by [tool-loop](tool-loop.md). Defaults
-are immutable versions with a positive `u64` ordinal:
+are immutable epochs identified by a positive `u64` ordinal:
 
 - session creation establishes version one;
 - each replacement installs the checked successor ordinal as a new immutable row
@@ -208,10 +210,21 @@ are immutable versions with a positive `u64` ordinal:
 - an exhausted ordinal (`u64::MAX`) is a typed recorded rejection
   (`VersionExhausted`), not a panic or wraparound.
 
-An installed version affects only origin input accepted afterward; it never
-rewrites creation provenance or queued, active, or completed work (INV-008).
-Configuration-free steering inherits from its source turn rather than reading
-defaults.
+Origin acceptance is the logical start of a turn for defaults binding. It
+freezes the epoch current in that acceptance transaction; replacing defaults
+later never rebinds that origin, whether the turn is still queued, active, or
+terminal. An installed epoch therefore affects only origin input accepted
+afterward and never rewrites creation provenance or earlier work (INV-008,
+INV-046). Configuration-free steering inherits from its source turn rather than
+reading defaults.
+
+The model selection in a replacement may name a configured direct selection or
+alias whose target belongs to another provider; the domain and replacement
+command impose no same-provider restriction. The successor turn resolves and
+pins its target and non-secret credential reference at its own model-call
+boundary. The predecessor's prepared or in-flight call retains its existing
+pins, so credential affinity and provider prompt-cache prefixes do not move
+mid-call (INV-046).
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -242,6 +255,21 @@ A supplied session that does not match the command target is a nonterminal
 preparation error, not a recorded rejection. Application orchestration
 constructs the canonical command once and calls its atomic port exactly once,
 with no preload and no retry.
+
+When a started turn's frozen direct selection differs from its immediate
+predecessor's, eligibility appends one `ModelIdentityChanged` semantic entry
+immediately before that turn's origin entry. The entry names the turn, its
+frozen defaults epoch, and its exact direct selection. It is absent for the
+first turn and for equal-selection successors. Thus the frontier records the
+model identity actually crossed by executed conversation history rather than
+unused or redundant replacement epochs (INV-046). The exact provider-message
+projection is recorded by the
+[model-identity injection decision](../decisions.md#2026-07-25--render-model-identity-boundaries-as-injected-user-role-events).
+Started frontiers committed before this boundary existed retain their exact
+historical membership: an immutable per-turn compatibility fact grandfathers
+only those already-active or terminal starts. Turns still queued at migration
+and every newly accepted turn require the boundary normally, as recorded by the
+[legacy-frontier decision](../decisions.md#2026-07-25--grandfather-pre-boundary-started-frontiers).
 
 ## Session metadata and list projection
 
@@ -407,6 +435,9 @@ and closed:
   origin turn became eligible;
 - `SteeringAcceptedInput { accepted_input, source_turn }` — accepted
   next-safe-point input consumed by its exact source turn;
+- `ModelIdentityChanged { turn, defaults_version, selected }` — the exact
+  successor-turn boundary at which execution first observes a different frozen
+  direct model identity;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -456,10 +487,12 @@ restricts it to imported-ancestry sessions and the exact selected source prefix,
 and keeps imported entries outside every native subject-identity constraint.
 Migration `202607220001` adds the unique completion marker, `202607220004` adds
 the unique steering entry, and `202607220005` adds the unique cancellation
-marker. The tool-loop migration adds request/result references while widening
-the corresponding closed payload shapes. The origin-disposition guard arrived
-later: migration `202607180005_occupied_slot_submit_input.sql` — the migration
-that first admits the `pending_steering` disposition — replaces the
+marker. Migration `202607280201_mid_session_model_selection.sql` adds the unique
+per-turn model-identity boundary and checks it against the origin's frozen epoch
+and selection. The tool-loop migration adds request/result references while
+widening the corresponding closed payload shapes. The origin-disposition guard
+arrived later: migration `202607180005_occupied_slot_submit_input.sql` — the
+migration that first admits the `pending_steering` disposition — replaces the
 entry/turn-state trigger so an origin entry additionally requires its input's
 `origin_of` disposition (constraint
 `semantic_transcript_entry_origin_disposition`); pending steering can never
@@ -484,8 +517,10 @@ exists, together with imported ancestry and the exact seed frontier. They never
 require or create accepted-input, turn, attempt, call, or native tool records.
 The first native turn's eligibility transaction creates a new successor frontier
 whose predecessor is that immutable seed frontier and whose appended member is
-the ordinary `OriginAcceptedInput`; every later native frontier follows the
-existing predecessor-prefix rules (INV-039).
+the ordinary `OriginAcceptedInput`. Every later native frontier retains its
+predecessor terminal prefix, then appends the model-identity boundary when the
+frozen direct selection changed, and finally appends its ordinary origin
+(INV-039, INV-046).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
 before an initial or continuation call is prepared, the transaction appends one
@@ -508,7 +543,10 @@ practice. Deferred constraint triggers around
 `assert_turn_lifecycle_final_state` (migration `202607180004`) check every
 commit bidirectionally: a queued turn carries zero origin or failure entries; a
 started turn carries exactly one correlated origin entry, and its starting
-frontier ends with exactly that entry; a failed turn's terminal frontier extends
+frontier ends with exactly that entry. A non-first turn carries exactly one
+immediately preceding model-identity entry iff its frozen direct selection
+differs from its predecessor's, subject to the immutable pre-boundary
+compatibility fact described above; a failed turn's terminal frontier extends
 its latest call frontier (or starting frontier) by its exact terminal
 tool-result suffix when one exists and exactly its failure marker last; a
 completed turn's terminal frontier extends its producing call's frontier by the
