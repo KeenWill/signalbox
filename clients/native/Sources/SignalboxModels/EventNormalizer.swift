@@ -107,8 +107,27 @@ public struct SignalboxUnknownEventCard: Equatable, Sendable {
     public let diagnostic: String
 }
 
+struct SignalboxEventNormalizationMetrics: Equatable, Sendable {
+    fileprivate(set) var recordEvaluationCount = 0
+
+    init() {}
+}
+
+fileprivate enum SignalboxTimelineLinkage {
+    case linked
+    case unlinked
+}
+
 public enum SignalboxEventNormalizer {
     public static func normalize(_ records: [SignalboxStoredEvent]) -> [SignalboxTimelineItem] {
+        var metrics = SignalboxEventNormalizationMetrics()
+        return normalize(records, recording: &metrics)
+    }
+
+    static func normalize(
+        _ records: [SignalboxStoredEvent],
+        recording metrics: inout SignalboxEventNormalizationMetrics
+    ) -> [SignalboxTimelineItem] {
         let recordsByID = Dictionary(records.map { ($0.eventID, $0.event) }, uniquingKeysWith: { first, _ in first })
         let toolLinkEventIDs = Set(records.compactMap { record -> SignalboxEventID? in
             guard case .toolInvocation(let invocation) = record.event else {
@@ -123,52 +142,67 @@ public enum SignalboxEventNormalizer {
             return invocation.functionResponseEventID
         })
 
+        metrics.recordEvaluationCount += records.count
         return records.compactMap { record in
-            switch record.event {
-            case .message(let event):
-                return normalizedMessage(
-                    record: record,
-                    event: event,
-                    linkedFunctionCallEventIDs: toolLinkEventIDs,
-                    linkedFunctionResponseEventIDs: toolResponseEventIDs
+            normalize(
+                record,
+                recordsByID: recordsByID,
+                functionCallLinkage: toolLinkEventIDs.contains(record.eventID) ? .linked : .unlinked,
+                functionResponseLinkage: toolResponseEventIDs.contains(record.eventID) ? .linked : .unlinked
+            )
+        }
+    }
+
+    fileprivate static func normalize(
+        _ record: SignalboxStoredEvent,
+        recordsByID: [SignalboxEventID: SignalboxConversationEvent],
+        functionCallLinkage: SignalboxTimelineLinkage,
+        functionResponseLinkage: SignalboxTimelineLinkage
+    ) -> SignalboxTimelineItem? {
+        switch record.event {
+        case .message(let event):
+            return normalizedMessage(
+                record: record,
+                event: event,
+                functionCallLinkage: functionCallLinkage,
+                functionResponseLinkage: functionResponseLinkage
+            )
+        case .toolInvocation(let event):
+            return .tool(toolCard(record: record, event: event, recordsByID: recordsByID))
+        case .turnFailed(let event):
+            return .turnFailure(
+                SignalboxTurnFailureCard(
+                    eventID: record.eventID,
+                    reason: event.reason,
+                    runnerID: event.runnerID,
+                    failedAt: event.failedAt
                 )
-            case .toolInvocation(let event):
-                return .tool(toolCard(record: record, event: event, recordsByID: recordsByID))
-            case .turnFailed(let event):
-                return .turnFailure(
-                    SignalboxTurnFailureCard(
-                        eventID: record.eventID,
-                        reason: event.reason,
-                        runnerID: event.runnerID,
-                        failedAt: event.failedAt
-                    )
-                )
-            case .unknown(let event):
-                guard event.payload["visible_to_user"] != .bool(false) else {
-                    return nil
-                }
-                return .unknown(
-                    SignalboxUnknownEventCard(
-                        eventID: record.eventID,
-                        kind: event.kind,
-                        diagnostic: event.decodingDiagnostic?.message
-                            ?? event.payload.keys.sorted().joined(separator: ", ")
-                    )
-                )
+            )
+        case .unknown(let event):
+            guard event.payload["visible_to_user"] != .bool(false) else {
+                return nil
             }
+            return .unknown(
+                SignalboxUnknownEventCard(
+                    eventID: record.eventID,
+                    kind: event.kind,
+                    diagnostic: event.decodingDiagnostic?.message
+                        ?? event.payload.keys.sorted().joined(separator: ", ")
+                )
+            )
         }
     }
 
     private static func normalizedMessage(
         record: SignalboxStoredEvent,
         event: SignalboxMessageEvent,
-        linkedFunctionCallEventIDs: Set<SignalboxEventID>,
-        linkedFunctionResponseEventIDs: Set<SignalboxEventID>
+        functionCallLinkage: SignalboxTimelineLinkage,
+        functionResponseLinkage: SignalboxTimelineLinkage
     ) -> SignalboxTimelineItem? {
         guard event.visibleToUser else {
             return nil
         }
-        if linkedFunctionResponseEventIDs.contains(record.eventID) {
+        if functionResponseLinkage == .linked {
             return nil
         }
         let textParts = event.message.parts.compactMap { part -> String? in
@@ -185,7 +219,7 @@ public enum SignalboxEventNormalizer {
         }
         .joined(separator: "\n")
         let text = textParts.joined(separator: "\n")
-        if text.isEmpty && thinkingText.isEmpty && linkedFunctionCallEventIDs.contains(record.eventID) {
+        if text.isEmpty && thinkingText.isEmpty && functionCallLinkage == .linked {
             return nil
         }
         if event.message.role == .tool {
@@ -293,5 +327,337 @@ public enum SignalboxEventNormalizer {
             return .approved
         }
         return .running
+    }
+}
+
+/// Stable reference-backed timeline storage for SwiftUI collection consumers.
+///
+/// The collection keeps the normalized array single-owned while a view retains
+/// the collection across renders, so appending does not trigger an array
+/// copy-on-write clone of the preceding timeline.
+public final class SignalboxTimelineCollection: RandomAccessCollection {
+    public typealias Index = Int
+    public typealias Element = SignalboxTimelineItem
+
+    fileprivate var items: [SignalboxTimelineItem] = []
+
+    public var startIndex: Int {
+        items.startIndex
+    }
+
+    public var endIndex: Int {
+        items.endIndex
+    }
+
+    public subscript(position: Int) -> SignalboxTimelineItem {
+        items[position]
+    }
+}
+
+public enum SignalboxEventNormalizerError: Error, Equatable, Sendable, LocalizedError {
+    /// A whole-history snapshot named the same event more than once.
+    ///
+    /// Event IDs identify a record, so a single snapshot cannot legitimately
+    /// carry one twice; the client refuses such a snapshot rather than pick a
+    /// winner it cannot justify.
+    case duplicateEventIDs([SignalboxEventID])
+
+    public var errorDescription: String? {
+        switch self {
+        case .duplicateEventIDs(let eventIDs):
+            let list = eventIDs.map { "\($0.rawValue)" }.joined(separator: ", ")
+            return "The session history repeated event \(list) and could not be loaded."
+        }
+    }
+}
+
+/// Maintains a normalized timeline across incremental event mutations.
+///
+/// The stored records, the event-ID index, and the timeline are three views of
+/// one history, and every mutation keeps them in agreement:
+///
+/// - A mutation for an event ID the normalizer already holds is an *update*:
+///   the later record replaces the stored one and its timeline item is
+///   renormalized in place. Stream replay depends on this — a frame buffered
+///   behind a history resynchronization may restate an event the authoritative
+///   snapshot already delivered, and the later frame is the correction.
+/// - A whole-history snapshot that names the same event ID twice is corrupt
+///   input, not a correction: `replaceAll(with:)` rejects it and leaves the
+///   previously loaded history untouched, so the caller can fail the refresh
+///   and recover instead of rendering a history no structure agrees on.
+public final class SignalboxIncrementalEventNormalizer {
+    public private(set) var records: [SignalboxStoredEvent] = []
+    public let timeline = SignalboxTimelineCollection()
+    private(set) var metrics = SignalboxEventNormalizationMetrics()
+
+    private var recordsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
+    private var invocationEventIDsByFunctionCallEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
+    private var invocationEventIDsByFunctionResponseEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
+
+    public var timelineItems: [SignalboxTimelineItem] {
+        Array(timeline)
+    }
+
+    public init() {}
+
+    public init(records: [SignalboxStoredEvent]) throws {
+        try replaceAll(with: records)
+    }
+
+    /// Replaces the whole history with an authoritative snapshot.
+    ///
+    /// - Throws: ``SignalboxEventNormalizerError/duplicateEventIDs(_:)`` when
+    ///   the snapshot names an event ID more than once. Nothing is mutated in
+    ///   that case, so the previously loaded history stays renderable while the
+    ///   caller fails the refresh.
+    public func replaceAll(with records: [SignalboxStoredEvent]) throws {
+        let sortedRecords = records.sorted { $0.eventID < $1.eventID }
+        // Index before storing anything: a snapshot cannot be applied halfway,
+        // and only the index can tell a duplicate ID from a fresh one.
+        let recordsByID = try Self.eventsByID(in: sortedRecords)
+
+        self.records = sortedRecords
+        self.recordsByID = recordsByID
+        timeline.items = []
+        metrics = SignalboxEventNormalizationMetrics()
+        invocationEventIDsByFunctionCallEventID = [:]
+        invocationEventIDsByFunctionResponseEventID = [:]
+
+        for record in self.records {
+            addInvocationLinks(for: record.event, invocationEventID: record.eventID)
+        }
+        for record in self.records {
+            reevaluate(record.eventID)
+        }
+    }
+
+    /// Indexes a snapshot sorted by event ID, rejecting any repeated ID.
+    private static func eventsByID(
+        in sortedRecords: [SignalboxStoredEvent]
+    ) throws -> [SignalboxEventID: SignalboxConversationEvent] {
+        var eventsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
+        eventsByID.reserveCapacity(sortedRecords.count)
+        var duplicateEventIDs: [SignalboxEventID] = []
+        for record in sortedRecords {
+            guard eventsByID.updateValue(record.event, forKey: record.eventID) != nil else {
+                continue
+            }
+            // The sort groups repeats, so reporting each ID once needs no set.
+            if duplicateEventIDs.last != record.eventID {
+                duplicateEventIDs.append(record.eventID)
+            }
+        }
+        guard duplicateEventIDs.isEmpty else {
+            throw SignalboxEventNormalizerError.duplicateEventIDs(duplicateEventIDs)
+        }
+        return eventsByID
+    }
+
+    /// Stores `record`, replacing any record already held under its event ID.
+    ///
+    /// A repeated event ID is a correction, not a second event: the stored
+    /// record, the event-ID index, and the timeline item are all updated in
+    /// place, so no structure can retain a stale copy.
+    public func upsert(_ record: SignalboxStoredEvent) {
+        let eventID = record.eventID
+        let oldEvent = recordsByID[eventID]
+        var affectedEventIDs: Set<SignalboxEventID> = [eventID]
+
+        addLinkedEventIDs(from: oldEvent, to: &affectedEventIDs)
+        addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
+        removeInvocationLinks(for: oldEvent, invocationEventID: eventID)
+
+        let index = recordInsertionIndex(for: eventID)
+        if index < records.count, records[index].eventID == eventID {
+            records[index] = record
+        } else {
+            records.insert(record, at: index)
+        }
+        recordsByID[eventID] = record.event
+        addInvocationLinks(for: record.event, invocationEventID: eventID)
+        addLinkedEventIDs(from: record.event, to: &affectedEventIDs)
+        addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
+
+        for affectedEventID in affectedEventIDs.sorted() {
+            reevaluate(affectedEventID)
+        }
+    }
+
+    public func upsert(contentsOf records: [SignalboxStoredEvent]) {
+        for record in records {
+            upsert(record)
+        }
+    }
+
+    public func remove(eventID: SignalboxEventID) {
+        guard let removedEvent = recordsByID.removeValue(forKey: eventID) else {
+            return
+        }
+        var affectedEventIDs: Set<SignalboxEventID> = []
+        addLinkedEventIDs(from: removedEvent, to: &affectedEventIDs)
+        addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
+        removeInvocationLinks(for: removedEvent, invocationEventID: eventID)
+
+        let index = recordInsertionIndex(for: eventID)
+        if index < records.count, records[index].eventID == eventID {
+            records.remove(at: index)
+        }
+        setTimelineItem(nil, for: eventID)
+        for affectedEventID in affectedEventIDs.sorted() {
+            reevaluate(affectedEventID)
+        }
+    }
+
+    private func reevaluate(_ eventID: SignalboxEventID) {
+        guard let event = recordsByID[eventID] else {
+            setTimelineItem(nil, for: eventID)
+            return
+        }
+        metrics.recordEvaluationCount += 1
+        let record = SignalboxStoredEvent(eventID: eventID, event: event)
+        let item = SignalboxEventNormalizer.normalize(
+            record,
+            recordsByID: recordsByID,
+            functionCallLinkage: invocationEventIDsByFunctionCallEventID[eventID]?.isEmpty == false
+                ? .linked
+                : .unlinked,
+            functionResponseLinkage: invocationEventIDsByFunctionResponseEventID[eventID]?.isEmpty == false
+                ? .linked
+                : .unlinked
+        )
+        setTimelineItem(item, for: eventID)
+    }
+
+    private func addInvocationLinks(
+        for event: SignalboxConversationEvent,
+        invocationEventID: SignalboxEventID
+    ) {
+        guard case .toolInvocation(let invocation) = event else {
+            return
+        }
+        invocationEventIDsByFunctionCallEventID[invocation.functionCallEventID, default: []]
+            .insert(invocationEventID)
+        if let functionResponseEventID = invocation.functionResponseEventID {
+            invocationEventIDsByFunctionResponseEventID[functionResponseEventID, default: []]
+                .insert(invocationEventID)
+        }
+    }
+
+    private func removeInvocationLinks(
+        for event: SignalboxConversationEvent?,
+        invocationEventID: SignalboxEventID
+    ) {
+        guard case .toolInvocation(let invocation)? = event else {
+            return
+        }
+        Self.remove(
+            invocationEventID,
+            from: &invocationEventIDsByFunctionCallEventID,
+            linkedEventID: invocation.functionCallEventID
+        )
+        if let functionResponseEventID = invocation.functionResponseEventID {
+            Self.remove(
+                invocationEventID,
+                from: &invocationEventIDsByFunctionResponseEventID,
+                linkedEventID: functionResponseEventID
+            )
+        }
+    }
+
+    private func addLinkedEventIDs(
+        from event: SignalboxConversationEvent?,
+        to affectedEventIDs: inout Set<SignalboxEventID>
+    ) {
+        guard case .toolInvocation(let invocation)? = event else {
+            return
+        }
+        affectedEventIDs.insert(invocation.functionCallEventID)
+        if let functionResponseEventID = invocation.functionResponseEventID {
+            affectedEventIDs.insert(functionResponseEventID)
+        }
+    }
+
+    private func addLinkedInvocationEventIDs(
+        for eventID: SignalboxEventID,
+        to affectedEventIDs: inout Set<SignalboxEventID>
+    ) {
+        affectedEventIDs.formUnion(invocationEventIDsByFunctionCallEventID[eventID] ?? [])
+        affectedEventIDs.formUnion(invocationEventIDsByFunctionResponseEventID[eventID] ?? [])
+    }
+
+    private static func remove(
+        _ invocationEventID: SignalboxEventID,
+        from links: inout [SignalboxEventID: Set<SignalboxEventID>],
+        linkedEventID: SignalboxEventID
+    ) {
+        links[linkedEventID]?.remove(invocationEventID)
+        if links[linkedEventID]?.isEmpty == true {
+            links.removeValue(forKey: linkedEventID)
+        }
+    }
+
+    private func recordInsertionIndex(for eventID: SignalboxEventID) -> Int {
+        if let lastRecord = records.last, lastRecord.eventID < eventID {
+            return records.count
+        }
+        return insertionIndex(count: records.count) { index in
+            records[index].eventID < eventID
+        }
+    }
+
+    private func timelineInsertionIndex(for eventID: SignalboxEventID) -> Int {
+        if let lastItem = timeline.last, timelineEventID(lastItem) < eventID {
+            return timeline.count
+        }
+        return insertionIndex(count: timeline.count) { index in
+            timelineEventID(timeline[index]) < eventID
+        }
+    }
+
+    private func insertionIndex(
+        count: Int,
+        isOrderedBeforeTarget: (Int) -> Bool
+    ) -> Int {
+        var lowerBound = 0
+        var upperBound = count
+        while lowerBound < upperBound {
+            let middle = lowerBound + (upperBound - lowerBound) / 2
+            if isOrderedBeforeTarget(middle) {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+        return lowerBound
+    }
+
+    private func setTimelineItem(
+        _ item: SignalboxTimelineItem?,
+        for eventID: SignalboxEventID
+    ) {
+        let index = timelineInsertionIndex(for: eventID)
+        let itemExists = index < timeline.count && timelineEventID(timeline[index]) == eventID
+        if let item {
+            if itemExists {
+                timeline.items[index] = item
+            } else {
+                timeline.items.insert(item, at: index)
+            }
+        } else if itemExists {
+            timeline.items.remove(at: index)
+        }
+    }
+
+    private func timelineEventID(_ item: SignalboxTimelineItem) -> SignalboxEventID {
+        switch item {
+        case .message(let message):
+            return message.eventID
+        case .tool(let tool):
+            return tool.eventID
+        case .turnFailure(let failure):
+            return failure.eventID
+        case .unknown(let unknown):
+            return unknown.eventID
+        }
     }
 }
