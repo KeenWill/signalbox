@@ -395,9 +395,9 @@ unwritten snapshot has the empty non-archived metadata object and a null
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
 microseconds since the Unix epoch) and an `actor` member carrying the closed
 actor object `{"type":"owner"}`. No non-owner metadata writer is constructible
-through this boundary; additional
-actor variants require the later slice that introduces their constructing
-authority. Actor is provenance, not wire authentication or authorization.
+through this boundary; additional actor variants require the later slice that
+introduces their constructing authority. Actor is provenance, not wire
+authentication or authorization.
 
 `session_defaults_replaced` is the successful version-six defaults write
 receipt. It echoes the complete installed defaults and names the exact successor

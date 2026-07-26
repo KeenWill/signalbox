@@ -323,9 +323,8 @@ evidence is mapped, including when that evidence is `Refused`. Once identity
 validation passes, that refusal evidence arises only from an authenticated
 complete exchange by the runtime layer's contract
 ([runtime-substrate](runtime-substrate.md)), not a condition rechecked here.
-Empty text
-blocks are dropped without creating invalid entries. Tool-call parts with a
-`ToolUse` finish become the normalized proposals owned by
+Empty text blocks are dropped without creating invalid entries. Tool-call parts
+with a `ToolUse` finish become the normalized proposals owned by
 [tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
 stage closed because no durable semantic representation exists. Scripted
 providers declare their exact terminal observation; nothing is inferred from
