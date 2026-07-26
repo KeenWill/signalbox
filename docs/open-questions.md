@@ -204,11 +204,12 @@ remain open.
 
 - **Future tool-attempt retry.** Version one never automatically creates another
   physical attempt after a prepared, known-failed, crash-lost, or ambiguous tool
-  attempt. The runner foundation separately permits re-leasing the same physical
-  attempt after lease loss when its effect class is pure or idempotent. Any
-  later owner command that creates another attempt needs effect/evidence
-  eligibility, duplicate-risk, idempotency-key, resource-limit, and audit
-  decisions. Blocks tool retry features. (S05, S06, S31)
+  attempt. The runner foundation separately emits typed retry authority after
+  lease loss: loss before claim retains the never-executed attempt, while
+  claimed pure or idempotent loss requires a fresh physical attempt identity.
+  Application creation and durable linkage of that successor attempt still need
+  effect/evidence eligibility, duplicate-risk, idempotency-key, resource-limit,
+  and audit decisions. Blocks executable runner retry. (S05, S06, S31)
 - **Ambiguous tool-wait resolution.** Version one can preserve the exact
   external-effect attempt and terminalize through a proof-bearing interrupt. Who
   may record resolving evidence, how an exact accepted-risk continuation is
@@ -277,6 +278,11 @@ questions below remain open.
   selector may itself require a profile, and how availability changes affect
   class membership, remains undecided. Blocks profile-aware dynamic runner
   pools. (S30, S32)
+- **Runner result credential egress.** Runner credential control fields carry
+  profile names and policy, never values. Arbitrary runner tool result and error
+  text can nevertheless echo machine-local data. Whether the runner, daemon, or
+  tool contract applies redaction or stronger egress controls remains undecided.
+  Blocks a general no-credential-disclosure claim for runner output.
 - **In-memory credential hygiene.** Zeroization or equivalent handling for the
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
