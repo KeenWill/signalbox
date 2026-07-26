@@ -342,7 +342,7 @@ the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
 outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
 executors, with replay eligibility conditioned on turn state.
 
-## Tool catalog buildout [tiered — tiers 0 and 1 ready, later tiers blocked per tier] [size: L, spread over batches]
+## Tool catalog buildout [ready] [size: L, spread over batches]
 
 Owns: catalog declarations and their executors — one new tool module per entry
 with its argument schema, permission default, and effect class, plus the
@@ -363,14 +363,16 @@ and test fixture more than a capability), a bounded single-URL web fetch, and a
 session status update tool that writes through the session-metadata satellites
 owned by the entry below.
 
-Tier 1 — daemon-side behind held credentials, also unblocked now; approval
-posture per the credential-profile direction recorded in the runner entry below,
-which resolves posture on the pair of tool and credential profile rather than on
-the tool alone. A change-request review suite against the code host: summary,
-changed files, per-file patch, checks status, comment, review threads, thread
-reply, thread resolve, CI job log, and rerun failed jobs. Its first consumer is
-the platform's own review workflows (the review-workflow tier below), which is
-why it leads the tier. Alongside it, a library-documentation lookup service.
+Tier 1 — daemon-side behind held credentials, also unblocked now. Daemon-held
+credentials ride the existing configuration channel (the same file-path pattern
+as the provider keys); the runner entry's credential-profile machinery is not a
+prerequisite here — its (tool, profile) approval pairing governs this tier only
+once profiles exist, and until then the registry's own approval defaults apply.
+A change-request review suite against the code host: summary, changed files,
+per-file patch, checks status, comment, review threads, thread reply, thread
+resolve, CI job log, and rerun failed jobs. Its first consumer is the platform's
+own review workflows (the review-workflow tier below), which is why it leads the
+tier. Alongside it, a library-documentation lookup service.
 
 Tier 2 — runner-side workspace tools [blocked-on: runner protocol design pass].
 File operations (read, multi-read, contextual read, write, text replace, patch
@@ -386,7 +388,8 @@ Tier 3 — feature-coupled, each item blocked on the feature it needs rather tha
 on any tool machinery. Task management tools [blocked-on: a task aggregate] —
 the domain feature of the durable session tasks entry below, not a tool;
 delegation tools, meaning delegate to a sub-session plus list, read, and
-summarize delegated sessions [blocked-on: goal mode in platform]; skills,
+summarize delegated sessions \[blocked-on: a child-session delegation substrate
+— goal mode alone owns goal-session semantics, not child sessions\]; skills,
 guidance, and profile tools [blocked-on: those concepts existing at all]; report
 and artifact persistence [blocked-on: the artifact-boundary open question];
 image inspection [blocked-on: multimodal input]; and MCP-bridged tools
