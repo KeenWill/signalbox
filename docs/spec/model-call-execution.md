@@ -119,6 +119,9 @@ projects the exact frontier order into provider-neutral messages:
   input content;
 - `SteeringAcceptedInput` renders as a user message with the referenced accepted
   input's checked content;
+- `ModelIdentityChanged` renders as an injected user-role message with the fixed
+  `Signalbox session event: your model identity is now` prefix, the exact
+  selected-model UUID, and the bound session-defaults epoch (INV-046);
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
 - imported `Text` with an attested value renders with its imported user or
@@ -313,9 +316,14 @@ derived) to exactly one disposition:
 | `CancellationConfirmed`                                                      | `Cancelled`   |
 | `BoundaryLoss` (loss after possible acceptance, incl. timeouts)              | `Ambiguous`   |
 
-The bridge maps `Refused` evidence unconditionally; that such evidence arises
-only from an authenticated complete exchange is the runtime layer's contract
-([runtime-substrate](runtime-substrate.md)), not rechecked here. Empty text
+The bridge maps `Refused` evidence only after every provider-reported identity
+passes the provider-target identity rule below. A different-lineage identity
+fails the adapter stage closed as `ProviderTargetSubstituted` before terminal
+evidence is mapped, including when that evidence is `Refused`. Once identity
+validation passes, that refusal evidence arises only from an authenticated
+complete exchange by the runtime layer's contract
+([runtime-substrate](runtime-substrate.md)), not a condition rechecked here.
+Empty text
 blocks are dropped without creating invalid entries. Tool-call parts with a
 `ToolUse` finish become the normalized proposals owned by
 [tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
