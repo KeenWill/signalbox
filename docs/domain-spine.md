@@ -5425,17 +5425,9 @@ impl RunnerLease {
 pub struct RunnerLeaseReconstitutionInput {
     /* public raw lease projection and independent fence */
 }
-pub enum RunnerLeaseLoss {
-    RetryPermitted {
-        lost: RunnerLease,
-        retry: Box<RunnerLeaseRetryAuthority>,
-    },
-    CrashClassificationRequired {
-        lost: RunnerLease,
-    },
-}
+pub struct RunnerLeaseLoss { /* private, produced only by RunnerLease::lose */ }
 impl RunnerLeaseLoss {
-    // accessors: retry(), crash_attempt()
+    // accessors: lost(), retry(), crash_attempt()
 }
 pub struct RunnerLeaseRetryAuthority { /* private */ }
 impl RunnerLeaseRetryAuthority {
@@ -5474,8 +5466,11 @@ pub struct ProvisionedWorkspace {
 pub struct SessionRunnerPlacementRequest {
     /* public complete requested axes */
 }
+pub struct RunnerCredentialGrantLineage {
+    /* public exact last-grant runner and revision */
+}
 pub struct PinnedRunnerPlacement {
-    /* public complete pinned facts */
+    /* public complete pinned facts, including optional grant lineage */
 }
 pub enum SessionRunnerPlacementState {
     Unpinned,
@@ -5563,7 +5558,7 @@ pub enum CredentialProfileGrantState {
 }
 pub struct CredentialProfileGrant { /* private */ }
 impl CredentialProfileGrant {
-    // accessors: state(), revision(), profile()
+    // accessors: state(), revision(), lineage(), profile()
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
         input: CredentialProfileGrantReconstitutionInput,
@@ -6377,8 +6372,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 47                   |
-| **signalbox-domain total**                         | **502 (+1 free fn)** |
+| domain: runner                                     | 48                   |
+| **signalbox-domain total**                         | **503 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

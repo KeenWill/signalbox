@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Carry credential lineage in runner placement
+
+**Context.** Runner replacement can intentionally move from a credential-bearing
+placement to a profileless one. The terminal grant tombstone advances the
+revision, but a later caller could omit that separate value and the pure
+replacement function had no fact from which to distinguish a never-profiled
+placement from a lineage whose tombstone was dropped.
+
+**Decision.** Every pinned placement carries the optional exact last-grant
+identity: runner and positive revision. Initial profile selection records
+revision one; profile and runner replacements advance the identity from the
+checked predecessor, including a revoked tombstone for a profileless successor.
+A replacement must supply the grant named by existing placement evidence, while
+a placement with no lineage may begin at revision one. Reconstitution validates
+the placement evidence and persistence validates the named grant record.
+
+**Rejected alternatives.** Letting callers omit a profileless tombstone can
+recreate a retired session/runner/profile/revision tuple. A revision-only marker
+cannot distinguish cross-runner grant ancestry. A global lookup inside the pure
+domain transition would move storage authority into the domain boundary.
+
+**Affects.** `PinnedRunnerPlacement`, credential-grant replacement and
+reconstitution, INV-044 and INV-045, S32, and the
+[runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-26 — Add sccache as the devenv shared compiler cache
 
 **Context.** Every checkout and worktree cold-builds the full dependency graph,
