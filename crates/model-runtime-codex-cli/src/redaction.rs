@@ -17,12 +17,15 @@ pub(crate) fn redact_text(text: &str) -> String {
         "api-key:",
         "\"api_key\":",
         "\"api-key\":",
+        "\"apiKey\":",
         "access_token=",
         "access_token:",
         "\"access_token\":",
+        "\"accessToken\":",
         "refresh_token=",
         "refresh_token:",
         "\"refresh_token\":",
+        "\"refreshToken\":",
         "password=",
         "password:",
         "\"password\":",
@@ -91,12 +94,16 @@ fn redact_value(value: &mut Value) -> bool {
 }
 
 fn credential_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase().replace('-', "_");
+    let key = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect::<String>();
     [
         "authorization",
-        "api_key",
-        "access_token",
-        "refresh_token",
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
         "credential",
         "password",
         "secret",
@@ -192,7 +199,7 @@ mod tests {
     #[test]
     fn inv_035_redacts_nested_credential_members() {
         let fixture = format!(
-            r#"{{"safe":"kept","nested":{{"refresh_token":"{NESTED_CREDENTIAL_VALUE}"}}}}"#
+            r#"{{"safe":"kept","nested":{{"API_KEY":"{NESTED_CREDENTIAL_VALUE}","apiKey":"{NESTED_CREDENTIAL_VALUE}","accessToken":"{NESTED_CREDENTIAL_VALUE}","refreshToken":"{NESTED_CREDENTIAL_VALUE}"}}}}"#
         );
         let output = redact_json(&fixture);
 

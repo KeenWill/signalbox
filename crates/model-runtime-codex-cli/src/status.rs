@@ -18,7 +18,11 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
                 "authentication failed",
                 "invalid api key",
                 "invalid_api_key",
-                "refresh token",
+                "refresh_token_expired",
+                "refresh_token_reused",
+                "refresh_token_invalidated",
+                "refresh token rejected",
+                "invalid refresh token",
                 "credential rejected",
             ],
         ) =>
@@ -140,6 +144,22 @@ mod tests {
         assert_eq!(
             classify_error("refusal followed by authentication failed"),
             ProviderErrorKind::CredentialRejected
+        );
+    }
+
+    #[test]
+    fn permanent_refresh_failure_is_a_credential_rejection() {
+        assert_eq!(
+            classify_error("refresh_token_invalidated"),
+            ProviderErrorKind::CredentialRejected
+        );
+    }
+
+    #[test]
+    fn transient_refresh_failure_is_not_a_credential_rejection() {
+        assert_eq!(
+            classify_error("refresh token request timed out"),
+            ProviderErrorKind::Unrecognized
         );
     }
 }

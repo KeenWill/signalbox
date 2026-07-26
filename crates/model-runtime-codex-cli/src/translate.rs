@@ -38,10 +38,14 @@ pub(crate) fn translate<C>(
         .tools
         .iter()
         .map(|tool| {
+            let input_schema = parse_object_schema(
+                tool.input_schema.get(),
+                &format!("tool `{}` input schema", tool.name.as_str()),
+            )?;
             Ok(json!({
                 "name": tool.name.as_str(),
                 "description": tool.description,
-                "input_schema": parse_raw_json(tool.input_schema.get())?,
+                "input_schema": input_schema,
             }))
         })
         .collect::<Result<Vec<_>, TranslationError>>()?;
@@ -49,20 +53,31 @@ pub(crate) fn translate<C>(
         .output_contract
         .as_ref()
         .map(|contract| {
+            let schema = parse_object_schema(
+                contract.schema.get(),
+                &format!("structured output `{}` schema", contract.name.as_str()),
+            )?;
             Ok(json!({
                 "name": contract.name.as_str(),
                 "description": contract.description,
-                "schema": parse_raw_json(contract.schema.get())?,
+                "schema": schema,
             }))
         })
         .transpose()?;
 
-    let tool_choice = match &operation.tool_choice {
+    let effective_tool_choice = if let Some(contract) = &operation.output_contract {
+        ToolChoice::Named(contract.name.clone())
+    } else if operation.tools.is_empty() {
+        ToolChoice::Automatic
+    } else {
+        operation.tool_choice.clone()
+    };
+    let tool_choice = match &effective_tool_choice {
         ToolChoice::Automatic => json!({"kind": "automatic"}),
         ToolChoice::AnyTool => json!({"kind": "any_tool"}),
         ToolChoice::Named(name) => json!({"kind": "named", "name": name.as_str()}),
     };
-    let tool_requirement = match &operation.tool_choice {
+    let tool_requirement = match effective_tool_choice {
         ToolChoice::Automatic => ToolRequirement::Optional,
         ToolChoice::AnyTool => ToolRequirement::Any,
         ToolChoice::Named(name) => ToolRequirement::Named(name.as_str().to_string()),
@@ -158,6 +173,18 @@ fn parse_raw_json(raw: &str) -> Result<Value, TranslationError> {
             detail: error.to_string(),
         })
     })
+}
+
+fn parse_object_schema(raw: &str, subject: &str) -> Result<Value, TranslationError> {
+    let schema = parse_raw_json(raw)?;
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(TranslationError::Failure(
+            PreparationFailure::UnsupportedOperation {
+                detail: format!("{subject} must describe an object at its root"),
+            },
+        ));
+    }
+    Ok(schema)
 }
 
 pub(crate) enum TranslationError {

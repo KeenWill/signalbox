@@ -3,6 +3,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
 mod fixtures;
@@ -10,6 +11,10 @@ mod fixtures;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
     validate_argv()?;
+    if Path::new("fake-codex-block-stdin").exists() {
+        std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
+        std::thread::sleep(Duration::from_secs(60));
+    }
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-codex-prompt", &prompt)?;
@@ -29,13 +34,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             completed();
         }
         "streamed_completed" => {
-            emit(
-                r#"{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"considering"}}"#,
-            );
+            emit(&format!(
+                r#"{{"type":"item.completed","item":{{"id":"reason-1","type":"reasoning","text":"{}"}}}}"#,
+                fixtures::REASONING_TEXT
+            ));
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
                 fixtures::STREAMED_ANSWER
             ));
+            completed();
+        }
+        "last_agent_message" => {
+            agent_message("message-intermediate", "not a response envelope");
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
+        "malformed_last_agent_message" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            agent_message("message-last", "not a response envelope");
             completed();
         }
         "tool_call" => {
@@ -50,6 +72,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"structured-offline-1","name":"verdict","arguments":{{ "accepted" : {} }}}}]}}"#,
                 fixtures::STRUCTURED_ACCEPTED
+            ));
+            completed();
+        }
+        "structured_refused" => {
+            envelope(&format!(
+                r#"{{"outcome":"refused","text":"{}","tool_calls":[]}}"#,
+                fixtures::REFUSAL_TEXT
             ));
             completed();
         }
@@ -89,6 +118,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "sensitive_tool_ids" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"{}","name":"{}","arguments":{{}}}},{{"id":"{}","name":"{}","arguments":{{}}}}]}}"#,
+                fixtures::SENSITIVE_TOOL_ID_ONE,
+                fixtures::TOOL_NAME,
+                fixtures::SENSITIVE_TOOL_ID_TWO,
+                fixtures::TOOL_NAME
+            ));
+            completed();
+        }
+        "usage_without_cache" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed_without_cache();
+        }
         "stderr_redaction" => {
             eprintln!(
                 "authentication failed API_KEY=\"{}\"",
@@ -98,6 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "killed_process" => std::process::abort(),
         "hang" => std::thread::sleep(Duration::from_secs(60)),
+        "busy_stdout" => {
+            std::fs::write("fake-codex-busy-stdout", "ready\n")?;
+            loop {
+                emit(r#"{"type":"item.updated"}"#);
+            }
+        }
         _ => failed("invalid request: unknown offline fixture"),
     }
     Ok(())
@@ -141,9 +193,13 @@ fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn envelope(value: &str) {
+    agent_message("message-offline-1", value);
+}
+
+fn agent_message(id: &str, value: &str) {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     emit(&format!(
-        r#"{{"type":"item.completed","item":{{"id":"message-offline-1","type":"agent_message","text":"{escaped}"}}}}"#
+        r#"{{"type":"item.completed","item":{{"id":"{id}","type":"agent_message","text":"{escaped}"}}}}"#
     ));
 }
 
@@ -153,6 +209,14 @@ fn completed() {
         fixtures::INPUT_TOKENS,
         fixtures::CACHE_READ_INPUT_TOKENS,
         fixtures::CACHE_CREATION_INPUT_TOKENS,
+        fixtures::OUTPUT_TOKENS
+    ));
+}
+
+fn completed_without_cache() {
+    emit(&format!(
+        r#"{{"type":"turn.completed","usage":{{"input_tokens":{},"output_tokens":{},"reasoning_output_tokens":3}}}}"#,
+        fixtures::INPUT_TOKENS,
         fixtures::OUTPUT_TOKENS
     ));
 }

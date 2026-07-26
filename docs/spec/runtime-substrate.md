@@ -394,15 +394,19 @@ refusal. Buffered delivery retains its content without deltas; streamed delivery
 emits bounded CLI reasoning items and the final envelope content as ordered
 deltas before the same terminal evidence. Tool argument JSON remains
 byte-verbatim when it is credential-shape clean. Usage comes only from
-`turn.completed`.
+`turn.completed`; an omitted cache counter remains unreported rather than
+becoming a reported zero.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Cancellation before spawn is proven unsent.
 After spawn it sends an interrupt to the dedicated process group, waits a
 positive grace, and force-kills only as fallback; either path is
 `BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
-force-kills the original process and is typed boundary loss. The offline test
-binary exercises all process and evidence paths without a live CLI or network.
+starts immediately after successful spawn, governs stdin transfer, stdout
+decoding, and process exit, then force-kills the original process as typed
+boundary loss. Control signals take priority over continuously ready stdout. The
+offline test binary exercises all process and evidence paths without a live CLI
+or network.
 
 ## Credential-access boundary
 

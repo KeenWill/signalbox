@@ -27,9 +27,9 @@ pub(crate) struct ThreadError {
 pub(crate) struct Usage {
     pub(crate) input_tokens: i64,
     #[serde(default)]
-    pub(crate) cached_input_tokens: i64,
+    pub(crate) cached_input_tokens: Option<i64>,
     #[serde(default)]
-    pub(crate) cache_write_input_tokens: i64,
+    pub(crate) cache_write_input_tokens: Option<i64>,
     pub(crate) output_tokens: i64,
 }
 

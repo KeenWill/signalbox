@@ -165,7 +165,8 @@ impl<C> ModelOperation<C> {
                 });
             }
         }
-        if let ToolChoice::Named(name) = &self.tool_choice
+        if (!self.tools.is_empty() || self.output_contract.is_some())
+            && let ToolChoice::Named(name) = &self.tool_choice
             && !self.tools.iter().any(|tool| &tool.name == name)
         {
             // An impossible choice is a locally knowable declaration error;
@@ -265,6 +266,14 @@ mod tests {
                 name: crate::ToolName::new("missing"),
             }
         );
+    }
+
+    #[test]
+    fn a_named_choice_without_tools_or_contract_is_ignored() {
+        let mut operation = operation();
+        operation.tool_choice = crate::ToolChoice::Named(crate::ToolName::new("unused"));
+
+        assert_eq!(operation.validate(), Ok(()));
     }
 
     #[test]

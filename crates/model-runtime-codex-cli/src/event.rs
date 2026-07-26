@@ -28,7 +28,8 @@ pub(crate) struct EventDecoder<C> {
     tool_requirement: ToolRequirement,
     exchange: ExchangeFacts,
     message_id: Option<String>,
-    envelope: Option<ModelEnvelope>,
+    agent_message: Option<String>,
+    next_part_index: u32,
     usage: TokenUsage,
     terminal: Option<CliTerminal>,
 }
@@ -53,7 +54,8 @@ impl<C: Clone> EventDecoder<C> {
             tool_requirement: translated.tool_requirement.clone(),
             exchange: ExchangeFacts::default(),
             message_id: None,
-            envelope: None,
+            agent_message: None,
+            next_part_index: 0,
             usage: TokenUsage::unreported(),
             terminal: None,
         }
@@ -99,21 +101,16 @@ impl<C: Clone> EventDecoder<C> {
                 let event: ItemEvent = decode(value)?;
                 match event.item.details {
                     ItemDetails::AgentMessage { text } => {
-                        let envelope: ModelEnvelope =
-                            serde_json::from_str(&text).map_err(|error| {
-                                DecodeFailure::new(format!(
-                                    "agent message does not match the response envelope: {error}"
-                                ))
-                            })?;
                         self.message_id = Some(redact_text(&event.item.id));
-                        self.envelope = Some(envelope);
+                        self.agent_message = Some(text);
                     }
                     ItemDetails::Reasoning { text } => {
                         if self.delivery == DeliveryMode::Streamed {
+                            let index = self.take_part_index()?;
                             sink.observe(Observation {
                                 correlation: self.correlation.clone(),
                                 fact: ObservationFact::ThinkingDelta {
-                                    index: 0,
+                                    index,
                                     text: redact_text(&text),
                                 },
                             });
@@ -178,8 +175,8 @@ impl<C: Clone> EventDecoder<C> {
         boundary_loss(self.exchange, self.usage, cause)
     }
 
-    fn completed(self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
-        let Some(ref envelope) = self.envelope else {
+    fn completed(mut self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
+        let Some(agent_message) = self.agent_message.take() else {
             return boundary_loss(
                 self.exchange,
                 self.usage,
@@ -188,7 +185,21 @@ impl<C: Clone> EventDecoder<C> {
                 },
             );
         };
-        let content = match self.decode_content(envelope) {
+        let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                return boundary_loss(
+                    self.exchange,
+                    self.usage,
+                    LossCause::ResponseUnintelligible {
+                        detail: format!(
+                            "last agent message does not match the response envelope: {error}"
+                        ),
+                    },
+                );
+            }
+        };
+        let content = match self.decode_content(&envelope) {
             Ok(content) => content,
             Err(detail) => {
                 return boundary_loss(
@@ -203,7 +214,15 @@ impl<C: Clone> EventDecoder<C> {
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
             EnvelopeOutcome::Completed => FinishReason::ToolUse,
         };
-        self.emit_completion_observations(sink, &content, reported_finish.clone());
+        if let Err(detail) =
+            self.emit_completion_observations(sink, &content, reported_finish.clone())
+        {
+            return boundary_loss(
+                self.exchange,
+                self.usage,
+                LossCause::ResponseUnintelligible { detail },
+            );
+        }
 
         match envelope.outcome {
             EnvelopeOutcome::Refused => TerminalEvidence::Refused(RefusalEvidence {
@@ -240,11 +259,23 @@ impl<C: Clone> EventDecoder<C> {
         if !text.is_empty() {
             content.push(AssistantPart::Text(text));
         }
-        let mut ids = HashSet::new();
+        if envelope.outcome == EnvelopeOutcome::Refused {
+            return Ok(content);
+        }
+
+        let mut raw_ids = HashSet::new();
+        let mut clean_ids = HashSet::new();
         for call in &envelope.tool_calls {
-            if call.id.is_empty() || !ids.insert(call.id.as_str()) {
+            if call.id.is_empty() || !raw_ids.insert(call.id.as_str()) {
                 return Err("tool call ids must be nonempty and distinct".to_string());
             }
+            let sanitized = redact_text(&call.id);
+            if sanitized == call.id {
+                clean_ids.insert(sanitized);
+            }
+        }
+        let mut emitted_ids = HashSet::new();
+        for (index, call) in envelope.tool_calls.iter().enumerate() {
             let allowed = self.declared_tools.contains(&call.name)
                 || self.output_contract_name.as_deref() == Some(call.name.as_str());
             if !allowed {
@@ -253,8 +284,15 @@ impl<C: Clone> EventDecoder<C> {
                     redact_text(&call.name)
                 ));
             }
+            let sanitized = redact_text(&call.id);
+            let id = if sanitized == call.id {
+                sanitized
+            } else {
+                redacted_call_id(index, &clean_ids, &emitted_ids)
+            };
+            emitted_ids.insert(id.clone());
             content.push(AssistantPart::ToolCall(ToolCallProposal {
-                id: ToolCallId::new(redact_text(&call.id)),
+                id: ToolCallId::new(id),
                 name: ToolName::new(call.name.clone()),
                 arguments_json: redact_json(call.arguments.get()),
             }));
@@ -291,16 +329,21 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     fn emit_completion_observations(
-        &self,
+        &mut self,
         sink: &mut (dyn ObservationSink<C> + Send),
         content: &[AssistantPart],
         finish: FinishReason,
-    ) {
+    ) -> Result<(), String> {
         if self.delivery == DeliveryMode::Streamed {
+            let content_len = u32::try_from(content.len())
+                .map_err(|_| "response has too many ordered parts".to_string())?;
+            self.next_part_index
+                .checked_add(content_len)
+                .ok_or_else(|| "response has too many ordered parts".to_string())?;
             for (index, part) in content.iter().enumerate() {
-                let Ok(index) = u32::try_from(index) else {
-                    continue;
-                };
+                let offset = u32::try_from(index)
+                    .map_err(|_| "response has too many ordered parts".to_string())?;
+                let index = self.next_part_index + offset;
                 match part {
                     AssistantPart::Text(text) => sink.observe(Observation {
                         correlation: self.correlation.clone(),
@@ -319,6 +362,7 @@ impl<C: Clone> EventDecoder<C> {
                     AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {}
                 }
             }
+            self.next_part_index += content_len;
         }
         for part in content {
             if let AssistantPart::ToolCall(call) = part {
@@ -336,6 +380,31 @@ impl<C: Clone> EventDecoder<C> {
             correlation: self.correlation.clone(),
             fact: ObservationFact::FinishReported(finish),
         });
+        Ok(())
+    }
+
+    fn take_part_index(&mut self) -> Result<u32, DecodeFailure> {
+        let index = self.next_part_index;
+        self.next_part_index = self
+            .next_part_index
+            .checked_add(1)
+            .ok_or_else(|| DecodeFailure::new("response has too many ordered parts"))?;
+        Ok(index)
+    }
+}
+
+fn redacted_call_id(
+    index: usize,
+    clean_ids: &HashSet<String>,
+    emitted_ids: &HashSet<String>,
+) -> String {
+    let mut ordinal = index + 1;
+    loop {
+        let candidate = format!("codex-redacted-call-{ordinal}");
+        if !clean_ids.contains(&candidate) && !emitted_ids.contains(&candidate) {
+            return candidate;
+        }
+        ordinal += 1;
     }
 }
 
@@ -349,16 +418,24 @@ fn usage(usage: crate::wire::Usage) -> Result<TokenUsage, DecodeFailure> {
         .map_err(|_| DecodeFailure::new("usage input_tokens is negative"))?;
     let output_tokens = u64::try_from(usage.output_tokens)
         .map_err(|_| DecodeFailure::new("usage output_tokens is negative"))?;
-    let cache_read_input_tokens = u64::try_from(usage.cached_input_tokens)
-        .map_err(|_| DecodeFailure::new("usage cached_input_tokens is negative"))?;
-    let cache_creation_input_tokens = u64::try_from(usage.cache_write_input_tokens)
-        .map_err(|_| DecodeFailure::new("usage cache_write_input_tokens is negative"))?;
     Ok(TokenUsage {
         input_tokens: Some(input_tokens),
         output_tokens: Some(output_tokens),
-        cache_creation_input_tokens: Some(cache_creation_input_tokens),
-        cache_read_input_tokens: Some(cache_read_input_tokens),
+        cache_creation_input_tokens: optional_usage(
+            usage.cache_write_input_tokens,
+            "cache_write_input_tokens",
+        )?,
+        cache_read_input_tokens: optional_usage(usage.cached_input_tokens, "cached_input_tokens")?,
     })
+}
+
+fn optional_usage(value: Option<i64>, name: &str) -> Result<Option<u64>, DecodeFailure> {
+    value
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| DecodeFailure::new(format!("usage {name} is negative")))
+        })
+        .transpose()
 }
 
 fn provider_error(exchange: ExchangeFacts, usage: TokenUsage, message: &str) -> TerminalEvidence {

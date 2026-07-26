@@ -11,9 +11,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, CredentialReference, DeliveryMode,
-    LossCause, ModelOperation, ModelRuntime, Observation, ObservationFact, PreparationOutcome,
-    ProviderErrorKind, RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence,
-    TokenUsage, ToolDefinition, decode_structured,
+    LossCause, ModelOperation, ModelRuntime, Observation, ObservationFact, PreparationFailure,
+    PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget, StreamInterruption,
+    StructuredOutputContract, TerminalEvidence, TokenUsage, ToolChoice, ToolDefinition, ToolName,
+    decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{CodexCliConfig, CodexCliRuntime};
 
@@ -105,11 +106,50 @@ async fn streamed_completion_emits_redacted_progress_in_order() {
     assert!(result.observations.iter().any(|observation| {
         observation.fact
             == ObservationFact::TextDelta {
-                index: 0,
+                index: 1,
                 text: fixtures::STREAMED_ANSWER.to_string(),
             }
     }));
+    assert!(result.observations.iter().any(|observation| {
+        observation.fact
+            == ObservationFact::ThinkingDelta {
+                index: 0,
+                text: fixtures::REASONING_TEXT.to_string(),
+            }
+    }));
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn only_the_last_agent_message_is_decoded_as_the_terminal_envelope() {
+    let result = execute_scenario(
+        "last_agent_message",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+}
+
+#[tokio::test]
+async fn an_undecodable_last_agent_message_is_boundary_loss() {
+    let result = execute_scenario(
+        "malformed_last_agent_message",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("last agent message")
+    );
 }
 
 #[tokio::test]
@@ -175,6 +215,44 @@ async fn structured_output_uses_the_shared_forced_tool_decode() {
             accepted: fixtures::STRUCTURED_ACCEPTED,
         }
     );
+}
+
+#[tokio::test]
+async fn structured_output_can_end_in_explicit_refusal() {
+    let result = execute_scenario(
+        "structured_refused",
+        DeliveryMode::Buffered,
+        OperationShape::Structured,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        refused(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::REFUSAL_TEXT.to_string())]
+    );
+}
+
+#[tokio::test]
+async fn tool_choice_is_ignored_when_no_tools_or_contract_exist() {
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.tool_choice = ToolChoice::AnyTool;
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
@@ -309,6 +387,27 @@ async fn exit_zero_without_terminal_marker_is_boundary_loss() {
     assert_eq!(result.spawns, 1);
 }
 
+#[tokio::test]
+async fn omitted_cache_counters_remain_unreported() {
+    let result = execute_scenario(
+        "usage_without_cache",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).usage,
+        TokenUsage {
+            input_tokens: Some(fixtures::INPUT_TOKENS),
+            output_tokens: Some(fixtures::OUTPUT_TOKENS),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    );
+}
+
 /// INV-025, INV-026: pre-dispatch cancellation performs no process spawn.
 #[tokio::test]
 async fn cancellation_before_spawn_is_proven_unsent() {
@@ -379,7 +478,7 @@ async fn cancellation_after_spawn_interrupts_once_without_respawn() {
         operation("hang", DeliveryMode::Streamed, OperationShape::Text),
     )
     .await;
-    let cancellation = cancel_after_spawn_record(temporary.path().join("fake-codex-spawns"));
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-spawns"));
     let mut observations = Vec::new();
 
     let report = runtime
@@ -388,6 +487,29 @@ async fn cancellation_after_spawn_interrupts_once_without_respawn() {
     let loss = boundary_loss(&report.evidence);
 
     assert_eq!(loss.cause, LossCause::CancellationRequested);
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
+async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation("busy_stdout", DeliveryMode::Streamed, OperationShape::Text),
+    )
+    .await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-busy-stdout"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::CancellationRequested
+    );
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
@@ -410,6 +532,47 @@ async fn whole_process_timeout_is_boundary_loss_without_respawn() {
     assert_eq!(result.spawns, 1);
 }
 
+#[tokio::test]
+async fn cancellation_while_stdin_is_blocked_interrupts_the_spawned_process() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(temporary.path().join("fake-codex-block-stdin"), "block")
+        .expect("the fake CLI blocking marker is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let cancellation = cancel_after_record(temporary.path().join("fake-codex-block-stdin-ready"));
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, cancellation)
+        .await;
+
+    assert_eq!(
+        boundary_loss(&report.evidence).cause,
+        LossCause::CancellationRequested
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[tokio::test]
+async fn timeout_while_stdin_is_blocked_covers_the_whole_spawn_lifetime() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(temporary.path().join("fake-codex-block-stdin"), "block")
+        .expect("the fake CLI blocking marker is created");
+    let runtime = runtime_with_timeout(temporary.path(), fake_cli(), Duration::from_millis(100));
+    let prepared = prepare(&runtime, blocked_input_operation()).await;
+    let mut observations = Vec::new();
+
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        timed_out(&boundary_loss(&report.evidence).cause).detail,
+        "Codex CLI process exceeded its exchange timeout"
+    );
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
 /// INV-035: credential-shaped CLI text and tool JSON are redacted before
 /// observations or terminal evidence leave the adapter.
 #[tokio::test]
@@ -426,6 +589,57 @@ async fn inv_035_cli_output_is_credential_shape_redacted() {
     assert!(!diagnostic.contains(fixtures::SENSITIVE_OUTPUT_TOKEN));
     assert!(!diagnostic.contains(fixtures::SENSITIVE_REFRESH_TOKEN));
     assert!(diagnostic.contains("[redacted]"));
+}
+
+/// INV-035: distinct credential-shaped provider ids remain distinct without
+/// exposing their raw values.
+#[tokio::test]
+async fn inv_035_redacted_tool_ids_receive_distinct_safe_surrogates() {
+    let result = execute_scenario(
+        "sensitive_tool_ids",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let content = &completed(&result.evidence).content;
+    let diagnostic = format!("{:?}", result.evidence);
+
+    assert_eq!(
+        tool_ids(content),
+        vec![
+            fixtures::REDACTED_TOOL_ID_ONE,
+            fixtures::REDACTED_TOOL_ID_TWO
+        ]
+    );
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_TOOL_ID_ONE));
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_TOOL_ID_TWO));
+}
+
+#[tokio::test]
+async fn non_object_structured_schema_fails_before_spawn() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let mut operation = operation(
+        "structured_output",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.output_contract = Some(StructuredOutputContract {
+        name: ToolName::new("verdict"),
+        description: "verdict".to_string(),
+        schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "string"}))
+            .expect("the test schema serializes"),
+    });
+
+    let failure = failed_preparation(
+        runtime
+            .prepare(operation, CancellationSignal::never())
+            .await,
+    );
+
+    assert!(unsupported_detail(failure).contains("must describe an object"));
+    assert_eq!(spawn_count(temporary.path()), 0);
 }
 
 async fn assert_error_scenario(scenario: &str, expected: ProviderErrorKind) {
@@ -464,9 +678,22 @@ async fn execute_scenario_with_timeout(
     cancellation: CancellationSignal,
     exchange_timeout: Duration,
 ) -> ExecutionResult {
+    execute_operation_with_timeout(
+        operation(scenario, delivery, shape),
+        cancellation,
+        exchange_timeout,
+    )
+    .await
+}
+
+async fn execute_operation_with_timeout(
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+    exchange_timeout: Duration,
+) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime_with_timeout(temporary.path(), fake_cli(), exchange_timeout);
-    let prepared = prepare(&runtime, operation(scenario, delivery, shape)).await;
+    let prepared = prepare(&runtime, operation).await;
     let mut observations = Vec::new();
     let report = runtime
         .execute(prepared, &mut observations, cancellation)
@@ -545,6 +772,18 @@ fn operation(
     operation
 }
 
+fn blocked_input_operation() -> ModelOperation<String> {
+    let mut operation = operation(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    operation.messages = vec![signalbox_model_runtime::ConversationMessage::user_text(
+        "x".repeat(2 * 1024 * 1024),
+    )];
+    operation
+}
+
 async fn prepare(
     runtime: &CodexCliRuntime,
     operation: ModelOperation<String>,
@@ -578,11 +817,16 @@ fn read_optional(path: std::path::PathBuf) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-fn cancel_after_spawn_record(path: std::path::PathBuf) -> CancellationSignal {
+fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
     CancellationSignal::when(async move {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                if tokio::fs::read_to_string(&path)
+                    .await
+                    .map(|content| content.lines().count())
+                    .unwrap_or_default()
+                    > 0
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -654,6 +898,13 @@ fn timed_out(cause: &LossCause) -> &signalbox_model_runtime::TransportFacts {
     facts
 }
 
+fn response_unintelligible(cause: &LossCause) -> &str {
+    let LossCause::ResponseUnintelligible { detail } = cause else {
+        panic!("expected unintelligible-response loss, got {cause:?}");
+    };
+    detail
+}
+
 fn tool_proposal(content: &[AssistantPart]) -> &signalbox_model_runtime::ToolCallProposal {
     let Some(AssistantPart::ToolCall(proposal)) = content.first() else {
         panic!("expected one leading tool proposal, got {content:?}");
@@ -668,4 +919,35 @@ fn observed_tool_arguments(observations: &[Observation<String>]) -> Option<&str>
             ObservationFact::ToolCallProposed(proposal) => Some(proposal.arguments_json.as_str()),
             _ => None,
         })
+}
+
+fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::ToolCall(proposal) => Some(proposal.id.as_str()),
+            AssistantPart::Text(_)
+            | AssistantPart::Thinking { .. }
+            | AssistantPart::RedactedThinking { .. } => None,
+        })
+        .collect()
+}
+
+fn failed_preparation(
+    outcome: PreparationOutcome<
+        String,
+        signalbox_model_runtime_codex_cli::CodexCliPreparedRequest<String>,
+    >,
+) -> PreparationFailure {
+    let PreparationOutcome::Failed { failure, .. } = outcome else {
+        panic!("expected failed preparation");
+    };
+    failure
+}
+
+fn unsupported_detail(failure: PreparationFailure) -> String {
+    let PreparationFailure::UnsupportedOperation { detail } = failure else {
+        panic!("expected unsupported-operation preparation failure");
+    };
+    detail
 }

@@ -309,6 +309,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             });
         }
     };
+    let deadline = tokio::time::Instant::now() + prepared.exchange_timeout;
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.start_kill();
         let _ = child.wait().await;
@@ -324,21 +325,43 @@ async fn execute_process<C: Clone + Send + Sync>(
         let _ = child.wait().await;
         return pre_exchange_transport_loss("spawned Codex process has no stderr");
     };
-    if let Err(error) = stdin.write_all(&prepared.prompt).await {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        return pre_exchange_transport_loss(format!("Codex stdin write failed: {error}"));
-    }
-    if let Err(error) = stdin.shutdown().await {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        return pre_exchange_transport_loss(format!("Codex stdin close failed: {error}"));
+    let stderr_limit = prepared.stderr_limit;
+    let stderr_task = tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
+    let input_step = {
+        let send_prompt = async {
+            stdin.write_all(&prepared.prompt).await?;
+            stdin.shutdown().await
+        };
+        tokio::pin!(send_prompt);
+        tokio::select! {
+            biased;
+            () = &mut *cancellation => InputStep::Cancelled,
+            () = tokio::time::sleep_until(deadline) => InputStep::TimedOut,
+            result = &mut send_prompt => InputStep::Written(result),
+        }
+    };
+    match input_step {
+        InputStep::Written(Ok(())) => {}
+        InputStep::Written(Err(error)) => {
+            force_kill(&mut child).await;
+            let _ = stderr_task.await;
+            return pre_exchange_transport_loss(format!("Codex stdin write failed: {error}"));
+        }
+        InputStep::Cancelled => {
+            interrupt_then_kill(&mut child, prepared.interrupt_grace).await;
+            let _ = stderr_task.await;
+            return pre_exchange_boundary_loss(LossCause::CancellationRequested);
+        }
+        InputStep::TimedOut => {
+            force_kill(&mut child).await;
+            let _ = stderr_task.await;
+            return pre_exchange_boundary_loss(LossCause::TimedOut(TransportFacts::new(
+                "Codex CLI process exceeded its exchange timeout",
+            )));
+        }
     }
     drop(stdin);
 
-    let stderr_limit = prepared.stderr_limit;
-    let stderr_task = tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
-    let deadline = tokio::time::Instant::now() + prepared.exchange_timeout;
     let mut stdout = BufReader::new(stdout);
     let mut decoder = EventDecoder::new(
         prepared.correlation,
@@ -349,9 +372,9 @@ async fn execute_process<C: Clone + Send + Sync>(
     loop {
         let next = tokio::select! {
             biased;
-            result = read_bounded_line(&mut stdout, prepared.event_limit) => ProcessStep::Line(result),
             () = &mut *cancellation => ProcessStep::Cancelled,
             () = tokio::time::sleep_until(deadline) => ProcessStep::TimedOut,
+            result = read_bounded_line(&mut stdout, prepared.event_limit) => ProcessStep::Line(result),
         };
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
@@ -426,6 +449,12 @@ async fn execute_process<C: Clone + Send + Sync>(
 
 enum ProcessStep {
     Line(std::io::Result<Option<Vec<u8>>>),
+    Cancelled,
+    TimedOut,
+}
+
+enum InputStep {
+    Written(std::io::Result<()>),
     Cancelled,
     TimedOut,
 }
@@ -507,8 +536,12 @@ async fn force_kill(child: &mut Child) {
 }
 
 fn pre_exchange_transport_loss(detail: impl Into<String>) -> TerminalEvidence {
+    pre_exchange_boundary_loss(LossCause::TransportFailed(TransportFacts::new(detail)))
+}
+
+fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(signalbox_model_runtime::BoundaryLossEvidence {
-        cause: LossCause::TransportFailed(TransportFacts::new(detail)),
+        cause,
         exchange: signalbox_model_runtime::ExchangeFacts::default(),
         reported_model: None,
         finish_reported: None,
