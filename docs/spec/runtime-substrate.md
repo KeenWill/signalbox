@@ -4,11 +4,11 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`,
 `crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
 against the implementing stack through PR #183
-(`agent/provider-call-security-parser`) plus the Codex CLI adapter stack
-(`agent/codex-cli-wrap`). It covers the provider-neutral operation, observation,
-and evidence vocabulary; SSE framing; structured-output and tool decode;
-`ScriptedModel`; the three provider adapters; and their credential boundaries.
-Layer-2 authorization and evidence classification
+(`agent/provider-call-security-parser`) plus the Codex CLI adapter stack (PR
+#264, `agent/codex-cli-wrap`). It covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the three provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
