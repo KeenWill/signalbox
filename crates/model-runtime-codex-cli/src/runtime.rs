@@ -299,10 +299,29 @@ impl CodexCliRuntime {
                 };
             }
         };
+        // The child interprets `--output-schema` after `current_dir` moves it
+        // to the configured working root, so a schema path that is relative
+        // there — as under a relative `TMPDIR` — would name a file that
+        // preparation never created. Create the file under the absolutized
+        // temporary directory so its retained path cannot be relative.
+        let temporary_directory = match std::path::absolute(std::env::temp_dir()) {
+            Ok(directory) => directory,
+            Err(error) => {
+                return PreparationOutcome::Defect {
+                    correlation,
+                    defect: PreparationDefect::RequestConstructionFailed {
+                        detail: format!(
+                            "could not absolutize the temporary directory for the \
+                             output-schema file: {error}"
+                        ),
+                    },
+                };
+            }
+        };
         let mut output_schema = match tempfile::Builder::new()
             .prefix("signalbox-codex-output-")
             .suffix(".json")
-            .tempfile()
+            .tempfile_in(temporary_directory)
         {
             Ok(file) => file,
             Err(error) => {

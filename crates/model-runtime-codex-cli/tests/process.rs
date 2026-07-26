@@ -1257,6 +1257,27 @@ async fn stderr_cleanup_timeout_preserves_boundary_loss_evidence() {
     );
 }
 
+/// The retained output-schema argument is absolute, so the child's move to
+/// the configured working root cannot re-root a relative schema path.
+#[tokio::test]
+async fn output_schema_argument_is_an_absolute_path() {
+    let result = execute_scenario(
+        "buffered_completed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let schema_argument = result
+        .argv
+        .lines()
+        .skip_while(|line| *line != "--output-schema")
+        .nth(1)
+        .expect("the argv records an --output-schema value");
+
+    assert!(std::path::Path::new(schema_argument).is_absolute());
+}
+
 #[tokio::test]
 async fn subprocess_environment_is_allowlisted() {
     let result = execute_scenario(
