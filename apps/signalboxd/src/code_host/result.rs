@@ -1,5 +1,6 @@
 //! Typed, bounded results returned by the code-host transport.
 
+use reqwest::Url;
 use serde_json::{Value, json};
 
 use super::arguments::{valid_opaque_id, valid_revision};
@@ -48,8 +49,19 @@ fn valid_required_text(value: &str) -> bool {
     !value.is_empty() && valid_text(value)
 }
 
+/// Whether a parsed location is one absolute credential-free HTTPS URL. The
+/// job-log redirect location is admitted by this same predicate.
+pub(super) fn absolute_https_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 fn valid_url(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_RESULT_URL_BYTES && !value.chars().any(char::is_control)
+    value.len() <= MAX_RESULT_URL_BYTES
+        && !value.chars().any(char::is_control)
+        && Url::parse(value).is_ok_and(|url| absolute_https_url(&url))
 }
 
 fn valid_path(value: &str) -> bool {

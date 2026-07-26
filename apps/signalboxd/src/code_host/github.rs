@@ -12,6 +12,7 @@ use signalbox_model_runtime::CredentialValue;
 
 use crate::web_fetch::{PublicDestinationClientError, public_destination_client};
 
+use super::result::absolute_https_url;
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, CiJobLogResult,
@@ -418,12 +419,7 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let redirect =
             Url::parse(location).map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
-        if redirect.scheme() != "https"
-            || redirect.host_str().is_none()
-            || !redirect.username().is_empty()
-            || redirect.password().is_some()
-            || redirect.fragment().is_some()
-        {
+        if !absolute_https_url(&redirect) || redirect.fragment().is_some() {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
         let remaining = remaining_exchange_timeout(started.elapsed())?;

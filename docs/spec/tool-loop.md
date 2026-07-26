@@ -562,8 +562,11 @@ The declarations and compact result objects are:
 
 Shared typed admission rejects extra object members; repositories are at most
 256 bytes, paths 4 KiB, comment bodies and returned text fields 64 KiB, and
-opaque node ids 512 bytes. No result has more than 100 collection members or
-more than 512 KiB of encoded JSON.
+opaque node ids 512 bytes. A returned node id or head revision is admitted by
+the same predicate its argument counterpart uses, so an identity a result
+carries can always be passed back as an argument, and every returned URL is one
+absolute credential-free HTTPS location. No result has more than 100 collection
+members or more than 512 KiB of encoded JSON.
 
 The production adapter uses fixed GitHub REST and GraphQL endpoints. It disables
 ambient proxies, automatic redirects, protocol retries, and idle reuse; uses

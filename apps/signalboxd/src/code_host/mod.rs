@@ -898,6 +898,27 @@ mod tests {
         assert_eq!(summary, None);
     }
 
+    /// A success-shaped acknowledgement whose URL is not an absolute HTTPS
+    /// location cannot become durable completed evidence.
+    #[test]
+    fn returned_urls_reject_non_absolute_https_values() {
+        let whitespace = ChangeRequestCommentResult::try_new(8001, String::from(" "));
+        let script = ChangeRequestCommentResult::try_new(8001, String::from("javascript:0"));
+        let relative = ChangeRequestCommentResult::try_new(8001, String::from("/comment/8001"));
+        let insecure =
+            ChangeRequestCommentResult::try_new(8001, String::from("http://github.example/8001"));
+        let absolute = ChangeRequestCommentResult::try_new(
+            8001,
+            String::from("https://github.example/comment/8001"),
+        );
+
+        assert_eq!(whitespace, None);
+        assert_eq!(script, None);
+        assert_eq!(relative, None);
+        assert_eq!(insecure, None);
+        assert!(absolute.is_some());
+    }
+
     /// A resolve result exists only for an acknowledgement that establishes
     /// the requested terminal posture.
     #[test]
