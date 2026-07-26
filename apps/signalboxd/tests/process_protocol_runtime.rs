@@ -424,6 +424,28 @@ async fn submit_first_input(
     }
 }
 
+/// Reads one accepted-input acknowledgement and returns the successor turn it
+/// names, requiring the exact session and acceptance ordinal the caller states.
+async fn accepted_successor_turn(
+    connection: &mut Connection,
+    session_id: CanonicalUuid,
+    acceptance: u64,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::InputSubmitted {
+            session_id: accepted_session,
+            acceptance_position,
+            turn_id,
+            ..
+        } if *accepted_session == session_id && acceptance_position.value() == acceptance => {
+            Ok(*turn_id)
+        }
+        message => {
+            Err(io::Error::other(format!("unexpected accepted-input response: {message:?}")).into())
+        }
+    }
+}
+
 async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box<dyn Error>> {
     timeout(Duration::from_secs(5), connection.response()).await?
 }
@@ -1769,20 +1791,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
             },
         )
         .await?;
-    let successor_turn_id = match response_within(&mut connection).await?.message() {
-        ServerMessage::InputSubmitted {
-            session_id: reconciled_session,
-            acceptance_position,
-            turn_id,
-            ..
-        } if *reconciled_session == session_id && acceptance_position.value() == 2 => *turn_id,
-        message => {
-            return Err(io::Error::other(format!(
-                "unexpected reconciliation response: {message:?}"
-            ))
-            .into());
-        }
-    };
+    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
     assert_ne!(successor_turn_id, parked_turn_id);
 
     connection
@@ -1845,6 +1854,83 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
             acceptance_position,
             state: TurnState::Queued { .. },
         } if *turn_id == successor_turn_id && acceptance_position.value() == 2
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-012: a reconciliation decision that already committed replays its exact
+/// recorded successor, because a claimed command identity reaches the durable
+/// replay boundary before the current-state precondition is applied.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+
+    let decision = ClientRequest::ReconcileTurn {
+        command_id: command()?,
+        session_id,
+        expected_active_turn_id: parked_turn_id,
+        content: InputContent::new(String::from("continue after reconciliation")),
+        expected_defaults_version: CanonicalU64::new(1),
+    };
+    connection
+        .request_version(ProtocolVersion::Seven, 3, decision.clone())
+        .await?;
+    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+
+    connection
+        .request_version(ProtocolVersion::Seven, 4, decision)
+        .await?;
+    let replayed_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+
+    assert_eq!(
+        replayed_turn_id, successor_turn_id,
+        "an equal reconciliation retry returns its recorded successor, never a refusal"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S04: an absent session is left to the authoritative transaction's recorded
+/// `session_not_found`, not collapsed into the precondition refusal.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s04_reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let absent_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xB2));
+
+    connection
+        .request_version(
+            ProtocolVersion::Seven,
+            1,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id: absent_session_id,
+                expected_active_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xB3)),
+                content: InputContent::new(String::from("names no session")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            detail,
+            ..
+        } if detail.value() == Some(RejectionDetail::SessionNotFound {
+            session_id: absent_session_id,
+        })
     ));
 
     drop(connection);

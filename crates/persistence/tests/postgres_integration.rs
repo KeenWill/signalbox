@@ -77,9 +77,9 @@ use signalbox_persistence::{
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
-        ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessTranscriptEntry,
-        ProcessTurnState,
+        ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
+        ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadRepository,
+        ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -6288,9 +6288,9 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
     );
     assert_eq!(
         ProcessReadRepository::new(restarted_pool.clone())
-            .active_model_call_recovery_turn(parked.session)
+            .model_call_recovery_precondition(parked.session)
             .await?,
-        Some(parked.turn)
+        ProcessModelCallRecoveryPrecondition::Parked { turn: parked.turn }
     );
 
     let wedged = SubmitInputRepository::new(restarted_pool.clone())
@@ -6388,9 +6388,9 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
     );
     assert_eq!(
         ProcessReadRepository::new(restarted_pool.clone())
-            .active_model_call_recovery_turn(parked.session)
+            .model_call_recovery_precondition(parked.session)
             .await?,
-        None
+        ProcessModelCallRecoveryPrecondition::NoParkedTurn
     );
 
     let healed_restart = scan.execute().await?;

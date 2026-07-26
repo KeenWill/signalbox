@@ -1140,6 +1140,13 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// No turn held the session slot when the caller named one.
+    NoActiveTurn {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Turn the caller expected to be active.
+        expected_active_turn_id: CanonicalUuid,
+    },
     /// The named turn is not parked on the model-call recovery wait, so no
     /// reconciliation decision is owed for it.
     ///
@@ -1188,9 +1195,9 @@ impl RejectionDetail {
     const fn minimum_protocol_version(self) -> u64 {
         match self {
             Self::DefaultsVersionExhausted { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
-            Self::ActiveTurnMismatch { .. } | Self::TurnNotAwaitingReconciliation { .. } => {
-                TURN_RECONCILIATION_PROTOCOL_VERSION
-            }
+            Self::ActiveTurnMismatch { .. }
+            | Self::NoActiveTurn { .. }
+            | Self::TurnNotAwaitingReconciliation { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::SessionNotFound { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::DefaultsVersionMismatch { .. }
@@ -3816,6 +3823,18 @@ mod tests {
                 }),
             },
             r#"{"type":"error","code":"rejected","message":"the expected active turn is stale","detail":{"type":"active_turn_mismatch","session_id":"00000000-0000-0000-0000-000000000006","expected_active_turn_id":"00000000-0000-0000-0000-000000000007","active_turn_id":"00000000-0000-0000-0000-000000000008"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("a racing decision already released the slot"),
+                detail: ErrorDetail::rejected(RejectionDetail::NoActiveTurn {
+                    session_id: uuid(6),
+                    expected_active_turn_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"a racing decision already released the slot","detail":{"type":"no_active_turn","session_id":"00000000-0000-0000-0000-000000000006","expected_active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
         )
     }
 

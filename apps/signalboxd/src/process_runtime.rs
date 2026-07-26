@@ -45,10 +45,10 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
-        ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessModelSelection,
-        ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
-        ProcessSessionAncestry, ProcessTranscriptEntry, ProcessTranscriptItem,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessImportedContentKind, ProcessImportedSourceSpeaker,
+        ProcessModelCallRecoveryPrecondition, ProcessModelSelection, ProcessReadError,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionAncestry,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -1705,7 +1705,20 @@ where
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
+    let command_id = DurableCommandId::from_uuid(command_id);
     let repository = SubmitInputRepository::new(pool.clone());
+    // A command identity that already names durable intent must reach the
+    // replay boundary unconditionally (INV-012): the first handling already
+    // released the wait, so re-applying the current-state precondition would
+    // answer a retry of a committed decision with a refusal instead of its
+    // recorded result.
+    let command_is_claimed = match repository.load(command_id).await {
+        Ok(Some(_)) | Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => true,
+        Ok(None) => false,
+        Err(error) => {
+            return write_submit_input_repository_error(writer, version, request_id, error).await;
+        }
+    };
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -1726,29 +1739,38 @@ where
         )
         .await;
     };
-    match ProcessReadRepository::new(pool.clone())
-        .active_model_call_recovery_turn(session)
-        .await
-    {
-        Ok(Some(parked)) if parked == expected_active_turn => {}
-        Ok(_) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::rejected(RejectionDetail::TurnNotAwaitingReconciliation {
-                    session_id,
-                    turn_id: expected_active_turn_id,
-                }),
-            )
-            .await;
-        }
-        Err(error) => {
-            return write_process_read_error(writer, version, request_id, error).await;
+    if !command_is_claimed {
+        match ProcessReadRepository::new(pool.clone())
+            .model_call_recovery_precondition(session)
+            .await
+        {
+            // An absent session is left to the authoritative transaction, whose
+            // recorded `SessionNotFound` the version-seven contract promises.
+            Ok(ProcessModelCallRecoveryPrecondition::SessionAbsent) => {}
+            Ok(ProcessModelCallRecoveryPrecondition::Parked { turn })
+                if turn == expected_active_turn => {}
+            Ok(
+                ProcessModelCallRecoveryPrecondition::NoParkedTurn
+                | ProcessModelCallRecoveryPrecondition::Parked { .. },
+            ) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::rejected(RejectionDetail::TurnNotAwaitingReconciliation {
+                        session_id,
+                        turn_id: expected_active_turn_id,
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                return write_process_read_error(writer, version, request_id, error).await;
+            }
         }
     }
     let request = SubmitInputRequest::try_new(
-        DurableCommandId::from_uuid(command_id),
+        command_id,
         session,
         content,
         DeliveryRequest::Interrupt {
@@ -2681,8 +2703,14 @@ fn map_rejection(
             expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
             active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
         },
-        SubmitInputRejectedResult::NoActiveTurn { .. }
-        | SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. }
+        SubmitInputRejectedResult::NoActiveTurn {
+            session,
+            expected_active_turn,
+        } => RejectionDetail::NoActiveTurn {
+            session_id: wire_uuid(session.into_uuid()),
+            expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
+        },
+        SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. }
         | SubmitInputRejectedResult::InterruptAlreadyApplied { .. }
         | SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval { .. } => {
             return Err(ProcessConnectionError::EncodeInvariant);
@@ -3591,13 +3619,14 @@ mod tests {
     use signalbox_domain::{
         ContextFrontierId, DirectModelSelection, ImportedConversation, ImportedConversationFormat,
         ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
-        SemanticTranscriptEntryId, SessionId, ToolAttemptId, TurnAttemptId, TurnId,
+        SemanticTranscriptEntryId, SessionId, SubmitInputRejectedResult, ToolAttemptId,
+        TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, ImportedContentKind,
         ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ProtocolVersion, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        ProtocolVersion, RejectionDetail, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
+        TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -3615,10 +3644,11 @@ mod tests {
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SelectedSessionRepresentationFacts,
         SnapshotSpoolError, acquire_import_permit, acquire_inbound_frame_permit,
         acquire_inbound_frame_permit_after_input, acquire_snapshot_reader_permit,
-        admitted_user_content, execute_import, inspect_connection_completion, read_frame_line,
-        replacement_model_is_admitted, required_protocol_version_for_selected_session,
-        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_turn_state,
-        write_content, write_snapshot_spool_error, write_transcript_entry,
+        admitted_user_content, execute_import, inspect_connection_completion, map_rejection,
+        read_frame_line, replacement_model_is_admitted,
+        required_protocol_version_for_selected_session, run_until_shutdown,
+        snapshot_reader_capacity, wire_model_call_state, wire_turn_state, wire_uuid, write_content,
+        write_snapshot_spool_error, write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -3778,6 +3808,41 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// INV-033: a reconciliation decision that lost its race to another
+    /// decision reaches the wire as its recorded typed rejection, not as an
+    /// encode invariant that closes the connection.
+    #[test]
+    fn inv033_racing_reconciliation_rejections_have_wire_projections() -> Result<(), Box<dyn Error>>
+    {
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        let expected_active_turn = TurnId::from_uuid(uuid::Uuid::from_u128(2));
+        let actual_active_turn = TurnId::from_uuid(uuid::Uuid::from_u128(3));
+
+        assert_eq!(
+            map_rejection(SubmitInputRejectedResult::NoActiveTurn {
+                session,
+                expected_active_turn,
+            })?,
+            RejectionDetail::NoActiveTurn {
+                session_id: wire_uuid(session.into_uuid()),
+                expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
+            }
+        );
+        assert_eq!(
+            map_rejection(SubmitInputRejectedResult::ActiveTurnMismatch {
+                session,
+                expected_active_turn,
+                actual_active_turn,
+            })?,
+            RejectionDetail::ActiveTurnMismatch {
+                session_id: wire_uuid(session.into_uuid()),
+                expected_active_turn_id: wire_uuid(expected_active_turn.into_uuid()),
+                active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
+            }
+        );
+        Ok(())
     }
 
     #[test]
