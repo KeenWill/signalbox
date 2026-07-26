@@ -15,7 +15,7 @@ use error::ClientError;
 use presentation::{Output, SnapshotSelection};
 use rustix::{
     fd::OwnedFd,
-    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, openat, statat},
+    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportFormat,
@@ -598,7 +598,7 @@ fn open_scanned_import_source(
         let flags = if components.peek().is_some() {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
         } else {
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
         };
         current = Some(
             openat(parent, name, flags, Mode::empty())
@@ -609,6 +609,15 @@ fn open_scanned_import_source(
     let descriptor = current.ok_or(ClientError::Protocol(
         "scan produced an empty candidate path",
     ))?;
+    let status = fstat(&descriptor)
+        .map_err(std::io::Error::from)
+        .map_err(ClientError::source_file)?;
+    if FileType::from_raw_mode(status.st_mode) != FileType::RegularFile {
+        return Err(ClientError::source_file(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "scan candidate is no longer a regular file",
+        )));
+    }
     Ok(tokio::fs::File::from_std(File::from(descriptor)))
 }
 
@@ -1753,6 +1762,33 @@ mod tests {
         let relative = candidate.relative.clone();
         fs::rename(&queued_directory, retained_directory)?;
         symlink(outside.path(), &queued_directory)?;
+
+        let opened = open_scanned_import_source(&scan.root, &relative);
+
+        assert!(matches!(opened, Err(ClientError::SourceFile(_))));
+        Ok(())
+    }
+
+    /// S28 / INV-038: a regular candidate replaced after enumeration by a
+    /// FIFO is rejected without waiting for a writer.
+    #[tokio::test]
+    async fn s28_inv038_scan_refuses_fifo_replacement_without_blocking()
+    -> Result<(), Box<dyn Error>> {
+        let root = tempfile::tempdir()?;
+        let candidate_path = root.path().join("conversation.jsonl");
+        fs::write(&candidate_path, b"inside")?;
+        let scan = collect_import_paths(root.path())?;
+        let candidate = scan
+            .paths
+            .first()
+            .ok_or("fixture must select one candidate")?;
+        let relative = candidate.relative.clone();
+        fs::remove_file(&candidate_path)?;
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &candidate_path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
 
         let opened = open_scanned_import_source(&scan.root, &relative);
 

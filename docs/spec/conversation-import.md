@@ -291,12 +291,14 @@ directory without following symbolic links. Traversal opens the root and each
 descendant directory through no-follow descriptors; later candidate reads reopen
 every relative path component from the retained root descriptor with no-follow
 semantics, so replacing a queued path with a symbolic link cannot redirect the
-read outside that tree. It selects only regular files whose extension is exactly
-lowercase `.jsonl`, sorts their full paths, and imposes no candidate-count cap.
-A traversal failure aborts before any request rather than hiding an unread
-subtree. Each candidate is then read and sent through the existing version-five
-`import_conversation` request, one file per request and in that sorted order;
-scan mode adds no protocol request or server-side batching.
+read outside that tree. Final candidate opens are nonblocking and the opened
+descriptor must still name a regular file, so a special-file replacement is
+skipped instead of blocking the scan. Traversal selects only regular files whose
+extension is exactly lowercase `.jsonl`, sorts their full paths, and imposes no
+candidate-count cap. A traversal failure aborts before any request rather than
+hiding an unread subtree. Each candidate is then read and sent through the
+existing version-five `import_conversation` request, one file per request and in
+that sorted order; scan mode adds no protocol request or server-side batching.
 
 For every candidate, the terminal prints an escaped, quoted local path and one
 `imported`, `already_imported`, or `skipped` outcome. Successful outcomes name

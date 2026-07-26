@@ -244,20 +244,18 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
     Ok(())
 }
 
-/// S28 / INV-038: scan mode imports every matching regular file in sorted
-/// path order, reports an oversized source without truncation, and exposes
-/// digest-idempotent replay per file.
+/// S28 / INV-038: scan mode selects recursive matching regular files and
+/// reports them in deterministic path order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_inv038_terminal_client_scan_reports_each_exact_import_outcome()
+async fn s28_inv038_terminal_client_scan_selects_recursive_files_in_sorted_path_order()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
     let source_directory = tempfile::tempdir()?;
     let first_path = source_directory.path().join("01-session.jsonl");
-    let oversized_path = source_directory.path().join("02-oversized.jsonl");
     let nested_directory = source_directory.path().join("nested");
-    let second_path = nested_directory.join("03-session.jsonl");
+    let second_path = nested_directory.join("02-session.jsonl");
     fs::create_dir(&nested_directory)?;
     fs::write(
         &first_path,
@@ -277,7 +275,6 @@ async fn s28_inv038_terminal_client_scan_reports_each_exact_import_outcome()
             "\"message\":{\"role\":\"assistant\",\"content\":\"second answer\"}}"
         ),
     )?;
-    std::fs::File::create(&oversized_path)?.set_len(OVERSIZED_IMPORT_BYTES)?;
     fs::write(
         source_directory.path().join("ignored.JSONL"),
         b"not selected",
@@ -285,9 +282,123 @@ async fn s28_inv038_terminal_client_scan_reports_each_exact_import_outcome()
     fs::write(source_directory.path().join("ignored.txt"), b"not selected")?;
     symlink(
         &first_path,
-        source_directory.path().join("04-symlink.jsonl"),
+        source_directory.path().join("03-symlink.jsonl"),
     )?;
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
+    let arguments = vec![
+        String::from("import"),
+        String::from("--format"),
+        String::from("claude-code"),
+        String::from("--scan"),
+        source_directory.path().display().to_string(),
+    ];
 
+    let inserted = run_client(socket_directory.socket().to_owned(), arguments, None).await?;
+
+    assert!(inserted.status.success());
+    assert!(inserted.stderr.is_empty());
+    let inserted_output = String::from_utf8(inserted.stdout)?;
+    let first_identity = scan_imported_identity(
+        inserted_output
+            .lines()
+            .next()
+            .ok_or_else(|| io::Error::other("the first scan outcome is absent"))?,
+        &first_path,
+    )?;
+    let second_identity = scan_imported_identity(
+        inserted_output
+            .lines()
+            .nth(1)
+            .ok_or_else(|| io::Error::other("the nested scan outcome is absent"))?,
+        &second_path,
+    )?;
+    assert_eq!(
+        inserted_output,
+        format!(
+            "imported path={:?} imported_conversation_id={first_identity}\n\
+             imported path={:?} imported_conversation_id={second_identity}\n\
+             scan_summary imported=2 already_imported=0 skipped=0\n",
+            first_path, second_path,
+        )
+    );
+
+    shutdown.send(true)?;
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-038: scan mode reports an oversized selected source as skipped
+/// without truncating it or hiding the failure total.
+#[tokio::test]
+async fn s28_inv038_terminal_client_scan_skips_oversized_source_without_truncation()
+-> Result<(), Box<dyn Error>> {
+    let source_directory = tempfile::tempdir()?;
+    let oversized_path = source_directory.path().join("oversized.jsonl");
+    std::fs::File::create(&oversized_path)?.set_len(OVERSIZED_IMPORT_BYTES)?;
+    let arguments = vec![
+        String::from("import"),
+        String::from("--format"),
+        String::from("claude-code"),
+        String::from("--scan"),
+        source_directory.path().display().to_string(),
+    ];
+
+    let skipped = run_client(
+        source_directory.path().join("missing.sock"),
+        arguments,
+        None,
+    )
+    .await?;
+
+    assert!(!skipped.status.success());
+    assert_eq!(
+        String::from_utf8(skipped.stdout)?,
+        format!(
+            "skipped path={:?} reason=the conversation import source cannot fit within the process \
+             frame bound\nscan_summary imported=0 already_imported=0 skipped=1\n",
+            oversized_path,
+        )
+    );
+    assert_eq!(
+        String::from_utf8(skipped.stderr)?,
+        "error: the conversation import scan completed with 1 skipped file(s)\n"
+    );
+    Ok(())
+}
+
+/// S28 / INV-038: exact scan replay reports the durable digest match as
+/// already imported for that file.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv038_terminal_client_scan_replays_as_already_imported() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("session.jsonl");
+    fs::write(
+        &source_path,
+        concat!(
+            "{\"sessionId\":\"terminal-scan-replay\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+            "{\"sessionId\":\"terminal-scan-replay\",\"type\":\"assistant\",",
+            "\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}"
+        ),
+    )?;
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
     let listener = LocalProcessListener::bind(socket_directory.socket())?;
@@ -314,54 +425,36 @@ async fn s28_inv038_terminal_client_scan_reports_each_exact_import_outcome()
         None,
     )
     .await?;
-    assert!(!inserted.status.success());
-    assert_eq!(
-        String::from_utf8(inserted.stderr)?,
-        "error: the conversation import scan completed with 1 skipped file(s)\n"
-    );
+
+    assert!(inserted.status.success());
+    assert!(inserted.stderr.is_empty());
     let inserted_output = String::from_utf8(inserted.stdout)?;
-    let first_identity = scan_imported_identity(
+    let imported_identity = scan_imported_identity(
         inserted_output
             .lines()
             .next()
-            .ok_or_else(|| io::Error::other("the first scan outcome is absent"))?,
-        &first_path,
-    )?;
-    let second_identity = scan_imported_identity(
-        inserted_output
-            .lines()
-            .nth(2)
-            .ok_or_else(|| io::Error::other("the nested scan outcome is absent"))?,
-        &second_path,
+            .ok_or_else(|| io::Error::other("the scan outcome is absent"))?,
+        &source_path,
     )?;
     assert_eq!(
         inserted_output,
         format!(
-            "imported path={:?} imported_conversation_id={first_identity}\n\
-             skipped path={:?} reason=the conversation import source cannot fit within the process \
-             frame bound\n\
-             imported path={:?} imported_conversation_id={second_identity}\n\
-             scan_summary imported=2 already_imported=0 skipped=1\n",
-            first_path, oversized_path, second_path,
+            "imported path={:?} imported_conversation_id={imported_identity}\n\
+             scan_summary imported=1 already_imported=0 skipped=0\n",
+            source_path,
         )
     );
 
-    let already_imported =
-        run_client(socket_directory.socket().to_owned(), arguments, None).await?;
-    assert!(!already_imported.status.success());
+    let replayed = run_client(socket_directory.socket().to_owned(), arguments, None).await?;
+
+    assert!(replayed.status.success());
+    assert!(replayed.stderr.is_empty());
     assert_eq!(
-        String::from_utf8(already_imported.stderr)?,
-        "error: the conversation import scan completed with 1 skipped file(s)\n"
-    );
-    assert_eq!(
-        String::from_utf8(already_imported.stdout)?,
+        String::from_utf8(replayed.stdout)?,
         format!(
-            "already_imported path={:?} imported_conversation_id={first_identity}\n\
-             skipped path={:?} reason=the conversation import source cannot fit within the process \
-             frame bound\n\
-             already_imported path={:?} imported_conversation_id={second_identity}\n\
-             scan_summary imported=0 already_imported=2 skipped=1\n",
-            first_path, oversized_path, second_path,
+            "already_imported path={:?} imported_conversation_id={imported_identity}\n\
+             scan_summary imported=0 already_imported=1 skipped=0\n",
+            source_path,
         )
     );
 

@@ -781,7 +781,8 @@ by their declared version as described above. The client accepts a global
 - `model <session-uuid> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid> --defaults-version <decimal> --dangerous-tool-auto-approval <disabled|approve-all>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
-- `import --format <claude-code|codex> <file>`;
+- conversation import operations described by the
+  [conversation-import operational surface](conversation-import.md#operational-surface);
 - `reconcile <session-uuid> <turn-uuid> [--command-id <uuid> --defaults-version <decimal>]`.
 
 `send` reads the exact input text from standard input through EOF and never
@@ -793,12 +794,6 @@ the operator observed in the session transcript. It prints the same recovery
 values as `send`, then follows the accepted successor turn to its own terminal,
 so one invocation both records the reconciliation decision and continues the
 conversation.
-
-`import` reads one bounded file snapshot before socket I/O, sends its exact
-bytes rather than its path, and prints either `inserted` or `already_imported`
-with the durable imported-conversation identity. Its complete behavior is owned
-by the
-[conversation-import operational surface](conversation-import.md#operational-surface).
 
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` first reads the
