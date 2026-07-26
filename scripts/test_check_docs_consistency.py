@@ -33,8 +33,17 @@ def pr_tokens(text: str) -> list[str]:
 
 def run_git(root: Path, *arguments: str) -> None:
     """Run one deterministic local-only Git fixture command."""
+    disabled_hooks = root / ".disabled-git-hooks"
+    disabled_hooks.mkdir(exist_ok=True)
     subprocess.run(
-        ["git", *arguments],
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            f"core.hooksPath={disabled_hooks}",
+            *arguments,
+        ],
         cwd=root,
         check=True,
         capture_output=True,
@@ -45,7 +54,9 @@ def run_git(root: Path, *arguments: str) -> None:
 def initialize_git_history(root: Path) -> str:
     """Create one reachable GitHub-style PR merge for the baseline fixture."""
     merged_branch = "agent/example"
-    run_git(root, "init", "-q", "-b", "main")
+    empty_template = root / ".empty-git-template"
+    empty_template.mkdir()
+    run_git(root, "init", "-q", "-b", "main", f"--template={empty_template}")
     run_git(root, "config", "user.name", "Docs checker tests")
     run_git(root, "config", "user.email", "docs-checker@example.invalid")
     run_git(root, "add", ".")
@@ -149,6 +160,19 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
+    def test_git_fixture_commands_disable_signing_and_hooks(self) -> None:
+        hooks = self.root / ".fixture-hooks"
+        hooks.mkdir()
+        pre_commit = hooks / "pre-commit"
+        pre_commit.write_text("#!/bin/sh\ntouch hook-ran\nexit 1\n", encoding="utf-8")
+        pre_commit.chmod(0o755)
+        run_git(self.root, "config", "commit.gpgSign", "true")
+        run_git(self.root, "config", "core.hooksPath", str(hooks))
+
+        run_git(self.root, "commit", "-q", "--allow-empty", "-m", "isolated fixture")
+
+        self.assertFalse((self.root / "hook-ran").exists())
+
     def test_tagged_enforcement_file_must_contain_its_invariant_tag(self) -> None:
         (self.root / "src/tests.rs").write_text(
             "#[test]\nfn untagged_test() {}\n", encoding="utf-8"
@@ -245,6 +269,24 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(failure_categories(failures), ["invariant-tag"])
         self.assertIn("test name or attached doc comment", failures[0].message)
+
+    def test_reverse_discovers_doc_tag_across_comment_gap(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "/// INV-001: attached despite the gap.\n"
+            "// The ordinary comment and blank line remain trivia.\n"
+            "\n"
+            "#[test]\n"
+            "fn generically_named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
 
     def test_non_test_invariant_mentions_do_not_require_registration(self) -> None:
         (self.root / "src/context.rs").write_text(
