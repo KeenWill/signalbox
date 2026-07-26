@@ -35,6 +35,11 @@ let
   serverCertificate = "${tlsRoot}/server.crt";
   serverKey = "${tlsRoot}/server.key";
 
+  # Generation staging. It sits inside `tlsRoot` so it is always on the same
+  # filesystem as the published artifacts, which is what makes the `mv` below
+  # a rename(2) rather than a copy — and therefore atomic.
+  tlsStaging = "${tlsRoot}/.staging";
+
   # A process-scoped home for the daemon. `production_connection_options`
   # refuses to parse when `~/.pgpass` exists under the process home, and it
   # resolves that home with `std::env::home_dir()`, which on Unix returns
@@ -231,41 +236,76 @@ in
       # All four artifacts are required, not just the certificates: a run
       # interrupted between writing a certificate and its key would otherwise
       # be skipped here and then abort on the `chmod 600` below.
+      #
+      # Presence alone is only a sound gate because nothing partial is ever
+      # published. Every artifact is generated under a staging directory and
+      # renamed into place once it is complete, so an `openssl` run killed
+      # midway — or one that runs out of space — leaves the staging copy
+      # truncated and the published path untouched. A file that exists here
+      # was written completely.
       if [ ! -f ${shellArg authorityCertificate} ] \
          || [ ! -f ${shellArg authorityKey} ] \
          || [ ! -f ${shellArg serverCertificate} ] \
          || [ ! -f ${shellArg serverKey} ]; then
         echo "dev instance: generating local TLS material under" \
              ${shellArg tlsRoot}
-        rm -f ${shellArg authorityCertificate} ${shellArg authorityKey} \
-              ${shellArg serverCertificate} ${shellArg serverKey}
+
+        # A leftover staging directory means a previous run died mid-generation;
+        # its contents are unusable by construction, so start clean.
+        rm -rf ${shellArg tlsStaging}
+        mkdir -p ${shellArg tlsStaging}
+        chmod 700 ${shellArg tlsStaging}
 
         ${shellArg openssl} req -x509 -newkey rsa:2048 -noenc -sha256 -days 3650 \
           -subj "/CN=signalbox devenv dev-instance authority" \
           -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
           -addext "keyUsage=critical,keyCertSign,cRLSign" \
-          -keyout ${shellArg authorityKey} \
-          -out ${shellArg authorityCertificate} 2>/dev/null
+          -keyout ${shellArg "${tlsStaging}/dev-ca.key"} \
+          -out ${shellArg "${tlsStaging}/dev-ca.crt"} 2>/dev/null
 
         ${shellArg openssl} req -newkey rsa:2048 -noenc -sha256 \
           -subj "/CN=localhost" \
-          -keyout ${shellArg serverKey} \
-          -out ${shellArg "${tlsRoot}/server.csr"} 2>/dev/null
+          -keyout ${shellArg "${tlsStaging}/server.key"} \
+          -out ${shellArg "${tlsStaging}/server.csr"} 2>/dev/null
 
         printf '%s\n' \
           'basicConstraints=critical,CA:FALSE' \
           'keyUsage=critical,digitalSignature,keyEncipherment' \
           'extendedKeyUsage=serverAuth' \
-          'subjectAltName=DNS:localhost' > ${shellArg "${tlsRoot}/server.ext"}
+          'subjectAltName=DNS:localhost' > ${shellArg "${tlsStaging}/server.ext"}
 
-        ${shellArg openssl} x509 -req -in ${shellArg "${tlsRoot}/server.csr"} \
+        ${shellArg openssl} x509 -req -in ${shellArg "${tlsStaging}/server.csr"} \
           -sha256 -days 3650 \
-          -CA ${shellArg authorityCertificate} -CAkey ${shellArg authorityKey} \
+          -CA ${shellArg "${tlsStaging}/dev-ca.crt"} \
+          -CAkey ${shellArg "${tlsStaging}/dev-ca.key"} \
           -CAcreateserial \
-          -extfile ${shellArg "${tlsRoot}/server.ext"} \
-          -out ${shellArg serverCertificate} 2>/dev/null
+          -extfile ${shellArg "${tlsStaging}/server.ext"} \
+          -out ${shellArg "${tlsStaging}/server.crt"} 2>/dev/null
 
-        rm -f ${shellArg "${tlsRoot}/server.csr"} ${shellArg "${tlsRoot}/server.ext"}
+        # Moded before publishing, so a published key is never even briefly
+        # group- or world-readable.
+        chmod 600 ${shellArg "${tlsStaging}/dev-ca.key"} \
+                  ${shellArg "${tlsStaging}/server.key"}
+        chmod 644 ${shellArg "${tlsStaging}/dev-ca.crt"} \
+                  ${shellArg "${tlsStaging}/server.crt"}
+
+        # Publish. Each `mv` is a rename within one filesystem, so every
+        # destination holds either the previous artifact or the complete new
+        # one — never a partial write. Removing the old set first keeps the
+        # *set* consistent too: an interruption part-way through publishing
+        # leaves at least one path missing, which the gate above turns into a
+        # clean regeneration rather than a new authority paired with a server
+        # certificate the old one signed.
+        rm -f ${shellArg authorityCertificate} ${shellArg authorityKey} \
+              ${shellArg serverCertificate} ${shellArg serverKey}
+        mv -f ${shellArg "${tlsStaging}/dev-ca.key"} ${shellArg authorityKey}
+        mv -f ${shellArg "${tlsStaging}/dev-ca.crt"} ${shellArg authorityCertificate}
+        mv -f ${shellArg "${tlsStaging}/server.key"} ${shellArg serverKey}
+        mv -f ${shellArg "${tlsStaging}/server.crt"} ${shellArg serverCertificate}
+
+        # The CSR, the extension file, and openssl's serial file were only
+        # ever inputs to the above and live entirely inside staging.
+        rm -rf ${shellArg tlsStaging}
       fi
 
       # PostgreSQL refuses to start if the private key is group- or
