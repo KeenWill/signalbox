@@ -529,10 +529,11 @@ lines. That is the checkpoint input the reset should baseline, not today's
    implemented behavior is reverified against the baseline.
 7. Apply the baseline to a second empty database. Diff normalized catalogs
    against the oracle with an explicit allowlist containing only the duplicate
-   removal and physical-name changes. Confirm the frozen checkpoint inventory
-   and the logical frontier view are present. If the review-workflow migration
-   lands, the expected table count is 58; if it is abandoned, the expected count
-   remains 48 unless other checkpoint work changes it.
+   removal, physical-name changes, and validator function/trigger rename.
+   Confirm the frozen checkpoint inventory and the logical frontier view are
+   present. If the review-workflow migration lands, the expected table count is
+   58; if it is abandoned, the expected count remains 48 unless other checkpoint
+   work changes it.
 8. Run the complete repository validation sequence and all ignored
    `postgres-integration` tests. Run a fresh hub bootstrap to exercise baseline
    1, fence advancement, and baseline 2 through the production entry point.
