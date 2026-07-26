@@ -5207,8 +5207,10 @@ pub enum RunnerDomainError {
     ContainsNull,
     TooLong,
     InvalidName,
+    DuplicateCapabilityClass(RunnerCapabilityClass),
     DuplicateTool(ToolName),
     DuplicateProfile(CredentialProfileName),
+    DuplicateWorkspaceCapability(WorkspaceCapability),
     UndeclaredProfileTool(ToolName),
     EnrollmentRevoked,
     CapabilityClassNotAllowed(RunnerCapabilityClass),
@@ -5219,6 +5221,7 @@ pub enum RunnerDomainError {
     InvalidState,
     CorrelationMismatch,
     GenerationExhausted,
+    AttemptIdentityReuse,
     SelectorMismatch,
     CredentialProfileUnavailable,
     WorkingDirectoryMismatch,
@@ -5274,6 +5277,14 @@ pub enum WorkspaceCapability {
     WorktreePerSession,
 }
 pub struct RunnerCatalog { /* private */ }
+impl RunnerCatalog {
+    pub fn try_new(
+        classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        tools: impl IntoIterator<Item = RunnerToolDeclaration>,
+        profiles: impl IntoIterator<Item = CredentialProfilePolicy>,
+        workspaces: impl IntoIterator<Item = WorkspaceCapability>,
+    ) -> Result<Self, RunnerDomainError>;
+}
 pub struct RunnerAdvertisement { /* private */ }
 
 pub enum RunnerEnrollmentState {
@@ -5298,19 +5309,33 @@ pub enum RunnerLeaseState {
     LostClaimed,
 }
 pub struct RunnerLease { /* private */ }
+impl RunnerLease {
+    // accessors: correlation(), state(), generation(), attempt(), tool(),
+    //   credential_authorization()
+    pub fn claim(
+        self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn complete(
+        self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<Self, RunnerDomainError>;
+    pub fn lose(self) -> Result<RunnerLeaseLoss, RunnerDomainError>;
+}
 pub struct RunnerLeaseReconstitutionInput {
     /* public lease and independent fence */
 }
 pub enum RunnerLeaseLoss {
-    Releasable {
+    RetryPermitted {
         lost: RunnerLease,
-        replacement: RunnerLease,
+        retry: RunnerLeaseRetryAuthority,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
         attempt: ToolAttemptId,
     },
 }
+pub struct RunnerLeaseRetryAuthority { /* private */ }
 
 pub enum WorkingDirectorySelection {
     RunnerDefault,
@@ -5337,11 +5362,42 @@ pub enum SessionRunnerPlacementState {
     RunnerLost(PinnedRunnerPlacement),
 }
 pub struct SessionRunnerPlacement { /* private */ }
+impl SessionRunnerPlacement {
+    // placement is the only producer of initial and retry lease offers
+    pub fn pin(
+        self,
+        registration: &ValidatedRunnerRegistration,
+        directory: RunnerWorkingDirectory,
+        workspace: Option<ProvisionedWorkspace>,
+    ) -> Result<SessionRunnerPin, RunnerDomainError>;
+    pub fn offer_lease(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+        grant: Option<&CredentialProfileGrant>,
+        lease: RunnerLeaseId,
+        attempt: ToolAttemptId,
+        tool: ToolName,
+        generation: RunnerGeneration,
+    ) -> Result<RunnerLease, RunnerDomainError>;
+    pub fn offer_retry(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+        grant: Option<&CredentialProfileGrant>,
+        loss: RunnerLeaseLoss,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerLease, RunnerDomainError>;
+}
+pub struct SessionRunnerPin {
+    /* public placement and optional initial grant */
+}
 pub struct RunnerPlacementReplacement {
-    /* public placement and change */
+    /* public placement, change, and optional replacement grant */
 }
 pub struct RunnerPlacementChange {
     /* public before-and-after facts */
+}
+pub struct CredentialProfilePlacementReplacement {
+    /* public placement, placement change, and grant replacement */
 }
 
 pub enum CredentialProfileGrantState {
@@ -5349,8 +5405,17 @@ pub enum CredentialProfileGrantState {
     Revoked,
 }
 pub struct CredentialProfileGrant { /* private */ }
+impl CredentialProfileGrant {
+    // accessors: state(), revision(), profile()
+    pub fn revoke(self) -> Result<Self, RunnerDomainError>;
+    pub fn reconstitute(
+        self,
+        expected_session: SessionId,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError>;
+}
 pub struct CredentialDispatchAuthorization {
-    /* public exact tool/profile authority */
+    /* public exact tool/profile decision facts; produced only inside a lease */
 }
 pub struct CredentialProfileGrantReplacement {
     /* public grant and change */
@@ -5390,8 +5455,8 @@ pub struct CredentialProfileChange {
 | domain: fatal_mismatch                             | 0                    |
 | domain: replace_session_defaults                   | 13                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 38                   |
-| **signalbox-domain total**                         | **407 (+1 free fn)** |
+| domain: runner                                     | 41                   |
+| **signalbox-domain total**                         | **410 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
