@@ -83,7 +83,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testReplayDeduplicatesSnapshotCursorAndPreservesUnknownEvent() throws {
+  func testS24INV032ReplayDeduplicatesSnapshotCursorAndPreservesUnknownEvent() throws {
     var transport = try SynchronizationFixture.transportAtReplay(cursor: 10)
 
     let duplicateEffects = transport.send(
@@ -604,6 +604,137 @@ final class SessionSynchronizationTests: XCTestCase {
       .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
     )
   }
+
+  func testFrameAfterStopIsIgnoredWithoutRestartingSynchronization() throws {
+    var transport = try SynchronizationFixture.transport()
+
+    _ = transport.send(.start)
+    _ = transport.send(.stop)
+    let effects = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.unknownTopLevelMessage())
+    )
+
+    XCTAssertTrue(effects.isEmpty)
+    XCTAssertEqual(transport.machine.phase, .stopped)
+    XCTAssertTrue(transport.machine.diagnostics.isEmpty)
+  }
+
+  func testLateFrameInRecoveryCannotConsumeAnotherRetry() throws {
+    var transport = try SynchronizationFixture.transport()
+
+    _ = transport.send(.start)
+    _ = transport.send(
+      .transportEnded(generation: 1, message: "fixture disconnect")
+    )
+    let effects = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.unknownTopLevelMessage())
+    )
+
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .connect, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["report_diagnostic"]
+    )
+    XCTAssertEqual(transport.machine.diagnostics.last?.kind, .staleCompletion)
+  }
+
+  func testMalformedKnownSnapshotFrameFailsClosedIntoRecovery() throws {
+    var transport = try SynchronizationFixture.transportInHistory(cursor: 10)
+
+    let effects = transport.send(
+      .frame(
+        generation: 1,
+        message: try SynchronizationFixture.malformedKnownSnapshotEntry()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testSnapshotRecordCapacityFailsClosedWithoutPublishingPartialState() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: 10,
+      snapshotCapacity: .init(maximumRecords: 1, maximumUTF8Bytes: 1_024)
+    )
+
+    _ = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.queuedTurn())
+    )
+    let effects = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.markerEntry(index: 0))
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testSnapshotUTF8CapacityFailsClosedWithoutPublishingPartialState() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: 10,
+      snapshotCapacity: .init(maximumRecords: 10, maximumUTF8Bytes: 5)
+    )
+
+    let effects = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.queuedTurn())
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .history, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testNonRetriableProtocolErrorReportsTerminalFailure() throws {
+    var transport = try SynchronizationFixture.transport()
+
+    _ = transport.send(.start)
+    _ = transport.send(.connected(generation: 1))
+    let effects = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.notFoundError())
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsTerminalFailure(effects))
+    XCTAssertFalse(SynchronizationFixture.containsRetryLimit(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .hello, failureCount: 1, nextGeneration: nil)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.last?.kind, .terminalFailure)
+  }
+
+  func testPrimaryDisconnectDuringSideSnapshotIsAttributedToSteadyStage() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+
+    _ = transport.send(
+      .frame(generation: 1, message: try SynchronizationFixture.completedEvent(cursor: 20))
+    )
+    let effects = transport.send(
+      .transportEnded(generation: 1, message: "fixture primary disconnect")
+    )
+
+    XCTAssertEqual(
+      transport.machine.phase,
+      .recovery(failedStage: .steady, failureCount: 1, nextGeneration: 2)
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.reconnectDelay(in: effects),
+      .milliseconds(100)
+    )
+  }
 }
 
 private struct ScriptedSynchronizationTransport {
@@ -634,26 +765,34 @@ private enum SynchronizationFixture {
     ),
     retry: SignalboxSynchronizationRetryPolicy(
       delays: [.milliseconds(100), .milliseconds(200)]
-    )
+    ),
+    snapshotCapacity: .init(maximumRecords: 128, maximumUTF8Bytes: 1_048_576)
   )
 
   static func sessionID() throws -> SignalboxCanonicalUUID {
     try SignalboxCanonicalUUID(validating: session)
   }
 
-  static func transport() throws -> ScriptedSynchronizationTransport {
+  static func transport(
+    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity = policy.snapshotCapacity
+  ) throws -> ScriptedSynchronizationTransport {
     ScriptedSynchronizationTransport(
       machine: SignalboxSessionSynchronizationMachine(
         sessionID: try sessionID(),
-        policy: policy
+        policy: SignalboxSessionSynchronizationPolicy(
+          deadlines: policy.deadlines,
+          retry: policy.retry,
+          snapshotCapacity: snapshotCapacity
+        )
       )
     )
   }
 
   static func transportInHistory(
-    cursor: UInt64
+    cursor: UInt64,
+    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity = policy.snapshotCapacity
   ) throws -> ScriptedSynchronizationTransport {
-    var result = try transport()
+    var result = try transport(snapshotCapacity: snapshotCapacity)
     _ = result.send(.start)
     _ = result.send(.connected(generation: 1))
     _ = result.send(
@@ -849,6 +988,33 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func malformedKnownSnapshotEntry() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_entry",
+        "entry_index":17,
+        "source_session_id":"\(session)",
+        "entry_id":"\(entry)",
+        "entry":{"type":"turn_completed","turn_id":"\(turn)"}
+      }
+      """
+    )
+  }
+
+  static func notFoundError() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"error",
+        "code":"not_found",
+        "message":"fixture session missing",
+        "detail":null
+      }
+      """
+    )
+  }
+
   static func unknownTopLevelMessage() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -908,6 +1074,12 @@ private enum SynchronizationFixture {
     effects.contains(.retryLimitReached)
   }
 
+  static func containsTerminalFailure(
+    _ effects: [SignalboxSessionSynchronizationEffect]
+  ) -> Bool {
+    effects.contains(.terminalFailure)
+  }
+
   static func containsSideMerge(
     _ effects: [SignalboxSessionSynchronizationEffect]
   ) -> Bool {
@@ -957,6 +1129,8 @@ private enum SynchronizationFixture {
         return "report_diagnostic"
       case .retryLimitReached:
         return "retry_limit_reached"
+      case .terminalFailure:
+        return "terminal_failure"
       }
     }
   }

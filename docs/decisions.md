@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Bound native snapshot validation in memory
+
+**Context.** The process protocol deliberately has no aggregate transcript-size
+limit, while the native synchronization machine must validate a complete
+snapshot before publishing it. Retaining every record and its identity indexes
+without a client-side bound lets one snapshot consume unbounded memory. The
+bound is an operational client concern rather than a wire restriction.
+
+**Decision.** Every native synchronization policy supplies an explicit snapshot
+capacity: a maximum record count for fixed per-record overhead and a maximum
+retained UTF-8 byte count for wire strings and unknown JSON payloads. Crossing
+either bound rejects the snapshot through the existing bounded recovery path;
+the machine never publishes the partial snapshot. The application wiring owns
+the concrete operational values.
+
+**Rejected alternatives.** Unbounded retention leaves the client exposed to
+unbounded heap growth. A disk-backed spool and identity index would add storage
+lifecycle and failure modes disproportionate to this phase. Silent truncation
+would publish state the server never described.
+
+**Affects.** The native synchronization policy, snapshot accumulator, scripted
+transport tests, and application composition that selects the capacity.
+
 ## 2026-07-25 — Scoped verification references on specification pages
 
 **Context.** Every `docs/spec/` page names the pull request its claims were last

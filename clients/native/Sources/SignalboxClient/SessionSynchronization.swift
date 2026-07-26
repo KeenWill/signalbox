@@ -47,13 +47,30 @@ public struct SignalboxSynchronizationRetryPolicy: Equatable, Sendable {
 public struct SignalboxSessionSynchronizationPolicy: Equatable, Sendable {
   public let deadlines: SignalboxSynchronizationDeadlines
   public let retry: SignalboxSynchronizationRetryPolicy
+  public let snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
 
   public init(
     deadlines: SignalboxSynchronizationDeadlines,
-    retry: SignalboxSynchronizationRetryPolicy
+    retry: SignalboxSynchronizationRetryPolicy,
+    snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
   ) {
     self.deadlines = deadlines
     self.retry = retry
+    self.snapshotCapacity = snapshotCapacity
+  }
+}
+
+/// The caller-selected heap bound for one validated snapshot.
+///
+/// Record count bounds fixed per-record overhead. UTF-8 bytes bound retained
+/// wire strings and unknown JSON payloads. Zero permits only an empty snapshot.
+public struct SignalboxSynchronizationSnapshotCapacity: Equatable, Sendable {
+  public let maximumRecords: UInt
+  public let maximumUTF8Bytes: UInt
+
+  public init(maximumRecords: UInt, maximumUTF8Bytes: UInt) {
+    self.maximumRecords = maximumRecords
+    self.maximumUTF8Bytes = maximumUTF8Bytes
   }
 }
 
@@ -82,6 +99,7 @@ public struct SignalboxSynchronizationDiagnostic: Equatable, Sendable {
     case retryExhausted
     case staleCompletion
     case staleSnapshot
+    case terminalFailure
     case transport
   }
 
@@ -187,6 +205,7 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
   case scheduleReconnect(generation: UInt64, after: Duration)
   case reportDiagnostic(SignalboxSynchronizationDiagnostic)
   case retryLimitReached
+  case terminalFailure
 }
 
 /// A transport-independent reducer for one followed session.
@@ -297,7 +316,11 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       return replayFrame(message, generation: currentGeneration)
     case .steady(let currentGeneration, _, _):
       return steadyFrame(message, generation: currentGeneration)
-    case .stopped, .connect, .recovery:
+    case .stopped:
+      return []
+    case .recovery:
+      return staleCompletion(stage: stage)
+    case .connect:
       return protocolFailure(
         stage: stage,
         message: "Received a process frame outside a readable synchronization phase."
@@ -312,7 +335,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
   ) -> [SignalboxSessionSynchronizationEffect] {
     switch message {
     case .transcriptSnapshotStart(let boundary) where boundary.sessionID == sessionID:
-      accumulator = SignalboxSnapshotAccumulator(boundary: boundary)
+      accumulator = SignalboxSnapshotAccumulator(
+        boundary: boundary,
+        capacity: policy.snapshotCapacity
+      )
       replayBuffer = []
       phase = .history(
         generation: currentGeneration,
@@ -365,9 +391,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       return diagnosticEffects(for: followed, stage: .history)
     case .diagnostic(let kind, let decodingDiagnostic):
       accumulator = currentAccumulator
+      if let decodingDiagnostic {
+        return protocolFailure(stage: .history, message: decodingDiagnostic.message)
+      }
       return reportUnknown(
         kind: kind,
-        decodingDiagnostic: decodingDiagnostic,
+        decodingDiagnostic: nil,
         stage: .history
       )
     case .completed(let snapshot):
@@ -546,7 +575,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     if refresh.accumulator == nil {
       switch message {
       case .transcriptSnapshotStart(let boundary) where boundary.sessionID == sessionID:
-        refresh.accumulator = SignalboxSnapshotAccumulator(boundary: boundary)
+        refresh.accumulator = SignalboxSnapshotAccumulator(
+          boundary: boundary,
+          capacity: policy.snapshotCapacity
+        )
         activeRefresh = refresh
         return []
       case .protocolError(let remote):
@@ -575,9 +607,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .diagnostic(let kind, let decodingDiagnostic):
       refresh.accumulator = currentAccumulator
       activeRefresh = refresh
+      if let decodingDiagnostic {
+        return protocolFailure(stage: .sideHistory, message: decodingDiagnostic.message)
+      }
       return reportUnknown(
         kind: kind,
-        decodingDiagnostic: decodingDiagnostic,
+        decodingDiagnostic: nil,
         stage: .sideHistory
       )
     case .completed(let snapshot):
@@ -660,7 +695,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     else {
       return staleCompletion(stage: stage)
     }
-    return enterRecovery(stage: stage, message: message, kind: .transport)
+    return enterRecovery(stage: primaryTransportStage, message: message, kind: .transport)
   }
 
   private mutating func sideTransportEnded(
@@ -808,6 +843,17 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     }
     effects.append(.closeFollow(generation: oldGeneration))
     effects.append(.reportDiagnostic(diagnostic))
+    guard permitsRetry else {
+      let terminal = SignalboxSynchronizationDiagnostic(
+        kind: .terminalFailure,
+        stage: failedStage,
+        message: "Synchronization stopped after a non-retriable protocol failure."
+      )
+      diagnostics.append(terminal)
+      effects.append(.reportDiagnostic(terminal))
+      effects.append(.terminalFailure)
+      return effects
+    }
     if let retryDelay, let retryGeneration {
       effects.append(.scheduleReconnect(generation: retryGeneration, after: retryDelay))
     } else {
@@ -928,6 +974,15 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     }
   }
 
+  private var primaryTransportStage: SignalboxSynchronizationStage {
+    switch phase {
+    case .steady:
+      return .steady
+    default:
+      return stage
+    }
+  }
+
   private func deadlineStage(
     _ token: SignalboxSynchronizationDeadlineToken
   ) -> SignalboxSynchronizationStage {
@@ -996,6 +1051,7 @@ private struct SignalboxSnapshotEntryIdentity: Hashable {
 
 private struct SignalboxSnapshotAccumulator: Sendable {
   let boundary: SignalboxTranscriptSnapshotBoundary
+  let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
   private var turnIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
@@ -1005,9 +1061,14 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   private var entriesStarted = false
   private var contentEntryIndex: UInt64?
   private var expectedFragmentIndex: UInt64 = 0
+  private var retainedUTF8Bytes: UInt = 0
 
-  init(boundary: SignalboxTranscriptSnapshotBoundary) {
+  init(
+    boundary: SignalboxTranscriptSnapshotBoundary,
+    capacity: SignalboxSynchronizationSnapshotCapacity
+  ) {
     self.boundary = boundary
+    self.capacity = capacity
   }
 
   mutating func ingest(
@@ -1032,7 +1093,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
-      records.append(.turn(turn))
+      guard append(.turn(turn)) else {
+        return .invalid("Snapshot exceeded the configured native-client capacity.")
+      }
       return .accepted
     case .transcriptEntry(let entry):
       entriesStarted = true
@@ -1048,7 +1111,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         return .invalid("Snapshot entry indices or source-qualified identities were invalid.")
       }
       entryCount = entryCount.addingReportingOverflow(1).partialValue
-      records.append(.entry(entry))
+      guard append(.entry(entry)) else {
+        return .invalid("Snapshot exceeded the configured native-client capacity.")
+      }
       return .accepted
     case .transcriptTextEntry(let entry):
       entriesStarted = true
@@ -1065,7 +1130,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       }
       contentEntryIndex = entry.entryIndex.rawValue
       expectedFragmentIndex = 0
-      records.append(.textEntry(entry))
+      guard append(.textEntry(entry)) else {
+        return .invalid("Snapshot exceeded the configured native-client capacity.")
+      }
       return .accepted
     case .transcriptSnapshotEnd(let end):
       guard
@@ -1103,7 +1170,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     case .transcriptContent(let content)
     where content.entryIndex.rawValue == contentEntryIndex
       && content.fragmentIndex.rawValue == expectedFragmentIndex:
-      records.append(.content(content))
+      guard append(.content(content)) else {
+        return .invalid("Snapshot exceeded the configured native-client capacity.")
+      }
       if content.finalFragment {
         self.contentEntryIndex = nil
         entryCount = entryCount.addingReportingOverflow(1).partialValue
@@ -1118,5 +1187,144 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     default:
       return .invalid("Snapshot text content fragments were invalid.")
     }
+  }
+
+  private mutating func append(
+    _ record: SignalboxSynchronizationSnapshot.Record
+  ) -> Bool {
+    let recordBytes = record.retainedUTF8Bytes
+    let (nextBytes, overflowed) = retainedUTF8Bytes.addingReportingOverflow(recordBytes)
+    guard
+      UInt(records.count) < capacity.maximumRecords,
+      !overflowed,
+      nextBytes <= capacity.maximumUTF8Bytes
+    else {
+      return false
+    }
+    records.append(record)
+    retainedUTF8Bytes = nextBytes
+    return true
+  }
+}
+
+extension SignalboxSynchronizationSnapshot.Record {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .turn(let turn):
+      return turn.state.retainedUTF8Bytes
+    case .entry(let message):
+      return message.entry.retainedUTF8Bytes
+    case .textEntry(let message):
+      return message.entry.retainedUTF8Bytes
+    case .content(let content):
+      return UInt(content.contentFragment.utf8.count)
+    }
+  }
+}
+
+extension SignalboxTranscriptTurnState {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .queued(_, let content):
+      return UInt(content.utf8.count)
+    case .activeRunning(_, let currentModelCall):
+      return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .unknown(_, let payload, let diagnostic):
+      return payload.retainedUTF8Bytes
+        .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
+    case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
+      return 0
+    }
+  }
+}
+
+extension SignalboxCurrentModelCallState {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .unknown(_, let payload):
+      return payload.retainedUTF8Bytes
+    case .prepared, .inFlight, .cancellationRequested:
+      return 0
+    }
+  }
+}
+
+extension SignalboxTranscriptEntry {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .assistantToolUse(_, _, _, let toolName, let arguments):
+      return UInt(toolName.utf8.count).saturatedAdding(UInt(arguments.utf8.count))
+    case .toolExecutionResult(_, _, let content),
+      .toolDenied(_, let content),
+      .toolClosed(_, let content):
+      return UInt(content.utf8.count)
+    case .imported(_, _, let sourceSpeaker, _):
+      return sourceSpeaker.retainedUTF8Bytes
+    case .unknown(_, let payload, let diagnostic):
+      return payload.retainedUTF8Bytes
+        .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
+    case .turnCompleted, .turnFailed, .turnCancelled:
+      return 0
+    }
+  }
+}
+
+extension SignalboxTranscriptTextEntry {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .imported(_, _, let sourceSpeaker):
+      return sourceSpeaker.retainedUTF8Bytes
+    case .unknown(_, let payload, let diagnostic):
+      return payload.retainedUTF8Bytes
+        .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
+    case .user, .assistant:
+      return 0
+    }
+  }
+}
+
+extension SignalboxImportedSourceSpeaker {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .unknown(_, let payload):
+      return payload.retainedUTF8Bytes
+    case .notAttested, .attestedAbsent, .attested:
+      return 0
+    }
+  }
+}
+
+extension Dictionary where Key == String, Value == SignalboxJSONValue {
+  fileprivate var retainedUTF8Bytes: UInt {
+    reduce(into: UInt(0)) { total, field in
+      total = total.saturatedAdding(UInt(field.key.utf8.count))
+      total = total.saturatedAdding(field.value.retainedUTF8Bytes)
+    }
+  }
+}
+
+extension SignalboxJSONValue {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .object(let object):
+      return object.retainedUTF8Bytes
+    case .array(let array):
+      return array.reduce(into: UInt(0)) { total, value in
+        total = total.saturatedAdding(value.retainedUTF8Bytes)
+      }
+    case .string(let string):
+      return UInt(string.utf8.count)
+    case .number, .bool, .null:
+      return 0
+    }
+  }
+}
+
+extension UInt {
+  fileprivate func saturatedAdding(_ other: UInt) -> UInt {
+    let (sum, overflowed) = addingReportingOverflow(other)
+    return overflowed ? .max : sum
   }
 }
