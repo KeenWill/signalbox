@@ -1,4 +1,5 @@
-import SignalboxModels
+import Foundation
+@testable import SignalboxNative
 import XCTest
 
 final class SignalboxModelsTests: XCTestCase {
