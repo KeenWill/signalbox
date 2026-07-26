@@ -13,9 +13,9 @@ conversation-import surface adds protocol version five; versions one through
 four remain unchanged, verified through PR #252 (`agent/import-surfaces`). The
 mid-session model-selection stack adds protocol version six for complete,
 forward-only defaults replacement and its model-identity frontier entry;
-versions one through five remain unchanged, verified on
-`agent/mid-session-model`. The implementation in this stack speaks versions one
-through six, and its terminal client selects version six. This page is the
+versions one through five remain unchanged, verified through PR #272
+(`agent/mid-session-model`). The implementation in this stack speaks versions
+one through six, and its terminal client selects version six. This page is the
 normative boundary between a local client process and `signalbox-hubd`; domain
 values, PostgreSQL records, and wire messages remain distinct representations.
 

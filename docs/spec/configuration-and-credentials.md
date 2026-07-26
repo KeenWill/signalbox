@@ -12,8 +12,8 @@ in [process configuration](#process-configuration) were verified through PR #237
 (`agent/fix-pg-env-surface`), in `production_connection_options` under
 `crates/persistence/src/lib.rs`. Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The per-turn pinning
-behavior at a mid-session defaults boundary was verified on
-`agent/mid-session-model`.
+behavior at a mid-session defaults boundary was verified through PR #272
+(`agent/mid-session-model`).
 
 ## Process configuration
 
