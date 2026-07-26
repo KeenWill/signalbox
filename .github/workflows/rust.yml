@@ -20,6 +20,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check domain spine sync
         run: python3 scripts/check_domain_spine.py
+      - name: Check documentation consistency
+        run: python3 scripts/check_docs_consistency.py
+      - name: Test documentation consistency checker
+        run: python3 scripts/test_check_docs_consistency.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting

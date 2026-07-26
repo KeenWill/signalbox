@@ -726,6 +726,30 @@ process-configuration section of
 direct `url` dependency for `signalbox-persistence` — already in the tree as
 SQLx's own URL parser, so it adds an edge rather than a crate.
 
+## 2026-07-25 — Check living-spec consistency deterministically in CI
+
+**Context.** Reviews have repeatedly found dead file and heading citations,
+premature invariant-enforcement references, misplaced decision entries, and
+missing specification verification references. These checks depend only on the
+checked-out repository but were still performed by reviewers.
+
+**Decision.** Add one Python-standard-library checker to the validate job. It
+checks invariant enforcement citations and explicitly named tests, every
+relative Markdown target and heading anchor under `docs/` and in `AGENTS.md`,
+newest-first decision dates, and the presence and local format of subsystem-page
+verification references. Output is stable and per violation; the check performs
+no network access or semantic PR verification.
+
+**Rejected alternatives.** Keep the checks reviewer-only, which preserves the
+repeated labor and late feedback. Add a third-party link checker, which adds a
+dependency without covering the repository-specific invariant and decision
+formats. Discover every INV-tagged test or judge whether a verification PR is
+fresh, which would exceed the mechanically decidable scope.
+
+**Affects.** `scripts/check_docs_consistency.py`, its regression tests,
+`AGENTS.md`, the Rust workflow's validate job, and future edits to the
+living-spec surface.
+
 ## 2026-07-25 — Prohibit credential-capable logging in shipping native sources
 
 **Context.** The native client holds an API credential, and an error-path test

@@ -1425,6 +1425,48 @@ mod tests {
         assert_eq!(admitted.as_str(), "\u{00a0}denied\u{00a0}");
     }
 
+    /// S15: the admission bound is inclusive, so a result of exactly the
+    /// bounded size is admitted exactly.
+    #[test]
+    fn s15_result_text_admits_exactly_the_bounded_size() {
+        let at_bound = "r".repeat(MAX_TOOL_RESULT_TEXT_BYTES);
+
+        let admitted = ToolResultText::try_new(at_bound.clone())
+            .expect("the bound itself is an admissible result size");
+        assert_eq!(admitted.as_str(), at_bound);
+    }
+
+    /// S15: one byte past the bound is refused, and the refusal reports the
+    /// observed size while retaining the rejected text without rewriting it.
+    #[test]
+    fn s15_result_text_rejects_one_byte_past_the_bound() {
+        let past_bound = "r".repeat(MAX_TOOL_RESULT_TEXT_BYTES + 1);
+
+        let error = ToolResultText::try_new(past_bound.clone())
+            .expect_err("one byte past the bound is not an admissible result");
+
+        assert_eq!(
+            error.failure(),
+            ToolResultTextFailure::TooLarge {
+                bytes: past_bound.len(),
+            }
+        );
+        assert_eq!(error.value(), past_bound);
+    }
+
+    /// S15: literal U+0000 cannot enter the durable result vocabulary, and the
+    /// refusal retains the rejected text without rewriting it.
+    #[test]
+    fn s15_result_text_rejects_a_literal_null() {
+        let value = String::from("head\0tail");
+
+        let error = ToolResultText::try_new(value.clone())
+            .expect_err("PostgreSQL text cannot preserve a literal null");
+
+        assert_eq!(error.failure(), ToolResultTextFailure::ContainsNull);
+        assert_eq!(error.value(), value);
+    }
+
     /// INV-012: durable-command comparison equality excludes only command
     /// identity and retains the exact decision payload.
     #[test]
