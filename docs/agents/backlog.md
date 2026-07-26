@@ -140,7 +140,12 @@ in the archive's directory layout — a per-session subagent directory whose
 placement, not whose bytes, names the parent. The likely resolution is declared
 lineage: the parent arrives as explicit caller-supplied evidence on the import
 request, the operator asserting the relationship, which keeps the converter
-pure. The owning spec diff decides.
+pure. The same request also carries the source filename, captured as recorded
+provenance evidence and never as identity input, which leaves the byte-digest
+identity law untouched. It is cheap, auditable corroboration: some source
+formats name their files by session identifier, and that is worth the most
+exactly where in-band metadata is thin, as in the subagent case. The owning spec
+diff decides.
 
 Counting follows from the first-class stance: subagent conversations are
 conversations and count in any conversation inventory, with the provenance
