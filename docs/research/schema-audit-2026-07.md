@@ -511,7 +511,8 @@ lines. That is the checkpoint input the reset should baseline, not today's
    functions, views, and triggers. Preserve a schema-only dump as a review
    oracle, not as blindly accepted source.
 3. Author two checkpoint-dated files:
-   - baseline 1: the shared immutable-record helper plus `hub_fence_state`, its
+   - baseline 1: the shared immutable-record and
+     `reject_outbox_table_truncate()` helpers plus `hub_fence_state`, its
      guards, and seed row;
    - baseline 2: every remaining final table, singleton seed, constraint,
      independent index, function, view, and trigger in dependency order.
