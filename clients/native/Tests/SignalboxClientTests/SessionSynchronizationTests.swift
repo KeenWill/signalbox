@@ -410,6 +410,63 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testINV033ActiveRunningRequiresNullableModelCallMember() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.activeRunningWithoutModelCallMember()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testINV033FailedTurnRequiresNullableTerminalMembers() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.failedTurnWithoutNullableMembers()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testINV033CancelledTurnRequiresNullableModelCallMember() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.cancelledTurnWithoutModelCallMember()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testINV033FutureEntryVariantFailsAuthoritativeSnapshotClosed() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -636,6 +693,33 @@ final class SessionSynchronizationTests: XCTestCase {
         generation: 1,
         cursor: SignalboxCanonicalUInt64(rawValue: bufferedCursor),
         refreshID: nil
+      )
+    )
+  }
+
+  func testUnknownEventRequestsBoundedSideSnapshotRefresh() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["report_diagnostic", "publish_event", "request_side_snapshot", "arm_deadline"]
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(
+        cursor: SynchronizationFixture.unknownCursor,
+        refreshID: SynchronizationFixture.firstRefreshID
       )
     )
   }
@@ -1117,6 +1201,25 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testStoppingRecoveryCancelsScheduledReconnect() throws {
+    var transport = try SynchronizationFixture.transport()
+
+    _ = transport.send(.start)
+    _ = transport.send(
+      .transportEnded(
+        generation: SynchronizationFixture.initialGeneration,
+        message: "fixture disconnect"
+      )
+    )
+    let effects = transport.send(.stop)
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      ["cancel_reconnect", "close_follow"]
+    )
+    XCTAssertEqual(transport.machine.phase, .stopped)
+  }
+
   func testDuplicateSnapshotEntryFailsClosedIntoRecovery() throws {
     var transport = try SynchronizationFixture.transportInHistory(cursor: 10)
 
@@ -1311,6 +1414,14 @@ final class SessionSynchronizationTests: XCTestCase {
       SynchronizationFixture.reconnectDelay(in: effects),
       SynchronizationFixture.policy.retry.delays.first
     )
+    XCTAssertTrue(
+      effects.contains(
+        .cancelSideSnapshot(
+          generation: SynchronizationFixture.initialGeneration,
+          refreshID: SynchronizationFixture.firstRefreshID
+        )
+      )
+    )
   }
 }
 
@@ -1369,12 +1480,13 @@ private enum SynchronizationFixture {
   }
 
   static func steady(
-    cursor: UInt64
+    cursor: UInt64,
+    refreshID: UInt64? = nil
   ) -> SignalboxSessionSynchronizationPhase {
     .steady(
       generation: initialGeneration,
       cursor: SignalboxCanonicalUInt64(rawValue: cursor),
-      refreshID: nil
+      refreshID: refreshID
     )
   }
 
@@ -1694,6 +1806,55 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func activeRunningWithoutModelCallMember() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_running",
+          "current_attempt_id":"44444444-4444-4444-8444-444444444444"
+        }
+      }
+      """
+    )
+  }
+
+  static func failedTurnWithoutNullableMembers() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"failed",
+          "terminal_frontier_id":"\(frontier)"
+        }
+      }
+      """
+    )
+  }
+
+  static func cancelledTurnWithoutModelCallMember() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"cancelled",
+          "terminal_frontier_id":"\(frontier)",
+          "terminal_attempt_id":"44444444-4444-4444-8444-444444444444"
+        }
+      }
+      """
+    )
+  }
+
   static func futureTranscriptEntry() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -1995,10 +2156,7 @@ private enum SynchronizationFixture {
       {"version":5,"request_id":"1","message":\(object)}
       """.utf8
     )
-    return try SignalboxJSONCoding.decoder().decode(
-      SignalboxProcessServerFrame.self,
-      from: data
-    ).message
+    return try SignalboxProcessServerFrame.decode(from: data).message
   }
 
   static func publishedSnapshot(
@@ -2109,10 +2267,14 @@ private enum SynchronizationFixture {
         return "publish_event"
       case .requestSideSnapshot:
         return "request_side_snapshot"
+      case .cancelSideSnapshot:
+        return "cancel_side_snapshot"
       case .mergeSideSnapshot:
         return "merge_side_snapshot"
       case .scheduleReconnect:
         return "schedule_reconnect"
+      case .cancelReconnect:
+        return "cancel_reconnect"
       case .reportDiagnostic:
         return "report_diagnostic"
       case .retryLimitReached:

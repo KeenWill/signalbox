@@ -321,6 +321,22 @@ public struct SignalboxProcessServerFrame: Decodable, Equatable, Sendable {
   public let requestID: SignalboxCanonicalUInt64
   public let message: SignalboxProcessServerMessage
 
+  public init(from decoder: Decoder) throws {
+    try decoder.rejectDuplicateObjectMembers()
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    version = try container.decode(SignalboxProcessProtocolVersion.self, forKey: .version)
+    requestID = try container.decode(SignalboxCanonicalUInt64.self, forKey: .requestID)
+    message = try container.decode(SignalboxProcessServerMessage.self, forKey: .message)
+  }
+
+  public static func decode(from data: Data) throws -> Self {
+    var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
+    let duplicateObjectPaths = try scanner.scan()
+    let decoder = SignalboxJSONCoding.decoder()
+    decoder.userInfo[.signalboxDuplicateObjectPaths] = duplicateObjectPaths
+    return try decoder.decode(Self.self, from: data)
+  }
+
   private enum CodingKeys: String, CodingKey {
     case version
     case requestID = "request_id"
@@ -356,6 +372,27 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   )
 
   public init(from decoder: Decoder) throws {
+    if decoder.containsDuplicateObjectMembers {
+      let payload =
+        try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
+      guard case .string(let kind) = payload["type"] else {
+        throw DecodingError.keyNotFound(
+          SignalboxDynamicCodingKey("type"),
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Tagged object is missing its type."
+          )
+        )
+      }
+      self = .unknown(
+        kind: kind,
+        payload: payload,
+        decodingDiagnostic: SignalboxDecodingDiagnostic(
+          error: decoder.duplicateObjectMembersError()
+        )
+      )
+      return
+    }
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
@@ -608,6 +645,7 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           ["type", "current_attempt_id", "current_model_call"],
           decoder: decoder
         )
+        try tagged.requireFields(["current_model_call"], decoder: decoder)
         self = .activeRunning(
           currentAttemptID: try decoder.decode("current_attempt_id"),
           currentModelCall: try decoder.decodeIfPresent("current_model_call")
@@ -641,6 +679,10 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call"],
           decoder: decoder
         )
+        try tagged.requireFields(
+          ["terminal_attempt_id", "terminal_model_call"],
+          decoder: decoder
+        )
         self = .failed(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decodeIfPresent("terminal_attempt_id"),
@@ -671,6 +713,7 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call_id"],
           decoder: decoder
         )
+        try tagged.requireFields(["terminal_model_call_id"], decoder: decoder)
         self = .cancelled(
           terminalFrontierID: try decoder.decode("terminal_frontier_id"),
           terminalAttemptID: try decoder.decode("terminal_attempt_id"),
@@ -1290,6 +1333,7 @@ private struct SignalboxTaggedPayload: Decodable {
   let payload: [String: SignalboxJSONValue]
 
   init(from decoder: Decoder) throws {
+    try decoder.rejectDuplicateObjectMembers()
     payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
     guard case .string(let kind) = payload["type"] else {
       throw DecodingError.keyNotFound(
@@ -1317,6 +1361,24 @@ private struct SignalboxTaggedPayload: Decodable {
       )
     )
   }
+
+  func requireFields(
+    _ requiredFields: Set<String>,
+    decoder: Decoder
+  ) throws {
+    guard
+      let field = requiredFields.sorted().first(where: { payload[$0] == nil })
+    else {
+      return
+    }
+    throw DecodingError.keyNotFound(
+      SignalboxDynamicCodingKey(field),
+      .init(
+        codingPath: decoder.codingPath,
+        debugDescription: "Tagged object is missing a required field."
+      )
+    )
+  }
 }
 
 /// The decoded members of a closed object that carries no `type` discriminator.
@@ -1330,6 +1392,7 @@ private struct SignalboxUntaggedPayload: Decodable {
   let payload: [String: SignalboxJSONValue]
 
   init(from decoder: Decoder) throws {
+    try decoder.rejectDuplicateObjectMembers()
     payload = try decoder.singleValueContainer().decode([String: SignalboxJSONValue].self)
   }
 
@@ -1346,6 +1409,207 @@ private struct SignalboxUntaggedPayload: Decodable {
       .init(
         codingPath: decoder.codingPath + [SignalboxDynamicCodingKey(field)],
         debugDescription: "Closed object contains an unadmitted field."
+      )
+    )
+  }
+}
+
+private extension CodingUserInfoKey {
+  static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
+    rawValue: "org.signalbox.process-protocol.duplicate-object-paths"
+  )!
+}
+
+private extension Decoder {
+  var containsDuplicateObjectMembers: Bool {
+    guard
+      let duplicateObjectPaths =
+        userInfo[.signalboxDuplicateObjectPaths] as? Set<[String]>
+    else {
+      return false
+    }
+    return duplicateObjectPaths.contains(decodedObjectPath)
+  }
+
+  func rejectDuplicateObjectMembers() throws {
+    guard containsDuplicateObjectMembers else {
+      return
+    }
+    throw duplicateObjectMembersError()
+  }
+
+  func duplicateObjectMembersError() -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: codingPath,
+        debugDescription: "Object contains a repeated decoded member name."
+      )
+    )
+  }
+
+  private var decodedObjectPath: [String] {
+    codingPath.map { key in
+      key.intValue.map { "[\($0)]" } ?? key.stringValue
+    }
+  }
+}
+
+private struct SignalboxJSONDuplicateMemberScanner {
+  private let bytes: [UInt8]
+  private var index = 0
+  private var duplicateObjectPaths: Set<[String]> = []
+
+  init(data: Data) {
+    bytes = Array(data)
+  }
+
+  mutating func scan() throws -> Set<[String]> {
+    skipWhitespace()
+    try scanValue(path: [])
+    skipWhitespace()
+    guard index == bytes.count else {
+      throw malformedJSON()
+    }
+    return duplicateObjectPaths
+  }
+
+  private mutating func scanValue(path: [String]) throws {
+    guard let byte = currentByte else {
+      throw malformedJSON()
+    }
+    switch byte {
+    case UInt8(ascii: "{"):
+      try scanObject(path: path)
+    case UInt8(ascii: "["):
+      try scanArray(path: path)
+    case UInt8(ascii: "\""):
+      _ = try scanString()
+    default:
+      try scanPrimitive()
+    }
+  }
+
+  private mutating func scanObject(path: [String]) throws {
+    index += 1
+    skipWhitespace()
+    if consume(UInt8(ascii: "}")) {
+      return
+    }
+    var members: Set<String> = []
+    while true {
+      let member = try scanString()
+      if !members.insert(member).inserted {
+        duplicateObjectPaths.insert(path)
+      }
+      skipWhitespace()
+      guard consume(UInt8(ascii: ":")) else {
+        throw malformedJSON()
+      }
+      skipWhitespace()
+      try scanValue(path: path + [member])
+      skipWhitespace()
+      if consume(UInt8(ascii: "}")) {
+        return
+      }
+      guard consume(UInt8(ascii: ",")) else {
+        throw malformedJSON()
+      }
+      skipWhitespace()
+    }
+  }
+
+  private mutating func scanArray(path: [String]) throws {
+    index += 1
+    skipWhitespace()
+    if consume(UInt8(ascii: "]")) {
+      return
+    }
+    var elementIndex = 0
+    while true {
+      try scanValue(path: path + ["[\(elementIndex)]"])
+      elementIndex += 1
+      skipWhitespace()
+      if consume(UInt8(ascii: "]")) {
+        return
+      }
+      guard consume(UInt8(ascii: ",")) else {
+        throw malformedJSON()
+      }
+      skipWhitespace()
+    }
+  }
+
+  private mutating func scanString() throws -> String {
+    guard currentByte == UInt8(ascii: "\"") else {
+      throw malformedJSON()
+    }
+    let start = index
+    index += 1
+    var escaped = false
+    while let byte = currentByte {
+      index += 1
+      if escaped {
+        escaped = false
+      } else if byte == UInt8(ascii: "\\") {
+        escaped = true
+      } else if byte == UInt8(ascii: "\"") {
+        let encoded = Data(bytes[start..<index])
+        return try SignalboxJSONCoding.decoder().decode(String.self, from: encoded)
+      }
+    }
+    throw malformedJSON()
+  }
+
+  private mutating func scanPrimitive() throws {
+    let start = index
+    while let byte = currentByte,
+      !Self.primitiveDelimiters.contains(byte)
+    {
+      index += 1
+    }
+    guard index > start else {
+      throw malformedJSON()
+    }
+  }
+
+  private mutating func skipWhitespace() {
+    while let byte = currentByte,
+      Self.whitespace.contains(byte)
+    {
+      index += 1
+    }
+  }
+
+  private mutating func consume(_ byte: UInt8) -> Bool {
+    guard currentByte == byte else {
+      return false
+    }
+    index += 1
+    return true
+  }
+
+  private var currentByte: UInt8? {
+    bytes.indices.contains(index) ? bytes[index] : nil
+  }
+
+  private static let whitespace: Set<UInt8> = [
+    UInt8(ascii: " "),
+    UInt8(ascii: "\t"),
+    UInt8(ascii: "\n"),
+    UInt8(ascii: "\r"),
+  ]
+
+  private static let primitiveDelimiters = whitespace.union([
+    UInt8(ascii: ","),
+    UInt8(ascii: "]"),
+    UInt8(ascii: "}"),
+  ])
+
+  private func malformedJSON() -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: [],
+        debugDescription: "Process frame was not one complete JSON value."
       )
     )
   }

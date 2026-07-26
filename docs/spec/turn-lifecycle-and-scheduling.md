@@ -12,15 +12,16 @@ homes: `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `crates/persistence/src/{start_eligible_turn,startup,scheduler,`
 `lock_inventory}.rs` and its migrations, and `apps/signalboxd/src/main.rs`. The
 `signalboxd` composition-root name and that `apps/signalboxd` code home were
-verified through PR #258 (`agent/signalboxd-rename`).
-[docs/invariants.md](../invariants.md) remains the law catalog; INV tags below
-reference its rows without restating them. Designed lifecycle behavior that has
-no committed code path appears only under [Open edges](#open-edges). Sibling
-pages named in scope deferrals below (identity-and-commands,
-sessions-and-transcript, persistence-protocol, model-call-execution,
-configuration-and-credentials, runtime-substrate) are companion pages of this
-spec set; each deferral names the owning page rather than restating its
-material.
+verified through PR #258 (`agent/signalboxd-rename`); the additional daemon-held
+code-host credential path is verified through PR #270
+(`agent/tool-batch-tier1`). [docs/invariants.md](../invariants.md) remains the
+law catalog; INV tags below reference its rows without restating them. Designed
+lifecycle behavior that has no committed code path appears only under
+[Open edges](#open-edges). Sibling pages named in scope deferrals below
+(identity-and-commands, sessions-and-transcript, persistence-protocol,
+model-call-execution, configuration-and-credentials, runtime-substrate) are
+companion pages of this spec set; each deferral names the owning page rather
+than restating its material.
 
 ## Turns, states, and the single active slot
 
@@ -504,8 +505,9 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 signalboxd is the composition root. It reads exactly `DATABASE_URL`,
 `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
-selections, and aliases), `ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`
-from the process environment (the provisional configuration channels are
+selections, and aliases), `ANTHROPIC_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
+`SIGNALBOX_SOCKET_PATH` from the process environment (the provisional
+configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
 connects, acquires the single-daemon guard, fences the prior pool incarnation,
 migrates, completes recovery scan, binds the process socket, then concurrently

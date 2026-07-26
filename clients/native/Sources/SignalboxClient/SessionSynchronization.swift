@@ -211,6 +211,7 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
     generation: UInt64,
     refreshID: UInt64
   )
+  case cancelSideSnapshot(generation: UInt64, refreshID: UInt64)
   /// Offers only side-read material for the named trigger. This is never a
   /// replacement snapshot: consumers may source-qualified-upsert immutable
   /// semantic entries attributable to `trigger`, but must not replace turn
@@ -220,6 +221,7 @@ public enum SignalboxSessionSynchronizationEffect: Equatable, Sendable {
     trigger: SignalboxFollowedSessionEvent
   )
   case scheduleReconnect(generation: UInt64, after: Duration)
+  case cancelReconnect(generation: UInt64)
   case reportDiagnostic(SignalboxSynchronizationDiagnostic)
   case retryLimitReached
   case terminalFailure
@@ -867,11 +869,28 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     let cancellation = currentDeadlineToken.map {
       SignalboxSessionSynchronizationEffect.cancelDeadline($0)
     }
+    let sideCancellation = activeRefresh.map {
+      SignalboxSessionSynchronizationEffect.cancelSideSnapshot(
+        generation: oldGeneration,
+        refreshID: $0.id
+      )
+    }
+    let reconnectCancellation: SignalboxSessionSynchronizationEffect? =
+      if case .recovery(_, _, let nextGeneration) = phase {
+        nextGeneration.map(SignalboxSessionSynchronizationEffect.cancelReconnect)
+      } else {
+        nil
+      }
     phase = .stopped
     accumulator = nil
     clearReplayBuffer()
     activeRefresh = nil
-    return [cancellation, .closeFollow(generation: oldGeneration)].compactMap { $0 }
+    return [
+      cancellation,
+      sideCancellation,
+      reconnectCancellation,
+      .closeFollow(generation: oldGeneration),
+    ].compactMap { $0 }
   }
 
   private mutating func remoteFailure(
@@ -926,6 +945,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     failureCount += 1
     let oldGeneration = generation
     let deadline = currentDeadlineToken
+    let abandonedRefresh = activeRefresh
     let diagnostic = SignalboxSynchronizationDiagnostic(
       kind: kind,
       stage: failedStage,
@@ -947,6 +967,14 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     var effects: [SignalboxSessionSynchronizationEffect] = []
     if let deadline {
       effects.append(.cancelDeadline(deadline))
+    }
+    if let abandonedRefresh {
+      effects.append(
+        .cancelSideSnapshot(
+          generation: oldGeneration,
+          refreshID: abandonedRefresh.id
+        )
+      )
     }
     effects.append(.closeFollow(generation: oldGeneration))
     effects.append(.reportDiagnostic(diagnostic))
@@ -1151,10 +1179,11 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .turnCompleted, .turnFailed, .turnCancelled, .turnToolReconciliationRequired:
+    case .turnCompleted, .turnFailed, .turnCancelled, .turnToolReconciliationRequired,
+      .unknown:
       return true
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+      .turnReconciliationRequired:
       return false
     }
   }

@@ -146,11 +146,16 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       await updates(.event(event))
     case .requestSideSnapshot(_, let generation, let refreshID):
       openSideSnapshot(generation: generation, refreshID: refreshID)
+    case .cancelSideSnapshot:
+      await closeSideTransport()
     case .mergeSideSnapshot(let snapshot, let trigger):
       await closeSideTransport()
       await updates(.sideSnapshot(snapshot: snapshot, trigger: trigger))
     case .scheduleReconnect(let generation, let delay):
       scheduleReconnect(generation: generation, delay: delay)
+    case .cancelReconnect:
+      reconnectTask?.cancel()
+      reconnectTask = nil
     case .reportDiagnostic(let diagnostic):
       await updates(.diagnostic(diagnostic))
     case .retryLimitReached:
