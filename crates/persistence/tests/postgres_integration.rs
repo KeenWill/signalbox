@@ -6226,6 +6226,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// and the owner reconciliation decision then terminalizes the exact ambiguity
 /// without inventing an outcome, releases the slot, and lets the session
 /// activate the accepted successor.
+///
+/// This is one restart-and-recovery contract, so it stays one test
+/// (testing-style rule 17): CONTRIBUTING's restart category conjoins the final
+/// state, the absence of forbidden effects, and scan idempotency, and each step
+/// below runs against the durable state the previous step committed. Every
+/// assertion names the leg it guards (rule 20) so a failure identifies which
+/// guarantee broke rather than only that the timeline broke.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambiguous_turn()
@@ -6255,13 +6262,20 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
     );
 
     let first_restart = scan.execute().await?;
-    assert_eq!(first_restart.recovered_turn_count(), 0);
+    assert_eq!(
+        first_restart.recovered_turn_count(),
+        0,
+        "an unobserved issued call parks its turn instead of terminalizing it"
+    );
     assert_eq!(
         first_restart.awaiting_recovery_decision_sessions(),
         &[parked.session],
         "the restart that parks the turn reports the wait it just created"
     );
-    assert!(first_restart.is_complete());
+    assert!(
+        first_restart.is_complete(),
+        "an ambiguity wait never blocks startup"
+    );
 
     let parked_shape: (String, String, String, String, String, Uuid) = sqlx::query_as(
         "SELECT call.state_kind,
@@ -6289,13 +6303,15 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
             "lost".into(),
             "awaiting_model_call_recovery".into(),
             parked.call.into_uuid(),
-        )
+        ),
+        "the restart boundary leaves the exact durable ambiguity it observed"
     );
     assert_eq!(
         ProcessReadRepository::new(restarted_pool.clone())
             .model_call_recovery_precondition(parked.session)
             .await?,
-        ProcessModelCallRecoveryPrecondition::Parked { turn: parked.turn }
+        ProcessModelCallRecoveryPrecondition::Parked { turn: parked.turn },
+        "the operator surface can see the wait it is expected to decide"
     );
 
     let wedged = SubmitInputRepository::new(restarted_pool.clone())
@@ -6318,16 +6334,25 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
                 session: parked.session,
                 active_turn: parked.turn,
             }
-        ))
+        )),
+        "the slot is never released without an owner decision"
     );
 
     let second_restart = scan.execute().await?;
-    assert_eq!(second_restart.recovered_turn_count(), 0);
+    assert_eq!(
+        second_restart.recovered_turn_count(),
+        0,
+        "a re-run scan reclassifies nothing it already parked"
+    );
     assert_eq!(
         second_restart.awaiting_recovery_decision_sessions(),
-        &[parked.session]
+        &[parked.session],
+        "the wait stays reported until a decision resolves it"
     );
-    assert!(second_restart.is_complete());
+    assert!(
+        second_restart.is_complete(),
+        "a surviving ambiguity wait still never blocks startup"
+    );
 
     let successor = TurnId::from_uuid(Uuid::from_u128(0xB222));
     let reconciled = SubmitInputRepository::new(restarted_pool.clone())
@@ -6345,12 +6370,15 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
             Some(successor),
         )
         .await?;
-    assert!(matches!(
-        reconciled,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    assert!(
+        matches!(
+            reconciled,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the owner decision is accepted as the successor origin"
+    );
 
     let reconciled_shape: (String, String, Uuid, Uuid, i64) = sqlx::query_as(
         "SELECT turn.state_kind,
@@ -6389,35 +6417,45 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
     .await?;
     assert_eq!(
         ambiguous_call_unchanged,
-        ("terminal".into(), "ambiguous".into())
+        ("terminal".into(), "ambiguous".into()),
+        "reconciliation never rewrites the ambiguous call it reports"
     );
     assert_eq!(
         ProcessReadRepository::new(restarted_pool.clone())
             .model_call_recovery_precondition(parked.session)
             .await?,
-        ProcessModelCallRecoveryPrecondition::NoParkedTurn
+        ProcessModelCallRecoveryPrecondition::NoParkedTurn,
+        "the decided wait no longer offers itself to the operator surface"
     );
 
     let healed_restart = scan.execute().await?;
-    assert_eq!(healed_restart.recovered_turn_count(), 0);
+    assert_eq!(
+        healed_restart.recovered_turn_count(),
+        0,
+        "a re-run scan after the decision changes nothing"
+    );
     assert_eq!(
         healed_restart.awaiting_recovery_decision_sessions(),
-        &[] as &[SessionId]
+        &[] as &[SessionId],
+        "a decided session is no longer reported as awaiting one"
     );
 
     let snapshot = ProcessReadRepository::new(restarted_pool.clone())
         .read_transcript(parked.session)
         .await?
         .expect("the reconciled session remains process-readable");
-    assert!(matches!(
-        snapshot.turns()[0].state(),
-        ProcessTurnState::ReconciliationRequired {
-            terminal_attempt,
-            operation,
-            ..
-        } if *terminal_attempt == parked.attempt
-            && *operation == ProcessReconciliationOperation::ModelCall(parked.call)
-    ));
+    assert!(
+        matches!(
+            snapshot.turns()[0].state(),
+            ProcessTurnState::ReconciliationRequired {
+                terminal_attempt,
+                operation,
+                ..
+            } if *terminal_attempt == parked.attempt
+                && *operation == ProcessReconciliationOperation::ModelCall(parked.call)
+        ),
+        "the reconciled turn stays readable and still names its exact ambiguity"
+    );
 
     let activated = activate_earliest_queued_turn(
         &restarted_pool,
