@@ -259,6 +259,37 @@ forward narrowing.
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
 
+## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
+
+**Context.** The recorded Tier 1 catalog direction calls for ten daemon-held
+change-request review tools but does not select a code host, API surface,
+exchange bounds, or credential reference. The repository already has a focused
+reqwest/rustls transport posture and a file-backed credential boundary.
+
+**Decision.** Implement the first code-host adapter against GitHub's fixed REST
+and GraphQL APIs, selected by the non-secret `github-primary` reference whose
+bytes are reread from `GITHUB_TOKEN_FILE` for each operation. Disable ambient
+proxies, automatic redirects, retries, and idle reuse; pin the REST version
+header to `2026-03-10`, require TLS 1.2 or later, and bound each exchange to 30
+seconds. Bound JSON responses to 512 KiB, returned text fields and job-log
+prefixes to 64 KiB, and collection pages to 100 items. The job-log endpoint may
+follow its one authenticated 302 response with one credential-free HTTPS
+download only after resolving and pinning a wholly public destination set.
+Definitive client rejection is known failure; a lost or malformed
+acknowledgement after a mutation is commit-ambiguous.
+
+**Rejected alternatives.** A provider-neutral plugin surface invents a boundary
+the commissioned batch does not need. GitHub CLI subprocesses add ambient
+configuration and an opaque credential channel. Live tests or new secret-bearing
+CI violate the offline proof requirement. Unbounded pagination or log downloads
+violate result admission.
+
+**Affects.** [tool-loop](spec/tool-loop.md),
+[configuration-and-credentials](spec/configuration-and-credentials.md), the
+`apps/signalboxd` code-host modules and composition root, and their mocked
+offline tests. Library-documentation lookup remains deferred until its provider
+is selected.
+
 ## 2026-07-25 — Grandfather pre-boundary started frontiers
 
 **Context.** Before durable model-identity boundaries existed, per-input model
