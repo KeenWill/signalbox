@@ -9,25 +9,48 @@ final class ScreenshotCaptureUITests: XCTestCase {
     func testCaptureScreenshotMatrix() throws {
         let outputDirectory = try screenshotOutputDirectory()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        try captureScreenshots(
+            ScreenshotCaptureSpecification.selectedByEnvironment(outputDirectory: outputDirectory),
+            in: outputDirectory
+        )
+    }
+
+    @MainActor
+    private func captureScreenshots(
+        _ specifications: [ScreenshotCaptureSpecification],
+        in outputDirectory: URL
+    ) throws {
+        setLandscapeOrientationIfSupported()
+        for specification in specifications {
+            try captureScreenshot(specification, in: outputDirectory)
+        }
+    }
+
+    @MainActor
+    private func captureScreenshot(
+        _ specification: ScreenshotCaptureSpecification,
+        in outputDirectory: URL
+    ) throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--screenshot-state", specification.state]
+        app.launchArguments.append(contentsOf: specification.presentationArguments)
+        app.launch()
 
         setLandscapeOrientationIfSupported()
-
-        for specification in ScreenshotCaptureSpecification.selectedByEnvironment(outputDirectory: outputDirectory) {
-            let app = XCUIApplication()
-            app.launchArguments = ["--screenshot-state", specification.state]
-            app.launchArguments.append(contentsOf: specification.presentationArguments)
-            app.launch()
-
-            setLandscapeOrientationIfSupported()
-            XCTAssertTrue(app.descendants(matching: .any)["signalbox-root"].waitForExistence(timeout: 20))
-            Thread.sleep(forTimeInterval: specification.settleTime)
-
-            let screenshotData = XCUIScreen.main.screenshot().pngRepresentation
-            let outputURL = outputDirectory.appendingPathComponent("\(specification.name).png")
-            try screenshotData.write(to: outputURL, options: .atomic)
-
-            app.terminate()
+        XCTAssertTrue(app.descendants(matching: .any)["signalbox-root"].waitForExistence(timeout: 20))
+        if let expectedLandmark = specification.expectedLandmark {
+            XCTAssertTrue(
+                app.descendants(matching: .any)[expectedLandmark].waitForExistence(timeout: 20),
+                "Screenshot scenario \(specification.name) did not present \(expectedLandmark)."
+            )
         }
+        Thread.sleep(forTimeInterval: specification.settleTime)
+
+        let screenshotData = XCUIScreen.main.screenshot().pngRepresentation
+        let outputURL = outputDirectory.appendingPathComponent("\(specification.name).png")
+        try screenshotData.write(to: outputURL, options: .atomic)
+
+        app.terminate()
     }
 
     private func screenshotOutputDirectory() throws -> URL {
@@ -64,20 +87,53 @@ private struct ScreenshotCaptureSpecification {
     let state: String
     let presentationArguments: [String]
     let settleTime: TimeInterval
+    let expectedLandmark: String?
+
+    init(
+        name: String,
+        state: String,
+        presentationArguments: [String],
+        settleTime: TimeInterval,
+        expectedLandmark: String? = nil
+    ) {
+        self.name = name
+        self.state = state
+        self.presentationArguments = presentationArguments
+        self.settleTime = settleTime
+        self.expectedLandmark = expectedLandmark
+    }
 
     static let all: [ScreenshotCaptureSpecification] = [
         .init(name: "setup", state: "setup", presentationArguments: [], settleTime: 2.0),
         .init(name: "sessions", state: "sessions", presentationArguments: [], settleTime: 2.0),
-        .init(name: "new-session", state: "new-session", presentationArguments: [], settleTime: 2.5),
+        .init(
+            name: "new-session",
+            state: "new-session",
+            presentationArguments: [],
+            settleTime: 2.5,
+            expectedLandmark: "Creation unavailable"
+        ),
         .init(name: "active-chat", state: "active-chat", presentationArguments: [], settleTime: 2.0),
-        .init(name: "markdown-basics", state: "markdown-basics", presentationArguments: [], settleTime: 2.0),
+        .init(
+            name: "markdown-basics",
+            state: "markdown-basics",
+            presentationArguments: [],
+            settleTime: 2.0,
+            expectedLandmark: "Incident Handoff"
+        ),
         .init(name: "markdown-table", state: "markdown-table", presentationArguments: [], settleTime: 2.0),
         .init(name: "markdown-code", state: "markdown-code", presentationArguments: [], settleTime: 2.0),
         .init(name: "markdown-message", state: "markdown-message", presentationArguments: [], settleTime: 2.0),
         .init(name: "pending-approval", state: "pending-approval", presentationArguments: [], settleTime: 2.0),
         .init(name: "completed-tool", state: "completed-tool", presentationArguments: [], settleTime: 2.0),
         .init(name: "failed-tool", state: "failed-tool", presentationArguments: [], settleTime: 2.0),
-        .init(name: "artifact-preview", state: "artifact-preview", presentationArguments: [], settleTime: 2.5),
+        .init(
+            name: "artifact-preview",
+            state: "artifact-preview",
+            presentationArguments: [],
+            settleTime: 2.5,
+            expectedLandmark: "Artifacts unavailable"
+        ),
         .init(name: "runners", state: "runners", presentationArguments: [], settleTime: 2.0),
         .init(name: "monitor", state: "monitor", presentationArguments: [], settleTime: 2.0),
         .init(name: "settings", state: "settings", presentationArguments: [], settleTime: 2.0),
