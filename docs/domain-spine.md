@@ -5437,6 +5437,10 @@ pub enum ReviewPassResult {
 pub struct ReviewReferencedFindingEvidence { /* reference + frozen status */ }
 impl ReviewReferencedFindingEvidence {
     pub fn from_finding(finding: &ReviewFinding) -> Self;
+    pub const fn try_reconstitute(
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+    ) -> Option<Self>;
     // accessors: reference(), status(), producing_pass()
 }
 

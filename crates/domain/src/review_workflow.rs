@@ -1025,6 +1025,21 @@ impl ReviewReferencedFindingEvidence {
         }
     }
 
+    /// Reconstitutes the exact reference facts frozen at event admission.
+    pub const fn try_reconstitute(
+        reference: ReviewFindingRef,
+        status: ReviewFindingStatus,
+    ) -> Option<Self> {
+        if matches!(
+            status,
+            ReviewFindingStatus::Open | ReviewFindingStatus::Accepted
+        ) {
+            Some(Self { reference, status })
+        } else {
+            None
+        }
+    }
+
     /// Returns the complete referenced-finding identity.
     pub const fn reference(self) -> ReviewFindingRef {
         self.reference
@@ -4067,7 +4082,7 @@ impl ReviewExternalLink {
                 claim.pass.kind() == ReviewPassKind::ImportExternalContext
                     && result.link() == self.id
                     && self.attachment.is_some()
-                    && self.observations.last().is_some_and(|observation| {
+                    && self.observations.iter().any(|observation| {
                         observation.ordinal == result.observed_through()
                             && observation.state == result.state()
                     })
@@ -7559,6 +7574,29 @@ mod tests {
         );
     }
 
+    /// INV-040: reconstitution preserves the status frozen when a reference
+    /// was admitted, independently of the referenced finding's current state.
+    #[test]
+    fn inv040_referenced_finding_evidence_reconstitutes_only_admissible_status() {
+        let reference = finding_ref(11);
+        let frozen = ReviewReferencedFindingEvidence::try_reconstitute(
+            reference,
+            ReviewFindingStatus::Accepted,
+        )
+        .expect("an accepted finding is admissible reference evidence");
+
+        assert_eq!(frozen.reference(), reference);
+        assert_eq!(frozen.status(), ReviewFindingStatus::Accepted);
+        assert!(
+            ReviewReferencedFindingEvidence::try_reconstitute(
+                reference,
+                ReviewFindingStatus::Posted,
+            )
+            .is_none(),
+            "a terminal current status cannot be substituted for frozen evidence",
+        );
+    }
+
     /// INV-040: a referenced finding must use the proposal run's exact one
     /// producing pass.
     #[test]
@@ -8263,6 +8301,38 @@ mod tests {
             error.failure(),
             ReviewExternalLinkTransitionFailure::ConflictingPassEvidence
         );
+    }
+
+    /// INV-040 / INV-041: reconstitution validates an unchanged claim against
+    /// its recorded historical frontier after a later changed observation.
+    #[test]
+    fn inv040_inv041_external_link_reconstitutes_historical_no_change_frontier() {
+        let reservation = link_id(30);
+        let first = attached_finding_link(finding_ref(10), reservation)
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::one(),
+                succeeded_pass(21, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Current,
+            ))
+            .expect("first external state is meaning-bearing");
+        let no_change = no_change_pass(
+            reservation,
+            succeeded_pass(22, ReviewPassKind::ImportExternalContext),
+            ReviewExternalObjectState::Current,
+        );
+        let advanced = first
+            .confirm_unchanged(no_change.clone(), pass_run_evidence(&no_change))
+            .expect("the exact first frontier consumes its import pass")
+            .observe(observation_evidence(
+                reservation,
+                ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+                succeeded_pass(23, ReviewPassKind::ImportExternalContext),
+                ReviewExternalObjectState::Outdated,
+            ))
+            .expect("a later changed state advances the durable frontier");
+
+        assert_eq!(reconstitute_link(&advanced), advanced);
     }
 
     /// INV-040 / INV-041: a no-change claim authenticates the exact latest
