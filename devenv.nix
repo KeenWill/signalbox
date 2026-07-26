@@ -216,8 +216,13 @@ in
         exit 1
       fi
 
+      # All four artifacts are required, not just the certificates: a run
+      # interrupted between writing a certificate and its key would otherwise
+      # be skipped here and then abort on the `chmod 600` below.
       if [ ! -f ${shellArg authorityCertificate} ] \
-         || [ ! -f ${shellArg serverCertificate} ]; then
+         || [ ! -f ${shellArg authorityKey} ] \
+         || [ ! -f ${shellArg serverCertificate} ] \
+         || [ ! -f ${shellArg serverKey} ]; then
         echo "dev instance: generating local TLS material under" \
              ${shellArg tlsRoot}
         rm -f ${shellArg authorityCertificate} ${shellArg authorityKey} \
