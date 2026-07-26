@@ -5,9 +5,17 @@ ALTER TABLE replace_session_metadata_command
     ADD COLUMN issuer_kind text,
     ADD COLUMN issuer_tool_request_id uuid;
 
+-- Metadata receipts are normally append-only. This migration owns the one-time
+-- issuer backfill and restores the guard before sealing the new evidence.
+ALTER TABLE replace_session_metadata_command
+    DISABLE TRIGGER replace_session_metadata_command_is_append_only;
+
 UPDATE replace_session_metadata_command
    SET issuer_kind = actor_kind,
        issuer_tool_request_id = actor_tool_request_id;
+
+ALTER TABLE replace_session_metadata_command
+    ENABLE TRIGGER replace_session_metadata_command_is_append_only;
 
 ALTER TABLE replace_session_metadata_command
     ALTER COLUMN issuer_kind SET NOT NULL,
