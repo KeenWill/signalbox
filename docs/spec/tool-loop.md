@@ -7,7 +7,8 @@ verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), and
 the failed-attempt operator event together with the credential-shaped code-host
-detail through PR #285 (`agent/dev-instance-code-host-credential`). It owns
+detail through PR #285 (`agent/dev-instance-code-host-credential`), and the
+client decision surface through PR #291 (`agent/turn-control-verbs`). It owns
 logical tool requests, approval policy and decisions, physical tool attempts,
 result admission, intra-turn continuation, crash classification, the compiled
 registry, and the daemon-local catalog. Turn and attempt lifecycle law lives in
