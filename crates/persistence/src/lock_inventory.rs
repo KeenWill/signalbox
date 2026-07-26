@@ -130,6 +130,7 @@ pub(crate) const REVIEW_PASS_TRANSITION: &str = "SELECT
             workflow_pass.result_external_object_key,
             workflow_pass.result_observation_state,
             canonical_input.session_id AS accepted_input_session_id,
+            canonical_input.origin_turn_id AS accepted_input_origin_turn_id,
             canonical_turn.turn_id AS evidence_turn_id,
             canonical_turn.session_id AS turn_session_id,
             canonical_turn.origin_accepted_input_id

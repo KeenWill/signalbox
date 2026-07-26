@@ -1442,7 +1442,51 @@ async fn inv040_inv041_review_workflow_store_reconstructs_complete_evidence()
             .load_external_link(link_id)
             .await
             .expect("no-change claim reloads"),
-        Some(expected_unchanged)
+        Some(expected_unchanged.clone())
+    );
+    let (later_import_pass, later_import_turn) = insert_isolated_pass_for_target(
+        &pool,
+        &store,
+        target_id,
+        0x30a,
+        ReviewPassKind::ImportExternalContext,
+    )
+    .await;
+    start_review_pass(&store, later_import_pass).await;
+    let later_output_frontier =
+        synthetically_terminalize_turn(&pool, later_import_turn, "completed").await;
+    let later_import_evidence = conclude_review_pass(
+        &store,
+        later_import_pass,
+        ReviewPassState::Succeeded {
+            turn: later_import_turn,
+            output_frontier: later_output_frontier,
+            result: None,
+        },
+    )
+    .await;
+    let later_observation = observation(
+        link_id,
+        ReviewEventOrdinal::try_new(2).expect("positive ordinal"),
+        later_import_evidence,
+        ReviewExternalObjectState::Outdated,
+    );
+    let expected_advanced = expected_unchanged
+        .observe(later_observation.clone())
+        .expect("later changed state advances the observation frontier");
+    assert_eq!(
+        store
+            .append_external_observation(link_id, later_observation)
+            .await
+            .expect("later changed state persists"),
+        Some(expected_advanced.clone())
+    );
+    assert_eq!(
+        store
+            .load_external_link(link_id)
+            .await
+            .expect("historical no-change claim reloads after later state"),
+        Some(expected_advanced)
     );
 
     sqlx::query(
@@ -1534,6 +1578,44 @@ async fn inv040_pass_loader_rejects_cross_wired_accepted_input() -> Result<(), B
         session_error
             .detail()
             .contains("AcceptedInputSessionMismatch")
+    );
+    sqlx::query(
+        "UPDATE review_pass
+            SET session_id = $2
+          WHERE pass_id = $1",
+    )
+    .bind(pass.into_uuid())
+    .bind(uuid(0x201))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE accepted_input
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET origin_turn_id = $2
+          WHERE accepted_input_id = $1",
+    )
+    .bind(uuid(0x202))
+    .bind(uuid(0x214))
+    .execute(&pool)
+    .await?;
+    let origin_error = fixture
+        .store
+        .load_pass(pass)
+        .await
+        .expect_err("canonical accepted-input origin must reject cross-wiring");
+    let ReviewWorkflowStoreError::Corruption(origin_error) = origin_error else {
+        panic!("expected typed review-pass corruption");
+    };
+    assert_eq!(origin_error.aggregate(), "review_pass");
+    assert!(
+        origin_error
+            .detail()
+            .contains("accepted input origin turn differs")
     );
 
     Ok(())
@@ -2389,6 +2471,27 @@ async fn inv040_inv041_schema_enforces_publication_confidence_threshold()
             .expect("reservation matches the target"),
         )
         .await?;
+
+    let missing_discriminator = sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_attachment',
+                result_finding_id = $2,
+                result_finding_run_id = $3,
+                result_finding_pass_id = $4,
+                result_event_ordinal = 2,
+                result_external_link_id = $5,
+                result_external_object_key = 'comment-34d'
+          WHERE pass_id = $1",
+    )
+    .bind(publish_pass.pass().into_uuid())
+    .bind(finding_ref.finding().into_uuid())
+    .bind(finding_ref.run().run().into_uuid())
+    .bind(finding_ref.pass().pass().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("posted attachment evidence requires its event discriminator");
+    assert_sqlstate(&missing_discriminator, "23514");
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -3989,6 +4092,56 @@ async fn inv041_external_link_load_rejects_missing_attachment_run() -> Result<()
         .store
         .attach_external_link(link, attachment(link, publish_evidence, key("comment-746")))
         .await?;
+    let unrelated_target = ReviewTarget::try_new(
+        ReviewTargetId::from_uuid(uuid(0x74a)),
+        key("example-code-host"),
+        key("example/repository"),
+        ReviewTargetSubject::Commit,
+        key("unrelated-head"),
+        None,
+        None,
+    )
+    .expect("unrelated target is structurally valid");
+    fixture.store.insert_target(&unrelated_target).await?;
+    sqlx::query(
+        "ALTER TABLE review_external_object_identity
+         DISABLE TRIGGER review_external_object_identity_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE review_external_object_identity
+            SET logical_target_id = $1
+          WHERE provider_key = 'example-code-host'
+            AND object_kind = 'review_comment'
+            AND external_object_key = 'comment-746'",
+    )
+    .bind(unrelated_target.id().into_uuid())
+    .execute(&pool)
+    .await?;
+    let identity_error = fixture
+        .store
+        .load_external_link(link)
+        .await
+        .expect_err("attachment loading must authenticate its object registry target");
+    let ReviewWorkflowStoreError::Corruption(identity_error) = identity_error else {
+        panic!("expected typed review-external-link corruption");
+    };
+    assert_eq!(
+        identity_error.aggregate(),
+        "review_external_link_attachment"
+    );
+    assert!(identity_error.detail().contains("unrelated logical target"));
+    sqlx::query(
+        "UPDATE review_external_object_identity
+            SET logical_target_id = $1
+          WHERE provider_key = 'example-code-host'
+            AND object_kind = 'review_comment'
+            AND external_object_key = 'comment-746'",
+    )
+    .bind(fixture.target.into_uuid())
+    .execute(&pool)
+    .await?;
 
     sqlx::query(
         "ALTER TABLE review_pass
@@ -4952,6 +5105,79 @@ async fn inv041_attachment_rejects_read_only_review_pass() -> Result<(), Box<dyn
     .await
     .expect_err("read-only review pass cannot produce an attachment");
     assert_sqlstate(&unauthorized, "23514");
+    Ok(())
+}
+
+/// INV-041: terminal pass effects require their exact attachment or
+/// observation child row in the same transaction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv041_external_pass_results_require_exact_child_rows() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let publish_pass = insert_fixture_pass(&fixture, 0x7a0, ReviewPassKind::Publish).await;
+    let import_pass =
+        insert_fixture_pass(&fixture, 0x7a1, ReviewPassKind::ImportExternalContext).await;
+    let evidence =
+        succeed_fixture_passes(&pool, &fixture.store, &[publish_pass, import_pass]).await;
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x7a2));
+    fixture
+        .store
+        .reserve_external_link(
+            ReviewExternalLink::try_reserve(
+                link,
+                ReviewExternalLinkAssociation::Target(fixture.target),
+                key("example-code-host"),
+                ReviewExternalObjectKind::ReviewComment,
+                &fixture.target_snapshot,
+            )
+            .expect("reservation matches the target"),
+        )
+        .await?;
+
+    let mut attachment_only = pool.begin().await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_attachment',
+                result_external_link_id = $2,
+                result_external_object_key = 'comment-7a2'
+          WHERE pass_id = $1",
+    )
+    .bind(publish_pass.pass().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&mut *attachment_only)
+    .await?;
+    let missing_attachment = attachment_only
+        .commit()
+        .await
+        .expect_err("attachment result cannot commit without its child row");
+    assert_sqlstate(&missing_attachment, "23514");
+
+    fixture
+        .store
+        .attach_external_link(
+            link,
+            attachment(link, evidence[0].clone(), key("comment-7a2")),
+        )
+        .await?;
+    let mut observation_only = pool.begin().await?;
+    sqlx::query(
+        "UPDATE review_pass
+            SET result_kind = 'external_link_observation',
+                result_external_link_id = $2,
+                result_event_ordinal = 1,
+                result_observation_state = 'current'
+          WHERE pass_id = $1",
+    )
+    .bind(import_pass.pass().into_uuid())
+    .bind(link.into_uuid())
+    .execute(&mut *observation_only)
+    .await?;
+    let missing_observation = observation_only
+        .commit()
+        .await
+        .expect_err("observation result cannot commit without its child row");
+    assert_sqlstate(&missing_observation, "23514");
     Ok(())
 }
 

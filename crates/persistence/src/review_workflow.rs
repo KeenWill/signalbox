@@ -1509,7 +1509,9 @@ impl ReviewWorkflowStore {
                         AS pass_minimum_publication_confidence,
                     pass_run.state_kind AS pass_run_state_kind,
                     pass_run.state_pass_id AS pass_run_state_pass_id,
-                    attachment.external_object_key
+                    attachment.external_object_key,
+                    object_identity.logical_target_id
+                        AS canonical_object_target_id
                FROM review_external_link_attachment AS attachment
                LEFT JOIN review_pass AS pass
                  ON pass.pass_id = attachment.pass_id
@@ -1518,6 +1520,11 @@ impl ReviewWorkflowStore {
                LEFT JOIN review_run AS pass_run
                  ON pass_run.run_id = pass.run_id
                 AND pass_run.target_id = pass.target_id
+               LEFT JOIN review_external_object_identity AS object_identity
+                 ON object_identity.provider_key = attachment.provider_key
+                AND object_identity.object_kind = attachment.object_kind
+                AND object_identity.external_object_key =
+                    attachment.external_object_key
               WHERE attachment.external_link_id = $1",
         )
         .bind(link.into_uuid())
@@ -1537,6 +1544,24 @@ impl ReviewWorkflowStore {
                     "review_external_link_attachment",
                     "attaching run row is missing",
                 )?;
+                let logical_target_id = target_id(
+                    row.try_get::<Option<Uuid>, _>("canonical_object_target_id")?
+                        .ok_or_else(|| {
+                            corruption(
+                                "review_external_link_attachment",
+                                String::from("external object identity row is missing"),
+                            )
+                        })?,
+                );
+                let logical_target = load_target_on_connection(connection, logical_target_id)
+                    .await?
+                    .ok_or_else(|| {
+                        corruption(
+                            "review_external_link_attachment",
+                            String::from("external object identity target row is missing"),
+                        )
+                    })?;
+                authenticate_external_object_target(&target, &logical_target)?;
                 let pass_id = pass_id(row.try_get("pass_id")?);
                 let pass = load_pass_on_connection(connection, pass_id)
                     .await?
@@ -1794,6 +1819,7 @@ async fn load_pass_on_connection(
                 workflow_pass.result_external_object_key,
                 workflow_pass.result_observation_state,
                 canonical_input.session_id AS accepted_input_session_id,
+                canonical_input.origin_turn_id AS accepted_input_origin_turn_id,
                 canonical_turn.turn_id AS evidence_turn_id,
                 canonical_turn.session_id AS turn_session_id,
                 canonical_turn.origin_accepted_input_id
@@ -2361,17 +2387,7 @@ async fn authenticate_unbound_pass_result(
             String::from("effect pass differs from canonical execution facts"),
         ));
     }
-    let accepted_input = ReviewPassAcceptedInputEvidence::new(
-        accepted_input_id(pass_row.try_get("accepted_input_id")?),
-        session_id(
-            pass_row
-                .try_get::<Option<Uuid>, _>("accepted_input_session_id")?
-                .ok_or_else(|| {
-                    corruption("review_pass", String::from("accepted input row is missing"))
-                })?,
-        ),
-        Some(turn_id(pass_row.try_get("origin_turn_id")?)),
-    );
+    let accepted_input = decode_pass_accepted_input_evidence(pass_row)?;
     let mut queued_run = ReviewRun::try_reconstitute(ReviewRunReconstitutionInput::new(
         run_reference,
         workflow,
@@ -2772,9 +2788,6 @@ fn reconstitute_pass(
     let state_kind: String = row.try_get("state_kind")?;
     let turn: Option<Uuid> = row.try_get("turn_id")?;
     let frontier: Option<Uuid> = row.try_get("output_frontier_id")?;
-    let accepted_input_session = row
-        .try_get::<Option<Uuid>, _>("accepted_input_session_id")?
-        .ok_or_else(|| corruption("review_pass", String::from("accepted input row is missing")))?;
     let workflow_run_id = row
         .try_get::<Option<Uuid>, _>("canonical_run_id")?
         .ok_or_else(|| corruption("review_pass", String::from("referenced run row is missing")))?;
@@ -2788,11 +2801,7 @@ fn reconstitute_pass(
         decode_workflow_kind(&row.try_get::<String, _>("run_workflow_kind")?)?,
         session_id(row.try_get("pass_session_id")?),
         accepted_input_id(row.try_get("accepted_input_id")?),
-        ReviewPassAcceptedInputEvidence::new(
-            accepted_input_id(row.try_get("accepted_input_id")?),
-            session_id(accepted_input_session),
-            Some(turn_id(row.try_get("origin_turn_id")?)),
-        ),
+        decode_pass_accepted_input_evidence(row)?,
         decode_pass_state(
             &state_kind,
             turn,
@@ -2808,6 +2817,29 @@ fn reconstitute_pass(
             format!("domain reconstitution failed: {:?}", error.failure()),
         )
     })
+}
+
+fn decode_pass_accepted_input_evidence(
+    row: &PgRow,
+) -> Result<ReviewPassAcceptedInputEvidence, ReviewWorkflowStoreError> {
+    let stored_origin = row.try_get::<Uuid, _>("origin_turn_id")?;
+    let canonical_origin = row.try_get::<Option<Uuid>, _>("accepted_input_origin_turn_id")?;
+    if canonical_origin != Some(stored_origin) {
+        return Err(corruption(
+            "review_pass",
+            String::from("accepted input origin turn differs from stored pass"),
+        ));
+    }
+    Ok(ReviewPassAcceptedInputEvidence::new(
+        accepted_input_id(row.try_get("accepted_input_id")?),
+        session_id(
+            row.try_get::<Option<Uuid>, _>("accepted_input_session_id")?
+                .ok_or_else(|| {
+                    corruption("review_pass", String::from("accepted input row is missing"))
+                })?,
+        ),
+        canonical_origin.map(turn_id),
+    ))
 }
 
 fn decode_pass_row_state(row: &PgRow) -> Result<ReviewPassState, ReviewWorkflowStoreError> {
@@ -3400,6 +3432,32 @@ fn decode_external_link_attachment(
             "review_external_link_attachment",
         )?,
     ))
+}
+
+fn authenticate_external_object_target(
+    attached_target: &ReviewTarget,
+    logical_target: &ReviewTarget,
+) -> Result<(), ReviewWorkflowStoreError> {
+    if attached_target.id() == logical_target.id() {
+        return Ok(());
+    }
+    let same_change_request = matches!(
+        (attached_target.subject(), logical_target.subject()),
+        (
+            ReviewTargetSubject::ChangeRequest(attached),
+            ReviewTargetSubject::ChangeRequest(logical),
+        ) if attached == logical
+    );
+    if attached_target.provider() != logical_target.provider()
+        || attached_target.repository() != logical_target.repository()
+        || !same_change_request
+    {
+        return Err(corruption(
+            "review_external_link_attachment",
+            String::from("external object identity names an unrelated logical target"),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_external_link_observation(

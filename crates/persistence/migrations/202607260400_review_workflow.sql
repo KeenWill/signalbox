@@ -467,6 +467,7 @@ CREATE TABLE review_pass (
                         AND result_finding_run_id IS NOT NULL
                         AND result_finding_pass_id IS NOT NULL
                         AND result_event_ordinal IS NOT NULL
+                        AND result_event_kind IS NOT NULL
                         AND result_event_kind = 'posted'
                         AND result_reason IS NULL
                         AND result_referenced_finding_id IS NULL
@@ -2641,6 +2642,39 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF NEW.result_kind = 'external_link_attachment'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_external_link_attachment
+            WHERE external_link_id = NEW.result_external_link_id
+              AND target_id = NEW.target_id
+              AND pass_run_id = NEW.run_id
+              AND pass_id = NEW.pass_id
+              AND external_object_key =
+                    NEW.result_external_object_key
+       )
+    THEN
+        RAISE EXCEPTION
+            'external attachment result omitted its exact child row'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.result_kind = 'external_link_observation'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM review_external_link_observation
+            WHERE external_link_id = NEW.result_external_link_id
+              AND observation_ordinal = NEW.result_event_ordinal
+              AND target_id = NEW.target_id
+              AND pass_run_id = NEW.run_id
+              AND pass_id = NEW.pass_id
+              AND object_state =
+                    NEW.result_observation_state
+       )
+    THEN
+        RAISE EXCEPTION
+            'external observation result omitted its exact child row'
+            USING ERRCODE = '23514';
+    END IF;
     IF NEW.result_kind = 'external_link_no_change'
        AND (
            NOT EXISTS (
