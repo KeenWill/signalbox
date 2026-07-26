@@ -166,6 +166,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
+  func testSideProjectionRejectsCompletionWithoutAssistantText() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletionMarkerOnly()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -2891,6 +2906,41 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"3"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCompletionMarkerOnly() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
         }
         """,
       ]

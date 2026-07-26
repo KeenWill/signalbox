@@ -533,17 +533,46 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           return entryTurnID == turnID && entryModelCallID == modelCallID
         }
       case .resultsProjected:
-        return snapshot.records.contains { record in
-          guard case .entry(let message) = record else {
-            return false
-          }
-          return toolEntry(message.entry, belongsTo: turnID, modelCallID: modelCallID)
+        let expectedRequestIDs = Set(
+          toolContextsByRequestID.compactMap {
+            requestID, context -> String? in
+            guard context.turnID == turnID, context.modelCallID == modelCallID else {
+              return nil
+            }
+            return requestID
+          })
+        guard !expectedRequestIDs.isEmpty else {
+          return false
         }
+        let projectedRequestIDs = Set(
+          snapshot.records.compactMap {
+            record -> String? in
+            guard case .entry(let message) = record else {
+              return nil
+            }
+            switch message.entry {
+            case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
+              .toolClosed(let requestID, _):
+              return requestID.rawValue
+            case .assistantToolUse, .turnCompleted, .turnFailed, .turnCancelled, .imported,
+              .unknown:
+              return nil
+            }
+          })
+        return expectedRequestIDs.isSubset(of: projectedRequestIDs)
       case .recoveryRequired, .unknown:
         return true
       }
-    case .turnCompleted(let turnID, _, let completionEntryID, _):
-      return snapshot.records.contains {
+    case .turnCompleted(let turnID, let modelCallID, let completionEntryID, _):
+      let hasAssistantText = snapshot.records.contains {
+        guard case .textEntry(let message) = $0,
+          case .assistant(let entryTurnID, let entryModelCallID) = message.entry
+        else {
+          return false
+        }
+        return entryTurnID == turnID && entryModelCallID == modelCallID
+      }
+      let hasCompletionMarker = snapshot.records.contains {
         guard case .entry(let message) = $0,
           message.entryID == completionEntryID,
           case .turnCompleted(let entryTurnID) = message.entry
@@ -552,6 +581,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID
       }
+      return hasAssistantText && hasCompletionMarker
     case .turnFailed(let turnID, let failureEntryID, _):
       return snapshot.records.contains {
         guard case .entry(let message) = $0,
