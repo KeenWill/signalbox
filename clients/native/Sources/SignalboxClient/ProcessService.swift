@@ -7,12 +7,14 @@ import Foundation
 public enum SignalboxProcessServiceError: LocalizedError, Equatable {
   case unexpectedMessage(String)
   case invalidPage(String)
+  case deadlineExceeded(String)
   case remote(code: SignalboxProcessErrorCode, message: String)
   case mutationRetryExhausted(code: SignalboxProcessErrorCode, message: String)
 
   public var errorDescription: String? {
     switch self {
-    case .unexpectedMessage(let message), .invalidPage(let message):
+    case .unexpectedMessage(let message), .invalidPage(let message),
+      .deadlineExceeded(let message):
       return message
     case .remote(let code, let message):
       return "\(code.rawValue): \(message)"
@@ -26,17 +28,20 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
   public let metadataPageSize: SignalboxCanonicalUInt64
   public let maximumMetadataPages: UInt
   public let ambiguousMutationRetryDelays: [Duration]
+  public let oneShotResponseDeadline: Duration
   public let synchronization: SignalboxSessionSynchronizationPolicy
 
   public init(
     metadataPageSize: SignalboxCanonicalUInt64,
     maximumMetadataPages: UInt,
     ambiguousMutationRetryDelays: [Duration],
+    oneShotResponseDeadline: Duration = .seconds(20),
     synchronization: SignalboxSessionSynchronizationPolicy
   ) {
     self.metadataPageSize = metadataPageSize
     self.maximumMetadataPages = maximumMetadataPages
     self.ambiguousMutationRetryDelays = ambiguousMutationRetryDelays
+    self.oneShotResponseDeadline = oneShotResponseDeadline
     self.synchronization = synchronization
   }
 
@@ -48,6 +53,7 @@ public struct SignalboxProcessApplicationPolicy: Equatable, Sendable {
       .milliseconds(750),
       .seconds(2),
     ],
+    oneShotResponseDeadline: .seconds(20),
     synchronization: SignalboxSessionSynchronizationPolicy(
       deadlines: SignalboxSynchronizationDeadlines(
         connect: .seconds(5),
@@ -190,6 +196,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     session: SignalboxProcessSession
   ) async throws -> SignalboxProcessSession {
     let current = try await readMetadata(sessionID: session.id)
+    guard current.sessionID == session.id else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The metadata read named a different session."
+      )
+    }
     let replacement = SignalboxProcessSessionMetadata(
       title: current.metadata.title,
       tags: current.metadata.tags,
@@ -210,6 +221,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         return receipt
       }
     )
+    guard receipt.sessionID == session.id else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The metadata replacement receipt named a different session."
+      )
+    }
     return SignalboxProcessSession(
       summary: SignalboxProcessSessionMetadataSummary(
         sessionID: session.id,
@@ -248,6 +264,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         return submitted
       }
     )
+    guard submitted.sessionID == submission.sessionID else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The input-submission receipt named a different session."
+      )
+    }
     return submitted
   }
 
@@ -287,7 +308,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       var started = false
       var priorSessionID: String?
       var cursorValidationIsComplete = true
-      while let frame = try await exchange.next() {
+      while let frame = try await nextFrame(from: exchange) {
         switch frame.message {
         case .sessionMetadataPageStart where !started:
           started = true
@@ -303,7 +324,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             )
           }
           priorSessionID = summary.sessionID.rawValue
-          sessions.append(SignalboxProcessSession(summary: summary))
+          if metadataSummaryIsAdmissible(summary) {
+            sessions.append(SignalboxProcessSession(summary: summary))
+          } else {
+            skippedMalformedSummaries += 1
+          }
           try validateMetadataPageCapacity(
             admittedCount: sessions.count,
             malformedCount: skippedMalformedSummaries,
@@ -371,6 +396,26 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     }
   }
 
+  private func metadataSummaryIsAdmissible(
+    _ summary: SignalboxProcessSessionMetadataSummary
+  ) -> Bool {
+    guard summary.tags.count <= SignalboxProcessProtocol.maximumMetadataTags else {
+      return false
+    }
+    guard tagsAreStrictlyIncreasingUTF8(summary.tags) else {
+      return false
+    }
+    let titleBytes = summary.title?.utf8.count ?? 0
+    let tagBytes = summary.tags.reduce(0) { $0 + $1.utf8.count }
+    return titleBytes + tagBytes <= SignalboxProcessProtocol.maximumMetadataSummaryUTF8Bytes
+  }
+
+  private func tagsAreStrictlyIncreasingUTF8(_ tags: [String]) -> Bool {
+    zip(tags, tags.dropFirst()).allSatisfy { earlier, later in
+      earlier.utf8.lexicographicallyPrecedes(later.utf8)
+    }
+  }
+
   private func validateMetadataPageCapacity(
     admittedCount: Int,
     malformedCount: UInt64,
@@ -389,7 +434,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     try await withExchange(
       request: .readSessionMetadata(sessionID: sessionID)
     ) { exchange in
-      while let frame = try await exchange.next() {
+      while let frame = try await nextFrame(from: exchange) {
         switch frame.message {
         case .sessionMetadata(let metadata):
           return metadata
@@ -406,6 +451,46 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The metadata read closed without a current snapshot."
       )
+    }
+  }
+
+  private enum DeadlineResult<Success: Sendable>: Sendable {
+    case value(Success)
+    case expired
+  }
+
+  private func nextFrame(
+    from exchange: any SignalboxProcessExchange
+  ) async throws -> SignalboxProcessServerFrame? {
+    try await withTaskCancellationHandler {
+      try await withThrowingTaskGroup(
+        of: DeadlineResult<SignalboxProcessServerFrame?>.self
+      ) { group in
+        group.addTask {
+          .value(try await exchange.next())
+        }
+        group.addTask {
+          try await Task.sleep(for: self.policy.oneShotResponseDeadline)
+          return .expired
+        }
+        guard let first = try await group.next() else {
+          throw CancellationError()
+        }
+        group.cancelAll()
+        switch first {
+        case .value(let frame):
+          return frame
+        case .expired:
+          await exchange.close()
+          throw SignalboxProcessServiceError.deadlineExceeded(
+            "The process request exceeded its response deadline."
+          )
+        }
+      }
+    } onCancel: {
+      Task {
+        await exchange.close()
+      }
     }
   }
 
@@ -433,10 +518,21 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       let frame: SignalboxProcessServerFrame?
       do {
         frame = try await withExchange(request: request) { exchange in
-          try await exchange.next()
+          try await nextFrame(from: exchange)
         }
       } catch let error as CancellationError {
         throw error
+      } catch let error as SignalboxProcessRequestOpenError {
+        if case .definitelyUnsent = error {
+          throw error
+        }
+        let delay = try ambiguousMutationRetryDelay(
+          at: retryIndex,
+          message: error.localizedDescription
+        )
+        retryIndex += 1
+        try await wait(delay)
+        continue
       } catch {
         let delay = try ambiguousMutationRetryDelay(
           at: retryIndex,
@@ -460,9 +556,13 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       }
       guard case .protocolError(let error) = frame.message else {
         if case .unknown = frame.message {
-          throw SignalboxProcessServiceError.unexpectedMessage(
-            "The mutation receipt could not be decoded."
+          let delay = try ambiguousMutationRetryDelay(
+            at: retryIndex,
+            message: "The mutation receipt could not be decoded."
           )
+          retryIndex += 1
+          try await wait(delay)
+          continue
         }
         throw SignalboxProcessServiceError.unexpectedMessage(
           "The mutation returned an unrelated message."

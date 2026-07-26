@@ -58,6 +58,22 @@ else
 	REQUESTED_SCREENSHOT_NAMES=()
 fi
 
+for requested in "${REQUESTED_SCREENSHOT_NAMES[@]}"; do
+	trimmed_requested="${requested#"${requested%%[![:space:]]*}"}"
+	trimmed_requested="${trimmed_requested%"${trimmed_requested##*[![:space:]]}"}"
+	known_screenshot=0
+	for screenshot_name in "${SCREENSHOT_NAMES[@]}"; do
+		if [[ "$trimmed_requested" == "$screenshot_name" ]]; then
+			known_screenshot=1
+			break
+		fi
+	done
+	if [[ -n "$trimmed_requested" && "$known_screenshot" -eq 0 ]]; then
+		echo "Unknown screenshot state name: $trimmed_requested" >&2
+		exit 2
+	fi
+done
+
 CMD_BUILD=(
 	xcodebuild
 	-quiet

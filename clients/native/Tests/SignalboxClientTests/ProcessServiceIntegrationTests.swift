@@ -85,6 +85,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       RejectingProcessService()
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.content
 
     await viewModel.send()
@@ -140,20 +141,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(cursors, ProcessDriverFixture.expectedCursors)
   }
 
-  func testSideProjectionIncludesMaterializedUserEntryForTriggerTurn() throws {
+  func testSideProjectionDoesNotSelectAcceptedInputTextByTurnAlone() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithUserEntry()
     let trigger = try ProcessProjectionFixture.completedTrigger()
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    let message = try ProcessProjectionFixture.onlyMessage(in: projection)
-
-    XCTAssertEqual(message.role, .user)
-    XCTAssertEqual(message.text, ProcessProjectionFixture.userText)
-    XCTAssertEqual(
-      projection.materializedAcceptedInputIDs,
-      try ProcessProjectionFixture.materializedAcceptedInputIDs()
-    )
+    XCTAssertTrue(projection.records.isEmpty)
+    XCTAssertTrue(projection.materializedAcceptedInputIDs.isEmpty)
   }
 
   func testProposedToolSideProjectionIncludesProducingAssistantText() throws {
@@ -167,6 +162,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(message.text, ProcessProjectionFixture.proposedAssistantText)
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
+  }
+
+  func testSnapshotPreservesPendingAcceptanceOrderAndActiveActivity() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithQueuedAndActiveTurns()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(
+      projection.pendingInputs.map(\.id.rawValue),
+      ProcessProjectionFixture.pendingIDsInAcceptanceOrder
+    )
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.runningActivity)
   }
 
   @MainActor
@@ -202,7 +210,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
 
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
-    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertEqual(viewModel.pendingInputs, try ProcessSubmissionFixture.livePendingInput())
   }
 
   @MainActor
@@ -270,6 +278,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testArchiveCommitWinsOverRacingStaleRefresh() async throws {
+    let backingService = makeService()
+    let fixtures = try await backingService.listSessions(includeArchived: true)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: fixtures)
+    let archived = try await backingService.setArchived(true, session: session)
+    let service = SuspendedArchiveProcessService(
+      staleSessions: [session],
+      replacement: archived
+    )
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+
+    let mutation = Task { await viewModel.toggleArchive(session) }
+    await service.waitUntilMutationStarted()
+    await viewModel.refresh()
+    await service.completeMutation()
+    await mutation.value
+
+    XCTAssertEqual(viewModel.sessions, [archived])
+    XCTAssertFalse(viewModel.isLoading)
+  }
+
+  @MainActor
   func testAmbiguousSubmissionRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -277,6 +308,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       service
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.content
 
     await viewModel.send()
@@ -294,6 +326,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       service
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.content
 
     await viewModel.send()
@@ -314,6 +347,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       service
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.precomposedContent
 
     await viewModel.send()
@@ -334,6 +368,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       service
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.whitespaceSensitiveContent
 
     await viewModel.send()
@@ -349,6 +384,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       ImmediateAcceptingProcessService()
     }
+    await viewModel.connect()
     viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
     viewModel.composerText = ProcessSubmissionFixture.content
 
@@ -365,6 +401,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       service
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.content
 
     let firstSend = Task { await viewModel.send() }
@@ -381,6 +418,67 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testSuccessfulSubmissionPreservesComposerEditMadeWhilePending() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = SuspendedSubmissionService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    let send = Task { await viewModel.send() }
+    await service.waitUntilSubmitStarted()
+    viewModel.composerText = ProcessSubmissionFixture.replacementContent
+    await service.completeSubmission()
+    await send.value
+
+    XCTAssertEqual(viewModel.composerText, ProcessSubmissionFixture.replacementContent)
+  }
+
+  @MainActor
+  func testSendUsesServiceThatOwnsCurrentSynchronization() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let firstService = ImmediateAcceptingProcessService()
+    let secondService = ImmediateAcceptingProcessService()
+    var currentService: (any SignalboxProcessServiceProtocol)? = firstService
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      currentService
+    }
+    await viewModel.connect()
+    currentService = secondService
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    await viewModel.send()
+    let firstContents = await firstService.submittedContents
+    let secondContents = await secondService.submittedContents
+
+    XCTAssertEqual(firstContents, [ProcessSubmissionFixture.content])
+    XCTAssertTrue(secondContents.isEmpty)
+  }
+
+  @MainActor
+  func testDisconnectedSynchronizationCallbackCannotOverwriteState() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = UpdateEmittingProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    viewModel.disconnect()
+
+    await service.emit(
+      .event(try ProcessProjectionFixture.activatedEvent()),
+      synchronizationIndex: 0
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+  }
+
+  @MainActor
   func testSubmissionReceiptDoesNotRestoreMaterializedPendingInput() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -388,6 +486,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let viewModel = ProcessSessionDetailViewModel(session: session) {
       service
     }
+    await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.content
 
     let send = Task { await viewModel.send() }
@@ -401,11 +500,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await service.completeSubmission()
     await send.value
     viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
-    let message = try ProcessProjectionFixture.onlyTimelineMessage(in: viewModel.timeline)
 
-    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
-    XCTAssertEqual(message.text, ProcessProjectionFixture.userText)
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(viewModel.pendingInputs, try ProcessSubmissionFixture.livePendingInput())
+    XCTAssertTrue(viewModel.timeline.isEmpty)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
   }
 
   @MainActor
@@ -419,6 +517,28 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertTrue(viewModel.pendingInputs.isEmpty)
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.refusedActivity)
+  }
+
+  @MainActor
+  func testCompletedModelCallDoesNotCompleteOwningTurn() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(.event(try ProcessProjectionFixture.completedModelCallEvent()))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+  }
+
+  @MainActor
+  func testAmbiguousModelCallPreservesRecoveryDiagnosticState() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(.event(try ProcessProjectionFixture.ambiguousModelCallEvent()))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
   }
 
   func testConnectionRejectsMetadataProbeWithoutTerminalBoundary() async throws {
@@ -478,6 +598,82 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       openedRequests,
       ProcessSubmissionFixture.retriedRequests(for: submission)
     )
+  }
+
+  func testUnknownMutationReceiptRetriesTheSameDurableCommand() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requester = SequencedProcessRequester(
+      pages: [
+        [try ProcessDriverFixture.unknownMutationReceipt()],
+        [try ProcessDriverFixture.inputSubmitted()],
+      ]
+    )
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
+    )
+
+    let receipt = try await service.submit(submission)
+    let openedRequests = await requester.openedRequests
+
+    XCTAssertEqual(receipt, try ProcessSubmissionFixture.submittedReceipt())
+    XCTAssertEqual(
+      openedRequests,
+      ProcessSubmissionFixture.retriedRequests(for: submission)
+    )
+  }
+
+  func testDefinitelyUnsentMutationIsNotRetried() async throws {
+    let requester = DefinitelyUnsentProcessRequester()
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
+    )
+
+    let error = await capturedError {
+      try await service.submit(ProcessSubmissionFixture.preparedSubmission())
+    }
+    let openCount = await requester.openCount
+
+    XCTAssertEqual(
+      error as? SignalboxProcessRequestOpenError,
+      ProcessDriverFixture.definitelyUnsentError
+    )
+    XCTAssertEqual(openCount, ProcessSubmissionFixture.singleRequestCount)
+  }
+
+  func testOneShotReadClosesAtItsTypedDeadline() async throws {
+    let requester = DeadlineProcessRequester()
+    let service = SignalboxProcessService(
+      requester: requester,
+      policy: ProcessDriverFixture.immediateDeadlinePolicy
+    )
+
+    let error = await capturedServiceError {
+      try await service.testConnection()
+    }
+    let wasClosed = await requester.exchange.wasClosed
+
+    XCTAssertEqual(error, ProcessDriverFixture.deadlineError)
+    XCTAssertTrue(wasClosed)
+  }
+
+  func testSubmissionReceiptRejectsDifferentSessionIdentity() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.inputSubmitted(
+          sessionID: ProcessDriverFixture.metadataSessionA
+        )
+      ]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError {
+      _ = try await service.submit(submission)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.mismatchedSubmissionSessionError)
   }
 
   func testMutationCancellationIsNotRetriedAsAmbiguous() async throws {
@@ -598,6 +794,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.metadataRequestCursorError)
   }
 
+  func testMetadataPageSkipsSummaryWithNoncanonicalTagOrder() async throws {
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.metadataPageStart(),
+        try ProcessDriverFixture.metadataSummaryWithUnorderedTags(),
+        try ProcessDriverFixture.metadataPageEnd(
+          count: ProcessDriverFixture.oneMetadataCount,
+          nextSessionID: nil
+        ),
+      ]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let sessions = try await service.listSessions(includeArchived: true)
+
+    XCTAssertTrue(sessions.isEmpty)
+  }
+
   func testMarkdownScreenshotHarnessProjectsScenarioSpecificContent() async throws {
     let service = makeService(scenario: .markdownCode)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -638,6 +852,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
 
     XCTAssertEqual(tool.status, ProcessProjectionFixture.neutralToolCardStatus)
+  }
+
+  func testClosedProcessToolNormalizesToClosedCard() throws {
+    let record = SignalboxStoredEvent(
+      eventID: SignalboxEventID(rawValue: 1),
+      event: .processTool(
+        SignalboxProcessToolEvent(
+          toolRequestID: SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.closedToolID),
+          toolName: ProcessProjectionFixture.closedToolName,
+          arguments: nil,
+          output: nil,
+          status: .closed
+        )
+      )
+    )
+
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.status, SignalboxToolCardStatus.closed)
   }
 
   private func makeService(
@@ -803,6 +1037,16 @@ private enum ProcessSubmissionFixture {
       )
     ]
   }
+
+  static func livePendingInput() throws -> [SignalboxProcessPendingInput] {
+    [
+      SignalboxProcessPendingInput(
+        id: try SignalboxCanonicalUUID(validating: acceptedInputID),
+        turnID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.turn),
+        content: content
+      )
+    ]
+  }
 }
 
 private struct SubmissionCallCounts: Equatable, Sendable {
@@ -855,6 +1099,52 @@ private struct RejectingProcessService: SignalboxProcessServiceProtocol {
 private struct NoopProcessSynchronization: SignalboxSessionSynchronizing {
   func start() async {}
   func stop() async {}
+}
+
+private actor UpdateEmittingProcessService: SignalboxProcessServiceProtocol {
+  private var updateHandlers:
+    [@Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void] = []
+
+  func testConnection() async {}
+
+  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
+    []
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async -> SignalboxProcessSession {
+    session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) async throws -> SignalboxPreparedInputSubmission {
+    try ProcessSubmissionFixture.preparedSubmission()
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) async throws -> SignalboxInputSubmitted {
+    try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) async -> any SignalboxSessionSynchronizing {
+    updateHandlers.append(updates)
+    return NoopProcessSynchronization()
+  }
+
+  func emit(
+    _ update: SignalboxSessionSynchronizationDriverUpdate,
+    synchronizationIndex: Int
+  ) async {
+    await updateHandlers[synchronizationIndex](update)
+  }
 }
 
 private actor SuspendedConnectionProcessService: SignalboxProcessServiceProtocol {
@@ -958,6 +1248,75 @@ private actor SuspendedSessionListProcessService: SignalboxProcessServiceProtoco
     session: SignalboxProcessSession
   ) async -> SignalboxProcessSession {
     session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) async throws -> SignalboxPreparedInputSubmission {
+    try ProcessSubmissionFixture.preparedSubmission()
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) async throws -> SignalboxInputSubmitted {
+    try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) async -> any SignalboxSessionSynchronizing {
+    NoopProcessSynchronization()
+  }
+}
+
+private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
+  private let staleSessions: [SignalboxProcessSession]
+  private let replacement: SignalboxProcessSession
+  private var mutationStarted = false
+  private var mutationStartedWaiter: CheckedContinuation<Void, Never>?
+  private var completionWaiter: CheckedContinuation<Void, Never>?
+
+  init(
+    staleSessions: [SignalboxProcessSession],
+    replacement: SignalboxProcessSession
+  ) {
+    self.staleSessions = staleSessions
+    self.replacement = replacement
+  }
+
+  func testConnection() async {}
+
+  func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
+    staleSessions
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async -> SignalboxProcessSession {
+    mutationStarted = true
+    mutationStartedWaiter?.resume()
+    mutationStartedWaiter = nil
+    await withCheckedContinuation { continuation in
+      completionWaiter = continuation
+    }
+    return replacement
+  }
+
+  func waitUntilMutationStarted() async {
+    guard !mutationStarted else {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      mutationStartedWaiter = continuation
+    }
+  }
+
+  func completeMutation() {
+    completionWaiter?.resume()
+    completionWaiter = nil
   }
 
   func prepareInputSubmission(
@@ -1400,6 +1759,44 @@ private actor CancellationProcessExchange: SignalboxProcessExchange {
   func close() {}
 }
 
+private actor DefinitelyUnsentProcessRequester: SignalboxProcessRequesting {
+  private(set) var openCount = 0
+
+  func open(
+    _ request: SignalboxProcessClientRequest
+  ) async throws -> any SignalboxProcessExchange {
+    openCount += 1
+    throw ProcessDriverFixture.definitelyUnsentError
+  }
+}
+
+private struct DeadlineProcessRequester: SignalboxProcessRequesting {
+  let exchange = DeadlineProcessExchange()
+
+  func open(
+    _ request: SignalboxProcessClientRequest
+  ) async -> any SignalboxProcessExchange {
+    exchange
+  }
+}
+
+private actor DeadlineProcessExchange: SignalboxProcessExchange {
+  private var continuation: CheckedContinuation<SignalboxProcessServerFrame?, Never>?
+  private(set) var wasClosed = false
+
+  func next() async -> SignalboxProcessServerFrame? {
+    await withCheckedContinuation { continuation in
+      self.continuation = continuation
+    }
+  }
+
+  func close() {
+    wasClosed = true
+    continuation?.resume(returning: nil)
+    continuation = nil
+  }
+}
+
 private actor StaticProcessExchange: SignalboxProcessExchange {
   private var frames: [SignalboxProcessServerFrame]
 
@@ -1428,6 +1825,7 @@ private enum ProcessDriverFixture {
   static let metadataSessionB = "88888888-8888-4888-8888-888888888888"
   static let singleMetadataCount: UInt64 = 1
   static let twoMetadataCount: UInt64 = 2
+  static let oneMetadataCount: UInt64 = 1
   static let initialFollowReadCount = 3
   static let bufferedFollowReadCount = 5
   static let sideEndReadCount = 2
@@ -1451,6 +1849,15 @@ private enum ProcessDriverFixture {
   static let metadataRegressingEndCursorError = SignalboxProcessServiceError.invalidPage(
     "The metadata page cursor regressed behind an admitted summary."
   )
+  static let definitelyUnsentError = SignalboxProcessRequestOpenError.definitelyUnsent(
+    "Fixture connection failed."
+  )
+  static let deadlineError = SignalboxProcessServiceError.deadlineExceeded(
+    "The process request exceeded its response deadline."
+  )
+  static let mismatchedSubmissionSessionError = SignalboxProcessServiceError.unexpectedMessage(
+    "The input-submission receipt named a different session."
+  )
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
@@ -1469,6 +1876,13 @@ private enum ProcessDriverFixture {
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
     ambiguousMutationRetryDelays:
       SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
+  static let immediateDeadlinePolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize,
+    maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
+    ambiguousMutationRetryDelays: [],
+    oneShotResponseDeadline: .milliseconds(1),
     synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
   )
 
@@ -1584,6 +1998,27 @@ private enum ProcessDriverFixture {
     )
   }
 
+  static func metadataSummaryWithUnorderedTags() throws -> SignalboxProcessServerFrame {
+    try frame(
+      """
+      {
+        "type":"session_metadata_summary",
+        "session_id":"\(metadataSessionA)",
+        "defaults_version":"1",
+        "model_selection":{
+          "kind":"direct",
+          "selection_id":"\(modelCall)"
+        },
+        "dangerous_tool_auto_approval":false,
+        "title":"Fixture metadata session",
+        "tags":["zeta","alpha"],
+        "archived":false,
+        "last_writer":null
+      }
+      """
+    )
+  }
+
   static func metadataPageEnd(
     count: UInt64,
     nextSessionID: String?
@@ -1605,18 +2040,24 @@ private enum ProcessDriverFixture {
     )
   }
 
-  static func inputSubmitted() throws -> SignalboxProcessServerFrame {
+  static func inputSubmitted(
+    sessionID: String = session
+  ) throws -> SignalboxProcessServerFrame {
     try frame(
       """
       {
         "type":"input_submitted",
-        "session_id":"\(session)",
+        "session_id":"\(sessionID)",
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "acceptance_position":"1",
         "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)"
       }
       """
     )
+  }
+
+  static func unknownMutationReceipt() throws -> SignalboxProcessServerFrame {
+    try frame(#"{"type":"future_mutation_receipt","opaque":"fixture"}"#)
   }
 
   static func malformedMetadataSummary() throws -> SignalboxProcessServerFrame {
@@ -1671,13 +2112,25 @@ private enum ProcessProjectionFixture {
   static let proposedAssistantEntry = "99999999-9999-4999-8999-999999999999"
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
   static let proposedToolRequest = "bbbbbbbb-1111-4111-8111-111111111111"
+  static let closedToolID = "cccccccc-1111-4111-8111-111111111111"
+  static let closedToolName = "closed_fixture_tool"
+  static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+  static let secondPendingID = "00000000-0000-4000-8000-000000000001"
+  static let firstPendingTurn = "ffffffff-ffff-4fff-8fff-fffffffffffe"
+  static let secondPendingTurn = "00000000-0000-4000-8000-000000000002"
+  static let pendingIDsInAcceptanceOrder = [firstPendingID, secondPendingID]
   static let runningActivity = SignalboxProcessActivity(state: .running, label: "Running")
+  static let queuedActivity = SignalboxProcessActivity(state: .queued, label: "Queued")
   static let waitingActivity = SignalboxProcessActivity(
     state: .waitingForToolDecision,
     label: "Tool decision unavailable"
   )
   static let unavailableActivity = SignalboxProcessActivity.unavailable
   static let refusedActivity = SignalboxProcessActivity(state: .refused, label: "Refused")
+  static let recoveryActivity = SignalboxProcessActivity(
+    state: .recoveryRequired,
+    label: "Recovery required"
+  )
   static let neutralToolCardStatus = SignalboxToolCardStatus.completed
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
@@ -1831,6 +2284,65 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithQueuedAndActiveTurns() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(firstPendingTurn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"queued",
+            "accepted_input_id":"\(firstPendingID)",
+            "content":"first"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"2",
+          "state":{
+            "type":"active_running",
+            "current_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "current_model_call":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(secondPendingTurn)",
+          "acceptance_position":"3",
+          "state":{
+            "type":"queued",
+            "accepted_input_id":"\(secondPendingID)",
+            "content":"second"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"3",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
   static func completedTrigger() throws -> SignalboxFollowedSessionEvent {
     let message = try message(
       """
@@ -1921,6 +2433,32 @@ private enum ProcessProjectionFixture {
         "turn_id":"\(ProcessDriverFixture.turn)",
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
         "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
+      }
+      """
+    )
+  }
+
+  static func completedModelCallEvent() throws -> SignalboxFollowedSessionEvent {
+    try modelCallEvent(disposition: "completed")
+  }
+
+  static func ambiguousModelCallEvent() throws -> SignalboxFollowedSessionEvent {
+    try modelCallEvent(disposition: "ambiguous")
+  }
+
+  private static func modelCallEvent(
+    disposition: String
+  ) throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"model_call_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{
+          "type":"terminal",
+          "disposition":"\(disposition)"
+        }
       }
       """
     )

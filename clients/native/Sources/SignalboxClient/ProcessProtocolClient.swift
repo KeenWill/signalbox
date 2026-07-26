@@ -53,6 +53,20 @@ public enum SignalboxProcessClientError: LocalizedError, Equatable {
   }
 }
 
+public enum SignalboxProcessRequestOpenError: LocalizedError, Equatable {
+  case definitelyUnsent(String)
+  case sendOutcomeUnknown(String)
+
+  public var errorDescription: String? {
+    switch self {
+    case .definitelyUnsent(let message):
+      return "The process request was not sent: \(message)"
+    case .sendOutcomeUnknown(let message):
+      return "The process request send outcome is unknown: \(message)"
+    }
+  }
+}
+
 public actor SignalboxProcessClient: SignalboxProcessRequesting {
   private let connectionFactory: any SignalboxProcessConnectionFactory
   private var nextRequestID: UInt64
@@ -83,10 +97,15 @@ public actor SignalboxProcessClient: SignalboxProcessRequesting {
     let connection = connectionFactory.makeConnection()
     do {
       try await connection.start()
+    } catch {
+      await connection.close()
+      throw SignalboxProcessRequestOpenError.definitelyUnsent(error.localizedDescription)
+    }
+    do {
       try await connection.send(encoded)
     } catch {
       await connection.close()
-      throw error
+      throw SignalboxProcessRequestOpenError.sendOutcomeUnknown(error.localizedDescription)
     }
     return SignalboxPullProcessExchange(
       connection: connection,

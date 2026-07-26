@@ -4,6 +4,9 @@ public enum SignalboxProcessProtocol {
   public static let currentVersion = SignalboxProcessProtocolVersion.five
   public static let maximumFrameBytes = 8 * 1024 * 1024
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
+  // docs/spec/process-protocol.md owns the version-five metadata projection bounds.
+  public static let maximumMetadataTags = 256
+  public static let maximumMetadataSummaryUTF8Bytes = 262_144
 }
 
 public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {

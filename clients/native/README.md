@@ -73,6 +73,8 @@ scripts/check-screenshot-goldens.sh
 
 The `new-session`, operations, and remote setup captures intentionally present
 capability gates. They are not previews of unimplemented server behavior.
+Selective capture fails before building when a requested screenshot name is not
+in the checked-in matrix, so a typo cannot silently validate an empty selection.
 
 ## Tart VM validation
 
@@ -115,6 +117,9 @@ The following work remains:
   select the protocol's required model UUID.
 - Tool decisions, runners, templates, monitor summaries, and artifacts await
   real process-protocol operations.
+- Compact-width navigation omits Templates until its information architecture is
+  owner-approved; regular-width and macOS navigation retain the explicit
+  capability gate.
 - The older REST/WebSocket implementation remains compiled temporarily for
   import-era test and presentation compatibility, but production composition no
   longer installs it.

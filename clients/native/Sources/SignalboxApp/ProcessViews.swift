@@ -18,6 +18,8 @@ final class ProcessSessionListViewModel: ObservableObject {
 
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var activeRefreshID = UUID()
+  private var serviceGeneration: UInt64 = 0
+  private var publicationGeneration: UInt64 = 0
 
   init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
     self.serviceProvider = serviceProvider
@@ -27,6 +29,10 @@ final class ProcessSessionListViewModel: ObservableObject {
     _ provider: @escaping () -> (any SignalboxProcessServiceProtocol)?
   ) {
     serviceProvider = provider
+    serviceGeneration &+= 1
+    publicationGeneration &+= 1
+    activeRefreshID = UUID()
+    isLoading = false
   }
 
   var visibleSessions: [SignalboxProcessSession] {
@@ -48,6 +54,9 @@ final class ProcessSessionListViewModel: ObservableObject {
 
   func refresh() async {
     let refreshID = UUID()
+    publicationGeneration &+= 1
+    let publication = publicationGeneration
+    let generation = serviceGeneration
     activeRefreshID = refreshID
     guard let service = serviceProvider() else {
       isLoading = false
@@ -62,13 +71,17 @@ final class ProcessSessionListViewModel: ObservableObject {
     }
     do {
       let refreshedSessions = try await service.listSessions(includeArchived: true)
-      guard activeRefreshID == refreshID else {
+      guard activeRefreshID == refreshID, serviceGeneration == generation,
+        publicationGeneration == publication
+      else {
         return
       }
       sessions = refreshedSessions
       errorMessage = nil
     } catch {
-      guard activeRefreshID == refreshID else {
+      guard activeRefreshID == refreshID, serviceGeneration == generation,
+        publicationGeneration == publication
+      else {
         return
       }
       errorMessage = error.localizedDescription
@@ -76,18 +89,34 @@ final class ProcessSessionListViewModel: ObservableObject {
   }
 
   func toggleArchive(_ session: SignalboxProcessSession) async {
+    let generation = serviceGeneration
+    publicationGeneration &+= 1
+    activeRefreshID = UUID()
+    isLoading = false
     guard let service = serviceProvider() else {
       errorMessage = remoteTransportGateMessage
       return
     }
     do {
       let replacement = try await service.setArchived(!session.archived, session: session)
+      guard serviceGeneration == generation else {
+        return
+      }
+      publicationGeneration &+= 1
+      activeRefreshID = UUID()
+      isLoading = false
       guard let index = sessions.firstIndex(where: { $0.id == session.id }) else {
         return
       }
       sessions[index] = replacement
       errorMessage = nil
     } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      publicationGeneration &+= 1
+      activeRefreshID = UUID()
+      isLoading = false
       errorMessage = error.localizedDescription
     }
   }
@@ -265,7 +294,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   let session: SignalboxProcessSession
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
+  private var connectedService: (any SignalboxProcessServiceProtocol)?
   private var synchronization: (any SignalboxSessionSynchronizing)?
+  private var synchronizationGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var projector = SignalboxProcessTranscriptProjector()
@@ -286,6 +317,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   func connect() async {
+    synchronizationGeneration &+= 1
+    let generation = synchronizationGeneration
+    let prior = synchronization
+    synchronization = nil
+    connectedService = nil
+    await prior?.stop()
+    guard synchronizationGeneration == generation, !Task.isCancelled else {
+      return
+    }
     guard let service = serviceProvider() else {
       errorMessage = remoteTransportGateMessage
       return
@@ -293,15 +333,22 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     let synchronization = await service.makeSynchronization(
       sessionID: session.id
     ) { [weak self] update in
-      await self?.apply(update)
+      await self?.apply(update, generation: generation)
     }
+    guard synchronizationGeneration == generation, !Task.isCancelled else {
+      await synchronization.stop()
+      return
+    }
+    connectedService = service
     self.synchronization = synchronization
     await synchronization.start()
   }
 
   func disconnect() {
+    synchronizationGeneration &+= 1
     let current = synchronization
     synchronization = nil
+    connectedService = nil
     Task {
       await current?.stop()
     }
@@ -312,7 +359,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     guard
       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       !isSubmitting,
-      let service = serviceProvider()
+      let service = connectedService
     else {
       return
     }
@@ -345,7 +392,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         )
       }
       unresolvedSubmission = nil
-      if hasExactUTF8(content, prepared.content) {
+      if hasExactUTF8(composerText, prepared.content) {
         composerText = ""
       }
       errorMessage = nil
@@ -362,6 +409,16 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
+    apply(update, generation: synchronizationGeneration)
+  }
+
+  private func apply(
+    _ update: SignalboxSessionSynchronizationDriverUpdate,
+    generation: UInt64
+  ) {
+    guard synchronizationGeneration == generation else {
+      return
+    }
     do {
       switch update {
       case .phase(let phase):
@@ -454,14 +511,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       activity = .init(state: .running, label: "Running")
     case .terminal(let disposition):
       switch disposition {
-      case .completed:
-        activity = .init(state: .completed, label: "Completed")
-      case .knownFailed, .ambiguous:
-        activity = .init(state: .failed, label: "Failed")
-      case .refused:
-        activity = .init(state: .refused, label: "Refused")
-      case .cancelled:
-        activity = .init(state: .cancelled, label: "Cancelled")
+      case .ambiguous:
+        activity = .init(state: .recoveryRequired, label: "Recovery required")
+      case .completed, .knownFailed, .refused, .cancelled:
+        activity = .init(state: .running, label: "Running")
       }
     case .unknown:
       break
@@ -537,6 +590,11 @@ struct ProcessSessionDetailScreen: View {
       await viewModel.connect()
       if coordinator.screenshotScenario == .artifactPreview {
         showArtifactGate = true
+      }
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .processServiceChanged)) { _ in
+      Task {
+        await viewModel.connect()
       }
     }
     .onDisappear {

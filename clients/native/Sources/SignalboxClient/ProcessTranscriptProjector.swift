@@ -98,22 +98,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) throws -> SignalboxProcessTranscriptProjection {
     var projectedByID: [SignalboxEventID: SignalboxStoredEvent] = [:]
     var projectedOrder: [SignalboxEventID] = []
-    var pendingByAcceptedInputID: [String: SignalboxProcessPendingInput] = [:]
+    var pendingInputs: [SignalboxProcessPendingInput] = []
     var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
-    var currentActivity = SignalboxProcessActivity.unavailable
+    var latestActivity = SignalboxProcessActivity.unavailable
+    var activeActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
 
     for record in snapshot.records {
       switch record {
       case .turn(let turn):
-        currentActivity = activity(for: turn.state)
+        latestActivity = activity(for: turn.state)
+        if turnStateIsActive(turn.state) {
+          activeActivity = latestActivity
+        }
         if case .queued(let acceptedInputID, let content) = turn.state {
-          pendingByAcceptedInputID[acceptedInputID.rawValue] = SignalboxProcessPendingInput(
+          pendingInputs.append(SignalboxProcessPendingInput(
             id: acceptedInputID,
             turnID: turn.turnID,
             content: content
-          )
+          ))
         }
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
           awaitingToolDecisionRequestID = requestID.rawValue
@@ -155,13 +159,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard textAssembly == nil else {
       throw SignalboxProcessTranscriptProjectionError.missingTextContent
     }
-    for acceptedInputID in materializedAcceptedInputIDs {
-      pendingByAcceptedInputID.removeValue(forKey: acceptedInputID.rawValue)
-    }
+    pendingInputs.removeAll { materializedAcceptedInputIDs.contains($0.id) }
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
-      pendingInputs: pendingByAcceptedInputID.values.sorted { $0.id.rawValue < $1.id.rawValue },
-      activity: currentActivity,
+      pendingInputs: pendingInputs,
+      activity: activeActivity ?? latestActivity,
       materializedAcceptedInputIDs: materializedAcceptedInputIDs
     )
   }
@@ -368,8 +370,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return true
     case .trigger(let trigger):
       switch entry {
-      case .user(_, let turnID):
-        return turnID == self.turnID(for: trigger)
+      case .user:
+        return false
       case .assistant(let turnID, let modelCallID):
         let producingCall: (turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID)?
         switch trigger {
@@ -386,6 +388,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .imported, .unknown:
         return false
       }
+    }
+  }
+
+  private func turnStateIsActive(_ state: SignalboxTranscriptTurnState) -> Bool {
+    switch state {
+    case .activeRunning, .activeAwaitingToolApproval, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolRecovery, .reconciliationRequired, .toolReconciliationRequired:
+      return true
+    case .queued, .failed, .completed, .refused, .cancelled, .unknown:
+      return false
     }
   }
 

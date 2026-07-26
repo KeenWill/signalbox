@@ -82,6 +82,13 @@ final class AppCoordinator: ObservableObject {
         )
     }
 
+    private func replaceProcessService(
+        _ replacement: (any SignalboxProcessServiceProtocol)?
+    ) {
+        processService = replacement
+        NotificationCenter.default.post(name: .processServiceChanged, object: nil)
+    }
+
     func testConnectionAndInstallClient() async {
         if isMockMode {
             await processSettings.test(using: processService)
@@ -89,20 +96,20 @@ final class AppCoordinator: ObservableObject {
         }
         #if os(macOS)
         guard let socketPath = processSettings.validatedSocketPath else {
-            processService = nil
+            replaceProcessService(nil)
             processSettings.save()
             return
         }
         let candidate = Self.makeProcessService(socketPath: socketPath)
-        processService = nil
+        replaceProcessService(nil)
         await processSettings.test(using: candidate, expectedSocketPath: socketPath)
         if processSettings.connectionStatus == .connected,
            processSettings.validatedSocketPath == socketPath {
-            processService = candidate
+            replaceProcessService(candidate)
             NotificationCenter.default.post(name: .refreshRequested, object: nil)
         }
         #else
-        processService = nil
+        replaceProcessService(nil)
         await processSettings.test(using: nil)
         #endif
     }
@@ -111,7 +118,7 @@ final class AppCoordinator: ObservableObject {
         guard !isMockMode else {
             return
         }
-        processService = nil
+        replaceProcessService(nil)
         processSettings.save()
         NotificationCenter.default.post(name: .refreshRequested, object: nil)
     }

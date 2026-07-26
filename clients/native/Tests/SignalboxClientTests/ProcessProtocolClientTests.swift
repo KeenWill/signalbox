@@ -98,6 +98,53 @@ final class ProcessProtocolClientTests: XCTestCase {
     XCTAssertEqual(readsBeforeNext, 0)
     XCTAssertEqual(readsAfterOneFrame, 1)
   }
+
+  func testConnectionStartFailureIsDefinitelyUnsent() async {
+    let connection = ScriptedProcessConnection(
+      chunks: [],
+      startError: ProcessProtocolClientFixtureError.startFailed
+    )
+    let client = SignalboxProcessClient(
+      connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
+    )
+
+    let error = await capturedOpenError(client)
+
+    XCTAssertEqual(
+      error,
+      .definitelyUnsent(ProcessProtocolClientFixtureError.startMessage)
+    )
+  }
+
+  func testConnectionSendFailureHasUnknownOutcome() async {
+    let connection = ScriptedProcessConnection(
+      chunks: [],
+      sendError: ProcessProtocolClientFixtureError.sendFailed
+    )
+    let client = SignalboxProcessClient(
+      connectionFactory: ScriptedProcessConnectionFactory(connection: connection)
+    )
+
+    let error = await capturedOpenError(client)
+
+    XCTAssertEqual(
+      error,
+      .sendOutcomeUnknown(ProcessProtocolClientFixtureError.sendMessage)
+    )
+  }
+
+  private func capturedOpenError(
+    _ client: SignalboxProcessClient
+  ) async -> SignalboxProcessRequestOpenError? {
+    do {
+      _ = try await client.open(.listSessions)
+      return nil
+    } catch let error as SignalboxProcessRequestOpenError {
+      return error
+    } catch {
+      return nil
+    }
+  }
 }
 
 private struct ScriptedProcessConnectionFactory: SignalboxProcessConnectionFactory {
@@ -110,16 +157,31 @@ private struct ScriptedProcessConnectionFactory: SignalboxProcessConnectionFacto
 
 private actor ScriptedProcessConnection: SignalboxProcessConnection {
   private var chunks: [Data]
+  private let startError: (any Error)?
+  private let sendError: (any Error)?
   private(set) var sentData = Data()
   private(set) var receiveCount = 0
 
-  init(chunks: [Data]) {
+  init(
+    chunks: [Data],
+    startError: (any Error)? = nil,
+    sendError: (any Error)? = nil
+  ) {
     self.chunks = chunks
+    self.startError = startError
+    self.sendError = sendError
   }
 
-  func start() async throws {}
+  func start() async throws {
+    if let startError {
+      throw startError
+    }
+  }
 
   func send(_ data: Data) async throws {
+    if let sendError {
+      throw sendError
+    }
     sentData.append(data)
   }
 
@@ -132,4 +194,21 @@ private actor ScriptedProcessConnection: SignalboxProcessConnection {
   }
 
   func close() async {}
+}
+
+private enum ProcessProtocolClientFixtureError: LocalizedError {
+  case startFailed
+  case sendFailed
+
+  static let startMessage = "Fixture start failed."
+  static let sendMessage = "Fixture send failed."
+
+  var errorDescription: String? {
+    switch self {
+    case .startFailed:
+      Self.startMessage
+    case .sendFailed:
+      Self.sendMessage
+    }
+  }
 }

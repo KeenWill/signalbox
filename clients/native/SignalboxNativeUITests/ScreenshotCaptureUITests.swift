@@ -10,7 +10,7 @@ final class ScreenshotCaptureUITests: XCTestCase {
         let outputDirectory = try screenshotOutputDirectory()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try captureScreenshots(
-            ScreenshotCaptureSpecification.selectedByEnvironment(outputDirectory: outputDirectory),
+            try ScreenshotCaptureSpecification.selectedByEnvironment(outputDirectory: outputDirectory),
             in: outputDirectory
         )
     }
@@ -141,7 +141,9 @@ private struct ScreenshotCaptureSpecification {
         .init(name: "large-type", state: "pending-approval", presentationArguments: ["--screenshot-dynamic-type", "accessibility3"], settleTime: 2.0),
     ]
 
-    static func selectedByEnvironment(outputDirectory: URL) -> [ScreenshotCaptureSpecification] {
+    static func selectedByEnvironment(
+        outputDirectory: URL
+    ) throws -> [ScreenshotCaptureSpecification] {
         let configuredNames = ProcessInfo.processInfo.environment["SIGNALBOX_NATIVE_SCREENSHOT_NAMES"]
             ?? (try? String(contentsOf: outputDirectory.appendingPathComponent(".capture-screenshot-names"), encoding: .utf8))
         guard let rawNames = configuredNames, !rawNames.isEmpty else {
@@ -157,6 +159,22 @@ private struct ScreenshotCaptureSpecification {
         guard !requestedNames.isEmpty else {
             return all
         }
+        let knownNames = Set(all.map(\.name))
+        let unknownNames = requestedNames.subtracting(knownNames).sorted()
+        guard unknownNames.isEmpty else {
+            throw ScreenshotCaptureConfigurationError.unknownNames(unknownNames)
+        }
         return all.filter { requestedNames.contains($0.name) }
+    }
+}
+
+private enum ScreenshotCaptureConfigurationError: LocalizedError {
+    case unknownNames([String])
+
+    var errorDescription: String? {
+        switch self {
+        case .unknownNames(let names):
+            return "Unknown screenshot state names: \(names.joined(separator: ", "))"
+        }
     }
 }

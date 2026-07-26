@@ -99,6 +99,7 @@ public enum SignalboxToolCardStatus: Equatable, Sendable {
     case succeeded
     case failed
     case completed
+    case closed
 
     public var label: String {
         switch self {
@@ -118,6 +119,8 @@ public enum SignalboxToolCardStatus: Equatable, Sendable {
             return "Failed"
         case .completed:
             return "Completed"
+        case .closed:
+            return "Closed"
         }
     }
 }
@@ -276,7 +279,9 @@ public enum SignalboxEventNormalizer {
             return .completed
         case .denied:
             return .denied
-        case .closed, .recoveryRequired:
+        case .closed:
+            return .closed
+        case .recoveryRequired:
             return .failed
         }
     }

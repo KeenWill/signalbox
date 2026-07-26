@@ -642,7 +642,7 @@ struct ToolInvocationCard: View {
             return .red
         case .succeeded:
             return .green
-        case .proposed, .running, .approved, .completed:
+        case .proposed, .running, .approved, .completed, .closed:
             return .blue
         }
     }
@@ -659,7 +659,7 @@ struct ToolInvocationCard: View {
             return "checkmark.seal.fill"
         case .completed:
             return "checkmark.circle.fill"
-        case .proposed, .running, .approved:
+        case .proposed, .running, .approved, .closed:
             return "terminal"
         }
     }
