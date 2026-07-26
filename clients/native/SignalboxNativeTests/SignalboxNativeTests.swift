@@ -293,7 +293,7 @@ final class SignalboxNativeTests: XCTestCase {
         await loadTask.value
     }
 
-    func testStreamHelloReusesLoadedHistoryAndReplaysConcurrentDeletion() async throws {
+    func testStreamHelloResynchronizesHistoryAndReplaysConcurrentDeletion() async throws {
         let fixture = try await streamHelloHistoryReuseFixture()
         let service = HistoryReuseStreamSignalboxService(fixture: fixture)
         let viewModel = SessionDetailViewModel(session: fixture.session) { service }
@@ -301,6 +301,8 @@ final class SignalboxNativeTests: XCTestCase {
         let loadTask = Task {
             await viewModel.loadAndConnect()
         }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
         await service.waitForStreamInvocation()
         let streamStopped = observeCurrentStreamStopped(on: viewModel)
         service.sendStreamHello()
@@ -320,9 +322,46 @@ final class SignalboxNativeTests: XCTestCase {
         )
         XCTAssertEqual(
             service.listEventsCallCount,
-            StreamHelloHistoryReuseFixture.expectedListEventsCallCount
+            StreamHelloHistoryReuseFixture.expectedSynchronizedListEventsCallCount
         )
         withExtendedLifetime(streamStopped.cancellable) {}
+    }
+
+    func testStreamHelloRefetchesHistoryToObservePreStreamDeletion() async throws {
+        let fixture = try await streamHelloHistoryReuseFixture()
+        let service = HistoryReuseStreamSignalboxService(fixture: fixture)
+        let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+
+        let loadTask = Task {
+            await viewModel.loadAndConnect()
+        }
+        await service.waitForListEventsInvocation()
+        // The pre-stream snapshot still contains the record whose deletion
+        // preceded the subscription, so no stream frame will ever announce it
+        // and the hello window is too recent to contradict it.
+        service.resumeHistoryEvents()
+        await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        let authoritativeHistoryRequested = expectation(
+            description: "authoritative history requested after hello"
+        )
+        Task {
+            await service.waitForListEventsInvocation()
+            service.resumeHistoryEvents(returning: fixture.expectedMergedEvents)
+            authoritativeHistoryRequested.fulfill()
+        }
+        await fulfillment(
+            of: [authoritativeHistoryRequested],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
+        await loadTask.value
+
+        XCTAssertEqual(viewModel.events, fixture.expectedMergedEvents)
+        XCTAssertEqual(
+            service.listEventsCallCount,
+            StreamHelloHistoryReuseFixture.expectedSynchronizedListEventsCallCount
+        )
+        viewModel.disconnectStream()
     }
 
     func testLoadAndConnectFallsBackWhenStreamHelloTimesOut() async throws {
@@ -355,29 +394,50 @@ final class SignalboxNativeTests: XCTestCase {
         viewModel.disconnectStream()
     }
 
-    func testLoadAndConnectRecoversFromInitialHistoryFailure() async throws {
+    func testLoadAndConnectRecoversFromSynchronizedHistoryFailure() async throws {
         let fixture = try await streamHelloHistoryReuseFixture()
         let service = HistoryReuseStreamSignalboxService(
             fixture: fixture,
-            historyFailureCount: StreamHelloHistoryReuseFixture.initialHistoryFailureCount
+            historyFailureCallNumbers: StreamHelloHistoryReuseFixture
+                .initialSynchronizedHistoryFailureCallNumbers
         )
         let viewModel = SessionDetailViewModel(session: fixture.session) { service }
+        let synchronizedStatus = observeStatus(
+            .waitingForConfirmation,
+            on: viewModel
+        )
 
         let loadTask = Task {
             await viewModel.loadAndConnect()
         }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
         await service.waitForStreamInvocation()
+        service.sendStreamHello()
+        await service.waitForStreamInvocationCount(
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
+        await loadTask.value
         service.sendStreamHello()
         await service.waitForListEventsInvocation()
         service.resumeHistoryEvents()
-        await loadTask.value
+        await fulfillment(
+            of: [synchronizedStatus.expectation],
+            timeout: StreamHelloHistoryReuseFixture.observationTimeout
+        )
 
-        XCTAssertEqual(viewModel.events, fixture.historyEvents)
+        XCTAssertTrue(viewModel.isStreaming)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(
+            service.streamInvocationCount,
+            StreamHelloHistoryReuseFixture.retryStreamInvocationCount
+        )
         XCTAssertEqual(
             service.listEventsCallCount,
             StreamHelloHistoryReuseFixture.expectedRecoveryListEventsCallCount
         )
-        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(viewModel.events, fixture.expectedSynchronizedEvents)
+        withExtendedLifetime(synchronizedStatus.cancellable) {}
         viewModel.disconnectStream()
     }
 
@@ -636,6 +696,8 @@ final class SignalboxNativeTests: XCTestCase {
         let loadTask = Task {
             await viewModel.loadAndConnect()
         }
+        await service.waitForListEventsInvocation()
+        service.resumeHistoryEvents()
         await service.waitForStreamInvocation()
         service.sendDiagnostic()
         service.sendStreamHello()
@@ -1305,11 +1367,17 @@ private struct StreamHelloHistoryReuseFixture {
     /// the preceding records exist only in the paginated history.
     static let helloWindowEventCount = 2
 
-    /// Loading history once and then applying hello must not fetch it again.
+    /// A stream that never delivers its hello adds no history request beyond
+    /// the initial render load.
     static let expectedListEventsCallCount = 1
 
-    /// One failed synchronized load plus one fallback load.
-    static let expectedRecoveryListEventsCallCount = 2
+    /// One pre-stream render request plus the authoritative post-hello
+    /// request.
+    static let expectedSynchronizedListEventsCallCount = 2
+
+    /// Initial render request, the failed hello-synchronized request, then
+    /// the reconnect retry's authoritative request.
+    static let expectedRecoveryListEventsCallCount = 3
 
     /// One initial snapshot plus one hello-bounded reconnect snapshot.
     static let expectedReconnectListEventsCallCount = 2
@@ -1320,8 +1388,9 @@ private struct StreamHelloHistoryReuseFixture {
     /// An explicit disconnect retains the initial request without starting a fallback.
     static let expectedCancelledInitialListEventsCallCount = 1
 
-    /// The recovery fixture fails only its first history request.
-    static let initialHistoryFailureCount = 1
+    /// The recovery fixture fails only the hello-synchronized request; the
+    /// initial render request is the preceding call.
+    static let initialSynchronizedHistoryFailureCallNumbers = [2]
 
     /// A local actor handoff should comfortably complete within this bound.
     static let observationTimeout: TimeInterval = 1
@@ -1542,7 +1611,6 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     private let lock = NSLock()
     private var lockedListEventsCallCount = 0
     private var lockedStreamInvocationCount = 0
-    private var lockedHistoryFailuresRemaining: Int
     private var lockedHistoryFailureCallNumbers: Set<Int>
     private var listEventsContinuation: CheckedContinuation<[SignalboxStoredEvent], Never>?
     private var listEventsInvocationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1552,13 +1620,11 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     init(
         fixture: StreamHelloHistoryReuseFixture,
         historyEvents: [SignalboxStoredEvent]? = nil,
-        historyFailureCount: Int = 0,
         historyFailureCallNumbers: [Int] = [],
         onListEventsInvocation: (() -> Void)? = nil
     ) {
         self.fixture = fixture
         self.historyEvents = historyEvents ?? fixture.historyEvents
-        self.lockedHistoryFailuresRemaining = historyFailureCount
         self.lockedHistoryFailureCallNumbers = Set(historyFailureCallNumbers)
         self.onListEventsInvocation = onListEventsInvocation
     }
@@ -1673,6 +1739,10 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     }
 
     func resumeHistoryEvents() {
+        resumeHistoryEvents(returning: historyEvents)
+    }
+
+    func resumeHistoryEvents(returning events: [SignalboxStoredEvent]) {
         let continuation = lock.withLock {
             guard let continuation = listEventsContinuation else {
                 preconditionFailure("No history load is ready")
@@ -1680,7 +1750,7 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
             listEventsContinuation = nil
             return continuation
         }
-        continuation.resume(returning: historyEvents)
+        continuation.resume(returning: events)
     }
 
     func testConnection() async throws {
@@ -1707,14 +1777,7 @@ private final class HistoryReuseStreamSignalboxService: SignalboxClientProtocol,
     func listEvents(sessionID: SignalboxSessionID) async throws -> [SignalboxStoredEvent] {
         let shouldFail = lock.withLock {
             lockedListEventsCallCount += 1
-            if lockedHistoryFailureCallNumbers.remove(lockedListEventsCallCount) != nil {
-                return true
-            }
-            if lockedHistoryFailuresRemaining > 0 {
-                lockedHistoryFailuresRemaining -= 1
-                return true
-            }
-            return false
+            return lockedHistoryFailureCallNumbers.remove(lockedListEventsCallCount) != nil
         }
         onListEventsInvocation?()
         if shouldFail {

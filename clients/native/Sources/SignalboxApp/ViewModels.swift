@@ -340,16 +340,10 @@ final class SessionDetailViewModel: ObservableObject {
         let artifacts: Task<[SignalboxArtifact], Error>
     }
 
-    private enum InitialEventsApplication: Equatable, Sendable {
-        case pending
-        case applied
-    }
-
     private struct StreamHistorySynchronization {
         let streamID: UUID
         var bufferedMessages: [SignalboxServerMessage]
         let initialHistoryLoad: InitialHistoryLoad?
-        var initialEventsApplication: InitialEventsApplication
         let completion: CheckedContinuation<HistorySynchronizationResult, Never>?
     }
 
@@ -502,7 +496,6 @@ final class SessionDetailViewModel: ObservableObject {
                 streamID: streamID,
                 bufferedMessages: [],
                 initialHistoryLoad: initialHistoryLoad,
-                initialEventsApplication: .pending,
                 completion: completion
             )
         }
@@ -698,29 +691,21 @@ final class SessionDetailViewModel: ObservableObject {
         streamHelloTimeoutTask?.cancel()
         streamHelloTimeoutTask = nil
         do {
-            let initialHistoryLoad = streamHistorySynchronization?.streamID == streamID
-                ? streamHistorySynchronization?.initialHistoryLoad
-                : nil
-            let synchronizedEvents: [SignalboxStoredEvent]
-            let synchronizedArtifacts: [SignalboxArtifact]
-            if let initialHistoryLoad {
-                synchronizedEvents = try await initialHistoryLoad.events.value
-                synchronizedArtifacts = try await initialHistoryLoad.artifacts.value
-            } else {
-                async let events = service.listEvents(sessionID: sessionID)
-                async let artifacts = service.listArtifacts(sessionID: sessionID)
-                synchronizedEvents = try await events
-                synchronizedArtifacts = try await artifacts
-            }
+            // The hello marks the subscription boundary: only a history read
+            // started after it can observe mutations, such as deletions, that
+            // landed before the stream existed. The pre-stream initial load is
+            // for early rendering only and is never authoritative.
+            async let refreshedEvents = service.listEvents(sessionID: sessionID)
+            async let refreshedArtifacts = service.listArtifacts(sessionID: sessionID)
+            let synchronizedEvents = try await refreshedEvents
+            let synchronizedArtifacts = try await refreshedArtifacts
             guard let synchronization = takeHistorySynchronization(streamID: streamID) else {
                 return
             }
             let preservedStreamError = errorMessage == latestStreamDiagnostic
                 ? errorMessage
                 : nil
-            if synchronization.initialEventsApplication == .pending {
-                replaceEvents(with: synchronizedEvents)
-            }
+            replaceEvents(with: synchronizedEvents)
             artifacts = synchronizedArtifacts
             errorMessage = nil
             synchronization.bufferedMessages.forEach(apply)
@@ -751,15 +736,11 @@ final class SessionDetailViewModel: ObservableObject {
     ) async {
         do {
             let events = try await historyLoad.events.value
-            guard var synchronization = streamHistorySynchronization,
-                  synchronization.streamID == streamID
-            else {
+            guard streamHistorySynchronization?.streamID == streamID else {
                 return
             }
             replaceEvents(with: events)
             errorMessage = nil
-            synchronization.initialEventsApplication = .applied
-            streamHistorySynchronization = synchronization
         } catch {
             guard streamHistorySynchronization?.streamID == streamID else {
                 return
