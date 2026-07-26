@@ -26,8 +26,9 @@ use signalbox_domain::{
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SteeringBinding, SteeringReclassificationReason, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
+    SessionInputPosition, SteeringBinding, SteeringContinuationRoundReconstitutionInput,
+    SteeringReclassificationReason, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
     SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
     TerminalAttemptEndReconstitutionInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
@@ -57,7 +58,8 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
         load_active_batch_from_connection, load_recovery_batch_by_attempt,
-        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
+        load_steering_continuation_round_evidence, load_terminal_result_attempts,
+        load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -1825,30 +1827,32 @@ pub(crate) async fn load_scheduling_projection(
                                     required_model_calls.insert(call);
                                     ModelCallId::from_uuid(call)
                                 });
-                                let (terminal_tool_attempts, terminal_tool_denials) =
-                                    if terminal_call.is_none() {
-                                        let terminal_frontier =
-                                            ContextFrontierId::from_uuid(terminal_frontier);
-                                        let attempts = load_terminal_result_attempts(
-                                            connection,
-                                            lifecycle_session,
-                                            lifecycle_turn,
-                                            terminal_frontier,
-                                        )
-                                        .await
-                                        .map_err(map_tool_loop_error)?;
-                                        let denials = load_terminal_result_denials(
-                                            connection,
-                                            lifecycle_session,
-                                            lifecycle_turn,
-                                            terminal_frontier,
-                                        )
-                                        .await
-                                        .map_err(map_tool_loop_error)?;
-                                        (attempts, denials)
-                                    } else {
-                                        (Vec::new(), Vec::new())
-                                    };
+                                // A failed turn's terminal frontier can close
+                                // a tool round whether the stored provenance
+                                // names no call (a round loss or a
+                                // denial-only closure) or the round's
+                                // continuation call (a provider failure or a
+                                // lost prepared call at the continuation
+                                // boundary), so the result evidence loads for
+                                // both shapes.
+                                let failed_terminal_frontier =
+                                    ContextFrontierId::from_uuid(terminal_frontier);
+                                let terminal_tool_attempts = load_terminal_result_attempts(
+                                    connection,
+                                    lifecycle_session,
+                                    lifecycle_turn,
+                                    failed_terminal_frontier,
+                                )
+                                .await
+                                .map_err(map_tool_loop_error)?;
+                                let terminal_tool_denials = load_terminal_result_denials(
+                                    connection,
+                                    lifecycle_session,
+                                    lifecycle_turn,
+                                    failed_terminal_frontier,
+                                )
+                                .await
+                                .map_err(map_tool_loop_error)?;
                                 let execution = match (
                                     end_variant.as_deref(),
                                     end_disposition.as_deref(),
@@ -2387,9 +2391,11 @@ pub(crate) async fn load_scheduling_projection(
     .fetch_all(&mut *connection)
     .await?;
     let mut consumed_steering = Vec::with_capacity(consumed_steering_rows.len());
+    let mut consumed_counts_by_call = BTreeMap::<Uuid, u64>::new();
     for row in consumed_steering_rows {
         let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
         required_model_calls.insert(call.into_uuid());
+        *consumed_counts_by_call.entry(call.into_uuid()).or_default() += 1;
         consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
             session_id_from_uuid(required(&row, "session_id")?),
             AcceptedInputLifecycle::new(
@@ -2441,6 +2447,7 @@ pub(crate) async fn load_scheduling_projection(
     let mut pinned_targets = Vec::with_capacity(model_call_rows.len());
     let mut loaded_pinned_turns = BTreeSet::new();
     let mut loaded_model_calls = BTreeSet::new();
+    let mut consuming_call_facts = Vec::new();
     for row in model_call_rows {
         let call_uuid: Uuid = required(&row, "model_call_id")?;
         if !loaded_model_calls.insert(call_uuid) {
@@ -2480,6 +2487,9 @@ pub(crate) async fn load_scheduling_projection(
                 .into());
             }
         };
+        if let Some(consumed_count) = consumed_counts_by_call.get(&call_uuid).copied() {
+            consuming_call_facts.push((call_uuid, turn, frontier_uuid, consumed_count));
+        }
         model_calls.push(ModelCallReconstitutionInput::new(
             ModelCallId::from_uuid(call_uuid),
             turn,
@@ -2500,6 +2510,32 @@ pub(crate) async fn load_scheduling_projection(
     }
     if loaded_model_calls != required_model_calls {
         return Err(SubmitInputCorruption::Missing("scheduling model call").into());
+    }
+
+    // A steering-consuming call prepared at a tool-round continuation
+    // boundary reconstitutes only together with its round's complete result
+    // evidence; a call prepared against its turn's starting frontier has no
+    // continuing round window and carries none.
+    let mut steering_continuation_rounds = Vec::new();
+    for (call_uuid, call_turn, call_frontier, consumed_count) in consuming_call_facts {
+        let Some((round_tool_attempts, round_tool_denials)) =
+            load_steering_continuation_round_evidence(
+                connection,
+                session_id,
+                call_turn,
+                ContextFrontierId::from_uuid(call_frontier),
+                consumed_count,
+            )
+            .await
+            .map_err(map_tool_loop_error)?
+        else {
+            continue;
+        };
+        steering_continuation_rounds.push(SteeringContinuationRoundReconstitutionInput::new(
+            ModelCallId::from_uuid(call_uuid),
+            round_tool_attempts,
+            round_tool_denials,
+        ));
     }
 
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
@@ -3034,6 +3070,7 @@ pub(crate) async fn load_scheduling_projection(
     input
         .with_model_call_facts(pinned_targets, model_calls)
         .with_consumed_steering_facts(consumed_steering)
+        .with_steering_continuation_rounds(steering_continuation_rounds)
         .reconstitute()
         .map_err(|error| {
             let (_, failure) = error.into_parts();

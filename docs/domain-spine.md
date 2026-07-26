@@ -1892,6 +1892,16 @@ impl ConsumedSteeringReconstitutionInput {
     // accessors: session(), accepted_input(), acceptance_position(), source_turn()
 }
 
+pub struct SteeringContinuationRoundReconstitutionInput { /* private */ }
+impl SteeringContinuationRoundReconstitutionInput {
+    pub const fn new(
+        call: ModelCallId,
+        round_tool_attempts: Vec<EndedToolAttempt>,
+        round_tool_denials: Vec<ToolApprovalResolution>,
+    ) -> Self;
+    // accessors: call(), round_tool_attempts(), round_tool_denials()
+}
+
 pub struct PendingSteeringInput { /* private */ }
 // sealed: checked AcceptedInputSchedulingProjection::active_turn_execution
 impl PendingSteeringInput {
@@ -1960,13 +1970,17 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
+    pub fn with_steering_continuation_rounds(
+        self,
+        steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
+    ) -> Self;
     pub fn with_imported_session(
         self,
         imported_session: ReconstitutedImportedSession,
     ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
     // snapshots(), pinned_targets(), model_calls(), consumed_steering(),
-    // active_acceptance_tail()
+    // steering_continuation_rounds(), active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
@@ -1992,6 +2006,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     DuplicateConsumedSteering { accepted_input: AcceptedInputId },
     SteeringSemanticEntryMismatch { entry: SemanticTranscriptEntryId },
     ConsumedSteeringMismatch { accepted_input: AcceptedInputId },
+    SteeringContinuationRoundMismatch { call: ModelCallId },
     SemanticEntryCallMissing {
         entry: SemanticTranscriptEntryId,
         call: ModelCallId,
@@ -6009,7 +6024,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: submit_input                               | 15                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
 | domain: turn_lifecycle                             | 10                   |
-| domain: turn_eligibility                           | 27                   |
+| domain: turn_eligibility                           | 28                   |
 | domain: turn_attempt                               | 13                   |
 | domain: model_call                                 | 12                   |
 | domain: model_execution                            | 49                   |
@@ -6024,7 +6039,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| **signalbox-domain total**                         | **451 (+1 free fn)** |
+| **signalbox-domain total**                         | **452 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

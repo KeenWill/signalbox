@@ -1135,16 +1135,18 @@ pub(crate) async fn load_recovery_batch_by_attempt(
 }
 
 /// Identifies the single continuing tool round whose request suffix exactly
-/// fills the terminal frontier, returning the boundary member position and
-/// request count that bound its result window.
+/// fills the checked frontier before `trailing_member_count` trailing entries,
+/// returning the boundary member position and request count that bound its
+/// result window.
 ///
-/// A `None` result names a terminal frontier with no continuing tool round, so
-/// no terminal tool results or denials back its ending marker.
-async fn load_terminal_tool_round_window(
+/// A `None` result names a frontier with no continuing tool round in that
+/// window, so no tool results or denials back its trailing entries.
+async fn load_tool_round_result_window(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     terminal_frontier: signalbox_domain::ContextFrontierId,
+    trailing_member_count: Decimal,
 ) -> Result<Option<(Decimal, Decimal)>, ToolLoopRepositoryError> {
     let candidate_rounds = sqlx::query(
         "SELECT round.producing_model_call_id,
@@ -1161,7 +1163,7 @@ async fn load_terminal_tool_round_window(
             AND round.turn_id = $2
             AND round.boundary_kind = 'continuing'
             AND terminal.member_count =
-                    boundary.member_count + round.request_count + 1
+                    boundary.member_count + round.request_count + $4
             AND NOT EXISTS (
                 SELECT 1
                   FROM context_frontier_member AS boundary_member
@@ -1185,6 +1187,7 @@ async fn load_terminal_tool_round_window(
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .bind(terminal_frontier.into_uuid())
+    .bind(trailing_member_count)
     .fetch_all(&mut *connection)
     .await?;
     let candidate = match candidate_rounds.as_slice() {
@@ -1206,10 +1209,28 @@ pub(crate) async fn load_terminal_result_attempts(
     terminal_frontier: signalbox_domain::ContextFrontierId,
 ) -> Result<Vec<EndedToolAttempt>, ToolLoopRepositoryError> {
     let Some((boundary_member_count, request_count)) =
-        load_terminal_tool_round_window(connection, session, turn, terminal_frontier).await?
+        load_tool_round_result_window(connection, session, turn, terminal_frontier, Decimal::ONE)
+            .await?
     else {
         return Ok(Vec::new());
     };
+    load_window_result_attempts(
+        connection,
+        session,
+        terminal_frontier,
+        boundary_member_count,
+        request_count,
+    )
+    .await
+}
+
+async fn load_window_result_attempts(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: signalbox_domain::ContextFrontierId,
+    boundary_member_count: Decimal,
+    request_count: Decimal,
+) -> Result<Vec<EndedToolAttempt>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT attempt.*
            FROM resolve_context_frontier_members($1, $2) AS member
@@ -1224,7 +1245,7 @@ pub(crate) async fn load_terminal_result_attempts(
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
-    .bind(terminal_frontier.into_uuid())
+    .bind(frontier.into_uuid())
     .bind(boundary_member_count)
     .bind(request_count)
     .fetch_all(&mut *connection)
@@ -1254,10 +1275,78 @@ pub(crate) async fn load_terminal_result_denials(
     terminal_frontier: signalbox_domain::ContextFrontierId,
 ) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
     let Some((boundary_member_count, request_count)) =
-        load_terminal_tool_round_window(connection, session, turn, terminal_frontier).await?
+        load_tool_round_result_window(connection, session, turn, terminal_frontier, Decimal::ONE)
+            .await?
     else {
         return Ok(Vec::new());
     };
+    load_window_result_denials(
+        connection,
+        session,
+        terminal_frontier,
+        boundary_member_count,
+        request_count,
+    )
+    .await
+}
+
+/// Loads the round result evidence backing one steering-consuming call
+/// prepared at a tool-round continuation boundary: the terminal tool attempts
+/// and owner-sourced denial resolutions whose result entries fill the call's
+/// frontier between the round boundary and the consumed steering suffix.
+///
+/// A `None` result names a call frontier with no continuing tool round in
+/// that window — a call prepared against its turn's starting frontier.
+pub(crate) async fn load_steering_continuation_round_evidence(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call_frontier: signalbox_domain::ContextFrontierId,
+    consumed_count: u64,
+) -> Result<
+    Option<(
+        Vec<EndedToolAttempt>,
+        Vec<signalbox_domain::ToolApprovalResolution>,
+    )>,
+    ToolLoopRepositoryError,
+> {
+    let Some((boundary_member_count, request_count)) = load_tool_round_result_window(
+        connection,
+        session,
+        turn,
+        call_frontier,
+        Decimal::from(consumed_count),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let attempts = load_window_result_attempts(
+        connection,
+        session,
+        call_frontier,
+        boundary_member_count,
+        request_count,
+    )
+    .await?;
+    let denials = load_window_result_denials(
+        connection,
+        session,
+        call_frontier,
+        boundary_member_count,
+        request_count,
+    )
+    .await?;
+    Ok(Some((attempts, denials)))
+}
+
+async fn load_window_result_denials(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: signalbox_domain::ContextFrontierId,
+    boundary_member_count: Decimal,
+    request_count: Decimal,
+) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
@@ -1274,7 +1363,7 @@ pub(crate) async fn load_terminal_result_denials(
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
-    .bind(terminal_frontier.into_uuid())
+    .bind(frontier.into_uuid())
     .bind(boundary_member_count)
     .bind(request_count)
     .fetch_all(&mut *connection)

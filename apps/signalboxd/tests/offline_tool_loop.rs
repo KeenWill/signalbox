@@ -38,10 +38,10 @@ use signalbox_model_provider_runtime::{
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialAccess,
     CredentialAccessError, CredentialReference, CredentialValue, ExchangeFacts, MessagePart,
-    ModelOperation, ModelRuntime, ObservationSink, PreparationOutcome, ProviderReportedModel,
-    Script, ScriptedModel, ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage,
-    ToolCallId, ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
-    ToolResultRecord,
+    ModelOperation, ModelRuntime, NativeErrorFacts, ObservationSink, PreparationOutcome,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderReportedModel, Script, ScriptedModel,
+    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallId,
+    ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName, ToolResultRecord,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
@@ -481,6 +481,16 @@ fn completion_script(text: &str) -> Script {
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         finish: CompletionFinish::EndTurn,
         content: vec![AssistantPart::Text(text.to_owned())],
+        usage: TokenUsage::unreported(),
+    }))
+}
+
+fn provider_error_script() -> Script {
+    Script::delivering(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        exchange: ExchangeFacts::default(),
+        reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
+        kind: ProviderErrorKind::ProviderInternal,
+        native: NativeErrorFacts::default(),
         usage: TokenUsage::unreported(),
     }))
 }
@@ -2521,6 +2531,222 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
         .await?;
     fixture
         .activate_and_complete_turn(later_turn, "post-failure submit completed")
+        .await?;
+    Ok(())
+}
+
+/// S02 / S10 / INV-006: an ordinary provider failure on the continuation model
+/// call of a completed tool round terminalizes the turn naming that call, and
+/// the committed terminal shape reloads through the scheduling projection —
+/// the startup scan completes and the next submit activates and runs instead
+/// of the session becoming permanently unloadable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s10_inv006_failed_continuation_call_admits_and_runs_later_turn()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "effect_free",
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    )]);
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("effect_free", "{}")]),
+            provider_error_script(),
+        ],
+        tool_catalog,
+        executor.clone(),
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    assert_eq!(executor.events(), vec![String::from("effect_free")]);
+    assert_eq!(
+        runtime.received_operations().len(),
+        2,
+        "the failed continuation round follows the completed tool round"
+    );
+    let terminal_shape: (String, Option<Uuid>, String, i64) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_model_call_id,
+                continuation.terminal_disposition_kind,
+                (SELECT count(*) FROM model_call
+                  WHERE session_id = $1 AND turn_id = $2)
+           FROM turn_lifecycle AS lifecycle
+           JOIN model_call AS continuation
+             ON continuation.session_id = lifecycle.session_id
+            AND continuation.model_call_id = lifecycle.terminal_model_call_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(terminal_shape.0, "failed");
+    assert_eq!(terminal_shape.2, "known_failed");
+    assert_eq!(
+        terminal_shape.3, 2,
+        "the terminal call is the second-round continuation call"
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "turn_failed",
+        ]
+    );
+
+    let mut startup = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(fixture.pool.clone()),
+    );
+    let recovery = startup.execute().await?;
+    assert!(recovery.is_complete());
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        0,
+        "the provider failure already terminalized the turn"
+    );
+
+    let later_turn = fixture
+        .submit_new_turn(0x3512, "work after failed continuation call")
+        .await?;
+    fixture
+        .activate_and_complete_turn(later_turn, "post-continuation-failure submit completed")
+        .await?;
+    Ok(())
+}
+
+/// S02 / S08 / S10 / INV-016 / INV-036: a NextSafePoint input accepted while
+/// a tool round is parked is consumed by the continuation call, the
+/// steering-bearing continuation completes the turn, and the committed shape
+/// reloads through the scheduling projection — the startup scan completes and
+/// the next submit activates and runs.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "confirmed",
+        ToolPermissionDefault::Confirm,
+        ToolEffectClass::EffectFree,
+    )]);
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("confirmed", "{}")]),
+            completion_script("steered tool result observed"),
+        ],
+        tool_catalog,
+        executor.clone(),
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+
+    let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
+    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let mut submit = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        SubmitInputRepository::new(fixture.pool.clone()),
+        nudge,
+        fixture.tool_dispatch_gate.clone(),
+    );
+    let steering = submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x3610)),
+            fixture.session,
+            UserContent::try_text(String::from("steer the parked tool round"))
+                .expect("fixture steering content is admitted"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: fixture.turn,
+            },
+        )?)
+        .await?;
+    assert!(
+        matches!(
+            steering,
+            SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "a safe-point input against the parked round is accepted as pending steering"
+    );
+
+    fixture
+        .decide(request, ToolApprovalDecision::Approve)
+        .await?;
+    execution.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from("confirmed")]);
+    assert_eq!(
+        runtime.received_operations().len(),
+        2,
+        "the steering-bearing continuation runs exactly one more model call"
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "steering_accepted_input",
+            "assistant_text",
+            "turn_completed",
+        ],
+        "the consumed steering entry follows the tool results in the continuation frontier"
+    );
+    let consumed_shape: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT accepted.disposition_kind,
+                accepted.consuming_model_call_id
+           FROM accepted_input AS accepted
+          WHERE accepted.session_id = $1
+            AND accepted.disposition_kind = 'consumed_as_steering'",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(consumed_shape.0, "consumed_as_steering");
+    let terminal_call: Option<Uuid> = sqlx::query_scalar(
+        "SELECT terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND terminal_disposition_kind = 'completed'",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        consumed_shape.1, terminal_call,
+        "the completing continuation call is the steering consumer"
+    );
+
+    let mut startup = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(fixture.pool.clone()),
+    );
+    let recovery = startup.execute().await?;
+    assert!(recovery.is_complete());
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        0,
+        "the completed steering-bearing continuation needs no recovery"
+    );
+
+    let later_turn = fixture
+        .submit_new_turn(0x3611, "work after steered continuation")
+        .await?;
+    fixture
+        .activate_and_complete_turn(later_turn, "post-steering submit completed")
         .await?;
     Ok(())
 }
