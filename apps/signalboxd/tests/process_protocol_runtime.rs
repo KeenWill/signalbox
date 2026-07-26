@@ -1709,11 +1709,12 @@ async fn park_turn_on_ambiguous_model_call(
     Ok(())
 }
 
-/// S04 / S07 / INV-029 / INV-033: a turn parked on an ambiguous model call
-/// refuses ordinary input until the owner reconciliation request supplies the
-/// interrupt authority that releases the slot and accepts the successor, and
-/// the same request is refused, without recording a command, for any turn that
-/// owes no reconciliation decision.
+/// S04 / S07 / INV-029: a turn parked on an ambiguous model call refuses
+/// ordinary input until the owner reconciliation decision releases the slot.
+///
+/// The refusal and the release are one contract: proving the release means
+/// nothing unless the same session is demonstrably wedged first, against the
+/// same durable state in the same execution (testing-style rule 17).
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
@@ -1752,36 +1753,10 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
         "an ambiguity wait must keep refusing ordinary input while it holds the slot"
     );
 
-    let unparked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xB1));
     connection
         .request_version(
             ProtocolVersion::Seven,
             4,
-            ClientRequest::ReconcileTurn {
-                command_id: command()?,
-                session_id,
-                expected_active_turn_id: unparked_turn_id,
-                content: InputContent::new(String::from("names no parked turn")),
-                expected_defaults_version: CanonicalU64::new(1),
-            },
-        )
-        .await?;
-    assert!(matches!(
-        response_within(&mut connection).await?.message(),
-        ServerMessage::Error {
-            code: ErrorCode::Rejected,
-            detail,
-            ..
-        } if detail.value() == Some(RejectionDetail::TurnNotAwaitingReconciliation {
-            session_id,
-            turn_id: unparked_turn_id,
-        })
-    ));
-
-    connection
-        .request_version(
-            ProtocolVersion::Seven,
-            5,
             ClientRequest::ReconcileTurn {
                 command_id: command()?,
                 session_id,
@@ -1797,35 +1772,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
     connection
         .request_version(
             ProtocolVersion::Seven,
-            6,
-            ClientRequest::ReconcileTurn {
-                command_id: command()?,
-                session_id,
-                expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("the decision is already recorded")),
-                expected_defaults_version: CanonicalU64::new(1),
-            },
-        )
-        .await?;
-    assert!(
-        matches!(
-            response_within(&mut connection).await?.message(),
-            ServerMessage::Error {
-                code: ErrorCode::Rejected,
-                detail,
-                ..
-            } if detail.value() == Some(RejectionDetail::TurnNotAwaitingReconciliation {
-                session_id,
-                turn_id: parked_turn_id,
-            })
-        ),
-        "the reconciliation verb never becomes a general active-turn stop"
-    );
-
-    connection
-        .request_version(
-            ProtocolVersion::Seven,
-            7,
+            5,
             ClientRequest::ReadTranscript { session_id },
         )
         .await?;
@@ -1854,6 +1801,90 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
             acceptance_position,
             state: TurnState::Queued { .. },
         } if *turn_id == successor_turn_id && acceptance_position.value() == 2
+    ));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S04 / INV-029: the reconciliation request is refused, without recording a
+/// command, for every turn that owes no reconciliation decision — so the verb
+/// never becomes a general active-turn stop.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+
+    let unparked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(0xB1));
+    connection
+        .request_version(
+            ProtocolVersion::Seven,
+            3,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: unparked_turn_id,
+                content: InputContent::new(String::from("names no parked turn")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            detail,
+            ..
+        } if detail.value() == Some(RejectionDetail::TurnNotAwaitingReconciliation {
+            session_id,
+            turn_id: unparked_turn_id,
+        })
+    ));
+
+    connection
+        .request_version(
+            ProtocolVersion::Seven,
+            4,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("continue after reconciliation")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    accepted_successor_turn(&mut connection, session_id, 2).await?;
+
+    connection
+        .request_version(
+            ProtocolVersion::Seven,
+            5,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("the decision is already recorded")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::Rejected,
+            detail,
+            ..
+        } if detail.value() == Some(RejectionDetail::TurnNotAwaitingReconciliation {
+            session_id,
+            turn_id: parked_turn_id,
+        })
     ));
 
     drop(connection);

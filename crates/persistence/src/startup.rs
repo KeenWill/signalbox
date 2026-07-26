@@ -369,14 +369,28 @@ where
         // recorded the exact ambiguity set, so there is no lost live end for
         // the scan to classify. Reporting it separately keeps the wait visible
         // to the operator instead of indistinguishable from a healed session.
-        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+        //
+        // The domain phase also carries a tool-attempt ambiguity wait, which
+        // has no operator surface to point at; that wait stays classified as
+        // it was, so the report never promises a decision nothing can make.
+        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations,
+            ..
+        } if ambiguous_operations.iter().all(|operation| {
+            matches!(
+                operation,
+                signalbox_domain::IssuedOperationRef::ModelCall(_)
+            )
+        }) =>
+        {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::AwaitingRecoveryDecision {
                     turn: active_turn.turn(),
                 },
             ));
         }
-        signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. } => {
+        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. } => {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::NoActiveTurn,
             ));

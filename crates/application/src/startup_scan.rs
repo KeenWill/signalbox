@@ -131,9 +131,11 @@ impl StartupScanOutcome {
     /// Returns every session whose active turn holds the slot awaiting an
     /// owner reconciliation decision.
     ///
-    /// The scan cannot classify these turns: a prior process already ended
-    /// their tenure and recorded the exact ambiguity set. They do not block
-    /// startup, so they are reported rather than counted as recovered.
+    /// The scan cannot resolve these turns: their physical tenure has ended
+    /// and the exact ambiguity set is durable, whether this scan classified
+    /// the issued call or found the wait already parked. They do not block
+    /// startup, so they are reported rather than counted as recovered. Only
+    /// waits with an operator surface are reported.
     pub fn awaiting_recovery_decision_sessions(&self) -> &[SessionId] {
         &self.awaiting_recovery_decision_sessions
     }
@@ -270,7 +272,12 @@ where
                         break;
                     }
                     Ok(StartupScanSessionOutcome::RecoveredModelCall(outcome)) => {
-                        if !matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
+                        // This scan just created the wait, so the session is
+                        // reported on the restart that wedges it rather than
+                        // only on a later one that observes it already parked.
+                        if matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
+                            awaiting_recovery_decision_sessions.push(session);
+                        } else {
                             recovered_turn_count += 1;
                         }
                         break;

@@ -311,7 +311,12 @@ end (INV-034):
   not block startup on it;
   `StartupScanOutcome::awaiting_recovery_decision_sessions` carries those
   sessions so the completed-phase log names each one instead of leaving the wait
-  indistinguishable from a healed session;
+  indistinguishable from a healed session. The scan that parks a turn itself —
+  the in-flight branch below — reports its session the same way, so the wait is
+  named on the restart that creates it and not only on a later one. The report
+  is scoped to the model-call wait: `AwaitingRecoveryDecision` also carries a
+  tool-attempt ambiguity set, which has no operator surface and stays classified
+  as before, so a reported session always names a decision an operator can make;
 - an approval wait remains parked unchanged, with no fabricated decision or live
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or

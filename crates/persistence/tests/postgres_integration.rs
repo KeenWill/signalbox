@@ -6256,6 +6256,11 @@ async fn s04_inv029_inv034_owner_reconciliation_releases_a_restart_parked_ambigu
 
     let first_restart = scan.execute().await?;
     assert_eq!(first_restart.recovered_turn_count(), 0);
+    assert_eq!(
+        first_restart.awaiting_recovery_decision_sessions(),
+        &[parked.session],
+        "the restart that parks the turn reports the wait it just created"
+    );
     assert!(first_restart.is_complete());
 
     let parked_shape: (String, String, String, String, String, Uuid) = sqlx::query_as(

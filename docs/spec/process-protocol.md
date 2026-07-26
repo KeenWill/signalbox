@@ -31,8 +31,8 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-All six versions use one Unix domain stream socket. The daemon requires its path
-in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
+All seven versions use one Unix domain stream socket. The daemon requires its
+path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
 override when present and otherwise requires that environment value.
 `signalboxd` binds the socket with owner-only `0600` permissions. The configured
 path must be absolute and must end in an explicit filename component; a trailing
@@ -723,7 +723,7 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-All six versions forward durable transition events only. Provider token deltas
+All seven versions forward durable transition events only. Provider token deltas
 remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
@@ -817,7 +817,7 @@ command identity, defaults version, and dangerous-tool posture. Each recovery
 set is all-or-none. The client never silently substitutes a new command identity
 for an ambiguous attempt. It uses a fresh nonzero request identity per
 connection, validates that a defaults receipt is the exact successor carrying
-the requested selection and copied posture, renders only known version-six
+the requested selection and copied posture, renders only known version-seven
 messages, and exits nonzero on protocol or application errors other than the
 follow-specific `resync_required` control case, which reconnects for a fresh
 snapshot.
