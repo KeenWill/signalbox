@@ -10,6 +10,36 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Make runner lease authority single-use and tool-bound
+
+**Context.** An authorized physical attempt identifies its request, session,
+turn, and attempt but does not itself expose the approved request's selected
+tool. A cloneable authorization or lease also permits two independent domain
+transitions to present the same capability. Placement reconstitution must prove
+the complete pinned catalog snapshot without mistaking a later narrowed
+registration for the historical facts that created the pin.
+
+**Decision.** Runner dispatch consumes one non-cloneable
+`RunnerToolAttemptAuthorization` that binds an `ApprovedToolRequest`, including
+its selected tool, to the exact non-cloneable `AuthorizedToolAttempt`.
+`RunnerLease` is likewise non-cloneable, and loss retains a private checked
+source snapshot rather than duplicating the lease aggregate. Initial dispatch
+creates the pin, any requested grant, and generation-one lease together;
+subsequent dispatch requires the current pin and grant. Placement reconstitution
+recomputes and exactly compares the pin from its historical validated
+registration snapshot; current re-registration is reconciled separately.
+
+**Rejected alternatives.** Comparing only the attempt's request identity cannot
+prove the selected tool. Cloning a capability and relying on callers to consume
+only one copy does not enforce single use. Validating only that stored required
+tools remain individually runner-only accepts an incomplete inventory.
+Reconstituting from current availability conflates historical integrity with
+forward narrowing.
+
+**Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
+`RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
+the [runner-protocol specification](spec/runner-protocol.md).
+
 ## 2026-07-25 — Scoped verification references on specification pages
 
 **Context.** Every `docs/spec/` page names the pull request its claims were last

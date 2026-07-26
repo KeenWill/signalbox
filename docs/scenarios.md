@@ -1021,15 +1021,19 @@ those tests.
   replacement while ensuring the model learns the changed logical runner,
   directory, tools, credential profile, and workspace.
 - **Durable commands:** A later owner command marks the runner lost and supplies
-  one complete validated replacement placement. Credential-profile replacement
-  separately installs one complete forward-only grant snapshot. Each transition
-  produces exact before-and-after change facts for a later injected semantic
-  message and frontier extension.
+  one complete validated replacement placement. When the placement selects a
+  credential profile, runner replacement consumes the prior grant and creates
+  its checked successor revision in that same replacement. A separate
+  credential-profile replacement changes the selected profile on the same pinned
+  runner. Each transition produces exact before-and-after change facts for a
+  later injected semantic message and frontier extension.
 - **State transitions:** Pinned → runner lost → explicitly replaced and pinned
-  at the checked successor revision. Active credential grant → replaced active
-  grant or revoked terminal grant. A repository-worktree requirement creates a
-  new runner-owned provisioned workspace; the old runner's workspace is never
-  inherited.
+  at the checked successor revision. Active or revoked prior credential grant →
+  checked active successor grant during runner replacement; the consumed prior
+  revision remains terminal. On the same pinned runner, active credential grant
+  → replaced active grant or revoked terminal grant. A repository-worktree
+  requirement creates a new runner-owned provisioned workspace; the old runner's
+  workspace is never inherited.
 - **Transient updates:** UI progress and connection discovery are not
   replacement authority.
 - **Owning component:** The daemon validates and records owner intent; the

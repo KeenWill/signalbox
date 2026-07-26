@@ -136,14 +136,20 @@ fail-closed adapter behavior is not a fourth domain effect class.
 A `RunnerLease` binds one lease identity, exact tool name, complete authorized
 physical-attempt dispatch correlation, session, runner, effect class, and
 positive lease-lineage generation. Lease creation is not a free constructor: it
-consumes the tool loop's `AuthorizedToolAttempt`, which exists only after the
-automatic or owner decision authorizes that exact attempt. Current active
+consumes one `RunnerToolAttemptAuthorization`, which binds the approved request
+and its exact tool name to the tool loop's `AuthorizedToolAttempt`. The latter
+exists only after the automatic or owner decision authorizes that exact attempt,
+and neither authority nor the resulting lease is cloneable. Current active
 enrollment, pinned placement, its exact validated registration, and any selected
-active credential grant jointly authorize the offer. The attempt's session and
-two-way crash class must match the placement and declaration-derived effect
-class (`Pure` to `EffectFree`; `Idempotent` or `SideEffecting` to
-`ExternalEffect`). Revoked enrollment, lost placement, or a mismatched runner,
-tool, attempt, effect, profile, or grant cannot create a lease.
+active credential grant jointly authorize every offer after the first. The
+initial offer instead creates that pinned placement, any selected grant, and
+generation-one lease in one checked transition from `Unpinned`; it does not
+require those products to exist beforehand. The request, attempt, session, and
+two-way crash class must match the selected tool, placement, and
+declaration-derived effect class (`Pure` to `EffectFree`; `Idempotent` or
+`SideEffecting` to `ExternalEffect`). Revoked enrollment, lost placement, or a
+mismatched runner, request, tool, attempt, effect, profile, or grant cannot
+create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
@@ -169,8 +175,8 @@ required retry law:
 
 - `Pure` and `Idempotent` produce typed re-lease authority at the checked
   successor generation; every successor offer consumes exact
-  `AuthorizedToolAttempt` authority, authority after claim requires a fresh
-  physical `ToolAttemptId`, while authority lost before claim retains the
+  `RunnerToolAttemptAuthorization` authority, authority after claim requires a
+  fresh physical `ToolAttemptId`, while authority lost before claim retains the
   never-executed attempt identity; and
 - `SideEffecting` produces typed crash-classification authority naming the exact
   physical attempt and never produces re-lease authority.
@@ -207,17 +213,18 @@ nonempty, U+0000-free, at-most-4,096-byte contract.
 
 Before execution, placement is `Unpinned`. Mere attachment does not pin it. The
 first authorized runner lease atomically validates the request against that
-runner's exact validated registration and produces `Pinned` state together with
-the initial offered lease. Selector, credential-profile availability, workspace
-capability, and authorized-attempt correlation must all match. The pinned state
-contains the runner, selected working directory, credential-profile selection,
-tool inventory, runner-required tool inventory, and any provisioned workspace.
-When a profile was requested, that same transition constructs its initial grant
-from the now-exact runner and registration; session creation cannot construct a
+runner's exact validated registration and produces `Pinned` state, any requested
+initial credential grant, and the initial offered lease together. Selector,
+credential-profile availability, workspace capability, and the tool-bound
+authorized-attempt correlation must all match. The pinned state contains the
+runner, selected working directory, credential-profile selection, tool
+inventory, runner-required tool inventory, and any provisioned workspace. When a
+profile was requested, that same transition constructs its initial grant from
+the now-exact runner and registration; session creation cannot construct a
 runner-bound grant while class-targeted placement is still unpinned. Once
-pinned, ordinary attachment and lease creation accept only that exact runner.
-There is no automatic migration or class-based rescheduling to a different
-runner (INV-044).
+pinned, ordinary attachment and lease creation accept only that exact runner and
+require the current grant when a profile is selected. There is no automatic
+migration or class-based rescheduling to a different runner (INV-044).
 
 For `RepositoryWorktree`, the provisioned workspace's working directory is the
 selected execution directory. Attachment and reconstitution reject a provisioned
@@ -242,9 +249,13 @@ workspace. It advances a positive placement revision and returns one
 facts needed for a later frontier-extending injected message. Reconstitution
 rejects an unpinned revision other than one, a pinned or lost state that does
 not match its current request and validated capabilities. Durable
-replacement-history verification belongs to the later persistence projection;
-this domain aggregate accepts every positive revision because each is reachable
-through checked successor transitions.
+replacement-history verification belongs to the later persistence projection.
+Pinned or lost reconstitution validates against the exact registration snapshot
+that produced the pin and rejects any stored tool or runner-required-tool
+inventory that differs from that checked result. A current narrowed
+re-registration is reconciled separately and is not substituted for that
+historical snapshot. This domain aggregate accepts every positive revision
+because each is reachable through checked successor transitions.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -281,9 +292,9 @@ availability known. The grant binds the session, runner, profile, and positive
 grant revision. A runner that did not advertise the profile cannot receive the
 grant. Lease creation requires the current active grant, the same pinned runner
 and profile, a tool present in the snapshot, and consumption of the exact
-`AuthorizedToolAttempt` produced after approval resolution. The grant records
-the exact tool/profile posture without issuing a reusable standalone dispatch
-token.
+`RunnerToolAttemptAuthorization` produced after approval resolution and bound to
+that tool. The grant records the exact tool/profile posture without issuing a
+reusable standalone dispatch token.
 
 Grant replacement is forward-only. It checks the current revision and installs
 one complete later snapshot, returning a `CredentialProfileChange` with the
