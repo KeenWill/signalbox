@@ -20,7 +20,12 @@ SET CONSTRAINTS ALL IMMEDIATE;
 SET CONSTRAINTS ALL DEFERRED;
 
 ALTER TABLE turn_lifecycle
-    ALTER COLUMN model_identity_boundary_required SET DEFAULT true;
+    ALTER COLUMN model_identity_boundary_required SET DEFAULT true,
+    ADD CONSTRAINT turn_lifecycle_model_identity_boundary_requirement_state
+        CHECK (
+            model_identity_boundary_required
+            OR state_kind IN ('active', 'terminal')
+        );
 
 DO $$
 DECLARE

@@ -8450,6 +8450,28 @@ async fn s30_inv008_inv015_inv040_mid_session_model_switch_is_forward_only()
             },
         )?)
         .await?;
+    let false_boundary_requirement = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id,
+             acceptance_position, state_kind,
+             model_identity_boundary_required)
+         SELECT turn_id, session_id, origin_accepted_input_id,
+                acceptance_position, state_kind, false
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a newly queued turn cannot claim pre-boundary compatibility");
+    let false_boundary_database_error = false_boundary_requirement
+        .as_database_error()
+        .expect("the compatibility-shape check returns a database error");
+    assert_eq!(false_boundary_database_error.code(), Some("23514".into()));
+    assert_eq!(
+        false_boundary_database_error.constraint(),
+        Some("turn_lifecycle_model_identity_boundary_requirement_state")
+    );
     activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {

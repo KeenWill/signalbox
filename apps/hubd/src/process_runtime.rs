@@ -59,7 +59,7 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, ConversationImportFormat, CurrentModelCall,
     CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
-    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
     IMPORTED_TRANSCRIPT_PROTOCOL_VERSION, ImportedContentKind, ImportedSourceSpeaker,
     ImportedSpeaker, InputContent, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
     ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, ProtocolVersion,
@@ -252,6 +252,9 @@ fn inspect_connection_completion(
             Err(ProcessRuntimeError::Encode(error))
         }
         Some(Ok(Err(ProcessConnectionError::EncodeInvariant))) => {
+            Err(ProcessRuntimeError::EncodeInvariant)
+        }
+        Some(Ok(Err(ProcessConnectionError::MessageRequiresVersion(_)))) => {
             Err(ProcessRuntimeError::EncodeInvariant)
         }
         Some(Ok(Err(ProcessConnectionError::InboundFrameBudgetClosed))) => {
@@ -870,6 +873,9 @@ impl SnapshotSpoolError {
             ProcessConnectionError::PeerIo(error) | ProcessConnectionError::SpoolIo(error) => {
                 Self::Io(error)
             }
+            ProcessConnectionError::MessageRequiresVersion(required) => {
+                Self::MessageRequiresVersion(required)
+            }
             ProcessConnectionError::Encode(error) => Self::Encode(error),
             ProcessConnectionError::EncodeInvariant
             | ProcessConnectionError::InboundFrameBudgetClosed
@@ -896,17 +902,6 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::Unavailable),
-            )
-            .await
-        }
-        SnapshotSpoolError::Encode(FrameEncodeError::Validation(
-            FrameValidationError::MessageRequiresNewerVersion,
-        )) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::unsupported_version(3),
             )
             .await
         }
@@ -2812,6 +2807,12 @@ async fn write_message<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let minimum_protocol_version = message.minimum_protocol_version();
+    if version.as_u64() < minimum_protocol_version {
+        return Err(ProcessConnectionError::MessageRequiresVersion(
+            minimum_protocol_version,
+        ));
+    }
     let frame = ServerFrame::try_new_for_version(version, request_id, message)
         .map_err(FrameEncodeError::Validation)?;
     let encoded = encode_server_line(&frame)?;
@@ -2825,20 +2826,9 @@ async fn write_spool_message(
     request_id: RequestId,
     message: ServerMessage,
 ) -> Result<(), SnapshotSpoolError> {
-    let minimum_protocol_version = message.minimum_protocol_version();
-    if version.as_u64() < minimum_protocol_version {
-        return Err(SnapshotSpoolError::MessageRequiresVersion(
-            minimum_protocol_version,
-        ));
-    }
-    let frame = ServerFrame::try_new_for_version(version, request_id, message)
-        .map_err(FrameEncodeError::Validation)
-        .map_err(SnapshotSpoolError::Encode)?;
-    let encoded = encode_server_line(&frame).map_err(SnapshotSpoolError::Encode)?;
-    writer
-        .write_all(&encoded)
+    write_message(writer, version, request_id, message)
         .await
-        .map_err(SnapshotSpoolError::Io)
+        .map_err(SnapshotSpoolError::from_connection)
 }
 
 enum IncomingLine {
@@ -3285,6 +3275,7 @@ const fn wire_model_call_state(state: DispatchedModelCallState) -> ModelCallStat
 enum ProcessConnectionError {
     PeerIo(io::Error),
     SpoolIo(io::Error),
+    MessageRequiresVersion(u64),
     Encode(FrameEncodeError),
     EncodeInvariant,
     InboundFrameBudgetClosed,
@@ -3309,6 +3300,9 @@ impl fmt::Display for ProcessConnectionError {
         formatter.write_str(match self {
             Self::PeerIo(_) => "the local process peer I/O failed",
             Self::SpoolIo(_) => "the local process snapshot spool I/O failed",
+            Self::MessageRequiresVersion(_) => {
+                "the local process message requires a newer protocol version"
+            }
             Self::Encode(_) => "the local process connection could not encode a frame",
             Self::EncodeInvariant => {
                 "the local process connection could not represent an internal value"
@@ -3331,7 +3325,8 @@ impl Error for ProcessConnectionError {
         match self {
             Self::PeerIo(error) | Self::SpoolIo(error) => Some(error),
             Self::Encode(error) => Some(error),
-            Self::EncodeInvariant
+            Self::MessageRequiresVersion(_)
+            | Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
             | Self::SnapshotReaderBudgetClosed => None,
@@ -4007,12 +4002,29 @@ max_output_tokens = 256
     async fn spool_version_race_reports_the_exact_required_version() -> Result<(), Box<dyn Error>> {
         let request_id = RequestId::try_new(10)?;
         let (mut writer, mut reader) = duplex(1_024);
+        let source_session = SessionId::from_uuid(Uuid::from_u128(1));
+        let model_identity = ProcessTranscriptEntry::ModelIdentityChanged {
+            entry_index: 0,
+            source_session,
+            entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(2)),
+            turn: TurnId::from_uuid(Uuid::from_u128(3)),
+            defaults_version: 2,
+            selected: DirectModelSelection::from_uuid(Uuid::from_u128(4)),
+        };
 
+        let spool_error = write_transcript_entry(
+            &mut writer,
+            ProtocolVersion::Five,
+            request_id,
+            &model_identity,
+        )
+        .await
+        .expect_err("a version-five spool cannot encode a model-identity boundary");
         write_snapshot_spool_error(
             &mut writer,
             ProtocolVersion::Five,
             request_id,
-            SnapshotSpoolError::MessageRequiresVersion(6),
+            SnapshotSpoolError::from_connection(spool_error),
         )
         .await?;
         drop(writer);
