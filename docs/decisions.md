@@ -65,6 +65,44 @@ items as caller tool proposals confuses agent activity with the declared
 **Affects.** `crates/model-runtime-codex-cli`, workspace dependencies, and the
 Codex CLI provider section of [runtime-substrate](spec/runtime-substrate.md).
 
+## 2026-07-25 — Scoped verification references on specification pages
+
+**Context.** Every `docs/spec/` page names the pull request its claims were last
+verified against, and pages narrow that claim to the surface the pull request
+actually settled whenever one reference no longer covers the whole page —
+[configuration-and-credentials](spec/configuration-and-credentials.md) and
+[persistence-protocol](spec/persistence-protocol.md) both carry per-surface
+references today. Those narrowings were written as prose outside the
+parenthetical because `scripts/check_docs_consistency.py` recognized nothing but
+a bare `` PR #N (`branch-ref`) `` token. The practice grew by imitation, and no
+documentation statement owned the reference format at all: the checker's
+docstring was the only place it appeared.
+
+**Decision.** [The specification index](spec/README.md) owns the format. A
+verification reference is `` PR #N (`branch-ref`) ``, optionally narrowed by a
+semicolon tail inside the parentheses — `` PR #N (`branch-ref`; <scope>) ``. The
+scope is free-form prose that must render as more than whitespace and
+block-quote markers (an empty, whitespace-only, or marker-only tail is rejected)
+and must stay inside the reference's own block, ending at a blank line or a
+sibling list item in either raw or block-quoted form. A scope may name code in
+backticks, and the parentheses inside such a span do not close the reference.
+`scripts/check_docs_consistency.py` enforces the format and captures nothing
+from the tail, so no consumer can come to depend on its wording.
+
+**Rejected alternatives.** Admitting only the scope-outside-the-parentheses form
+the pages use today: it separates the narrowing from the reference it narrows
+and reads as page prose rather than as part of the reference. Both forms stay
+valid and no existing page changes; the choice is which shapes an author may
+write. Validating the tail's content — requiring a path, a symbol, or a section
+link: it would freeze a prose vocabulary the pages have not settled and turn
+wording edits into checker changes. Leaving the convention to the checker alone:
+a repo-wide documentation format stated only in a script's docstring has no
+owner a page author would read.
+
+**Affects.** [The specification index](spec/README.md),
+`scripts/check_docs_consistency.py`, and the verification reference on every
+`docs/spec/` page.
+
 ## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
 
 **Context.** [tool-loop](spec/tool-loop.md) and S07 fix the caller protocol for
