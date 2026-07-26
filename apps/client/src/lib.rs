@@ -104,7 +104,7 @@ async fn execute(
             command_id,
             defaults_version,
         } => {
-            let input = input.ok_or(ClientError::Input("send input was not read"))?;
+            let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
             send(
                 &mut client,
                 &mut output,
@@ -149,7 +149,7 @@ async fn execute(
             command_id,
             defaults_version,
         } => {
-            let input = input.ok_or(ClientError::Input("reconcile input was not read"))?;
+            let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
             reconcile(
                 &mut client,
                 &mut output,
@@ -218,17 +218,21 @@ fn read_input(stdin: &mut dyn Read) -> Result<String, ClientError> {
         .take((MAX_INPUT_CONTENT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.is_empty() {
-        return Err(ClientError::Input("send input must not be empty"));
+        return Err(ClientError::Input(
+            "standard-input content must not be empty",
+        ));
     }
     if bytes.len() > MAX_INPUT_CONTENT_BYTES {
         return Err(ClientError::Input(
-            "send input exceeds the 1 MiB UTF-8 byte limit",
+            "standard-input content exceeds the 1 MiB UTF-8 byte limit",
         ));
     }
     let text = String::from_utf8(bytes)
-        .map_err(|_| ClientError::Input("send input must be valid UTF-8"))?;
+        .map_err(|_| ClientError::Input("standard-input content must be valid UTF-8"))?;
     if text.contains('\0') {
-        return Err(ClientError::Input("send input must not contain U+0000"));
+        return Err(ClientError::Input(
+            "standard-input content must not contain U+0000",
+        ));
     }
     Ok(text)
 }
@@ -1134,22 +1138,22 @@ mod tests {
     use crate::{error::ClientError, presentation::Output};
 
     #[test]
-    fn empty_send_input_is_rejected() {
+    fn empty_standard_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(Vec::<u8>::new())).is_err());
     }
 
     #[test]
-    fn nul_in_send_input_is_rejected() {
+    fn nul_in_standard_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(b"before\0after".to_vec())).is_err());
     }
 
     #[test]
-    fn oversized_send_input_is_rejected() {
+    fn oversized_standard_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(vec![b'a'; MAX_INPUT_CONTENT_BYTES + 1])).is_err());
     }
 
     #[test]
-    fn exact_limit_send_input_is_accepted() {
+    fn exact_limit_standard_input_is_accepted() {
         let exact = vec![b'a'; MAX_INPUT_CONTENT_BYTES];
         assert_eq!(
             read_input(&mut Cursor::new(exact.clone()))

@@ -1753,16 +1753,34 @@ where
                 ProcessModelCallRecoveryPrecondition::NoParkedTurn
                 | ProcessModelCallRecoveryPrecondition::Parked { .. },
             ) => {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::rejected(RejectionDetail::TurnNotAwaitingReconciliation {
-                        session_id,
-                        turn_id: expected_active_turn_id,
-                    }),
-                )
-                .await;
+                // The claim probe and this read are separate statements, so an
+                // equal-identity request that overlapped ours can have released
+                // the wait in between. Rechecking the claim before refusing
+                // keeps the loser of that race on the replay boundary instead
+                // of answering a committed decision with a refusal (INV-012).
+                match repository.load(command_id).await {
+                    Ok(Some(_)) | Err(SubmitInputRepositoryError::DifferentCommandKind { .. }) => {}
+                    Ok(None) => {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::rejected(
+                                RejectionDetail::TurnNotAwaitingReconciliation {
+                                    session_id,
+                                    turn_id: expected_active_turn_id,
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_submit_input_repository_error(
+                            writer, version, request_id, error,
+                        )
+                        .await;
+                    }
+                }
             }
             Err(error) => {
                 return write_process_read_error(writer, version, request_id, error).await;

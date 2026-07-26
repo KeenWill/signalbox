@@ -1930,6 +1930,55 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
     runtime.stop().await
 }
 
+/// INV-012: two overlapping requests carrying one reconciliation command
+/// identity both land on the committed decision.
+///
+/// The claim probe and the precondition read are separate statements, so the
+/// loser can observe the wait already released; it must still reach the replay
+/// boundary rather than the unrecorded refusal. Both halves are asserted in one
+/// execution because the race is the requirement (testing-style rule 17).
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decision()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut setup = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut setup).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut setup, session_id, String::from("first request")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+    drop(setup);
+
+    let decision = ClientRequest::ReconcileTurn {
+        command_id: command()?,
+        session_id,
+        expected_active_turn_id: parked_turn_id,
+        content: InputContent::new(String::from("continue after reconciliation")),
+        expected_defaults_version: CanonicalU64::new(1),
+    };
+    let mut first = Connection::connect(runtime.socket()).await?;
+    let mut second = Connection::connect(runtime.socket()).await?;
+    first
+        .request_version(ProtocolVersion::Seven, 1, decision.clone())
+        .await?;
+    second
+        .request_version(ProtocolVersion::Seven, 1, decision)
+        .await?;
+
+    let first_turn_id = accepted_successor_turn(&mut first, session_id, 2).await?;
+    let second_turn_id = accepted_successor_turn(&mut second, session_id, 2).await?;
+
+    assert_eq!(
+        second_turn_id, first_turn_id,
+        "an equal identity that loses the admission race replays the committed successor"
+    );
+    assert_ne!(first_turn_id, parked_turn_id);
+
+    drop(first);
+    drop(second);
+    runtime.stop().await
+}
+
 /// S04: an absent session is left to the authoritative transaction's recorded
 /// `session_not_found`, not collapsed into the precondition refusal.
 #[tokio::test]

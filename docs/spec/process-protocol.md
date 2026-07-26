@@ -332,8 +332,8 @@ request.
 
 Message objects carry a required string `type` and reject fields not admitted by
 that variant. Every accepted mutation request — `create_session`,
-`submit_input`, `replace_session_metadata`, `replace_session_defaults`, or
-`import_conversation` — produces exactly one of:
+`submit_input`, `reconcile_turn`, `replace_session_metadata`,
+`replace_session_defaults`, or `import_conversation` — produces exactly one of:
 
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
