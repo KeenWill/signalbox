@@ -17,9 +17,11 @@ model-selection stack adds protocol version six for complete, forward-only
 defaults replacement and its model-identity frontier entry; versions one through
 five remain unchanged, verified through PR #272 (`agent/mid-session-model`). The
 implementation in this stack speaks versions one through six, and its terminal
-client selects version six. This page is the normative boundary between a local
-client process and `signalboxd`; domain values, PostgreSQL records, and wire
-messages remain distinct representations.
+client selects version six. The terminal `search` verb over version four's
+metadata list was verified through PR #283 (`agent/session-search-cli`; terminal
+client surface only). This page is the normative boundary between a local client
+process and `signalboxd`; domain values, PostgreSQL records, and wire messages
+remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
