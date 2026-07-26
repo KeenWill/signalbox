@@ -43,6 +43,47 @@ actually composes tools.
 `echo`, `web_fetch`, `session_status_update`) and their golden schema tests; the
 code-host declarations migrate mechanically as a follow-up.
 
+## 2026-07-26 — Reconcile an ambiguity wait through an explicit owner request
+
+**Context.** A model call that terminalizes `Ambiguous` parks its turn in the
+`awaiting_model_call_recovery` wait, which retains the session's progressing
+slot. A live shakedown left a session in that wait across two daemon restarts:
+the startup scan reported `recovered_turn_count = 0` because the parked turn has
+no lost live end to classify, and every later `submit_input` recorded
+`active_turn_present`, so the session was permanently unusable. The process
+protocol's event taxonomy already defines `turn_reconciliation_required`, but no
+request could drive a turn to that terminal.
+
+**Decision.** Protocol version seven adds one additive request,
+`reconcile_turn`, naming the exact parked turn and carrying the successor input.
+The daemon admits it only when a narrow precondition read observes that turn
+parked on the model-call recovery wait, then submits the `Interrupt` delivery
+the accepted turn lifecycle already defines; the parked turn terminalizes
+`reconciliation_required` over its exact ambiguous call. The startup scan
+additionally reports sessions holding their slot for such a decision rather than
+returning them as `NoActiveTurn`.
+
+**Rejected alternatives.** Automatic reconciliation on the startup scan or the
+sweep would be the better operability story, but every reconciliation-required
+terminal in the implemented algebra is proof-bearing — the sealed
+`ReconciliationMarker` admits only an applied interrupt, an applied owner-stop
+decision, or fatal-mismatch causes. The durable evidence proves the turn cannot
+progress; it supplies no authority to construct. Adding an authority-free reason
+would need a new durable representation, a new reconstitution shape, and a
+migration, and would close the recorded open question that reserves provider
+request-status evidence as the resolution path. Failing the turn instead would
+invent a definite outcome the evidence does not support. Exposing a general
+interrupt request would ship active-turn cancellation as a side effect, which
+INV-029 and the standalone-cancellation open question keep out of the baseline.
+Placing the precondition in the durable aggregate would need a new typed
+rejection kind, and therefore a migration, for a refusal that records nothing.
+
+**Affects.** `crates/process-protocol` (version seven, `reconcile_turn`, three
+rejection details), the daemon request adapter and its narrow precondition read,
+the terminal client's `reconcile` verb and its version selection, the startup
+scan's reported outcome, and the process-protocol and
+turn-lifecycle-and-scheduling specification pages.
+
 ## 2026-07-26 — Dev instance under devenv's native process manager
 
 **Context.** Running the daemon locally means satisfying the
