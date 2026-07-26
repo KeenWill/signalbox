@@ -1112,9 +1112,7 @@ pub struct ReviewPassEvidence {
 }
 
 impl ReviewPassEvidence {
-    /// Supplies one independently stored pass reference, kind, run policy, and
-    /// current state.
-    pub const fn new(
+    const fn new(
         reference: ReviewPassRef,
         kind: ReviewPassKind,
         policy: ReviewPolicy,
@@ -1126,6 +1124,12 @@ impl ReviewPassEvidence {
             policy,
             state,
         }
+    }
+
+    /// Derives authenticated evidence from one fully validated pass and its
+    /// canonical run policy.
+    pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self {
+        Self::new(pass.reference, pass.kind, policy, pass.state.clone())
     }
 
     /// Returns the canonical pass reference.
@@ -2217,7 +2221,11 @@ fn validate_pass_result(
     kind: ReviewPassKind,
     state: &ReviewPassState,
 ) -> Option<ReviewPassReconstitutionFailure> {
-    let result = state.result()?;
+    let Some(result) = state.result() else {
+        return (kind == ReviewPassKind::Publish
+            && matches!(state, ReviewPassState::Blocked { .. }))
+        .then_some(ReviewPassReconstitutionFailure::IncompatibleResult);
+    };
     let foreign_target = match result {
         ReviewPassResult::ProducedFindings(findings) => findings
             .findings()
@@ -8358,6 +8366,93 @@ mod tests {
         );
     }
 
+    /// INV-041: a blocked publication transition must consume one exact
+    /// reservation-bearing result.
+    #[test]
+    fn inv041_publish_block_transition_requires_result() {
+        let mut run = ReviewRun::new(
+            run_ref(),
+            ReviewWorkflowKind::PublishReview,
+            ReviewPolicy::version_one(),
+        );
+        let running = ReviewPass::try_new(
+            pass_ref(3),
+            ReviewPassKind::Publish,
+            &mut run,
+            session_id(4),
+            ReviewPassAcceptedInputEvidence::new(
+                accepted_input_id(5),
+                session_id(4),
+                Some(turn_id(6)),
+            ),
+        )
+        .expect("canonical input admits the publish pass")
+        .transition(
+            ReviewPassState::Running { turn: turn_id(6) },
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::Active,
+                None,
+            )),
+        )
+        .expect("active canonical turn starts the publish pass");
+        let error = running
+            .transition(
+                ReviewPassState::Blocked {
+                    turn: turn_id(6),
+                    result: None,
+                },
+                Some(ReviewPassTurnEvidence::new(
+                    turn_id(6),
+                    session_id(4),
+                    accepted_input_id(5),
+                    ReviewPassTurnOutcome::ReconciliationRequired,
+                    Some(frontier_id(8)),
+                )),
+            )
+            .expect_err("blocked publication must bind its exact reservation");
+        assert_eq!(
+            error.failure(),
+            ReviewPassTransitionFailure::IncompatibleResult
+        );
+    }
+
+    /// INV-041: reconstitution also fails closed when a blocked publication
+    /// row omits its reservation-bearing result.
+    #[test]
+    fn inv041_publish_block_reconstitution_requires_result() {
+        let state = ReviewPassState::Blocked {
+            turn: turn_id(6),
+            result: None,
+        };
+        let input = ReviewPassReconstitutionInput::new(
+            pass_ref(3),
+            ReviewPassKind::Publish,
+            run_ref(),
+            ReviewWorkflowKind::PublishReview,
+            session_id(4),
+            ReviewPassAcceptedInputEvidence::new(
+                accepted_input_id(5),
+                session_id(4),
+                Some(turn_id(6)),
+            ),
+            state,
+            Some(ReviewPassTurnEvidence::new(
+                turn_id(6),
+                session_id(4),
+                accepted_input_id(5),
+                ReviewPassTurnOutcome::ReconciliationRequired,
+                Some(frontier_id(8)),
+            )),
+        );
+        assert_pass_reconstitution_rejects(
+            input,
+            ReviewPassReconstitutionFailure::IncompatibleResult,
+        );
+    }
+
     /// INV-040: pass construction requires an accepted input with a canonical
     /// origin turn.
     #[test]
@@ -8806,7 +8901,7 @@ mod tests {
         let error = ReviewPolicy::try_new(
             ReviewPolicyVersion::try_new(2).expect("positive version"),
             ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
-            ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+            ReviewConfidence::try_from_basis_points(8_000).expect("bounded confidence"),
         )
         .expect_err("unknown policy versions fail closed");
         assert_eq!(
@@ -8814,7 +8909,7 @@ mod tests {
             (
                 ReviewPolicyVersion::try_new(2).expect("positive version"),
                 ReviewConfidence::try_from_basis_points(7_000).expect("bounded confidence"),
-                ReviewConfidence::try_from_basis_points(8_001).expect("bounded confidence"),
+                ReviewConfidence::try_from_basis_points(8_000).expect("bounded confidence"),
             )
         );
     }

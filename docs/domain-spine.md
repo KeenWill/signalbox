@@ -5444,14 +5444,9 @@ impl ReviewRunEvidence {
     ) -> Self;
     // accessors: reference(), workflow(), policy(), state()
 }
-pub struct ReviewPassEvidence { /* canonical pass reference + kind + policy + state */ }
+pub struct ReviewPassEvidence { /* validated pass + canonical run policy */ }
 impl ReviewPassEvidence {
-    pub const fn new(
-        reference: ReviewPassRef,
-        kind: ReviewPassKind,
-        policy: ReviewPolicy,
-        state: ReviewPassState,
-    ) -> Self;
+    pub fn from_pass(pass: &ReviewPass, policy: ReviewPolicy) -> Self;
     // accessors: reference(), kind(), policy(), state()
 }
 pub struct ReviewRunReconstitutionInput { /* run row + canonical pass */ }
