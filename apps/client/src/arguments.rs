@@ -8,6 +8,11 @@ use signalbox_process_protocol::{
 };
 use uuid::Uuid;
 
+use crate::{MAX_METADATA_PAGE_SIZE, MIN_METADATA_PAGE_SIZE, SessionMetadataPageRequest};
+
+/// The specification's ordinary default metadata page size.
+const DEFAULT_SEARCH_RESULT_LIMIT: &str = "50";
+
 #[derive(Debug)]
 pub(crate) struct Arguments {
     pub(crate) socket: Option<PathBuf>,
@@ -22,6 +27,7 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
     },
     List,
+    Search(SessionMetadataPageRequest),
     Send {
         session_id: CanonicalUuid,
         command_id: Option<CommandId>,
@@ -87,6 +93,8 @@ enum CliCommand {
     Create(CreateArguments),
     /// List current sessions.
     List,
+    /// Read one filtered page of current session metadata.
+    Search(SearchArguments),
     /// Submit standard input and print the reply after completion.
     Send(SendArguments),
     /// Install a new forward-only session model-defaults epoch.
@@ -116,6 +124,30 @@ struct CreateArguments {
     /// Reuse an exact non-reserved durable command identity.
     #[arg(long, value_name = "UUID", value_parser = command_id)]
     command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SearchArguments {
+    /// Require an exact case-sensitive title substring.
+    #[arg(long, value_name = "SUBSTRING", value_parser = metadata_filter_text)]
+    title: Option<String>,
+    /// Require an exact tag; repeat the option to require every named tag.
+    #[arg(long = "tag", value_name = "TAG", value_parser = metadata_filter_text)]
+    tags: Vec<String>,
+    /// Include archived sessions, which the default view excludes.
+    #[arg(long)]
+    include_archived: bool,
+    /// Read at most this many results, from 1 through 100.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        default_value = DEFAULT_SEARCH_RESULT_LIMIT,
+        value_parser = metadata_page_size
+    )]
+    limit: CanonicalU64,
+    /// Continue after the exact session identity a prior page printed.
+    #[arg(long, value_name = "SESSION", value_parser = canonical_uuid)]
+    after: Option<CanonicalUuid>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -238,6 +270,24 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
         },
         CliCommand::List => Command::List,
+        CliCommand::Search(arguments) => {
+            let mut distinct = arguments.tags.clone();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() != arguments.tags.len() {
+                return Err(UsageError(Cli::command().error(
+                    ErrorKind::ArgumentConflict,
+                    "search requires distinct --tag values",
+                )));
+            }
+            Command::Search(SessionMetadataPageRequest {
+                required_tags: arguments.tags,
+                title_contains: arguments.title,
+                include_archived: arguments.include_archived,
+                page_size: arguments.limit,
+                after_session_id: arguments.after,
+            })
+        }
         CliCommand::Send(arguments) => Command::Send {
             session_id: arguments.session_id,
             command_id: arguments.command_id,
@@ -295,6 +345,24 @@ fn command_id(value: &str) -> Result<CommandId, String> {
         .map_err(|_| "command UUID uses a reserved value".to_owned())
 }
 
+fn metadata_filter_text(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("metadata filter text must not be empty".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+fn metadata_page_size(value: &str) -> Result<CanonicalU64, String> {
+    let parsed = canonical_u64(value)?;
+    if !(MIN_METADATA_PAGE_SIZE..=MAX_METADATA_PAGE_SIZE).contains(&parsed.value()) {
+        return Err(format!(
+            "the result limit must be from {MIN_METADATA_PAGE_SIZE} through \
+             {MAX_METADATA_PAGE_SIZE}"
+        ));
+    }
+    Ok(parsed)
+}
+
 fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     if value.is_empty()
         || (value.len() > 1 && value.starts_with('0'))
@@ -312,9 +380,13 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
 mod tests {
     use std::{ffi::OsString, path::Path};
 
-    use signalbox_process_protocol::ConversationImportFormat;
+    use signalbox_process_protocol::{CanonicalU64, CanonicalUuid, ConversationImportFormat};
+    use uuid::Uuid;
 
-    use super::{Arguments, Command, DangerousToolAutoApprovalArgument, ParseOutcome, parse};
+    use super::{
+        Arguments, Command, DangerousToolAutoApprovalArgument, ParseOutcome,
+        SessionMetadataPageRequest, parse,
+    };
 
     #[test]
     fn send_recovery_flags_are_an_exact_pair() {
@@ -388,6 +460,87 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn search_defaults_to_the_ordinary_non_archived_page() {
+        let parsed = parse(["search"].map(Into::into)).expect("the bare search verb parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful search parse runs the client");
+        };
+        let Command::Search(page) = arguments.command else {
+            panic!("the successful search parse selects the search command");
+        };
+        assert_eq!(
+            page,
+            SessionMetadataPageRequest {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: false,
+                page_size: CanonicalU64::new(50),
+                after_session_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn search_carries_every_named_filter_to_one_bounded_page() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "search",
+                "--title",
+                "Active plan",
+                "--tag",
+                "daily",
+                "--tag",
+                "plan",
+                "--include-archived",
+                "--limit",
+                "1",
+                "--after",
+                session,
+            ]
+            .map(Into::into),
+        )
+        .expect("every named search filter parses");
+
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the successful search parse runs the client");
+        };
+        let Command::Search(page) = arguments.command else {
+            panic!("the successful search parse selects the search command");
+        };
+        assert_eq!(
+            page,
+            SessionMetadataPageRequest {
+                required_tags: vec![String::from("daily"), String::from("plan")],
+                title_contains: Some(String::from("Active plan")),
+                include_archived: true,
+                page_size: CanonicalU64::new(1),
+                after_session_id: Some(CanonicalUuid::from_uuid(
+                    Uuid::parse_str(session).expect("the fixture session is canonical UUID text")
+                )),
+            }
+        );
+    }
+
+    #[test]
+    fn search_rejects_a_result_limit_outside_the_admitted_page_bound() {
+        assert!(parse(["search", "--limit", "0"].map(Into::into)).is_err());
+        assert!(parse(["search", "--limit", "101"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_empty_filter_text() {
+        assert!(parse(["search", "--title", ""].map(Into::into)).is_err());
+        assert!(parse(["search", "--tag", ""].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn search_rejects_a_repeated_tag_before_socket_use() {
+        assert!(parse(["search", "--tag", "daily", "--tag", "daily"].map(Into::into)).is_err());
     }
 
     #[test]

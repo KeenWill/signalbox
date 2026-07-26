@@ -729,19 +729,42 @@ side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary in this stack uses version six; version four's metadata
-operations remain core protocol and daemon capabilities without new
-terminal-client UX. Older clients remain supported for representations admitted
-by their declared version as described above. The client accepts a global
-`--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
+The `signalbox` binary in this stack uses version six; version four's
+single-session metadata read and metadata replacement remain core protocol and
+daemon capabilities without terminal-client UX, while its paginated metadata
+list is the `search` verb below. Older clients remain supported for
+representations admitted by their declared version as described above. The
+client accepts a global `--socket <path>` override or reads
+`SIGNALBOX_SOCKET_PATH`, and provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
+- `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `model <session-uuid> (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid> --defaults-version <decimal> --dangerous-tool-auto-approval <disabled|approve-all>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`;
 - `import --format <claude-code|codex> <file>`.
+
+`list` remains the complete unfiltered version-one summary sequence. `search` is
+the separate verb for version four's `list_session_metadata`, whose filters,
+bounded page, and keyset cursor have no version-one counterpart: each invocation
+sends exactly one request and prints exactly one page. `--title` is the exact
+case-sensitive substring query, each `--tag` adds one required tag to the exact
+AND-filter, `--include-archived` selects the archived-inclusive view, `--limit`
+is the page size and defaults to 50, and `--after` is the exclusive
+session-identity cursor. Empty filter text, a repeated `--tag` value, and a
+limit outside one through 100 are rejected as usage errors before socket I/O;
+the remaining metadata-filter bounds stated above are the server's to enforce.
+Each result is one line carrying the summary's session identity, archive state,
+defaults version, model selection, dangerous-tool posture, last-writer actor and
+timestamp, sorted comma-joined tags, and title. An unwritten metadata snapshot
+prints `last_writer=none`, `updated_at_unix_micros=none`, and empty tag and
+title values, which a present tag or title never is. When the page end names a
+continuation cursor, the client prints `next_after_session_id=<uuid>` to
+standard error after the results; a page is therefore never silently truncated,
+and that value is the next invocation's `--after`. The client also validates
+that a page never exceeds its requested limit.
 
 `send` reads the exact input text from standard input through EOF and never
 accepts conversation content in process arguments. Empty or oversized input
@@ -791,7 +814,10 @@ The unbounded aggregate session-summary sequence is bounded the same way. `list`
 validates ordering and the terminal count while spooling summary frames to an
 anonymous temporary file, then presents them only after the complete sequence
 validates. `send` validates the whole sequence with constant memory and retains
-only the selected session's defaults version.
+only the selected session's defaults version. `search` spools one metadata page
+the same way and presents it only after that page's ordering, count, and cursor
+validate; `model` reads the same validated pages while retaining only the
+selected session's defaults facts.
 
 After completion, `send` rereads and prints only authoritative committed
 assistant text produced for its exact turn. A failed or refused turn produces a
@@ -802,11 +828,13 @@ until interrupted. Version-six snapshots render a model boundary as
 `model_identity_changed` with its turn, defaults version, selected model, source
 session, and entry identity. By default every process-derived text field written
 to a terminal preserves line feed but renders every other C0 code point, DEL,
-and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC execution.
-`--raw-output` is the explicit opt-in that writes those fields unchanged; the
-same safe-rendering choice covers assistant text, typed diagnostics, and durable
-updates. Each complete raw text value is flushed before the client awaits
-another frame, without adding a delimiter.
+and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC execution. A
+metadata title or tag shares its output line with named neighbors, so `search`
+escapes line feed in those two fields as well and one metadata value cannot
+forge another result row. `--raw-output` is the explicit opt-in that writes
+those fields unchanged; the same safe-rendering choice covers assistant text,
+typed diagnostics, and durable updates. Each complete raw text value is flushed
+before the client awaits another frame, without adding a delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
