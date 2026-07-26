@@ -50,6 +50,33 @@ Owns: hubd configuration/composition, the model catalog example. Collides-with:
 `apps/hubd`. The merged OpenAI adapter is unreachable; the catalog admits only
 one provider.
 
+## Model catalog automation [blocked-on: OpenAI composition wiring; the wrapped-CLI drift-defense scaffolding] [size: S-M]
+
+Owns: a scheduled provider-listing watcher and the catalog-diff step that rides
+the wrapped-CLI pin-bump smoke, plus the PRs either one opens. Collides-with:
+the drift-defense CI wiring the subscription-runtime tracks introduce, and
+whichever entry holds the catalog file when a generated PR lands. Keeping the
+catalog current is an operations concern the composition-wiring entry above does
+not own; that entry makes the catalog multi-provider once, this one keeps it
+from going stale.
+
+Owner direction, 2026-07-25 (orientation only; per-model defaults, alias policy,
+and identity-generation rules are settled in the owning spec diff at pickup, not
+here): keeping the model catalog current should be automated, with the owner as
+the merge gate. Two mechanisms, both composing with the drift-defense pattern
+already recorded in the subscription-runtime entry's pin/Renovate/gated-smoke
+addendum below rather than restating it. (1) A provider-API watcher — a
+scheduled, main-only job under the same environment-protected-secrets rules as
+the gated smokes — queries each configured provider's model-listing endpoint,
+diffs the result against the catalog file (the `[[models]]` records in the
+example daemon configuration, or wherever the catalog lives at pickup), and
+opens a PR drafting entries for the new models with generated identities and
+conservative defaults for owner review; it never merges anything itself. (2)
+CLI-bump piggyback — for the wrapped-CLI runtimes, the Renovate pin-bump PR's
+compatibility smoke also enumerates the CLI's advertised models and surfaces
+catalog diffs in that same PR, so a CLI update shipping new models forces the
+catalog question at the moment of change.
+
 ## De-hub naming pass [blocked-on: in-flight stacks landing] [size: S-M]
 
 Owns: the `apps/hubd` rename (binary and directory to `signalboxd`) and "hub"

@@ -946,7 +946,8 @@ those tests.
   pending external reservation does not prove absence of an external effect and
   is not retried automatically. No transcript content or general-purpose
   artifact is copied into workflow rows.
-- **Required invariants:** INV-002, INV-007, INV-025, INV-026.
+- **Required invariants:** INV-001, INV-002, INV-007, INV-025, INV-026, INV-040,
+  INV-041.
 - **Remaining questions:** Application commands, scheduling, prompts,
   automation, repair, and stack propagation remain in
   [review-workflow orchestration](open-questions.md#destination-features-target-model);
