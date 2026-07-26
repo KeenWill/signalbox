@@ -10,6 +10,61 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-25 — Anchor subprocess dispatch at one process spawn
+
+**Context.** INV-025/026 prohibited hidden repeat sends around one authorized
+provider interaction, but named only the direct adapters' physical-request
+shape. A wrapped CLI exposes process control and a JSON event stream, not its
+internal provider requests, so treating each unobservable internal attempt as a
+hub dispatch would make the invariant unenforceable.
+
+**Decision.** Define the adapter-owned unit of irrevocable dispatch by
+transport: one physical request for a direct adapter and one process spawn for a
+subprocess adapter. One prepared call spawns at most once, never respawns after
+ambiguity, and treats provider-client activity inside the process as
+provider-internal. Process death or terminal-marker loss after spawn remains
+typed evidence for the original dispatch.
+
+**Rejected alternatives.** Reimplementing or observing the CLI's internal
+transport would reverse the accepted wrap direction and couple Signalbox to a
+provider implementation boundary. Treating one spawn as proven retry-free would
+claim evidence the adapter cannot observe. Respawning after an ambiguous exit
+would hide accepted duplicate risk.
+
+**Affects.** INV-025, INV-026, the two-stage runtime contract in
+[runtime-substrate](spec/runtime-substrate.md), and every subprocess
+`ModelRuntime` adapter.
+
+## 2026-07-25 — Make Codex CLI calls ephemeral structured subprocesses
+
+**Context.** The Codex wrapper needs exact frontier input, typed completion,
+refusal and tool evidence, bounded supervision, version-drift defense, and
+subscription login without reading the CLI credential store. The CLI's JSONL
+events supply process and turn boundaries, while its final agent message needs a
+stable model-shaped envelope. The adapter cannot spend a model dispatch on a
+separate version-probe process, and composition is outside this pass.
+
+**Decision.** Anchor the event-protocol fixture corpus and exported deployment
+pin at Codex CLI version `0.145.0`; composition must select that executable
+before wiring the adapter. Invoke one fresh `codex exec --json --ephemeral`
+process with user configuration and rule files ignored, read-only sandboxing,
+the resolved model, the complete rendered operation on stdin, and an
+adapter-owned JSON output schema in a private temporary file. Use Tokio process
+I/O, `tempfile` for schema lifetime, and Rustix only for safe Unix process-group
+interrupt before force-kill. Parse the last agent message as the
+completion/refusal/tool envelope and require `turn.completed`; use only offline
+scripted-process tests in CI.
+
+**Rejected alternatives.** Resume-by-default would move required semantic state
+behind an in-memory session pointer. Positional prompt arguments expose large
+frontiers through process listings. Reading Codex auth to seed exact-value
+redaction violates the credential boundary. Treating Codex's own command or MCP
+items as caller tool proposals confuses agent activity with the declared
+`ModelOperation` contract.
+
+**Affects.** `crates/model-runtime-codex-cli`, workspace dependencies, and the
+Codex CLI provider section of [runtime-substrate](spec/runtime-substrate.md).
+
 ## 2026-07-25 — Typed rejection for an interrupt against a parked approval wait
 
 **Context.** [tool-loop](spec/tool-loop.md) and S07 fix the caller protocol for

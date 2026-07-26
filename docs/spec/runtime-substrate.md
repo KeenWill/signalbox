@@ -1,12 +1,14 @@
 # Model-runtime substrate
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
-`crates/model-runtime`, `crates/model-runtime-anthropic`, and
-`crates/model-runtime-openai`, verified against the implementing stack through
-PR #183 (`agent/provider-call-security-parser`). It covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the two provider adapters; and the in-process
-credential-access boundary. Layer-2 authorization and evidence classification
+`crates/model-runtime`, `crates/model-runtime-anthropic`,
+`crates/model-runtime-openai`, and `crates/model-runtime-codex-cli`, verified
+against the implementing stack through PR #183
+(`agent/provider-call-security-parser`) plus the Codex CLI adapter stack
+(`agent/codex-cli-wrap`). It covers the provider-neutral operation, observation,
+and evidence vocabulary; SSE framing; structured-output and tool decode;
+`ScriptedModel`; the three provider adapters; and their credential boundaries.
+Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -18,14 +20,14 @@ companion pages. This page also owns the shared
 
 ## Boundary and crate layout
 
-The runtime layer is three library crates, hand-rolled per the 2026-07-20
+The runtime layer is four library crates, hand-rolled per the 2026-07-20
 [decision-ledger entry](../decisions.md) that closed the substrate's
 vendor-versus-hand-roll question: one provider-neutral core crate plus
 separately named provider adapters, with SerdesAI as a design reference only.
 `signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
-adapter crates' only workspace `[dependencies]` entry is
-`signalbox-model-runtime` (their dev-dependencies add the workspace test helper
-`signalbox-expect-table`, which is test-only and ships in no built artifact).
+adapters additionally own their HTTP, TLS, and serde dependencies, while the
+Codex CLI adapter owns only its subprocess, temporary-schema-file, signal, and
+serde dependencies. Test helpers ship in no built library artifact.
 `crates/domain`, `crates/application`, and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
 application signature (INV-002, INV-005); the approved runtime consumers are the
@@ -93,9 +95,13 @@ provider-interaction boundary whose caller side is
   and always returns a `TerminalReport` — failures are typed evidence, never
   exceptions.
 
-Nothing in this layer retries, falls back, or repeats a request after the
-provider could have accepted it; there is no retry machinery to disable
-(INV-025, INV-026). Why: a hidden second physical request would corrupt the
+Nothing in this layer retries, falls back, or repeats its adapter-owned unit of
+irrevocable dispatch after the provider could have accepted it (INV-025,
+INV-026). That unit is one HTTPS request for a direct adapter and one process
+spawn for a subprocess adapter. A subprocess adapter cannot observe or govern
+the wrapped provider client's internal HTTP attempts; those are
+provider-internal in the same sense as server-side attempts behind one direct
+request. Why: a hidden second adapter dispatch would corrupt the
 acceptance-boundary evidence that failure classification consumes.
 
 `CancellationSignal` wraps any `Future<Output = ()> + Send`. In both stages the
@@ -131,7 +137,9 @@ strings appear only as retained detail inside already-classified variants:
 - `Completed`: complete correlated response, terminal success status, valid
   completion material (`CompletionFinish` excludes refusal by construction).
 - `Refused`: a complete exchange reporting the provider's refusal outcome. See
-  the downgrade note below — no in-repo adapter surfaces this today.
+  the downgrade note below: the direct HTTP adapters do not surface it, while
+  the Codex CLI adapter does because its structured response envelope and
+  terminal process event jointly establish the complete exchange.
 - `ProviderError`: a complete, correlated definitive error response, classified
   into the shared `ProviderErrorKind` vocabulary (credential rejected,
   permission denied, invalid request, target not found, request too large, rate
@@ -161,17 +169,17 @@ strings appear only as retained detail inside already-classified variants:
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
-in both adapters, never silently completed. A finish reason observed before a
-stream loss is retained as `finish_reported` but is not refusal or completion
-evidence, because the exchange did not complete.
+in both direct HTTP adapters, never silently completed. A finish reason observed
+before a stream loss is retained as `finish_reported` but is not refusal or
+completion evidence, because the exchange did not complete.
 
-Refusal downgrade: both adapters' decoders construct `Refused` evidence, but
-`execute` unconditionally converts it to `ProviderError { kind: Unrecognized }`
-before returning, because a fully buffered HTTP request exposes no independent
-proof that the response arrived only after the complete upload. Why: without
-full-upload proof a refusal token cannot satisfy the completed-exchange
-precondition for the refusal disposition, so the adapter fails toward known
-failure rather than inventing evidence.
+Refusal downgrade: both direct HTTP adapters' decoders construct `Refused`
+evidence, but `execute` unconditionally converts it to
+`ProviderError { kind: Unrecognized }` before returning, because a fully
+buffered HTTP request exposes no independent proof that the response arrived
+only after the complete upload. Why: without full-upload proof a refusal token
+cannot satisfy the completed-exchange precondition for the refusal disposition,
+so the adapter fails toward known failure rather than inventing evidence.
 
 ## SSE framing
 
@@ -200,13 +208,15 @@ Guarantees:
 ## Structured output and tool decode
 
 `StructuredOutputContract` (name, description, JSON Schema, generated from a
-Rust type via schemars or supplied explicitly) is realized by both adapters as a
-forced tool/function call with parallel tool use disabled. That is a request
-constraint, not a response guarantee: a nonconforming or malformed response can
-still carry zero or several proposals, and the provider-independent decode below
-is what enforces the exactly-one contract. Why: one decode path across adapters
-beats per-provider native output mechanisms that would return content-text
-values and require schema transformation.
+Rust type via schemars or supplied explicitly) is realized as one forced
+tool/function proposal. The direct adapters use their native request tools. The
+Codex CLI adapter renders the contract into the stateless prompt and requires
+the final CLI agent message to satisfy an outer response schema whose one
+contract-named proposal carries the value. That is a request constraint, not a
+response guarantee: a nonconforming or malformed response can still carry zero
+or several proposals, and the provider-independent decode below is what enforces
+the exactly-one contract. Why: one decode path across adapters beats
+provider-specific output values that require caller-side transformation.
 
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
@@ -237,15 +247,18 @@ is inferred from timing; scripted evidence is declared, never simulated.
 
 ## Provider adapters
 
-Both adapters implement the same shape: at most one `POST` per operation
-(`/v1/messages` for Anthropic with `x-api-key` and `anthropic-version` headers;
-`/v1/chat/completions` for OpenAI with a bearer `Authorization` header),
-hand-rolled serde wire types with no provider SDK dependency, and typed evidence
-out. Construction validates configuration: the base URL must be absolute HTTPS,
-except that plain HTTP is admitted for an IP-literal loopback host used by
-deterministic tests; user information, a query, or a fragment is forbidden; and
-the SSE record limit and whole-exchange timeout must both be positive.
-Construction failure is a configuration defect, not operation evidence.
+### Direct HTTP adapters
+
+The Anthropic and OpenAI adapters implement the same shape: at most one `POST`
+per operation (`/v1/messages` for Anthropic with `x-api-key` and
+`anthropic-version` headers; `/v1/chat/completions` for OpenAI with a bearer
+`Authorization` header), hand-rolled serde wire types with no provider SDK
+dependency, and typed evidence out. Construction validates configuration: the
+base URL must be absolute HTTPS, except that plain HTTP is admitted for an
+IP-literal loopback host used by deterministic tests; user information, a query,
+or a fragment is forbidden; and the SSE record limit and whole-exchange timeout
+must both be positive. Construction failure is a configuration defect, not
+operation evidence.
 
 Provider traffic uses reqwest 0.13 with default features disabled and only its
 providerless rustls-platform-verifier and byte-stream features enabled. Both
@@ -346,6 +359,51 @@ Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
 
+## Codex CLI provider adapter
+
+`signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
+protocol captured by the offline fixture corpus at version `0.145.0`; its
+exported version constant is the contract a later composition must pin before
+wiring the adapter. The model dispatch itself performs no separate version
+probe. Preparation validates and renders the complete operation, writes the
+non-secret response-envelope schema to a private temporary file, and returns a
+one-shot capability without starting a process. Execution consumes it as exactly
+one `codex exec --json --ephemeral` spawn, passes the full rendered frontier on
+stdin, selects the exact resolved model, ignores user configuration and rule
+files, and uses the read-only CLI sandbox. It neither resumes nor persists a
+Codex thread. Why: a fresh ephemeral invocation keeps provider session state out
+of memory and makes the caller's complete handed context the sole semantic
+input.
+
+`SendCommenced` immediately precedes spawn. Spawn failure is
+`ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
+The first `thread.started` establishes the exchange and its thread id becomes
+the provider request id. Unknown top-level events and unsupported item kinds are
+additively tolerated within the byte and JSON-depth bounds. Known events with
+invalid shapes, non-UTF-8 or undecodable JSONL, nonzero or signal process exits,
+and `turn.failed` fail closed as provider error evidence; the rendered CLI
+message classifier gives credential rejection first precedence and maps only
+explicit native phrases, with all other material `Unrecognized`. Exit zero
+without `turn.completed` is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`,
+never completion.
+
+`turn.completed` is success evidence only when the last completed agent-message
+item decodes as the adapter's response envelope and satisfies the declared tool
+and structured-output constraints. The envelope distinguishes completion from
+refusal. Buffered delivery retains its content without deltas; streamed delivery
+emits bounded CLI reasoning items and the final envelope content as ordered
+deltas before the same terminal evidence. Tool argument JSON remains
+byte-verbatim when it is credential-shape clean. Usage comes only from
+`turn.completed`.
+
+The adapter bounds every stdout event while copying and drains stderr while
+retaining only a bounded prefix. Cancellation before spawn is proven unsent.
+After spawn it sends an interrupt to the dedicated process group, waits a
+positive grace, and force-kills only as fallback; either path is
+`BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
+force-kills the original process and is typed boundary loss. The offline test
+binary exercises all process and evidence paths without a live CLI or network.
+
 ## Credential-access boundary
 
 The in-process boundary implements the access-port rules of the credential
@@ -355,15 +413,15 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 - `CredentialReference` is the non-secret durable name; it is safe in errors and
   configuration. `CredentialValue` is the boundary value: no `Display`, no
   serialization, `Debug` always redacted. `expose_bytes` is the sole read path;
-  the landed adapters call it for exactly two purposes — building request
+  the direct HTTP adapters call it for exactly two purposes — building request
   authentication and seeding the credential-redaction machinery that scrubs
   provider-controlled output.
-- `CredentialAccess::resolve` is called during preparation of each physical
-  request; nothing is cached. Why: per-request resolution makes mounted-secret
-  rotation visible without a hub restart. Resolution races the cancellation
-  signal so a blocked read cannot hold a cancelled operation. Failures are
-  reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
-  secret bytes.
+- Direct HTTP adapters call `CredentialAccess::resolve` during preparation of
+  each physical request; nothing is cached. Why: per-request resolution makes
+  mounted-secret rotation visible without a hub restart. Resolution races the
+  cancellation signal so a blocked read cannot hold a cancelled operation.
+  Failures are reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and
+  never contain secret bytes.
 - The production implementation is hubd's `FileCredentialAccess`: each resolve
   rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
   production `AnthropicRuntime`.
@@ -377,6 +435,15 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   so a secret split across provider chunks can never be emitted piecewise; when
   ordering forces a held prefix out, it is replaced with `[redacted]`. Why: fail
   closed — a possible secret prefix is destroyed rather than delivered.
+- The Codex CLI adapter accepts only the configured non-secret
+  `CredentialReference` and delegates resolution to the CLI's ambient
+  subscription login on every fresh spawn. It never locates, reads, copies,
+  logs, or transports the CLI credential store. Because no credential value
+  crosses the adapter boundary to seed exact-value redaction, CLI-controlled
+  text and JSON are recursively scrubbed by credential-bearing member names and
+  credential token shapes before observations or evidence leave the crate. Why:
+  subscription authentication remains wholly inside the intended CLI control
+  surface while credential-shaped reflection still fails closed.
 
 ## Operator failure taxonomy
 
@@ -409,7 +476,7 @@ failures after staleness handling.
 
 ## Open edges
 
-- `Refused` terminal evidence never leaves either adapter: execute
+- `Refused` terminal evidence never leaves either direct HTTP adapter: execute
   unconditionally downgrades it to a provider error because the buffered HTTP
   transport cannot prove complete request upload; surfacing refusal dispositions
   awaits an upload-proving transport or evidence source.

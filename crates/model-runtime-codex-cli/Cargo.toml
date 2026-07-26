@@ -1,0 +1,44 @@
+[package]
+name = "signalbox-model-runtime-codex-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["raw_value"] }
+signalbox-model-runtime = { path = "../model-runtime" }
+tempfile = "3.27.0"
+tokio = { version = "1.53.0", default-features = false, features = [
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "time",
+] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["process"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+schemars = "1.0.4"
+tokio = { version = "1.53.0", default-features = false, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "time",
+] }
+
+[[bin]]
+name = "signalbox-fake-codex-cli"
+path = "tests/support/fake_codex_cli.rs"
+doc = false
+test = false
