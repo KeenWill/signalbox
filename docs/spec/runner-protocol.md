@@ -143,17 +143,21 @@ positive lease-lineage generation. Lease creation is not a free constructor: it
 consumes one `RunnerToolAttemptAuthorization`, which binds the approved request
 and its exact tool name to the tool loop's `AuthorizedToolAttempt`. The latter
 exists only after the automatic or owner decision authorizes that exact attempt,
-and neither authority nor the resulting lease is cloneable. Current active
-enrollment, pinned placement, its exact validated registration, and any selected
-active credential grant jointly authorize every offer after the first. The
-initial offer instead creates that pinned placement, any selected grant, and
-generation-one lease in one checked transition from `Unpinned`; it does not
-require those products to exist beforehand. The request, attempt, session, and
-two-way crash class must match the selected tool, placement, and
-declaration-derived effect class (`Pure` to `EffectFree`; `Idempotent` or
-`SideEffecting` to `ExternalEffect`). Revoked enrollment, lost placement, or a
-mismatched runner, request, tool, attempt, effect, profile, or grant cannot
-create a lease.
+and neither authority nor the resulting lease is cloneable. Every checked
+`ToolBatch` instance and all of its clones share one runner-authority issuance
+guard. Prepared authorization and in-flight restoration retain the daemon-local
+durable fence, but converting either result into
+`RunnerToolAttemptAuthorization` consumes that shared guard, so the batch cannot
+mint a second runner lease capability. Current active enrollment, pinned
+placement, its exact validated registration, and any selected active credential
+grant jointly authorize every offer after the first. The initial offer instead
+creates that pinned placement, any selected grant, and generation-one lease in
+one checked transition from `Unpinned`; it does not require those products to
+exist beforehand. The request, attempt, session, and two-way crash class must
+match the selected tool, placement, and declaration-derived effect class (`Pure`
+to `EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
+enrollment, lost placement, or a mismatched runner, request, tool, attempt,
+effect, profile, or grant cannot create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
@@ -181,17 +185,19 @@ required retry law:
   successor generation; after claim that authority consumes the owning checked
   `ToolBatch`, retires the prior in-flight attempt to its effect-correct
   terminal history, installs and authorizes a fresh physical `ToolAttemptId`,
-  retains every retired attempt identity in the updated batch, and returns both
-  attempt records; only the private replacement evidence produced by that batch
-  transition can authorize the claimed re-lease, while authority lost before
-  claim retains the never-executed attempt identity; and
+  retains every retired attempt identity in the updated batch and its complete
+  reconstitution facts, and returns both attempt records; only the private
+  replacement evidence produced by that batch transition can authorize the
+  claimed re-lease, while authority lost before claim retains the never-executed
+  attempt identity; and
 - `SideEffecting` produces typed crash-classification authority whose physical
   attempt is derived from the opaque lost lease and never produces re-lease
   authority.
 
 Generation exhaustion, reuse of any current or retired attempt identity, and a
 standalone same-request authorization for claimed retry all fail closed.
-`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` can
+`RunnerLeaseLoss` has sealed construction, so only `RunnerLease::lose` or
+`RunnerLease::reconstitute_loss` over an already-lost checked projection can
 produce retry or crash-classification authority. Re-leasing continues one
 logical tool request and lease lineage. Its successor `RunnerGeneration` is
 distinct from the fresh physical attempt's `ToolDispatchGeneration`, which
@@ -260,16 +266,19 @@ selection, tool inventory, and provisioned workspace. Exact-runner placement
 therefore changes identity only through this explicit replacement. It advances a
 positive placement revision and returns one `RunnerPlacementChange` value
 carrying the complete before-and-after placement requests and pinned facts
-needed for a later frontier-extending injected message. Reconstitution accepts a
-complete public raw-facts input and rejects an unpinned revision other than one,
-a pinned or lost state that does not match its current request and validated
-capabilities. Durable replacement-history verification belongs to the later
-persistence projection. Pinned or lost reconstitution validates against the
-exact registration snapshot that produced the pin and rejects any stored tool or
-runner-required-tool inventory that differs from that checked result. A current
-narrowed re-registration is reconciled separately and is not substituted for
-that historical snapshot. This domain aggregate accepts every positive revision
-because each is reachable through checked successor transitions.
+needed for a later frontier-extending injected message. When credential grant
+authority changes, the same result also carries complete before-and-after grant
+reconstitution facts, including the prior narrowed tool inventory and successor
+inventory. Reconstitution accepts a complete public raw-facts input and rejects
+an unpinned revision other than one, a pinned or lost state that does not match
+its current request and validated capabilities. Durable replacement-history
+verification belongs to the later persistence projection. Pinned or lost
+reconstitution validates against the exact registration snapshot that produced
+the pin and rejects any stored tool or runner-required-tool inventory that
+differs from that checked result. A current narrowed re-registration is
+reconciled separately and is not substituted for that historical snapshot. This
+domain aggregate accepts every positive revision because each is reachable
+through checked successor transitions.
 
 This stack proves that replacement must be explicit and produces the typed
 change facts. Application orchestration that appends the corresponding semantic
@@ -295,9 +304,11 @@ One daemon catalog policy declares approval posture for exact
 dangerous blanket remains first. Otherwise `Automatic` authorizes the exact pair
 without a judge, while `SessionPolicy` and an absent pair require confirmation.
 The registry's tool-only default applies only when no credential profile is
-selected; it cannot override a pair-level `SessionPolicy`. Profile policy cannot
-make an undeclared tool available and cannot alter its effect class or
-admissible loci.
+selected; it cannot override a pair-level `SessionPolicy`. A profileless
+`Confirm` declaration accepts only an owner-command decision or the frozen
+session blanket; reconstituted policy-auto provenance fails closed. Profile
+policy cannot make an undeclared tool available and cannot alter its effect
+class or admissible loci.
 
 Session creation records the requested profile as a placement axis. The pinning
 transition snapshots the selected profile and validated advertised tool set into

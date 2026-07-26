@@ -5,6 +5,11 @@
 //! evidence through the exact dispatch correlation. The executor never owns a
 //! durable transition.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use crate::{
     SessionId, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptId, ToolEffectClass,
     ToolRequest, ToolRequestId, ToolResultContent, TurnAttemptId, TurnId,
@@ -455,7 +460,28 @@ impl CurrentToolAttempt {
                 ..self
             },
             correlation,
+            runner_issuance: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Authorizes while retaining one batch-shared runner conversion guard.
+    pub(crate) fn authorize_with_runner_issuance(
+        self,
+        runner_issuance: Arc<AtomicBool>,
+    ) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
+        let mut authorized = self.authorize()?;
+        authorized.runner_issuance = runner_issuance;
+        Ok(authorized)
+    }
+
+    /// Restores while retaining one batch-shared runner conversion guard.
+    pub(crate) fn resume_in_flight_with_runner_issuance(
+        self,
+        runner_issuance: Arc<AtomicBool>,
+    ) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
+        let mut authorized = self.resume_in_flight()?;
+        authorized.runner_issuance = runner_issuance;
+        Ok(authorized)
     }
 
     /// Reconstitutes exact dispatch authority after an ambiguous commit
@@ -473,6 +499,7 @@ impl CurrentToolAttempt {
         Ok(AuthorizedToolAttempt {
             attempt: self,
             correlation,
+            runner_issuance: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -593,11 +620,21 @@ impl CurrentToolAttempt {
 }
 
 /// An in-flight attempt paired with the only valid executor fence.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct AuthorizedToolAttempt {
     attempt: CurrentToolAttempt,
     correlation: ToolAttemptDispatchCorrelation,
+    runner_issuance: Arc<AtomicBool>,
 }
+
+// The process-local issuance guard is not part of durable authorization identity.
+impl PartialEq for AuthorizedToolAttempt {
+    fn eq(&self, other: &Self) -> bool {
+        self.attempt == other.attempt && self.correlation == other.correlation
+    }
+}
+
+impl Eq for AuthorizedToolAttempt {}
 
 impl AuthorizedToolAttempt {
     /// Borrows the in-flight attempt.
@@ -608,6 +645,12 @@ impl AuthorizedToolAttempt {
     /// Returns the executor correlation.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
         self.correlation
+    }
+
+    pub(crate) fn claim_runner_issuance(&self) -> bool {
+        self.runner_issuance
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Returns both values for the authorization transaction and effect.

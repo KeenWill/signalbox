@@ -152,7 +152,7 @@ pub use runner::{
     CredentialProfileGrantState, CredentialProfileName, CredentialProfilePlacementReplacement,
     CredentialProfilePolicy, CredentialToolApproval, PinnedRunnerPlacement, ProvisionedWorkspace,
     RunnerAdvertisement, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
-    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
+    RunnerCredentialGrantChange, RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerLease,
     RunnerLeaseCorrelation, RunnerLeaseLoss, RunnerLeaseOfferRequest,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryAuthority, RunnerLeaseState,

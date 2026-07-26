@@ -3258,6 +3258,10 @@ impl ToolBatchReconstitutionInput {
         attempts: Vec<ReconstitutedToolAttempt>,
         phase: ToolBatchPhaseReconstitutionInput,
     ) -> Self;
+    pub fn with_retired_attempts(
+        self,
+        retired_attempts: Vec<ToolAttemptId>,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ToolBatch, ToolBatchReconstitutionError>;
 }
 pub enum ToolBatchReconstitutionFailure {
@@ -3285,6 +3289,7 @@ pub enum ToolBatchPhase {
 
 pub struct ToolBatch { /* private */ }
 impl ToolBatch {
+    pub fn retired_attempts(&self) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
     pub fn prepare_owner_decision(
@@ -5421,11 +5426,14 @@ impl RunnerLease {
     pub fn reconstitute(
         input: RunnerLeaseReconstitutionInput,
     ) -> Result<Self, RunnerDomainError>;
+    pub fn reconstitute_loss(
+        input: RunnerLeaseReconstitutionInput,
+    ) -> Result<RunnerLeaseLoss, RunnerDomainError>;
 }
 pub struct RunnerLeaseReconstitutionInput {
     /* public raw lease projection and independent fence */
 }
-pub struct RunnerLeaseLoss { /* private, produced only by RunnerLease::lose */ }
+pub struct RunnerLeaseLoss { /* private, produced only by checked RunnerLease transitions */ }
 impl RunnerLeaseLoss {
     // accessors: lost(), retry(), crash_attempt()
 }
@@ -5532,7 +5540,7 @@ impl SessionRunnerPlacement {
     pub fn reconstitute(
         input: SessionRunnerPlacementReconstitutionInput,
         expected_session: SessionId,
-        pinned_registration: Option<&ValidatedRunnerRegistration>,
+        registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError>;
     // accessors: state(), revision()
 }
@@ -5543,7 +5551,7 @@ pub struct SessionRunnerPin {
     /* public placement, optional initial grant, and initial lease */
 }
 pub struct RunnerPlacementReplacement {
-    /* public placement, change, and optional replacement grant */
+    /* public placement, change, optional replacement grant, and optional complete grant change */
 }
 pub struct RunnerPlacementChange {
     /* public before-and-after request and pinned facts */
@@ -5568,6 +5576,9 @@ impl CredentialProfileGrant {
 }
 pub struct CredentialProfileGrantReconstitutionInput {
     /* public complete stored grant facts */
+}
+pub struct RunnerCredentialGrantChange {
+    /* public optional complete before-and-after grant facts */
 }
 pub struct CredentialDispatchAuthorization {
     /* public exact tool/profile decision facts; produced only inside a lease */
@@ -6372,8 +6383,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: replace_session_defaults                   | 13                   |
 | domain: review_workflow                            | 81                   |
 | domain: session_metadata                           | 15                   |
-| domain: runner                                     | 48                   |
-| **signalbox-domain total**                         | **503 (+1 free fn)** |
+| domain: runner                                     | 49                   |
+| **signalbox-domain total**                         | **504 (+1 free fn)** |
 | application: conversation_import                   | 8 (incl. 3 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

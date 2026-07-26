@@ -1,8 +1,8 @@
 # Tool loop
 
 This page specifies the implemented daemon-owned tool subsystem as verified
-against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`). It
-owns logical tool requests, approval policy and decisions, physical tool
+against the implementing stack through PR #260 (`agent/runner-protocol-domain`).
+It owns logical tool requests, approval policy and decisions, physical tool
 attempts, result admission, intra-turn continuation, crash classification, the
 compiled registry, and the first daemon-local tool. Turn and attempt lifecycle
 law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
