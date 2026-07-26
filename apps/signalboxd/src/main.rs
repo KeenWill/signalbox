@@ -67,7 +67,6 @@ enum RuntimePhase {
 struct HubRuntimeError {
     phase: RuntimePhase,
     failure_class: OperatorFailureClass,
-    blocker_count: Option<u64>,
     session: Option<SessionId>,
     turn: Option<TurnId>,
 }
@@ -79,17 +78,6 @@ impl HubRuntimeError {
             failure_class: OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
-            blocker_count: None,
-            session: None,
-            turn: None,
-        }
-    }
-
-    const fn classified(phase: RuntimePhase, failure_class: OperatorFailureClass) -> Self {
-        Self {
-            phase,
-            failure_class,
-            blocker_count: None,
             session: None,
             turn: None,
         }
@@ -103,21 +91,8 @@ impl HubRuntimeError {
         Self {
             phase: RuntimePhase::StartupScan,
             failure_class,
-            blocker_count: None,
             session,
             turn,
-        }
-    }
-
-    const fn recovery_blocked(pending_steering_count: u64) -> Self {
-        Self {
-            phase: RuntimePhase::StartupScan,
-            failure_class: OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
-            blocker_count: Some(pending_steering_count),
-            session: None,
-            turn: None,
         }
     }
 }
@@ -444,23 +419,12 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                     error.repository_error().corruption_turn(),
                 )
             })?;
-            if outcome.is_complete() {
-                tracing::info!(
-                    phase = ?RuntimePhase::StartupScan,
-                    recovered_turn_count = outcome.recovered_turn_count(),
-                    "daemon startup phase completed"
-                );
-                Ok(())
-            } else {
-                let blocker_count = u64::try_from(outcome.pending_steering_sessions().len())
-                    .map_err(|_| {
-                        HubRuntimeError::classified(
-                            RuntimePhase::StartupScan,
-                            OperatorFailureClass::CallerOrHubBug,
-                        )
-                    })?;
-                Err(HubRuntimeError::recovery_blocked(blocker_count))
-            }
+            tracing::info!(
+                phase = ?RuntimePhase::StartupScan,
+                recovered_turn_count = outcome.recovered_turn_count(),
+                "daemon startup phase completed"
+            );
+            Ok(())
         },
         || std::future::ready(()),
     )
@@ -688,7 +652,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                blocker_count = error.blocker_count,
                 session_id = ?error.session,
                 turn_id = ?error.turn,
                 "daemon startup failed"
@@ -869,7 +832,6 @@ mod tests {
             HubRuntimeError {
                 phase: RuntimePhase::StartupScan,
                 failure_class: OperatorFailureClass::FailClosedCorruption,
-                blocker_count: None,
                 session: Some(session),
                 turn: Some(turn),
             }

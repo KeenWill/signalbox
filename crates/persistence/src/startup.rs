@@ -557,11 +557,6 @@ where
                     StartupScanSessionOutcome::NoActiveTurn,
                 ));
             }
-            AcceptedInputTurnFailureFailure::PendingSteering { accepted_input } => {
-                return Ok(TransactionDecision::Rollback(
-                    StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
-                ));
-            }
             AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
                 return Err(StartupScanRepositoryError::IdentityCollision(
                     StartupScanIdentityCollision::FailureEntry,
@@ -572,7 +567,8 @@ where
                     StartupScanIdentityCollision::TerminalFrontier,
                 ));
             }
-            AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+            AcceptedInputTurnFailureFailure::PendingSteering { .. }
+            | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
             | AcceptedInputTurnFailureFailure::ActiveStartMissing
             | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
             | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {

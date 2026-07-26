@@ -6350,7 +6350,6 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     );
 
     let first = scan.execute().await?;
-    assert!(first.is_complete());
     assert_eq!(first.recovered_turn_count(), 2);
 
     let prepared_state: (String, String, String, String, String, Uuid, Uuid) = sqlx::query_as(
@@ -6511,7 +6510,6 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     );
 
     let replay = scan.execute().await?;
-    assert!(replay.is_complete());
     assert_eq!(replay.recovered_turn_count(), 0);
     let unchanged: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -13193,9 +13191,7 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
     );
 
     let first = scan.execute().await?;
-    assert!(first.is_complete());
     assert_eq!(first.recovered_turn_count(), 1);
-    assert!(first.pending_steering_sessions().is_empty());
 
     let recovered: (
         String,
@@ -13297,7 +13293,6 @@ async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblo
     assert_eq!(committed_counts_before_replay, (1, 2, 1, 1, 1));
 
     let replay = scan.execute().await?;
-    assert!(replay.is_complete());
     assert_eq!(replay.recovered_turn_count(), 0);
     let committed_counts_after_replay: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -13567,12 +13562,8 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
 
     let first = scan.execute().await?;
     assert_eq!(first.recovered_turn_count(), 1);
-    assert!(first.pending_steering_sessions().is_empty());
-    assert!(first.is_complete());
     let replay = scan.execute().await?;
     assert_eq!(replay.recovered_turn_count(), 0);
-    assert!(replay.pending_steering_sessions().is_empty());
-    assert!(replay.is_complete());
 
     let recovery_events: (i64, i64) = sqlx::query_as(
         "SELECT
