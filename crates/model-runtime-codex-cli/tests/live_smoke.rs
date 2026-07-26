@@ -254,19 +254,29 @@ fn variable_or(name: &str, fallback: &str) -> String {
 /// unaffected: the workflow always passes the absolute path of the binary
 /// installed from the pin manifest.
 fn absolute_executable(executable: &str) -> String {
+    resolved_executable(
+        executable,
+        &std::env::current_dir().expect("the smoke process has a working directory"),
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+}
+
+/// Pure resolution behind [`absolute_executable`]: the caller supplies the
+/// working directory and search path, so every branch is testable without
+/// mutating process-global state.
+fn resolved_executable(
+    executable: &str,
+    current_directory: &std::path::Path,
+    search: &std::ffi::OsStr,
+) -> String {
     let path = std::path::Path::new(executable);
     if path.is_absolute() {
         return executable.to_string();
     }
     if path.components().count() > 1 {
-        return std::env::current_dir()
-            .expect("the smoke process has a working directory")
-            .join(path)
-            .to_string_lossy()
-            .into_owned();
+        return current_directory.join(path).to_string_lossy().into_owned();
     }
-    let search = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&search)
+    std::env::split_paths(search)
         .map(|directory| directory.join(executable))
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| {
@@ -277,4 +287,60 @@ fn absolute_executable(executable: &str) -> String {
         })
         .to_string_lossy()
         .into_owned()
+}
+
+#[test]
+fn executable_resolution_passes_an_absolute_path_through() {
+    let directory = tempfile::tempdir().expect("resolution fixture directory is created");
+    let absolute = directory.path().join("codex-absolute");
+
+    let resolved = resolved_executable(
+        absolute.to_str().expect("the fixture path is UTF-8"),
+        directory.path(),
+        std::ffi::OsStr::new(""),
+    );
+
+    assert_eq!(resolved, absolute.to_string_lossy());
+}
+
+#[test]
+fn executable_resolution_anchors_a_relative_path_to_the_working_directory() {
+    let directory = tempfile::tempdir().expect("resolution fixture directory is created");
+
+    let resolved = resolved_executable(
+        "tooling/codex-relative",
+        directory.path(),
+        std::ffi::OsStr::new(""),
+    );
+
+    assert_eq!(
+        resolved,
+        directory
+            .path()
+            .join("tooling/codex-relative")
+            .to_string_lossy()
+    );
+}
+
+#[test]
+fn executable_resolution_finds_a_bare_command_on_the_search_path() {
+    let empty = tempfile::tempdir().expect("resolution fixture directory is created");
+    let populated = tempfile::tempdir().expect("resolution fixture directory is created");
+    let on_path = populated.path().join("codex-on-path");
+    std::fs::write(&on_path, "#!/bin/sh\n").expect("the search-path fixture file is written");
+    let search = std::env::join_paths([empty.path(), populated.path()])
+        .expect("the fixture search path joins");
+
+    let resolved = resolved_executable("codex-on-path", empty.path(), &search);
+
+    assert_eq!(resolved, on_path.to_string_lossy());
+}
+
+#[test]
+#[should_panic(expected = "`codex-missing` was not found on PATH")]
+fn executable_resolution_panics_for_a_missing_bare_command() {
+    let empty = tempfile::tempdir().expect("resolution fixture directory is created");
+    let search = std::env::join_paths([empty.path()]).expect("the fixture search path joins");
+
+    let _ = resolved_executable("codex-missing", empty.path(), &search);
 }
