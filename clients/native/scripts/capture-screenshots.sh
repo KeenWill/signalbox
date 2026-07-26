@@ -61,24 +61,26 @@ else
 fi
 
 NORMALIZED_SCREENSHOT_NAME_COUNT=0
-for requested in "${REQUESTED_SCREENSHOT_NAMES[@]}"; do
-	trimmed_requested="${requested#"${requested%%[![:space:]]*}"}"
-	trimmed_requested="${trimmed_requested%"${trimmed_requested##*[![:space:]]}"}"
-	known_screenshot=0
-	if [[ -n "$trimmed_requested" ]]; then
-		NORMALIZED_SCREENSHOT_NAME_COUNT=$((NORMALIZED_SCREENSHOT_NAME_COUNT + 1))
-	fi
-	for screenshot_name in "${SCREENSHOT_NAMES[@]}"; do
-		if [[ "$trimmed_requested" == "$screenshot_name" ]]; then
-			known_screenshot=1
-			break
+if ((${#REQUESTED_SCREENSHOT_NAMES[@]} > 0)); then
+	for requested in "${REQUESTED_SCREENSHOT_NAMES[@]}"; do
+		trimmed_requested="${requested#"${requested%%[![:space:]]*}"}"
+		trimmed_requested="${trimmed_requested%"${trimmed_requested##*[![:space:]]}"}"
+		known_screenshot=0
+		if [[ -n "$trimmed_requested" ]]; then
+			NORMALIZED_SCREENSHOT_NAME_COUNT=$((NORMALIZED_SCREENSHOT_NAME_COUNT + 1))
+		fi
+		for screenshot_name in "${SCREENSHOT_NAMES[@]}"; do
+			if [[ "$trimmed_requested" == "$screenshot_name" ]]; then
+				known_screenshot=1
+				break
+			fi
+		done
+		if [[ -n "$trimmed_requested" && "$known_screenshot" -eq 0 ]]; then
+			echo "Unknown screenshot state name: $trimmed_requested" >&2
+			exit 2
 		fi
 	done
-	if [[ -n "$trimmed_requested" && "$known_screenshot" -eq 0 ]]; then
-		echo "Unknown screenshot state name: $trimmed_requested" >&2
-		exit 2
-	fi
-done
+fi
 if [[ "$HAS_REQUESTED_SCREENSHOT_NAMES" -eq 1 && "$NORMALIZED_SCREENSHOT_NAME_COUNT" -eq 0 ]]; then
 	echo "Screenshot state selection contains no names." >&2
 	exit 2

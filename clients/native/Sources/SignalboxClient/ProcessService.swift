@@ -544,6 +544,15 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       case .value(let exchange):
         return exchange
       case .expired:
+        do {
+          while let remaining = try await group.next() {
+            if case .value(let exchange) = remaining {
+              await exchange.close()
+            }
+          }
+        } catch {
+          // The opening task observed cancellation after the deadline won.
+        }
         throw SignalboxProcessServiceError.deadlineExceeded(
           "The process request exceeded its response deadline while opening."
         )

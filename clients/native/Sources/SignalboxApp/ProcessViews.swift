@@ -297,10 +297,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var connectedService: (any SignalboxProcessServiceProtocol)?
   private var synchronization: (any SignalboxSessionSynchronizing)?
   private var synchronizationGeneration: UInt64 = 0
+  private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var projector = SignalboxProcessTranscriptProjector()
-  private let normalizer = SignalboxIncrementalEventNormalizer()
+  private var normalizer = SignalboxIncrementalEventNormalizer()
 
   init(
     session: SignalboxProcessSession,
@@ -316,12 +317,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     serviceProvider = provider
   }
 
-  func connect() async {
+  func connect(replacingService: Bool = false) async {
     synchronizationGeneration &+= 1
     let generation = synchronizationGeneration
     let prior = synchronization
     synchronization = nil
     connectedService = nil
+    if replacingService {
+      resetServiceOwnedPresentation()
+    }
     await prior?.stop()
     guard synchronizationGeneration == generation, !Task.isCancelled else {
       return
@@ -363,8 +367,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     else {
       return
     }
+    let generation = serviceGeneration
     isSubmitting = true
-    defer { isSubmitting = false }
+    defer {
+      if serviceGeneration == generation {
+        isSubmitting = false
+      }
+    }
     var preparedForAttempt: SignalboxPreparedInputSubmission?
     do {
       let prepared: SignalboxPreparedInputSubmission
@@ -380,7 +389,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         )
       }
       preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
       let submitted = try await service.submit(prepared)
+      guard serviceGeneration == generation else {
+        return
+      }
       pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
       if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
         pendingInputs.append(
@@ -399,7 +414,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       errorMessage = nil
     } catch {
-      if let serviceError = error as? SignalboxProcessServiceError,
+      guard serviceGeneration == generation else {
+        return
+      }
+      if error is CancellationError {
+        unresolvedSubmission = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
         case .mutationRetryExhausted = serviceError
       {
         unresolvedSubmission = preparedForAttempt
@@ -462,6 +482,21 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     lhs.utf8.elementsEqual(rhs.utf8)
   }
 
+  private func resetServiceOwnedPresentation() {
+    serviceGeneration &+= 1
+    timeline = []
+    pendingInputs = []
+    activity = .unavailable
+    phase = .stopped
+    latestDiagnostic = nil
+    isSubmitting = false
+    errorMessage = nil
+    unresolvedSubmission = nil
+    materializedAcceptedInputIDs = []
+    projector = SignalboxProcessTranscriptProjector()
+    normalizer = SignalboxIncrementalEventNormalizer()
+  }
+
   private func applyLiveEvent(_ event: SignalboxProcessSessionEvent) {
     switch event {
     case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
@@ -497,20 +532,44 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .unknown:
         break
       }
-    case .turnCompleted:
-      activity = .init(state: .completed, label: "Completed")
-    case .turnFailed:
-      activity = .init(state: .failed, label: "Failed")
+    case .turnCompleted(let turnID, _, _, _):
+      applyTerminalTurn(
+        turnID: turnID,
+        terminalActivity: .init(state: .completed, label: "Completed")
+      )
+    case .turnFailed(let turnID, _, _):
+      applyTerminalTurn(
+        turnID: turnID,
+        terminalActivity: .init(state: .failed, label: "Failed")
+      )
     case .turnRefused(let turnID, _, _):
-      pendingInputs.removeAll { $0.turnID == turnID }
-      activity = .init(state: .refused, label: "Refused")
-    case .turnCancelled:
-      activity = .init(state: .cancelled, label: "Cancelled")
+      applyTerminalTurn(
+        turnID: turnID,
+        terminalActivity: .init(state: .refused, label: "Refused")
+      )
+    case .turnCancelled(let turnID, _, _):
+      applyTerminalTurn(
+        turnID: turnID,
+        terminalActivity: .init(state: .cancelled, label: "Cancelled")
+      )
     case .turnReconciliationRequired, .turnToolReconciliationRequired:
       activity = .init(state: .recoveryRequired, label: "Recovery required")
     case .sessionCreated, .unknown:
       break
     }
+  }
+
+  private func applyTerminalTurn(
+    turnID: SignalboxCanonicalUUID,
+    terminalActivity: SignalboxProcessActivity
+  ) {
+    pendingInputs.removeAll { $0.turnID == turnID }
+    activity =
+      if pendingInputs.isEmpty {
+        terminalActivity
+      } else {
+        .init(state: .queued, label: "Queued")
+      }
   }
 
   private var activityRepresentsActiveTurn: Bool {
@@ -611,7 +670,7 @@ struct ProcessSessionDetailScreen: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: .processServiceChanged)) { _ in
       Task {
-        await viewModel.connect()
+        await viewModel.connect(replacingService: true)
       }
     }
     .onDisappear {
