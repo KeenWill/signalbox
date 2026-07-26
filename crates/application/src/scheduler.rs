@@ -1119,6 +1119,12 @@ mod tests {
     }
 
     impl StartEligibleTurnIdGenerator for StatefulActivationIds {
+        fn next_model_identity_entry_id(&mut self) -> SemanticTranscriptEntryId {
+            let id = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(self.next));
+            self.next += 1;
+            id
+        }
+
         fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
             let id = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(self.next));
             self.next += 1;
