@@ -13,9 +13,9 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
     CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
     Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
-    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredOutputContract,
-    TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition,
-    ToolName, decode_structured,
+    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
+    StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -386,6 +386,49 @@ async fn structured_output_uses_the_shared_forced_tool_decode() {
 }
 
 #[tokio::test]
+async fn missing_structured_output_reaches_the_shared_typed_decode() {
+    let result = execute_scenario(
+        "structured_output_missing",
+        DeliveryMode::Buffered,
+        OperationShape::Structured,
+        CancellationSignal::never(),
+    )
+    .await;
+    let contract = StructuredOutputContract::of_type::<Verdict>("verdict", "verdict");
+    let failure = decode_structured::<Verdict, _>(
+        &completed(&result.evidence).content,
+        &contract,
+        &signalbox_model_runtime::NoDomainConstraints,
+    )
+    .expect_err("the shared decoder classifies a missing structured value");
+
+    assert_eq!(failure, StructuredDecodeFailure::NoStructuredValue);
+}
+
+#[tokio::test]
+async fn multiple_structured_outputs_reach_the_shared_typed_decode() {
+    let result = execute_scenario(
+        "structured_output_multiple",
+        DeliveryMode::Buffered,
+        OperationShape::Structured,
+        CancellationSignal::never(),
+    )
+    .await;
+    let contract = StructuredOutputContract::of_type::<Verdict>("verdict", "verdict");
+    let failure = decode_structured::<Verdict, _>(
+        &completed(&result.evidence).content,
+        &contract,
+        &signalbox_model_runtime::NoDomainConstraints,
+    )
+    .expect_err("the shared decoder classifies multiple structured values");
+
+    assert_eq!(
+        failure,
+        StructuredDecodeFailure::MultipleStructuredValues { count: 2 }
+    );
+}
+
+#[tokio::test]
 async fn structured_output_can_end_in_explicit_refusal() {
     let result = execute_scenario(
         "structured_refused",
@@ -421,6 +464,36 @@ async fn tool_choice_is_ignored_when_no_tools_or_contract_exist() {
         vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
     );
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn named_tool_choice_rejects_an_extra_declared_tool_proposal() {
+    let mut operation = operation(
+        "named_choice_extra_tool",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+    );
+    operation.tools.push(ToolDefinition::with_schema(
+        fixtures::OTHER_TOOL_NAME,
+        fixtures::OTHER_TOOL_NAME,
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        }),
+    ));
+    operation.tool_choice = ToolChoice::Named(ToolName::new(fixtures::TOOL_NAME));
+    let result = execute_operation_with_timeout(
+        operation,
+        CancellationSignal::never(),
+        OFFLINE_HARNESS_TIMEOUT,
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains(fixtures::TOOL_NAME)
+    );
 }
 
 #[tokio::test]
@@ -895,6 +968,14 @@ async fn nonzero_exit_while_writing_stdin_preserves_provider_error() {
             .as_deref()
             .is_some_and(|message| message.contains(fixtures::EARLY_STDIN_FAILURE))
     );
+    assert_eq!(
+        failure
+            .exchange
+            .provider_request_id
+            .as_ref()
+            .map(signalbox_model_runtime::ProviderRequestId::as_str),
+        Some(fixtures::THREAD_ID)
+    );
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
@@ -931,6 +1012,39 @@ async fn cancellation_kills_descendants_after_the_group_leader_exits() {
         boundary_loss(&report.evidence).cause,
         LossCause::CancellationRequested
     );
+    assert_recorded_process_exited(descendant_path);
+    assert_eq!(spawn_count(temporary.path()), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_execution_kills_the_spawned_process_group() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let runtime = runtime(temporary.path(), fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation(
+            "interrupt_with_descendant",
+            DeliveryMode::Buffered,
+            OperationShape::Text,
+        ),
+    )
+    .await;
+    let descendant_path = temporary.path().join("fake-codex-interrupt-descendant-pid");
+    let execution = tokio::spawn(async move {
+        let mut observations = Vec::new();
+        runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await
+    });
+
+    wait_for_record(descendant_path.clone()).await;
+    execution.abort();
+    let aborted = execution
+        .await
+        .expect_err("the execution task was explicitly aborted");
+
+    assert!(aborted.is_cancelled());
     assert_recorded_process_exited(descendant_path);
     assert_eq!(spawn_count(temporary.path()), 1);
 }
@@ -1049,6 +1163,23 @@ async fn inv_035_cli_output_is_credential_shape_redacted() {
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_OUTPUT_TOKEN));
     assert!(!diagnostic.contains(fixtures::SENSITIVE_REFRESH_TOKEN));
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
+    assert!(diagnostic.contains("[redacted]"));
+}
+
+/// INV-035: a bare JSON credential member at the start of CLI-controlled text
+/// is still recognized without an enclosing object delimiter.
+#[tokio::test]
+async fn inv_035_bare_credential_member_is_redacted() {
+    let result = execute_scenario(
+        "bare_credential_text",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = format!("{:?}", result.evidence);
+
     assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
     assert!(diagnostic.contains("[redacted]"));
 }
@@ -1653,28 +1784,30 @@ fn linux_proc_stat_running_is_not_an_exited_process_state() {
 }
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
-    let watcher = tokio::spawn(async move {
-        tokio::time::timeout(OFFLINE_HARNESS_TIMEOUT, async {
-            loop {
-                if tokio::fs::read_to_string(&path)
-                    .await
-                    .map(|content| content.lines().count())
-                    .unwrap_or_default()
-                    > 0
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the fake CLI records the awaited marker before cancellation");
-    });
+    let watcher = tokio::spawn(wait_for_record(path));
     CancellationSignal::when(async move {
         watcher
             .await
             .expect("the cancellation-record watcher completes");
     })
+}
+
+async fn wait_for_record(path: std::path::PathBuf) {
+    tokio::time::timeout(OFFLINE_HARNESS_TIMEOUT, async {
+        loop {
+            if tokio::fs::read_to_string(&path)
+                .await
+                .map(|content| content.lines().count())
+                .unwrap_or_default()
+                > 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the fake CLI records the awaited marker");
 }
 
 fn completed(evidence: &TerminalEvidence) -> &signalbox_model_runtime::CompletionEvidence {

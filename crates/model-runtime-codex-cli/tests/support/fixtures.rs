@@ -8,6 +8,7 @@ pub const REASONING_TEXT: &str = "considering";
 pub const PENDING_PROGRESS_TEXT: &str = "harmless";
 pub const REFUSAL_TEXT: &str = "request refused";
 pub const TOOL_NAME: &str = "lookup";
+pub const OTHER_TOOL_NAME: &str = "timezone";
 pub const TOOL_ARGUMENTS: &str = r#"{ "city" : "Oslo", "limit": 3 }"#;
 pub const STRUCTURED_ACCEPTED: bool = true;
 pub const INPUT_TOKENS: u64 = 11;

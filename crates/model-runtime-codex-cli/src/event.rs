@@ -141,10 +141,7 @@ impl<C: Clone> EventDecoder<C> {
                             let index = self.take_part_index()?;
                             sink.observe(Observation {
                                 correlation: self.correlation.clone(),
-                                fact: ObservationFact::ThinkingDelta {
-                                    index,
-                                    text: redact_text(&text),
-                                },
+                                fact: ObservationFact::ThinkingDelta { index, text },
                             });
                         }
                     }
@@ -258,9 +255,12 @@ impl<C: Clone> EventDecoder<C> {
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
             EnvelopeOutcome::Completed => FinishReason::ToolUse,
         };
-        if let Err(detail) =
-            self.emit_completion_observations(sink, &content, reported_finish.clone())
-        {
+        if let Err(detail) = self.emit_completion_observations(
+            sink,
+            &content,
+            &envelope.text,
+            reported_finish.clone(),
+        ) {
             return boundary_loss(
                 self.exchange,
                 self.usage,
@@ -348,14 +348,13 @@ impl<C: Clone> EventDecoder<C> {
             }));
         }
         if let Some(contract_name) = &self.output_contract_name {
-            let matching = envelope
+            if !envelope
                 .tool_calls
                 .iter()
-                .filter(|call| &call.name == contract_name)
-                .count();
-            if matching != 1 || envelope.tool_calls.len() != 1 {
+                .all(|call| &call.name == contract_name)
+            {
                 return Err(format!(
-                    "structured output requires exactly one `{contract_name}` proposal"
+                    "structured output permits only `{contract_name}` proposals"
                 ));
             }
         } else {
@@ -365,14 +364,15 @@ impl<C: Clone> EventDecoder<C> {
                     return Err("tool choice requires a proposal".to_string());
                 }
                 ToolRequirement::Named(name)
-                    if !envelope.tool_calls.iter().any(|call| &call.name == name) =>
+                    if envelope.tool_calls.is_empty()
+                        || !envelope.tool_calls.iter().all(|call| &call.name == name) =>
                 {
-                    return Err(format!("tool choice requires `{name}`"));
+                    return Err(format!("tool choice permits only `{name}`"));
                 }
                 ToolRequirement::Any | ToolRequirement::Named(_) => {}
             }
         }
-        if content.is_empty() {
+        if content.is_empty() && self.output_contract_name.is_none() {
             return Err("response envelope carries no completion material".to_string());
         }
         Ok(content)
@@ -382,6 +382,7 @@ impl<C: Clone> EventDecoder<C> {
         &mut self,
         sink: &mut (dyn ObservationSink<C> + Send),
         content: &[AssistantPart],
+        raw_text: &str,
         finish: FinishReason,
     ) -> Result<(), String> {
         if self.delivery == DeliveryMode::Streamed {
@@ -395,11 +396,11 @@ impl<C: Clone> EventDecoder<C> {
                     .map_err(|_| "response has too many ordered parts".to_string())?;
                 let index = self.next_part_index + offset;
                 match part {
-                    AssistantPart::Text(text) => sink.observe(Observation {
+                    AssistantPart::Text(_) => sink.observe(Observation {
                         correlation: self.correlation.clone(),
                         fact: ObservationFact::TextDelta {
                             index,
-                            text: text.clone(),
+                            text: raw_text.to_string(),
                         },
                     }),
                     AssistantPart::ToolCall(call) => sink.observe(Observation {

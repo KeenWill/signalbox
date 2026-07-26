@@ -370,18 +370,20 @@ exported version constant is the contract a later composition must pin before
 wiring the adapter. The model dispatch itself performs no separate version
 probe. Preparation validates and renders the complete operation, writes the
 non-secret response-envelope schema to a private temporary file, and returns a
-one-shot capability without starting a process. Execution consumes it as exactly
-one `codex exec --json --ephemeral` spawn on Unix, passes the full rendered
-frontier on stdin, requires absolute configured executable and working-root
-paths, selects the exact resolved model, ignores user configuration and rule
-files, disables the shell and unified-exec features, sets the
-project-instruction byte budget to zero, and uses the read-only CLI sandbox.
-Strict configuration turns an unavailable control into a closed failure instead
-of silently relaxing this invocation boundary. Before spawn it clears the parent
-environment, then copies only its explicit home/Codex-home, executable and
-temporary path, XDG, locale/terminal, certificate, and proxy allowlist;
-unrelated service variables do not reach the CLI. It neither resumes nor
-persists a Codex thread. Why: a fresh ephemeral invocation keeps provider
+one-shot capability without starting a process. Admitted schemas and replayed
+tool arguments remain raw JSON through prompt serialization; a shallow raw
+member scan still requires each schema to declare an object root. Execution
+consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
+Unix, passes the full rendered frontier on stdin, requires absolute configured
+executable and working-root paths, selects the exact resolved model, ignores
+user configuration and rule files, disables the shell and unified-exec features,
+sets the project-instruction byte budget to zero, and uses the read-only CLI
+sandbox. Strict configuration turns an unavailable control into a closed failure
+instead of silently relaxing this invocation boundary. Before spawn it clears
+the parent environment, then copies only its explicit home/Codex-home,
+executable and temporary path, XDG, locale/terminal, certificate, and proxy
+allowlist; unrelated service variables do not reach the CLI. It neither resumes
+nor persists a Codex thread. Why: a fresh ephemeral invocation keeps provider
 session state out of memory, and the caller supplies the complete conversation
 frontier instead of an in-memory resume pointer. The read-only sandbox and
 working root are the adapter's filesystem boundary; Unix process-group
@@ -408,24 +410,28 @@ Exit zero without `turn.completed` is
 `BoundaryLoss(StreamEndedWithoutTerminalMarker)`, never completion.
 
 `turn.completed` is success evidence only when the last completed agent-message
-item decodes as the adapter's response envelope and satisfies the declared tool
-and structured-output constraints. The decoded envelope is checked against the
-shared JSON nesting bound independently of the escaped outer event; envelope
-decode errors are content-silent. The envelope distinguishes completion from
-refusal. Within the envelope each tool call carries its argument object as JSON
-text inside a string: strict structured-output validation refuses any schema
-object that does not supply `additionalProperties: false` and require all its
-properties, so a free-form argument object is not expressible in the output
-schema and the live API rejects one as `invalid_json_schema`. The adapter parses
-the string, requires exactly one JSON object within the provider nesting bound,
-and passes the contained text onward, so tool argument JSON still reaches the
-caller byte-verbatim when it is credential-shape clean. Caller JSON is rendered
-with arbitrary-precision number preservation, so a schema or replayed argument
-never changes a numeric lexeme through an `f64` round trip. Buffered delivery
-retains its content without deltas; streamed delivery emits bounded CLI
-reasoning items and the final envelope content as ordered deltas before the same
-terminal evidence. Usage comes only from `turn.completed`; an omitted cache
-counter remains unreported rather than becoming a reported zero.
+item decodes as the adapter's response envelope and satisfies the declared-tool
+constraints. A named ordinary-tool choice admits at least one proposal and
+requires every proposal to carry that selected name. For a structured-output
+contract, zero or several contract-named proposals remain definitive completion
+material for the provider-independent structured decoder above to classify. The
+decoded envelope is checked against the shared JSON nesting bound independently
+of the escaped outer event; envelope decode errors are content-silent. The
+envelope distinguishes completion from refusal. Within the envelope each tool
+call carries its argument object as JSON text inside a string: strict
+structured-output validation refuses any schema object that does not supply
+`additionalProperties: false` and require all its properties, so a free-form
+argument object is not expressible in the output schema and the live API rejects
+one as `invalid_json_schema`. The adapter parses the string, requires exactly
+one JSON object within the provider nesting bound, and passes the contained text
+onward, so tool argument JSON still reaches the caller byte-verbatim when it is
+credential-shape clean. Caller JSON remains raw through serialization,
+preserving deep admitted values and their numeric lexemes. Buffered delivery
+retains its content without deltas; streamed delivery feeds raw bounded CLI
+reasoning and final-envelope text through the stateful redactor before emitting
+ordered deltas and the same terminal evidence. Usage comes only from
+`turn.completed`; an omitted cache counter remains unreported rather than
+becoming a reported zero.
 
 The pinned CLI exposes no argv, configuration, or subscription request controls
 for output-token ceiling, temperature, top-p, or stop sequences. This adapter is
@@ -443,27 +449,31 @@ cannot pass the fixture corpus.
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Streamed credential lookbehind retains at most
 64 KiB; exceeding that bound emits redaction under each held observation's
-original metadata and suppresses later text through the terminal flush.
-Construction rejects a zero or runtime-clock-unrepresentable process timeout.
-Cancellation before spawn is proven unsent. After spawn it sends an interrupt to
-the dedicated process group, retains the unreaped leader through a positive
-grace, and kills the group before reaping the leader; cancellation is
-`BoundaryLoss(CancellationRequested)` and never causes another spawn. Timeout
-starts immediately after successful spawn, governs stdin transfer, stdout
-decoding, and process exit, then force-kills the original process as typed
-boundary loss; interrupt grace is capped at the time remaining before that
-deadline. A stdin write failure first drains bounded stderr and observes process
-status under the same controls, preserving a definitive nonzero CLI failure
-instead of discarding it as transport loss. Ready stdout is polled before
-simultaneous control signals, then the decoder drains only the current bounded
-reader batch before synchronously rechecking control, so continuously ready
-stdout cannot starve it. Once a provider terminal marker is observed, a later
-cancellation cannot replace that definitive evidence, but the process deadline
-continues to govern exit and cleanup. The adapter also bounds stderr cleanup
-before reaping the direct child and terminates the original process group when
-an inherited stderr handle outlives the deadline, so cleanup never signals
-through a reusable process identity. The offline test binary exercises all
-process and evidence paths without a live CLI or network.
+original metadata and suppresses later text through the terminal flush. A
+credential-bearing JSON member at the start of CLI-controlled text is recognized
+without requiring an enclosing object delimiter. Construction rejects a zero or
+runtime-clock-unrepresentable process timeout. Cancellation before spawn is
+proven unsent. After spawn it sends an interrupt to the dedicated process group,
+retains the unreaped leader through a positive grace, and kills the group before
+reaping the leader; cancellation is `BoundaryLoss(CancellationRequested)` and
+never causes another spawn. Timeout starts immediately after successful spawn,
+governs stdin transfer, stdout decoding, and process exit, then force-kills the
+original process as typed boundary loss; interrupt grace is capped at the time
+remaining before that deadline. Dropping or aborting execution synchronously
+kills the still-owned original process group before the direct child drops. A
+stdin write failure continues draining and decoding bounded JSONL stdout
+alongside bounded stderr, then observes process status under the same controls,
+preserving definitive CLI evidence instead of discarding it as transport loss or
+blocking on a full stdout pipe. Ready stdout is polled before simultaneous
+control signals, then the decoder drains only the current bounded reader batch
+before synchronously rechecking control, so continuously ready stdout cannot
+starve it. Once a provider terminal marker is observed, a later cancellation
+cannot replace that definitive evidence, but the process deadline continues to
+govern exit and cleanup. The adapter also bounds stderr cleanup before reaping
+the direct child and terminates the original process group when an inherited
+stderr handle outlives the deadline, so cleanup never signals through a reusable
+process identity. The offline test binary exercises all process and evidence
+paths without a live CLI or network.
 
 ## Credential-access boundary
 

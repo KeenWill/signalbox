@@ -1,6 +1,7 @@
 //! One operation, one Codex CLI process spawn.
 
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -85,6 +86,49 @@ pub struct CodexCliPreparedRequest<C> {
     interrupt_grace: Duration,
     event_limit: usize,
     stderr_limit: usize,
+}
+
+struct SupervisedChild {
+    child: Child,
+    process_group_id: Option<u32>,
+    armed: bool,
+}
+
+impl SupervisedChild {
+    fn new(child: Child) -> Self {
+        let process_group_id = child.id();
+        Self {
+            child,
+            process_group_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Deref for SupervisedChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl DerefMut for SupervisedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+
+impl Drop for SupervisedChild {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_process_group(self.process_group_id);
+        }
+    }
 }
 
 /// Why a [`CodexCliRuntime`] could not be constructed.
@@ -368,7 +412,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         fact: ObservationFact::SendCommenced,
     });
     let mut child = match command.spawn() {
-        Ok(child) => child,
+        Ok(child) => SupervisedChild::new(child),
         Err(error) => {
             return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
                 cause: UnsentCause::ConnectFailed(TransportFacts::new(error.to_string())),
@@ -382,18 +426,15 @@ async fn execute_process<C: Clone + Send + Sync>(
         );
     };
     let Some(mut stdin) = child.stdin.take() else {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        force_kill(&mut child).await;
         return pre_exchange_transport_loss("spawned Codex process has no stdin");
     };
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        force_kill(&mut child).await;
         return pre_exchange_transport_loss("spawned Codex process has no stdout");
     };
     let Some(stderr) = child.stderr.take() else {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        force_kill(&mut child).await;
         return pre_exchange_transport_loss("spawned Codex process has no stderr");
     };
     let stderr_limit = prepared.stderr_limit;
@@ -417,74 +458,9 @@ async fn execute_process<C: Clone + Send + Sync>(
             result = &mut send_prompt => InputStep::Written(result),
         }
     };
-    match input_step {
-        InputStep::Written(Ok(())) => {}
-        InputStep::Written(Err(error)) => {
-            drop(stdin);
-            let mut stderr_task = stderr_task;
-            let stderr = tokio::select! {
-                biased;
-                result = &mut stderr_task => stderr_result(result),
-                () = &mut *cancellation => {
-                    interrupt_then_kill(
-                        &mut child,
-                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                    )
-                    .await;
-                    abort_stderr_task(stderr_task).await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(LossCause::CancellationRequested);
-                },
-                () = tokio::time::sleep_until(deadline) => {
-                    force_kill(&mut child).await;
-                    abort_stderr_task(stderr_task).await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(timeout_cause());
-                },
-            };
-            let status = tokio::select! {
-                biased;
-                status = child.wait() => status,
-                () = &mut *cancellation => {
-                    interrupt_then_kill(
-                        &mut child,
-                        remaining_interrupt_grace(prepared.interrupt_grace, deadline),
-                    )
-                    .await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(LossCause::CancellationRequested);
-                },
-                () = tokio::time::sleep_until(deadline) => {
-                    force_kill(&mut child).await;
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(timeout_cause());
-                },
-            };
-            match status {
-                Ok(status) if !status.success() => {
-                    let message = if stderr.trim().is_empty() {
-                        format!("Codex CLI exited with status {status} after stdin failed: {error}")
-                    } else {
-                        format!("Codex CLI exited with status {status}: {stderr}")
-                    };
-                    redacting_sink.finish();
-                    return decoder.provider_error_after_exit(&message);
-                }
-                Ok(_) => {
-                    let evidence = decoder.finish(&mut redacting_sink);
-                    redacting_sink.finish();
-                    return evidence;
-                }
-                Err(wait_error) => {
-                    redacting_sink.finish();
-                    return decoder.boundary_loss(LossCause::TransportFailed(
-                        TransportFacts::new(format!(
-                            "Codex stdin write failed ({error}) and process wait failed: {wait_error}"
-                        )),
-                    ));
-                }
-            }
-        }
+    let input_error = match input_step {
+        InputStep::Written(Ok(())) => None,
+        InputStep::Written(Err(error)) => Some(error),
         InputStep::Cancelled => {
             interrupt_then_kill(
                 &mut child,
@@ -501,7 +477,7 @@ async fn execute_process<C: Clone + Send + Sync>(
                 "Codex CLI process exceeded its exchange timeout",
             )));
         }
-    }
+    };
     drop(stdin);
 
     let mut stdout = BufReader::new(stdout);
@@ -609,6 +585,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             kill_process_group(process_group_id);
             match child.try_wait() {
                 Ok(Some(status)) if !was_killed_by_group_cleanup(&status) => {
+                    child.disarm();
                     abort_stderr_task(stderr_task).await;
                     reaped_status = Some(Ok(status));
                     "Codex stderr was unavailable at the process-cleanup deadline".to_string()
@@ -643,6 +620,9 @@ async fn execute_process<C: Clone + Send + Sync>(
             },
         },
     };
+    if status.is_ok() {
+        child.disarm();
+    }
 
     match status {
         Ok(status) if status.success() => {
@@ -651,10 +631,12 @@ async fn execute_process<C: Clone + Send + Sync>(
             evidence
         }
         Ok(status) => {
-            let message = if stderr.trim().is_empty() {
-                format!("Codex CLI exited with status {status}")
-            } else {
+            let message = if !stderr.trim().is_empty() {
                 format!("Codex CLI exited with status {status}: {stderr}")
+            } else if let Some(error) = input_error {
+                format!("Codex CLI exited with status {status} after stdin failed: {error}")
+            } else {
+                format!("Codex CLI exited with status {status}")
             };
             redacting_sink.finish();
             decoder.provider_error_after_exit(&message)
@@ -744,7 +726,7 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
     Ok(crate::redaction::redact_text(&output))
 }
 
-async fn interrupt_then_kill(child: &mut Child, grace: Duration) {
+async fn interrupt_then_kill(child: &mut SupervisedChild, grace: Duration) {
     #[cfg(unix)]
     {
         let process_group_id = child.id();
@@ -755,7 +737,9 @@ async fn interrupt_then_kill(child: &mut Child, grace: Duration) {
             tokio::time::sleep(grace).await;
             kill_process_group(process_group_id);
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            if child.wait().await.is_ok() {
+                child.disarm();
+            }
             return;
         }
     }
@@ -766,10 +750,12 @@ fn remaining_interrupt_grace(grace: Duration, deadline: tokio::time::Instant) ->
     grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
 }
 
-async fn force_kill(child: &mut Child) {
+async fn force_kill(child: &mut SupervisedChild) {
     kill_process_group(child.id());
     let _ = child.start_kill();
-    let _ = child.wait().await;
+    if child.wait().await.is_ok() {
+        child.disarm();
+    }
 }
 
 fn kill_process_group(process_group_id: Option<u32>) {

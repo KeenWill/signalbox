@@ -67,7 +67,15 @@ fn redact_json_credential_values(text: &str) -> String {
             credential_value_bounds(remaining, value_start, ValueTermination::Token);
         output.push_str(prefix);
         output.push_str(REDACTED);
-        remaining = &remaining[value_end.max(token_start)..];
+        let consumed = value_end.max(token_start);
+        if let Some(quote @ (b'"' | b'\'')) = prefix.as_bytes().last()
+            && remaining.as_bytes().get(consumed) == Some(quote)
+        {
+            output.push(char::from(*quote));
+            remaining = &remaining[consumed + 1..];
+        } else {
+            remaining = &remaining[consumed..];
+        }
     }
     output.push_str(remaining);
     output
@@ -110,7 +118,7 @@ fn json_key_can_start_at(text: &str, key_start: usize) -> bool {
         .chars()
         .rev()
         .find(|character| !character.is_whitespace())
-        .is_some_and(|character| matches!(character, '{' | ','))
+        .is_none_or(|character| matches!(character, '{' | ','))
 }
 
 pub(crate) fn redact_json(raw: &str) -> String {
@@ -763,6 +771,15 @@ mod tests {
 
         assert!(!output.contains(COMPOSITE_SECRET_VALUE));
         assert!(output.contains("[redacted]"));
+    }
+
+    #[test]
+    fn inv_035_redacts_a_bare_credential_member_at_fragment_start() {
+        let fixture = format!(r#"  "client_secret":"{COMPOSITE_SECRET_VALUE}""#);
+        let output = redact_text(&fixture);
+
+        assert_eq!(output, r#"  "client_secret":"[redacted]""#);
+        assert!(!output.contains(COMPOSITE_SECRET_VALUE));
     }
 
     #[test]

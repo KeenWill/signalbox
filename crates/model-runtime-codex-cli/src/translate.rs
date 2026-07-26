@@ -1,6 +1,9 @@
 //! Stateless rendering of one model operation into Codex stdin.
 
-use serde_json::{Value, json};
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+use serde_json::value::RawValue;
 use signalbox_model_runtime::{
     ConversationMessage, ConversationRole, MessagePart, ModelOperation, PreparationDefect,
     PreparationFailure, ToolChoice,
@@ -18,6 +21,77 @@ pub(crate) enum ToolRequirement {
     Optional,
     Any,
     Named(String),
+}
+
+#[derive(Serialize)]
+struct PromptRequest<'a> {
+    system: &'a Option<String>,
+    messages: Vec<PromptMessage<'a>>,
+    settings: PromptSettings<'a>,
+    tools: Vec<PromptTool<'a>>,
+    tool_choice: PromptToolChoice<'a>,
+    structured_output: Option<PromptStructuredOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct PromptSettings<'a> {
+    max_output_tokens: u32,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    stop_sequences: &'a [String],
+}
+
+#[derive(Serialize)]
+struct PromptMessage<'a> {
+    role: &'static str,
+    parts: Vec<PromptPart<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PromptPart<'a> {
+    Text {
+        text: &'a str,
+    },
+    ToolCall {
+        id: &'a str,
+        name: &'a str,
+        arguments: Box<RawValue>,
+    },
+    ToolResult {
+        tool_call_id: &'a str,
+        content: &'a str,
+        is_error: bool,
+    },
+    Thinking {
+        text: &'a str,
+        signature: &'a Option<String>,
+    },
+    RedactedThinking {
+        data: &'a str,
+    },
+}
+
+#[derive(Serialize)]
+struct PromptTool<'a> {
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a RawValue,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PromptToolChoice<'a> {
+    Automatic,
+    AnyTool,
+    Named { name: &'a str },
+}
+
+#[derive(Serialize)]
+struct PromptStructuredOutput<'a> {
+    name: &'a str,
+    description: &'a str,
+    schema: &'a RawValue,
 }
 
 pub(crate) fn translate<C>(
@@ -40,14 +114,14 @@ pub(crate) fn translate<C>(
         .iter()
         .map(|tool| {
             let input_schema = parse_object_schema(
-                tool.input_schema.get(),
+                &tool.input_schema,
                 &format!("tool `{}` input schema", tool.name.as_str()),
             )?;
-            Ok(json!({
-                "name": tool.name.as_str(),
-                "description": tool.description,
-                "input_schema": input_schema,
-            }))
+            Ok(PromptTool {
+                name: tool.name.as_str(),
+                description: &tool.description,
+                input_schema,
+            })
         })
         .collect::<Result<Vec<_>, TranslationError>>()?;
     let output_contract = operation
@@ -55,14 +129,14 @@ pub(crate) fn translate<C>(
         .as_ref()
         .map(|contract| {
             let schema = parse_object_schema(
-                contract.schema.get(),
+                &contract.schema,
                 &format!("structured output `{}` schema", contract.name.as_str()),
             )?;
-            Ok(json!({
-                "name": contract.name.as_str(),
-                "description": contract.description,
-                "schema": schema,
-            }))
+            Ok(PromptStructuredOutput {
+                name: contract.name.as_str(),
+                description: &contract.description,
+                schema,
+            })
         })
         .transpose()?;
 
@@ -74,28 +148,30 @@ pub(crate) fn translate<C>(
         operation.tool_choice.clone()
     };
     let tool_choice = match &effective_tool_choice {
-        ToolChoice::Automatic => json!({"kind": "automatic"}),
-        ToolChoice::AnyTool => json!({"kind": "any_tool"}),
-        ToolChoice::Named(name) => json!({"kind": "named", "name": name.as_str()}),
+        ToolChoice::Automatic => PromptToolChoice::Automatic,
+        ToolChoice::AnyTool => PromptToolChoice::AnyTool,
+        ToolChoice::Named(name) => PromptToolChoice::Named {
+            name: name.as_str(),
+        },
     };
-    let tool_requirement = match effective_tool_choice {
+    let tool_requirement = match &effective_tool_choice {
         ToolChoice::Automatic => ToolRequirement::Optional,
         ToolChoice::AnyTool => ToolRequirement::Any,
         ToolChoice::Named(name) => ToolRequirement::Named(name.as_str().to_string()),
     };
-    let request = json!({
-        "system": operation.system,
-        "messages": messages,
-        "settings": {
-            "max_output_tokens": operation.settings.max_output_tokens,
-            "temperature": operation.settings.temperature,
-            "top_p": operation.settings.top_p,
-            "stop_sequences": operation.settings.stop_sequences,
+    let request = PromptRequest {
+        system: &operation.system,
+        messages,
+        settings: PromptSettings {
+            max_output_tokens: operation.settings.max_output_tokens,
+            temperature: operation.settings.temperature,
+            top_p: operation.settings.top_p,
+            stop_sequences: &operation.settings.stop_sequences,
         },
-        "tools": tools,
-        "tool_choice": tool_choice,
-        "structured_output": output_contract,
-    });
+        tools,
+        tool_choice,
+        structured_output: output_contract,
+    };
     let request_json = serde_json::to_string(&request).map_err(|error| {
         TranslationError::Defect(PreparationDefect::SerializationFailed {
             detail: error.to_string(),
@@ -130,7 +206,7 @@ pub(crate) fn translate<C>(
     })
 }
 
-fn render_message(message: &ConversationMessage) -> Result<Value, TranslationError> {
+fn render_message(message: &ConversationMessage) -> Result<PromptMessage<'_>, TranslationError> {
     let role = match message.role {
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
@@ -140,61 +216,58 @@ fn render_message(message: &ConversationMessage) -> Result<Value, TranslationErr
         .iter()
         .map(render_part)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({"role": role, "parts": parts}))
+    Ok(PromptMessage { role, parts })
 }
 
-fn render_part(part: &MessagePart) -> Result<Value, TranslationError> {
+fn render_part(part: &MessagePart) -> Result<PromptPart<'_>, TranslationError> {
     match part {
-        MessagePart::Text(text) => Ok(json!({"type": "text", "text": text})),
-        MessagePart::ToolCall(call) => Ok(json!({
-            "type": "tool_call",
-            "id": call.id.as_str(),
-            "name": call.name.as_str(),
-            "arguments": parse_replayed_tool_json(&call.arguments_json)?,
-        })),
-        MessagePart::ToolResult(result) => Ok(json!({
-            "type": "tool_result",
-            "tool_call_id": result.tool_call_id.as_str(),
-            "content": result.content,
-            "is_error": result.is_error,
-        })),
-        MessagePart::Thinking { text, signature } => Ok(json!({
-            "type": "thinking",
-            "text": text,
-            "signature": signature,
-        })),
-        MessagePart::RedactedThinking { data } => {
-            Ok(json!({"type": "redacted_thinking", "data": data}))
-        }
+        MessagePart::Text(text) => Ok(PromptPart::Text { text }),
+        MessagePart::ToolCall(call) => Ok(PromptPart::ToolCall {
+            id: call.id.as_str(),
+            name: call.name.as_str(),
+            arguments: parse_replayed_tool_json(&call.arguments_json)?,
+        }),
+        MessagePart::ToolResult(result) => Ok(PromptPart::ToolResult {
+            tool_call_id: result.tool_call_id.as_str(),
+            content: &result.content,
+            is_error: result.is_error,
+        }),
+        MessagePart::Thinking { text, signature } => Ok(PromptPart::Thinking { text, signature }),
+        MessagePart::RedactedThinking { data } => Ok(PromptPart::RedactedThinking { data }),
     }
 }
 
-fn parse_raw_json(raw: &str) -> Result<Value, TranslationError> {
-    serde_json::from_str(raw).map_err(|error| {
-        TranslationError::Defect(PreparationDefect::SerializationFailed {
-            detail: error.to_string(),
-        })
-    })
-}
-
-fn parse_replayed_tool_json(raw: &str) -> Result<Value, TranslationError> {
-    serde_json::from_str(raw).map_err(|error| {
+fn parse_replayed_tool_json(raw: &str) -> Result<Box<RawValue>, TranslationError> {
+    RawValue::from_string(raw.to_string()).map_err(|error| {
         TranslationError::Failure(PreparationFailure::UnsupportedOperation {
             detail: format!("replayed tool-call arguments are not valid JSON: {error}"),
         })
     })
 }
 
-fn parse_object_schema(raw: &str, subject: &str) -> Result<Value, TranslationError> {
-    let schema = parse_raw_json(raw)?;
-    if schema.get("type").and_then(Value::as_str) != Some("object") {
+fn parse_object_schema<'a>(
+    raw: &'a RawValue,
+    subject: &str,
+) -> Result<&'a RawValue, TranslationError> {
+    if !schema_describes_object(raw) {
         return Err(TranslationError::Failure(
             PreparationFailure::UnsupportedOperation {
                 detail: format!("{subject} must describe an object at its root"),
             },
         ));
     }
-    Ok(schema)
+    Ok(raw)
+}
+
+fn schema_describes_object(raw: &RawValue) -> bool {
+    let Ok(members) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw.get()) else {
+        return false;
+    };
+    members
+        .get("type")
+        .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+        .as_deref()
+        == Some("object")
 }
 
 fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), TranslationError> {
@@ -226,7 +299,64 @@ fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), Translation
     Ok(())
 }
 
+#[derive(Debug)]
 pub(crate) enum TranslationError {
     Failure(PreparationFailure),
     Defect(PreparationDefect),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::value::RawValue;
+    use signalbox_model_runtime::{
+        ConversationMessage, ConversationRole, CredentialReference, MessagePart, ModelOperation,
+        ModelSettings, RequestedTarget, ResolvedTarget, ToolCallId, ToolCallProposal,
+        ToolDefinition, ToolName,
+    };
+
+    use super::translate;
+
+    fn deeply_nested_operation() -> ModelOperation<()> {
+        let depth = 512;
+        let nested = format!(
+            "{}\"leaf\"{}",
+            r#"{"nested":"#.repeat(depth),
+            "}".repeat(depth)
+        );
+        let schema = format!(r#"{{"type":"object","deep":{nested}}}"#);
+        let arguments = format!(r#"{{"deep":{nested}}}"#);
+        let mut operation = ModelOperation::new(
+            (),
+            CredentialReference::new("codex-subscription"),
+            RequestedTarget::new("requested"),
+            ResolvedTarget::new("resolved"),
+            vec![ConversationMessage::user_text("hello")],
+            ModelSettings::new(64),
+        );
+        operation.tools.push(ToolDefinition::with_raw_schema(
+            "deep",
+            "Deep stack-safety fixture.",
+            RawValue::from_string(schema).expect("deep schema is valid raw JSON"),
+        ));
+        operation.messages.push(ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_deep"),
+                name: ToolName::new("deep"),
+                arguments_json: arguments,
+            })],
+        });
+        operation
+    }
+
+    #[test]
+    fn deep_schema_and_replay_arguments_remain_raw_through_prompt_rendering() {
+        let operation = deeply_nested_operation();
+        let translated = translate(&operation).expect("deep raw JSON translates");
+        let prompt = String::from_utf8(translated.prompt).expect("prompt is UTF-8");
+
+        assert!(prompt.contains(r#""call_deep""#));
+        assert!(prompt.contains(r#""leaf""#));
+        drop(operation);
+    }
 }

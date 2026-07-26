@@ -13,8 +13,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
     let output_schema = validate_argv()?;
     if Path::new(fixtures::EARLY_STDIN_EXIT_MARKER).exists() {
-        eprintln!("{}", fixtures::EARLY_STDIN_FAILURE);
-        std::process::exit(7);
+        eprintln!("Codex rejected stdin");
+        emit(&format!(
+            r#"{{"type":"thread.started","thread_id":"{}"}}"#,
+            fixtures::THREAD_ID
+        ));
+        emit(r#"{"type":"turn.started"}"#);
+        failed(fixtures::EARLY_STDIN_FAILURE);
     }
     if Path::new("fake-codex-block-stdin").exists() {
         std::fs::write("fake-codex-block-stdin-ready", "ready\n")?;
@@ -59,19 +64,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             completed();
         }
         "split_stream_credential_between_reasoning_items" => {
-            reasoning("reason-split-1", "s");
+            reasoning(
+                "reason-split-1",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
+            );
             reasoning(
                 "reason-split-2",
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[1..],
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..],
             );
             envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
             completed();
         }
         "split_stream_credential_before_final_text" => {
-            reasoning("reason-split-final", "s");
+            reasoning(
+                "reason-split-final",
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
+            );
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[1..]
+                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..]
             ));
             completed();
         }
@@ -144,6 +155,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     r#"{{ "accepted" : {} }}"#,
                     fixtures::STRUCTURED_ACCEPTED
                 ))
+            ));
+            completed();
+        }
+        "structured_output_missing" => {
+            envelope(r#"{"outcome":"completed","text":"","tool_calls":[]}"#);
+            completed();
+        }
+        "structured_output_multiple" => {
+            let arguments = json_escape(&format!(
+                r#"{{ "accepted" : {} }}"#,
+                fixtures::STRUCTURED_ACCEPTED
+            ));
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"structured-offline-1","name":"verdict","arguments":"{arguments}"}},{{"id":"structured-offline-2","name":"verdict","arguments":"{arguments}"}}]}}"#
+            ));
+            completed();
+        }
+        "named_choice_extra_tool" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"named-offline-1","name":"{}","arguments":"{}"}},{{"id":"named-offline-2","name":"{}","arguments":"{{}}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(fixtures::TOOL_ARGUMENTS),
+                fixtures::OTHER_TOOL_NAME
+            ));
+            completed();
+        }
+        "bare_credential_text" => {
+            let text = json_escape(&format!(
+                r#"  "client_secret":"{}""#,
+                fixtures::SENSITIVE_COMPOSITE_SECRET
+            ));
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{text}","tool_calls":[]}}"#
             ));
             completed();
         }
