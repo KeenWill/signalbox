@@ -181,6 +181,51 @@ final class ProcessProtocolTests: XCTestCase {
       ProcessProtocolFixture.duplicateSnapshotBoundaryMessage(sessionID: sessionID)
     )
   }
+
+  func testUnadmittedFrameMemberFailsClosed() {
+    let encoded = Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "unexpected":true,
+        "message":{"type":"sessions_start"}
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
+  }
+
+  func testNestedDuplicateMemberDegradesEnclosingMessage() throws {
+    let encoded = Data(
+      """
+      {
+        "version":5,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"future_transition",
+            "nested":{"value":1,"value":2}
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    ProcessProtocolFixture.assertNestedDuplicateMessage(frame.message)
+  }
+
+  func testExcessiveContainerDepthFailsBeforeTypedDecoding() {
+    let encoded = ProcessProtocolFixture.excessivelyNestedFrame()
+
+    XCTAssertThrowsError(try SignalboxProcessServerFrame.decode(from: encoded))
+  }
 }
 
 private enum ProcessProtocolFixture {
@@ -197,6 +242,34 @@ private enum ProcessProtocolFixture {
       decodingDiagnostic: SignalboxDecodingDiagnostic(
         message: "Invalid field value at message."
       )
+    )
+  }
+
+  static func assertNestedDuplicateMessage(
+    _ message: SignalboxProcessServerMessage,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    guard case .unknown(let kind, _, let diagnostic) = message else {
+      XCTFail("Expected a diagnostic unknown message.", file: file, line: line)
+      return
+    }
+    XCTAssertEqual(kind, "session_event", file: file, line: line)
+    XCTAssertEqual(
+      diagnostic,
+      SignalboxDecodingDiagnostic(message: "Invalid field value at message."),
+      file: file,
+      line: line
+    )
+  }
+
+  static func excessivelyNestedFrame() -> Data {
+    Data(
+      (
+        String(repeating: "[", count: 128)
+          + "null"
+          + String(repeating: "]", count: 128)
+      ).utf8
     )
   }
 }

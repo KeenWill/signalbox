@@ -1423,6 +1423,50 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
   }
+
+  func testInvalidSideSnapshotCancelsItsSeparateTransport() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedEvent(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    _ = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.snapshotStart(
+          cursor: SynchronizationFixture.sideRefreshTriggerCursor
+        )
+      )
+    )
+    let effects = transport.send(
+      .sideFrame(
+        generation: SynchronizationFixture.initialGeneration,
+        refreshID: SynchronizationFixture.firstRefreshID,
+        message: try SynchronizationFixture.content(fragmentIndex: 0)
+      )
+    )
+
+    XCTAssertTrue(
+      effects.contains(
+        .cancelSideSnapshot(
+          generation: SynchronizationFixture.initialGeneration,
+          refreshID: SynchronizationFixture.firstRefreshID
+        )
+      )
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .sideHistory)
+    )
+  }
 }
 
 private struct ScriptedSynchronizationTransport {

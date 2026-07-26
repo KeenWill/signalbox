@@ -322,7 +322,11 @@ public struct SignalboxProcessServerFrame: Decodable, Equatable, Sendable {
   public let message: SignalboxProcessServerMessage
 
   public init(from decoder: Decoder) throws {
-    try decoder.rejectDuplicateObjectMembers()
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["version", "request_id", "message"],
+      decoder: decoder
+    )
     let container = try decoder.container(keyedBy: CodingKeys.self)
     version = try container.decode(SignalboxProcessProtocolVersion.self, forKey: .version)
     requestID = try container.decode(SignalboxCanonicalUInt64.self, forKey: .requestID)
@@ -1465,7 +1469,7 @@ private struct SignalboxJSONDuplicateMemberScanner {
 
   mutating func scan() throws -> Set<[String]> {
     skipWhitespace()
-    try scanValue(path: [])
+    try scanValue(path: [], containerDepth: 0)
     skipWhitespace()
     guard index == bytes.count else {
       throw malformedJSON()
@@ -1473,15 +1477,24 @@ private struct SignalboxJSONDuplicateMemberScanner {
     return duplicateObjectPaths
   }
 
-  private mutating func scanValue(path: [String]) throws {
+  private mutating func scanValue(
+    path: [String],
+    containerDepth: Int
+  ) throws {
     guard let byte = currentByte else {
       throw malformedJSON()
     }
     switch byte {
     case UInt8(ascii: "{"):
-      try scanObject(path: path)
+      guard containerDepth < Self.maximumContainerDepth else {
+        throw excessiveContainerDepth()
+      }
+      try scanObject(path: path, containerDepth: containerDepth + 1)
     case UInt8(ascii: "["):
-      try scanArray(path: path)
+      guard containerDepth < Self.maximumContainerDepth else {
+        throw excessiveContainerDepth()
+      }
+      try scanArray(path: path, containerDepth: containerDepth + 1)
     case UInt8(ascii: "\""):
       _ = try scanString()
     default:
@@ -1489,7 +1502,10 @@ private struct SignalboxJSONDuplicateMemberScanner {
     }
   }
 
-  private mutating func scanObject(path: [String]) throws {
+  private mutating func scanObject(
+    path: [String],
+    containerDepth: Int
+  ) throws {
     index += 1
     skipWhitespace()
     if consume(UInt8(ascii: "}")) {
@@ -1499,14 +1515,14 @@ private struct SignalboxJSONDuplicateMemberScanner {
     while true {
       let member = try scanString()
       if !members.insert(member).inserted {
-        duplicateObjectPaths.insert(path)
+        recordDuplicateObject(at: path)
       }
       skipWhitespace()
       guard consume(UInt8(ascii: ":")) else {
         throw malformedJSON()
       }
       skipWhitespace()
-      try scanValue(path: path + [member])
+      try scanValue(path: path + [member], containerDepth: containerDepth)
       skipWhitespace()
       if consume(UInt8(ascii: "}")) {
         return
@@ -1518,7 +1534,17 @@ private struct SignalboxJSONDuplicateMemberScanner {
     }
   }
 
-  private mutating func scanArray(path: [String]) throws {
+  private mutating func recordDuplicateObject(at path: [String]) {
+    duplicateObjectPaths.insert(path)
+    if path.first == "message" {
+      duplicateObjectPaths.insert(["message"])
+    }
+  }
+
+  private mutating func scanArray(
+    path: [String],
+    containerDepth: Int
+  ) throws {
     index += 1
     skipWhitespace()
     if consume(UInt8(ascii: "]")) {
@@ -1526,7 +1552,10 @@ private struct SignalboxJSONDuplicateMemberScanner {
     }
     var elementIndex = 0
     while true {
-      try scanValue(path: path + ["[\(elementIndex)]"])
+      try scanValue(
+        path: path + ["[\(elementIndex)]"],
+        containerDepth: containerDepth
+      )
       elementIndex += 1
       skipWhitespace()
       if consume(UInt8(ascii: "]")) {
@@ -1605,11 +1634,22 @@ private struct SignalboxJSONDuplicateMemberScanner {
     UInt8(ascii: "}"),
   ])
 
+  private static let maximumContainerDepth = 127
+
   private func malformedJSON() -> DecodingError {
     .dataCorrupted(
       .init(
         codingPath: [],
         debugDescription: "Process frame was not one complete JSON value."
+      )
+    )
+  }
+
+  private func excessiveContainerDepth() -> DecodingError {
+    .dataCorrupted(
+      .init(
+        codingPath: [],
+        debugDescription: "Process frame exceeded 127 simultaneously open JSON containers."
       )
     )
   }

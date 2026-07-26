@@ -686,6 +686,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: .sideHistory
       )
     case .completed(let snapshot):
+      activeRefresh = refresh
       guard snapshot.cursor >= refresh.trigger.cursor else {
         return staleSideSnapshot(refresh: refresh, snapshot: snapshot)
       }
@@ -706,8 +707,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       effects.append(contentsOf: drainReplayBuffer(generation: receivedGeneration))
       return effects
     case .remoteFailure(let remote):
+      activeRefresh = refresh
       return remoteFailure(remote, stage: .sideHistory)
     case .invalid(let message):
+      activeRefresh = refresh
       return protocolFailure(stage: .sideHistory, message: message)
     }
   }
