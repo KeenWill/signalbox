@@ -14,7 +14,9 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 [persistence-protocol](persistence-protocol.md); per-command product semantics
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
-[configuration-and-credentials](configuration-and-credentials.md).
+[configuration-and-credentials](configuration-and-credentials.md). The
+tool-attributed metadata command and reconstitution surface was verified through
+PR #265 (`agent/tool-batch-tier0`).
 
 ## Identity model
 
@@ -320,10 +322,12 @@ Storage follows the closed-discriminator convention: `actor_kind`
 (`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
 `actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
 in `submit_input_command` and `replace_session_metadata_command`. Unknown or
-malformed stored spellings fail decoding as corruption. Metadata domain
-reconstitution independently compares the stored actor against the canonical
-command actor (`CommandActorMismatch`) for both applied and rejected receipts,
-so a cross-wired actor fails closed.
+malformed stored spellings fail decoding as corruption. A well-formed `model` or
+`recovery` actor on a metadata command fails earlier as unsupported
+metadata-writer corruption. Metadata domain reconstitution independently
+compares supported stored actors against the canonical command actor
+(`CommandActorMismatch`) for both applied and rejected receipts, so a
+cross-wired owner/tool actor fails closed.
 
 `CreateSession` and `ReplaceSessionDefaults` v1 carry no actor field in payload
 or storage, and no recorded-transition family (including startup-scan

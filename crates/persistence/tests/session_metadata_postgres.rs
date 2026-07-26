@@ -37,6 +37,7 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_metadata";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const UNSUPPORTED_COMMAND_ACTOR: &str = "recovery";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -208,10 +209,11 @@ async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
     .await?;
     sqlx::query(
         "UPDATE replace_session_metadata_command
-            SET actor_kind = 'recovery',
-                result_actor_kind = 'recovery'
-          WHERE command_id = $1",
+            SET actor_kind = $1,
+                result_actor_kind = $1
+          WHERE command_id = $2",
     )
+    .bind(UNSUPPORTED_COMMAND_ACTOR)
     .bind(Uuid::from_u128(0x902))
     .execute(&pool)
     .await?;
@@ -224,7 +226,7 @@ async fn inv012_applied_metadata_receipt_rejects_unsupported_command_actor()
         panic!("recovery agency must remain unsupported for metadata commands")
     };
     assert_eq!(field, "command actor");
-    assert_eq!(value, "unsupported metadata writer");
+    assert_eq!(value, UNSUPPORTED_COMMAND_ACTOR);
 
     pool.close().await;
     drop(container);
@@ -255,9 +257,10 @@ async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
     .await?;
     sqlx::query(
         "UPDATE replace_session_metadata_command
-            SET actor_kind = 'recovery'
-          WHERE command_id = $1",
+            SET actor_kind = $1
+          WHERE command_id = $2",
     )
+    .bind(UNSUPPORTED_COMMAND_ACTOR)
     .bind(Uuid::from_u128(0x901))
     .execute(&pool)
     .await?;
@@ -270,7 +273,7 @@ async fn inv012_rejected_metadata_receipt_rejects_unsupported_command_actor()
         panic!("recovery agency must remain unsupported for metadata commands")
     };
     assert_eq!(field, "command actor");
-    assert_eq!(value, "unsupported metadata writer");
+    assert_eq!(value, UNSUPPORTED_COMMAND_ACTOR);
 
     pool.close().await;
     drop(container);
