@@ -5,7 +5,7 @@ creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
 long-lived session aggregate, semantic transcript entries, accepted-input user
 content, and actor attribution. It was verified against the implementing stack
-through PR #229 (`agent/session-metadata-protocol`); the defaults-epoch and
+through PR #265 (`agent/tool-batch-tier0`); the defaults-epoch and
 model-identity boundary were additionally verified through PR #272
 (`agent/mid-session-model`). The imported-conversation record and converter are
 owned by [conversation-import](conversation-import.md). Where a law is cited as
@@ -313,16 +313,18 @@ never a combination of separately committed snapshots.
 
 `ReplaceSessionMetadata` carries durable command identity, target session,
 actor, and one complete replacement snapshot. Its replay equality covers every
-field except command identity (INV-012). The implemented application request
-fixes `Actor::Owner`; non-owner metadata writers are not constructible through
-the process boundary. First handling locks the target session, then either
-records `SessionNotFound` without an effect or atomically replaces the complete
-root, tag, and attribute snapshot. After acquiring that lock, a separate
-statement samples PostgreSQL statement time at microsecond precision; the
-applied result records it together with the command actor as the one last-writer
-stamp. An equal replay returns that exact recorded result and timestamp. The
-database timestamp is result evidence, not caller intent or a global ordering
-token, so it does not participate in command equality.
+field except command identity (INV-012). The process-facing application request
+fixes `Actor::Owner`. A separate purpose-specific application constructor
+accepts only `Actor::Tool { request }` for the exact executing tool request;
+model, recovery, and arbitrary caller-selected actors remain unconstructible.
+First handling locks the target session, then either records `SessionNotFound`
+without an effect or atomically replaces the complete root, tag, and attribute
+snapshot. After acquiring that lock, a separate statement samples PostgreSQL
+statement time at microsecond precision; the applied result records it together
+with the command actor as the one last-writer stamp. An equal replay returns
+that exact recorded result and timestamp. The database timestamp is result
+evidence, not caller intent or a global ordering token, so it does not
+participate in command equality.
 
 There is deliberately no expected or installed metadata version and no versioned
 metadata-history API. Two distinct writes are last-writer-wins after
@@ -622,19 +624,21 @@ never compare equal to owner agency (INV-020).
 
 The session-command consequences: `SubmitInput` and `ReplaceSessionMetadata` are
 the command payloads carrying an actor inside the conversational command
-surface. Both implemented application constructors fix `Actor::Owner`, so no
-non-owner agency can claim either command through this boundary; domain
+surface. `SubmitInput` fixes `Actor::Owner`. Metadata replacement admits the
+owner-facing constructor plus the purpose-specific `Actor::Tool { request }`
+constructor described above; neither accepts arbitrary agency. Domain
 reconstitution compares the stored actor against the canonical command and fails
-closed on mismatch (`StoredActorMismatch`). The metadata actor also becomes its
-organizational last-writer stamp.
+closed on mismatch (`StoredActorMismatch` for input and `CommandActorMismatch`
+for metadata). The metadata actor also becomes its organizational last-writer
+stamp.
 
-Why (seeded while constant): `Owner` is currently the only truthful issuer, so
-seeding the field now preserves a truthful backfill; retrofitting after several
-agencies exist would force a semantic migration.
+Why (seeded before expansion): carrying owner attribution from the first
+metadata write preserved a truthful backfill, and the existing closed actor
+columns now admit tool attribution without a semantic migration.
 
 `CreateSession` carries no actor; amending it remains an explicit owner choice
-that has not been taken. `Recovery`, `Model`, and `Tool` are representable but
-no implemented boundary constructs them.
+that has not been taken. `Recovery` and `Model` remain representable without an
+implemented command-producing boundary.
 
 ## Implemented transcript projections
 
@@ -676,7 +680,7 @@ open edges of [model-call-execution](model-call-execution.md).
   backfill that design relies on still exists.
 - `CreateSession` actor attribution remains implicit pending an explicit owner
   amendment choice.
-- `Recovery`, `Model`, and `Tool` actor variants have no constructing boundary;
+- `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
 - The 1 MiB content bound is a provisional owner floor; the resource-governance
   limit question stays open, and non-text content kinds remain unconstructible

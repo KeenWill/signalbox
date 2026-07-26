@@ -10,6 +10,69 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Dev instance under devenv's native process manager
+
+**Context.** Running the daemon locally means satisfying the
+ambient-configuration refusals in `production_connection_options`: thirteen
+libpq-style `PG*` variables and two certificate-store variables must all be
+absent, no `~/.pgpass` may exist under the process home, the URL must state its
+user name and host, and the connection is `verify-full` whatever the URL says.
+Every experiment re-derived that setup by hand. Inheriting the developer
+environment cannot work, because devenv's PostgreSQL service exports `PGHOST`
+and `PGPORT` into it for its own tooling.
+
+**Decision.** `devenv up` starts the dev instance: a PostgreSQL cluster on the
+major version the integration suites already pin, serving TLS on loopback under
+a generated local authority, and one `signalboxd` that starts after the cluster
+reports ready. The daemon runs behind an `env -u` scrub of exactly the refused
+variable set, with `HOME` pointed at devenv state so the passfile check is
+deterministic, and with a complete `DATABASE_URL` — user, host, port, database,
+and `sslrootcert` — exported to that process alone. A provisioning task
+materialises the TLS material, the process-scoped home, and a dev catalog seeded
+from `config/signalboxd.example.toml`. No external credential is committed or
+embedded: the Anthropic key stays in a deployment-owned file outside the
+repository, and the TLS material is generated at runtime into gitignored state.
+The dev database password is the one credential the environment definition does
+state — a fixed literal authenticating only to the loopback cluster the same
+file creates under `.devenv/state`, following the convention the committed
+integration suites already use for their disposable containers.
+
+**Rejected alternatives.** docker-compose would stand a second orchestration
+stack beside the devenv adoption this repository already made, and would put the
+dev database behind a Docker dependency the rest of the developer environment
+does not have. Keeping ad-hoc manual setup leaves every experiment to re-derive
+the refusals, which is how they come to be worked around rather than satisfied.
+
+**Affects.** `devenv.nix` and the dev-instance section of the README. Test
+database provisioning is deliberately outside this scope: the integration and
+end-to-end suites keep getting their databases from testcontainers, and no test
+or testcontainers usage changes.
+
+## 2026-07-26 — Preserve metadata command issuer as independent evidence
+
+**Context.** Metadata receipt reconstitution decoded the stored actor and then
+used that same value to construct the canonical command it was meant to check.
+Changing an owner actor to a supported tool actor therefore made the later
+comparison tautological, including when applied result attribution changed with
+it. The specification already requires the comparison to use independent facts.
+
+**Decision.** Add a forward-only migration that backfills and seals an
+owner-or-tool issuer discriminator and optional tool-request identity separately
+from the existing actor projection. New receipts write both facts. Loads
+construct the canonical command from the issuer proof, decode the actor
+projection separately, and let domain reconstitution reject disagreement for
+both applied and rejected receipts.
+
+**Rejected alternatives.** Treating the actor projection as its own canonical
+source preserves the tautology. Using the applied result actor cannot cover
+rejected receipts and still permits command and result actors to be changed
+together. Removing the comparison would weaken INV-012.
+
+**Affects.** [identity-and-commands](spec/identity-and-commands.md),
+[persistence-protocol](spec/persistence-protocol.md), migration
+`202607280202_metadata_command_issuer.sql`, and metadata receipt loading and
+PostgreSQL proofs.
+
 ## 2026-07-26 — Normalize an alias to its dated snapshot and keep substitution distinct
 
 **Context.** A live shakedown against PostgreSQL and a real provider
@@ -262,6 +325,37 @@ reverse the recorded wrap direction.
 **Affects.** `ModelSettings` contract comments, the Codex CLI section of
 [runtime-substrate](spec/runtime-substrate.md), and
 `crates/model-runtime-codex-cli`.
+
+## 2026-07-25 — Use a bounded GitHub adapter for the first code-host tools
+
+**Context.** The recorded Tier 1 catalog direction calls for ten daemon-held
+change-request review tools but does not select a code host, API surface,
+exchange bounds, or credential reference. The repository already has a focused
+reqwest/rustls transport posture and a file-backed credential boundary.
+
+**Decision.** Implement the first code-host adapter against GitHub's fixed REST
+and GraphQL APIs, selected by the non-secret `github-primary` reference whose
+bytes are reread from `GITHUB_TOKEN_FILE` for each operation. Disable ambient
+proxies, automatic redirects, retries, and idle reuse; pin the REST version
+header to `2026-03-10`, require TLS 1.2 or later, and bound each exchange to 30
+seconds. Bound JSON responses to 512 KiB, returned text fields and job-log
+prefixes to 64 KiB, and collection pages to 100 items. The job-log endpoint may
+follow its one authenticated 302 response with one credential-free HTTPS
+download only after resolving and pinning a wholly public destination set.
+Definitive client rejection is known failure; a lost or malformed
+acknowledgement after a mutation is commit-ambiguous.
+
+**Rejected alternatives.** A provider-neutral plugin surface invents a boundary
+the commissioned batch does not need. GitHub CLI subprocesses add ambient
+configuration and an opaque credential channel. Live tests or new secret-bearing
+CI violate the offline proof requirement. Unbounded pagination or log downloads
+violate result admission.
+
+**Affects.** [tool-loop](spec/tool-loop.md),
+[configuration-and-credentials](spec/configuration-and-credentials.md), the
+`apps/signalboxd` code-host modules and composition root, and their mocked
+offline tests. Library-documentation lookup remains deferred until its provider
+is selected.
 
 ## 2026-07-25 — Grandfather pre-boundary started frontiers
 
@@ -595,6 +689,63 @@ boundaries.
 INV-001 and INV-042, S30, the
 [runner-protocol specification](spec/runner-protocol.md), and later
 configuration, authentication, persistence, and transport stacks.
+
+## 2026-07-25 — Attribute metadata writes initiated by tools
+
+**Context.** The commissioned session-status tool must replace the existing
+session-metadata satellite snapshot through its durable application seam.
+`Actor::Tool { request }` and its storage columns already exist, but metadata
+command construction admitted only owner agency; using that constructor would
+misattribute an automated write.
+
+**Decision.** Admit a second, purpose-specific metadata command constructor and
+application request for one exact `ToolRequestId`. Include that actor in replay
+equality and the last-writer stamp. Continue to admit owner construction
+separately; model and recovery metadata writers remain unconstructible. Reuse
+the existing command, snapshot, transaction, actor encoding, and foreign keys,
+so no migration or metadata shape changes.
+
+**Rejected alternatives.** Recording the tool write as owner loses initiating
+agency. Adding a status field or reserved attribute key invents a second
+metadata shape. Allowing arbitrary actors broadens the boundary beyond the
+commissioned tool. Bypassing the application service loses durable replay and
+commit-ambiguity handling.
+
+**Affects.** [sessions-and-transcript](spec/sessions-and-transcript.md),
+[identity-and-commands](spec/identity-and-commands.md), the domain/application
+metadata command boundary, PostgreSQL reconstitution, and the
+`session_status_update` tool.
+
+## 2026-07-25 — Bound daemon web fetches to one credential-free request
+
+**Context.** The first daemon tool batch needs useful web text without unbounded
+response retention, hidden request replay, ambient credential channels, or
+live-network tests. The existing provider transport already fixes the
+repository's redirect, proxy, retry, TLS, and idle-connection posture.
+
+**Decision.** Accept one absolute HTTP(S) URL of at most 8 KiB, rejecting user
+information, fragments, and direct non-public IP destinations. Before dispatch,
+resolve a domain to at most 32 addresses, reject the complete set if any address
+is non-public, and pin the admitted set into the request client so a second DNS
+answer cannot change the destination. Issue one GET with no credentials, ambient
+proxy, redirect following, protocol retry, or idle reuse, under a 15-second
+whole-exchange timeout and the existing rustls/TLS 1.2 floor. Retain at most 64
+KiB of response bytes, decode that prefix as lossy UTF-8, and return compact
+JSON with URL, status, bounded content type, body, and truncation metadata.
+Resolution and client-setup failures are sanitized known failures; after
+dispatch begins, transport, timeout, or body loss is commit-ambiguous.
+
+**Rejected alternatives.** Following redirects or enabling reqwest defaults can
+issue another physical request. Ambient proxies add an undeclared routing and
+credential channel. Trusting the URL text alone permits private-address access
+and DNS rebinding. Re-resolving during connection setup reopens the same race.
+Unbounded buffering violates result admission. Returning raw bytes would require
+a result-content variant the tool loop does not implement. A new HTTP stack
+would duplicate the focused reqwest/rustls dependencies already in the
+workspace.
+
+**Affects.** [tool-loop](spec/tool-loop.md), `apps/signalboxd` dependencies, the
+`web_fetch` declaration and executor, and its mocked offline proofs.
 
 ## 2026-07-25 — Ship the server daemon as signalboxd
 
