@@ -214,7 +214,10 @@ validated registration tool, canonical physical tool attempt, and optional
 active grant pair. Relational triggers reject a stale placement, revoked
 enrollment or grant, mismatched tool or effect, non-successor generation,
 attempt reuse after claimed safe work, and every retry after claimed
-side-effecting loss. Loads independently join the physical-attempt tool and
+side-effecting loss. Lease admission shares the canonical enrollment, current
+registration pointer, and selected grant authority locks, so enrollment or grant
+revocation and registration replacement serialize before the relational checks
+admit a new generation. Loads independently join the physical-attempt tool and
 pinned runner before invoking lease reconstitution. The single runner-initiated
 outbound stream, reconnect resynchronization, and exact wire correlations remain
 later stacks.

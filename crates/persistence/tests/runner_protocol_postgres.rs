@@ -23,7 +23,8 @@ use signalbox_domain::{
 use signalbox_persistence::{
     local_test_connection_options, migrate,
     runner_protocol::{
-        RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
+        RunnerProtocolCorruption, RunnerProtocolStore, RunnerProtocolStoreError,
+        StoredValidatedRunnerRegistration,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -456,6 +457,14 @@ fn assert_store_domain_error(error: RunnerProtocolStoreError, expected: RunnerDo
 }
 
 #[track_caller]
+fn assert_store_corruption(error: RunnerProtocolStoreError, expected: RunnerProtocolCorruption) {
+    let RunnerProtocolStoreError::Corruption(actual) = error else {
+        panic!("the adapter must return typed corruption for malformed durable evidence")
+    };
+    assert_eq!(actual, expected);
+}
+
+#[track_caller]
 fn assert_one_store_succeeds_and_one_conflicts(
     first: Result<(), RunnerProtocolStoreError>,
     second: Result<(), RunnerProtocolStoreError>,
@@ -561,6 +570,75 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
         .expect_err("a withdrawn current tool cannot receive a later runner lease");
 
     assert_store_check_violation(stale_registration);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let mut blocker = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&mut *blocker)
+    .await?;
+    let replacement_store = RunnerProtocolStore::new(pool.clone());
+    let daemon_catalog = catalog();
+    let mut replacement = Box::pin(replacement_store.register(
+        expected_enrollment.enrollment(),
+        narrowed_advertisement(),
+        &daemon_catalog,
+    ));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
+        .await
+        .expect_err("registration replacement must wait for enrollment authority");
+    let mut lease_store = Box::pin(store.store_lease(&lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("lease admission must wait behind registration replacement");
+    blocker.commit().await?;
+    replacement.await?;
+    let rejected = lease_store
+        .await
+        .expect_err("withdrawn current availability cannot authorize the later lease");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_current_registration_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, initial, _) = stored_pin_fixture(&pool).await?;
+    store
+        .register(
+            expected_enrollment.enrollment(),
+            expanded_advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let rewound_head = sqlx::query(
+        "UPDATE runner_current_registration
+            SET registration_revision = $2
+          WHERE enrollment_id = $1",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(initial.revision().get()))
+    .execute(&pool)
+    .await
+    .expect_err("the registration head cannot be rewound to retained history");
+
+    assert_check_violation(rewound_head);
     drop(pool);
     Ok(())
 }
@@ -722,6 +800,111 @@ async fn s31_inv045_concurrent_grant_revocation_blocks_a_later_lease() -> Result
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = pin
+        .placement
+        .clone()
+        .replace_credential_profile(
+            original_grant.clone(),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    let mut revocation = pool.begin().await?;
+    sqlx::query(
+        "SELECT credential_profile_name
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND runner_id = $2
+            AND grant_revision = $3
+          FOR UPDATE",
+    )
+    .bind(original_grant.session().into_uuid())
+    .bind(original_grant.runner().into_uuid())
+    .bind(Decimal::from(original_grant.revision().get()))
+    .fetch_one(&mut *revocation)
+    .await?;
+    let replacement_grant = replacement.grant.grant.clone();
+    let mut replacement_store = Box::pin(store.store_placement(
+        &replacement.placement,
+        Some(&registration),
+        Some(&replacement_grant),
+    ));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement_store)
+        .await
+        .expect_err("replacement must wait for predecessor grant authority");
+    sqlx::query(
+        "INSERT INTO runner_credential_grant_audit
+            (session_id, runner_id, grant_revision, audit_ordinal,
+             event_kind, credential_profile_name)
+         VALUES ($1, $2, $3, 2, 'revoked', $4)",
+    )
+    .bind(original_grant.session().into_uuid())
+    .bind(original_grant.runner().into_uuid())
+    .bind(Decimal::from(original_grant.revision().get()))
+    .bind(original_grant.profile().as_str())
+    .execute(&mut *revocation)
+    .await?;
+    revocation.commit().await?;
+    let rejected = replacement_store
+        .await
+        .expect_err("a revoked predecessor cannot authorize replacement");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_replaced_grant_is_not_a_current_revocation_target() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = pin
+        .placement
+        .clone()
+        .replace_credential_profile(
+            original_grant.clone(),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let obsolete = store
+        .revoke_grant(
+            original_grant.session(),
+            original_grant.runner(),
+            original_grant.revision(),
+        )
+        .await?;
+
+    assert_eq!(obsolete, None);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
@@ -774,6 +957,136 @@ async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), B
     .expect_err("the first placement row cannot begin as a replacement");
 
     assert_check_violation(malformed_first);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv044_initial_pin_requires_loadable_offered_lease() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/profileless".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the profileless initial pin is valid");
+    let correlation = pin.lease.correlation();
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id,
+             selector_capability_class, directory_selection_kind,
+             requested_working_directory,
+             requested_credential_profile_name,
+             workspace_requirement_kind, requested_repository_key,
+             state_kind, pinned_runner_id, pinned_working_directory,
+             pinned_credential_profile_name, registration_enrollment_id,
+             registration_revision, pinned_tool_count,
+             workspace_repository_key, workspace_working_directory,
+             credential_grant_revision)
+         SELECT session_id, event_ordinal + 1, placement_revision, 'pinned',
+                selector_kind, selector_runner_id,
+                selector_capability_class, directory_selection_kind,
+                requested_working_directory,
+                requested_credential_profile_name,
+                workspace_requirement_kind, requested_repository_key,
+                'pinned', $2, $3,
+                NULL, $4, $5,
+                (
+                    SELECT count(*)
+                      FROM runner_registration_tool
+                     WHERE enrollment_id = $4
+                       AND registration_revision = $5
+                       AND tool_name = $6
+                ),
+                NULL, NULL, NULL
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = 1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .bind(pin.lease.runner().into_uuid())
+    .bind("/workspace/profileless")
+    .bind(registration.registration().enrollment().into_uuid())
+    .bind(Decimal::from(registration.revision().get()))
+    .bind(pin.lease.tool().as_str())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_tool
+            (session_id, event_ordinal, tool_name, runner_required)
+         VALUES ($1, 2, $2, TRUE)",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .bind(pin.lease.tool().as_str())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = 2
+          WHERE session_id = $1",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             credential_profile_name, credential_grant_revision,
+             credential_approval_kind, predecessor_generation)
+         VALUES (
+             $1, 1, $2, $3, $4,
+             $5, 'pure', 2,
+             $6, $7,
+             NULL, NULL, NULL, NULL
+         )",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(pin.placement.session().into_uuid())
+    .bind(correlation.runner.into_uuid())
+    .bind(correlation.tool.as_str())
+    .bind(registration.registration().enrollment().into_uuid())
+    .bind(Decimal::from(registration.revision().get()))
+    .execute(&mut *malformed)
+    .await?;
+    let missing_offer = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("a pinned placement requires its loadable offered lease and current head");
+
+    assert_check_violation(missing_offer);
+    malformed.rollback().await?;
     drop(pool);
     Ok(())
 }
@@ -1024,6 +1337,33 @@ async fn s32_inv044_current_placement_head_cannot_rewind() -> Result<(), Box<dyn
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s31_inv043_current_lease_event_head_cannot_rewind() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = pin
+        .lease
+        .clone()
+        .claim(pin.lease.correlation())
+        .expect("the exact lease fence claims");
+    store.store_lease(&claimed).await?;
+    let rewound_head = sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = event_ordinal - 1
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(claimed.correlation().lease.into_uuid())
+    .bind(Decimal::from(claimed.generation().get()))
+    .execute(&pool)
+    .await
+    .expect_err("the lease event head cannot be rewound to retained history");
+
+    assert_check_violation(rewound_head);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
@@ -1053,6 +1393,69 @@ async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(),
         .expect("the replacement placement remains loadable");
 
     assert_eq!(loaded.grant(), Some(&revoked));
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv045_grant_audit_kind_is_revision_bound() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let initial = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued grant");
+    let replacement = pin
+        .placement
+        .clone()
+        .replace_credential_profile(
+            initial.clone(),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant_audit DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let forged_initial = sqlx::query(
+        "UPDATE runner_credential_grant_audit
+            SET event_kind = 'replaced'
+          WHERE session_id = $1
+            AND grant_revision = $2
+            AND audit_ordinal = 1",
+    )
+    .bind(initial.session().into_uuid())
+    .bind(Decimal::from(initial.revision().get()))
+    .execute(&pool)
+    .await
+    .expect_err("grant revision one is issued, never replaced");
+    let forged_successor = sqlx::query(
+        "UPDATE runner_credential_grant_audit
+            SET event_kind = 'issued'
+          WHERE session_id = $1
+            AND grant_revision = $2
+            AND audit_ordinal = 1",
+    )
+    .bind(replacement.grant.grant.session().into_uuid())
+    .bind(Decimal::from(replacement.grant.grant.revision().get()))
+    .execute(&pool)
+    .await
+    .expect_err("a successor grant is replaced, never issued");
+    sqlx::query("ALTER TABLE runner_credential_grant_audit ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    assert_check_violation(forged_initial);
+    assert_check_violation(forged_successor);
     drop(pool);
     Ok(())
 }
@@ -1467,9 +1870,25 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     .execute(&pool)
     .await?;
     sqlx::query(
+        "INSERT INTO runner_current_lease_event
+            (lease_id, generation, event_ordinal)
+         VALUES ($1, 2, 1)",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO runner_lease_event
             (lease_id, generation, event_ordinal, state_kind)
          VALUES ($1, 2, 2, 'claimed')",
+    )
+    .bind(uuid(LEASE))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = 2",
     )
     .bind(uuid(LEASE))
     .execute(&pool)
@@ -1483,9 +1902,9 @@ async fn s31_inv004_inv043_relational_retry_rejects_claimed_attempt_reuse()
     .execute(&pool)
     .await?;
     sqlx::query(
-        "INSERT INTO runner_current_lease_event
-            (lease_id, generation, event_ordinal)
-         VALUES ($1, 2, 3)",
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 3
+          WHERE lease_id = $1 AND generation = 2",
     )
     .bind(uuid(LEASE))
     .execute(&pool)
@@ -1571,6 +1990,49 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_registration() -> Result<
         .expect_err("cross-wired canonical identity fails closed");
 
     assert!(matches!(error, RunnerProtocolStoreError::Domain(_)));
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let stored = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE runner_registration_tool DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_registration_tool
+            SET model_input_schema = '{ \"x\" : 0 }'
+          WHERE enrollment_id = $1
+            AND registration_revision = $2
+            AND tool_name = $3",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(stored.revision().get()))
+    .bind(tool("inspect").as_str())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_registration_tool ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let malformed = store
+        .load_registration(expected_enrollment.enrollment(), stored.revision())
+        .await
+        .expect_err("noncanonical durable schema text must fail closed");
+
+    assert_store_corruption(malformed, RunnerProtocolCorruption::InvalidEncoding);
     drop(pool);
     Ok(())
 }

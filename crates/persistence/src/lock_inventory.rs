@@ -70,6 +70,12 @@ pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
                 AND grant_revision = $3
               FOR UPDATE";
 
+pub(crate) const RUNNER_GRANT_PREDECESSOR: &str = "SELECT runner_id
+               FROM runner_credential_grant
+              WHERE session_id = $1
+                AND grant_revision = $2
+              FOR SHARE";
+
 pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
                FROM runner_enrollment
               WHERE enrollment_id = $1
@@ -89,7 +95,9 @@ pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
 
 pub(crate) const RUNNER_PLACEMENT_HEAD: &str =
     "SELECT record.event_ordinal, record.placement_revision,
-                    record.state_kind
+                    record.state_kind, record.pinned_runner_id,
+                    record.pinned_credential_profile_name,
+                    record.credential_grant_revision
                FROM runner_current_session_placement AS current_placement
                JOIN runner_session_placement_record AS record
                  ON record.session_id = current_placement.session_id

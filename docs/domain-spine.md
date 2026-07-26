@@ -5500,7 +5500,7 @@ impl SessionRunnerPlacement {
         tools: impl IntoIterator<Item = ToolName>,
     ) -> Result<CredentialProfilePlacementReplacement, RunnerDomainError>;
     pub fn reconstitute(
-        input: CredentialProfileGrantReconstitutionInput,
+        self,
         expected_session: SessionId,
         registration: Option<&ValidatedRunnerRegistration>,
     ) -> Result<Self, RunnerDomainError>;
@@ -5536,7 +5536,7 @@ impl CredentialProfileGrant {
     //   approvals()
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
-        self,
+        input: CredentialProfileGrantReconstitutionInput,
         expected_session: SessionId,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<Self, RunnerDomainError>;

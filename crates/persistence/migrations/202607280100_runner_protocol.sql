@@ -531,6 +531,52 @@ CREATE TABLE runner_current_registration (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE FUNCTION guard_runner_current_registration()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    latest_revision numeric(20, 0);
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'runner registration head is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT max(registration_revision) INTO latest_revision
+      FROM runner_registration
+     WHERE enrollment_id = NEW.enrollment_id;
+    IF NEW.registration_revision IS DISTINCT FROM latest_revision
+       OR (
+            TG_OP = 'INSERT'
+            AND NEW.registration_revision <> 1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_current_registration AS current_registration
+                 WHERE current_registration.enrollment_id =
+                        NEW.enrollment_id
+            )
+       )
+       OR (
+            TG_OP = 'UPDATE'
+            AND (
+                NEW.enrollment_id <> OLD.enrollment_id
+                OR NEW.registration_revision <>
+                    OLD.registration_revision + 1
+            )
+       )
+    THEN
+        RAISE EXCEPTION 'runner registration head must advance to latest'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_current_registration_advances
+BEFORE INSERT OR UPDATE OR DELETE ON runner_current_registration
+FOR EACH ROW
+EXECUTE FUNCTION guard_runner_current_registration();
+
 CREATE TRIGGER runner_registration_is_append_only
 BEFORE UPDATE OR DELETE ON runner_registration
 FOR EACH ROW
@@ -1410,7 +1456,16 @@ CREATE TABLE runner_credential_grant_audit (
         CHECK (
             (
                 audit_ordinal = 1
-                AND event_kind IN ('issued', 'replaced')
+                AND (
+                    (
+                        grant_revision = 1
+                        AND event_kind = 'issued'
+                    )
+                    OR (
+                        grant_revision > 1
+                        AND event_kind = 'replaced'
+                    )
+                )
             )
             OR (
                 audit_ordinal = 2
@@ -1735,6 +1790,53 @@ CREATE TABLE runner_current_lease_event (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE FUNCTION guard_runner_current_lease_event()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    latest_ordinal numeric(20, 0);
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'runner lease event head is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT max(event_ordinal) INTO latest_ordinal
+      FROM runner_lease_event
+     WHERE lease_id = NEW.lease_id
+       AND generation = NEW.generation;
+    IF NEW.event_ordinal IS DISTINCT FROM latest_ordinal
+       OR (
+            TG_OP = 'INSERT'
+            AND NEW.event_ordinal <> 1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_current_lease_event AS current_event
+                 WHERE current_event.lease_id = NEW.lease_id
+                   AND current_event.generation = NEW.generation
+            )
+       )
+       OR (
+            TG_OP = 'UPDATE'
+            AND (
+                NEW.lease_id <> OLD.lease_id
+                OR NEW.generation <> OLD.generation
+                OR NEW.event_ordinal <> OLD.event_ordinal + 1
+            )
+       )
+    THEN
+        RAISE EXCEPTION 'runner lease event head must advance to latest'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_current_lease_event_advances
+BEFORE INSERT OR UPDATE OR DELETE ON runner_current_lease_event
+FOR EACH ROW
+EXECUTE FUNCTION guard_runner_current_lease_event();
+
 CREATE VIEW runner_current_tool_attempt AS
 SELECT attempt.*
   FROM tool_attempt AS attempt
@@ -1760,6 +1862,15 @@ BEGIN
        AND NOT EXISTS (
             SELECT 1
               FROM runner_lease_generation AS lease
+              JOIN runner_lease_event AS offered
+                ON offered.lease_id = lease.lease_id
+               AND offered.generation = lease.generation
+               AND offered.event_ordinal = 1
+               AND offered.state_kind = 'offered'
+              JOIN runner_current_lease_event AS current_event
+                ON current_event.lease_id = offered.lease_id
+               AND current_event.generation = offered.generation
+               AND current_event.event_ordinal = offered.event_ordinal
              WHERE lease.session_id = NEW.session_id
                AND lease.placement_event_ordinal = NEW.event_ordinal
                AND lease.generation = 1
@@ -1837,7 +1948,8 @@ BEGIN
             current_registration.registration_revision
      WHERE current_registration.enrollment_id =
             NEW.registration_enrollment_id
-       AND registered.tool_name = NEW.tool_name;
+       AND registered.tool_name = NEW.tool_name
+       FOR SHARE OF current_registration;
     INSERT INTO runner_physical_attempt_lease_binding
         (attempt_id, lease_id)
     VALUES (NEW.attempt_id, NEW.lease_id)

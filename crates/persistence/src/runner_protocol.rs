@@ -32,7 +32,7 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::lock_inventory::{
-    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
+    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_GRANT_PREDECESSOR, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
@@ -523,6 +523,26 @@ impl RunnerProtocolStore {
         }
         let revoked = grant.revoke().map_err(RunnerProtocolStoreError::Domain)?;
         let mut transaction = self.pool.begin().await?;
+        let locked_placement = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(session.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some(locked_placement) = locked_placement else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let locked_runner = locked_placement.try_get::<Option<Uuid>, _>("pinned_runner_id")?;
+        let locked_revision =
+            locked_placement.try_get::<Option<Decimal>, _>("credential_grant_revision")?;
+        let locked_profile =
+            locked_placement.try_get::<Option<String>, _>("pinned_credential_profile_name")?;
+        if locked_runner != Some(runner.into_uuid())
+            || locked_revision != Some(Decimal::from(revision.get()))
+            || locked_profile.as_deref() != Some(revoked.profile().as_str())
+        {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
         let locked: Option<String> = sqlx::query_scalar(RUNNER_GRANT)
             .bind(session.into_uuid())
             .bind(runner.into_uuid())
@@ -1221,16 +1241,12 @@ async fn insert_grant_if_new(
         .map(Decimal::from);
     let prior_runner: Option<Uuid> = match prior {
         Some(prior) => Some(
-            sqlx::query_scalar(
-                "SELECT runner_id
-                   FROM runner_credential_grant
-                  WHERE session_id = $1 AND grant_revision = $2",
-            )
-            .bind(grant.session().into_uuid())
-            .bind(prior)
-            .fetch_optional(&mut **transaction)
-            .await?
-            .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
+            sqlx::query_scalar(RUNNER_GRANT_PREDECESSOR)
+                .bind(grant.session().into_uuid())
+                .bind(prior)
+                .fetch_optional(&mut **transaction)
+                .await?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
         ),
         None => None,
     };
@@ -1961,13 +1977,16 @@ fn decode_tool_declaration(row: &PgRow) -> Result<RunnerToolDeclaration, RunnerP
         "daemon_or_runner" => ToolAdmissibleLoci::DaemonOrRunner { selector },
         _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     };
+    let stored_schema: String = row.get("model_input_schema");
+    let model =
+        RunnerToolModelDefinition::try_new(row.get("model_description"), stored_schema.clone())
+            .map_err(RunnerProtocolStoreError::Domain)?;
+    if model.input_schema().as_str() != stored_schema {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
     Ok(RunnerToolDeclaration::new(
         tool_name(row.get("tool_name"))?,
-        RunnerToolModelDefinition::try_new(
-            row.get("model_description"),
-            row.get("model_input_schema"),
-        )
-        .map_err(RunnerProtocolStoreError::Domain)?,
+        model,
         decode_permission(row.get("permission_kind"))?,
         decode_effect(row.get("effect_class"))?,
         loci,
