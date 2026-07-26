@@ -29,8 +29,13 @@ variable set, with `HOME` pointed at devenv state so the passfile check is
 deterministic, and with a complete `DATABASE_URL` — user, host, port, database,
 and `sslrootcert` — exported to that process alone. A provisioning task
 materialises the TLS material, the process-scoped home, and a dev catalog seeded
-from `config/signalboxd.example.toml`. No credential material is committed, and
-none is embedded in the environment definition.
+from `config/signalboxd.example.toml`. No external credential is committed or
+embedded: the Anthropic key stays in a deployment-owned file outside the
+repository, and the TLS material is generated at runtime into gitignored state.
+The dev database password is the one credential the environment definition does
+state — a fixed literal authenticating only to the loopback cluster the same
+file creates under `.devenv/state`, following the convention the committed
+integration suites already use for their disposable containers.
 
 **Rejected alternatives.** docker-compose would stand a second orchestration
 stack beside the devenv adoption this repository already made, and would put the

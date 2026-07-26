@@ -65,8 +65,17 @@ let
   # an accidental `%xx` would decode to something else entirely. `%` is
   # replaced first, and `builtins.replaceStrings` does not rescan what it
   # emits, so the escapes introduced here are not re-encoded.
+  #
+  # Tab, line feed, and carriage return are in the list for a different
+  # reason, and they complete it. `url` 2.5.8 — the parser behind
+  # `PgConnectOptions::from_str` — drops exactly those three anywhere in the
+  # URL rather than encoding them (`Input::next` skips `ascii_tab_or_new_line`
+  # unconditionally), so a path holding one would silently lose it. Every
+  # other C0 control, DEL, and non-ASCII byte is in the parser's own `CONTROLS`
+  # percent-encode set for the query component, so the parser encodes those
+  # itself and `query_pairs` decodes them back unchanged.
   percentEncodeQueryValue = builtins.replaceStrings
-    [ "%" "#" "&" "?" "+" "=" " " "\"" "<" ">" "\\" "^" "`" "{" "|" "}" ]
+    [ "%" "#" "&" "?" "+" "=" " " "\t" "\n" "\r" "\"" "<" ">" "\\" "^" "`" "{" "|" "}" ]
     [
       "%25"
       "%23"
@@ -75,6 +84,9 @@ let
       "%2B"
       "%3D"
       "%20"
+      "%09"
+      "%0A"
+      "%0D"
       "%22"
       "%3C"
       "%3E"
