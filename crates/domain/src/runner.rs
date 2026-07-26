@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::{
-    RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId, SessionId, ToolAttemptId,
-    ToolName, ToolPermissionDefault,
+    NormalizedToolArguments, RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+    SessionId, ToolArgumentsKind, ToolAttemptId, ToolName, ToolPermissionDefault,
 };
 
 const NAME_MAX_BYTES: usize = 64;
@@ -22,6 +22,7 @@ pub enum RunnerDomainError {
     ContainsNull,
     TooLong,
     InvalidName,
+    InvalidToolInputSchema,
     DuplicateCapabilityClass(RunnerCapabilityClass),
     DuplicateTool(ToolName),
     DuplicateProfile(CredentialProfileName),
@@ -44,6 +45,7 @@ pub enum RunnerDomainError {
     WorkspaceMismatch,
     ToolUnavailable,
     GrantRevoked,
+    RegistrationChanged,
     CorruptStoredFacts,
 }
 
@@ -179,6 +181,7 @@ impl ToolAdmissibleLoci {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerToolDeclaration {
     name: ToolName,
+    model: RunnerToolModelDefinition,
     permission: ToolPermissionDefault,
     effect: RunnerToolEffectClass,
     loci: ToolAdmissibleLoci,
@@ -187,12 +190,14 @@ pub struct RunnerToolDeclaration {
 impl RunnerToolDeclaration {
     pub const fn new(
         name: ToolName,
+        model: RunnerToolModelDefinition,
         permission: ToolPermissionDefault,
         effect: RunnerToolEffectClass,
         loci: ToolAdmissibleLoci,
     ) -> Self {
         Self {
             name,
+            model,
             permission,
             effect,
             loci,
@@ -201,6 +206,10 @@ impl RunnerToolDeclaration {
 
     pub const fn name(&self) -> &ToolName {
         &self.name
+    }
+
+    pub const fn model(&self) -> &RunnerToolModelDefinition {
+        &self.model
     }
 
     pub const fn permission(&self) -> ToolPermissionDefault {
@@ -213,6 +222,37 @@ impl RunnerToolDeclaration {
 
     pub const fn loci(&self) -> &ToolAdmissibleLoci {
         &self.loci
+    }
+}
+
+/// Checked model-facing definition required for every runner-advertisable tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerToolModelDefinition {
+    description: String,
+    input_schema: NormalizedToolArguments,
+}
+
+impl RunnerToolModelDefinition {
+    pub fn try_new(description: String, input_schema: String) -> Result<Self, RunnerDomainError> {
+        let description = validate_exact(description)?;
+        let input_schema = NormalizedToolArguments::try_from_provider_text(input_schema)
+            .map_err(|_| RunnerDomainError::InvalidToolInputSchema)?;
+        if input_schema.kind() != ToolArgumentsKind::Json || !input_schema.as_str().starts_with('{')
+        {
+            return Err(RunnerDomainError::InvalidToolInputSchema);
+        }
+        Ok(Self {
+            description,
+            input_schema,
+        })
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub const fn input_schema(&self) -> &NormalizedToolArguments {
+        &self.input_schema
     }
 }
 
@@ -487,6 +527,22 @@ impl RunnerEnrollment {
         })
     }
 
+    fn authorizes(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<(), RunnerDomainError> {
+        if self.state != RunnerEnrollmentState::Active {
+            return Err(RunnerDomainError::EnrollmentRevoked);
+        }
+        if self.enrollment != registration.enrollment
+            || self.runner != registration.runner
+            || self.authentication != registration.authentication
+        {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        Ok(())
+    }
+
     pub fn reconstitute(
         input: RunnerEnrollmentReconstitutionInput,
     ) -> Result<Self, RunnerDomainError> {
@@ -610,6 +666,15 @@ pub struct RunnerLeaseCorrelation {
     pub runner: RunnerId,
     pub tool: ToolName,
     pub attempt: ToolAttemptId,
+    pub generation: RunnerGeneration,
+}
+
+/// Complete caller-supplied identities for one initial lease offer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseOfferRequest {
+    pub lease: RunnerLeaseId,
+    pub attempt: ToolAttemptId,
+    pub tool: ToolName,
     pub generation: RunnerGeneration,
 }
 
@@ -920,28 +985,27 @@ impl SessionRunnerPlacement {
 
     pub fn offer_lease(
         &self,
+        enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
-        lease: RunnerLeaseId,
-        attempt: ToolAttemptId,
-        tool: ToolName,
-        generation: RunnerGeneration,
+        offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError> {
-        let dispatch = validate_dispatch(self, registration, grant, &tool)?;
+        let dispatch = validate_dispatch(self, enrollment, registration, grant, &offer.tool)?;
         Ok(RunnerLease::offer_validated(ValidatedRunnerLeaseOffer {
-            lease,
-            attempt,
+            lease: offer.lease,
+            attempt: offer.attempt,
             session: self.session,
             runner: dispatch.runner,
-            tool,
+            tool: offer.tool,
             effect: dispatch.effect,
             credential_authorization: dispatch.credential_authorization,
-            generation,
+            generation: offer.generation,
         }))
     }
 
     pub fn offer_retry(
         &self,
+        enrollment: &RunnerEnrollment,
         registration: &ValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
         loss: RunnerLeaseLoss,
@@ -950,7 +1014,7 @@ impl SessionRunnerPlacement {
         let RunnerLeaseLoss::RetryPermitted { lost, retry } = loss else {
             return Err(RunnerDomainError::InvalidState);
         };
-        let dispatch = validate_dispatch(self, registration, grant, &lost.tool)?;
+        let dispatch = validate_dispatch(self, enrollment, registration, grant, &lost.tool)?;
         if lost.session != self.session
             || lost.runner != dispatch.runner
             || lost.effect != dispatch.effect
@@ -980,6 +1044,23 @@ impl SessionRunnerPlacement {
     }
 
     pub fn mark_runner_lost(mut self) -> Result<Self, RunnerDomainError> {
+        let SessionRunnerPlacementState::Pinned(pinned) = self.state else {
+            return Err(RunnerDomainError::InvalidState);
+        };
+        self.state = SessionRunnerPlacementState::RunnerLost(pinned);
+        Ok(self)
+    }
+
+    pub fn reconcile_registration(
+        mut self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<Self, RunnerDomainError> {
+        let SessionRunnerPlacementState::Pinned(pinned) = &self.state else {
+            return Err(RunnerDomainError::InvalidState);
+        };
+        if registration_preserves_snapshot(&self.request, pinned, registration) {
+            return Ok(self);
+        }
         let SessionRunnerPlacementState::Pinned(pinned) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
@@ -1114,6 +1195,7 @@ struct ValidatedRunnerDispatch {
 
 fn validate_dispatch(
     placement: &SessionRunnerPlacement,
+    enrollment: &RunnerEnrollment,
     registration: &ValidatedRunnerRegistration,
     grant: Option<&CredentialProfileGrant>,
     tool: &ToolName,
@@ -1121,7 +1203,11 @@ fn validate_dispatch(
     let SessionRunnerPlacementState::Pinned(pinned) = &placement.state else {
         return Err(RunnerDomainError::InvalidState);
     };
-    if pinned.runner != registration.runner || !pinned.tools.contains(tool) {
+    enrollment.authorizes(registration)?;
+    if !registration_preserves_snapshot(&placement.request, pinned, registration) {
+        return Err(RunnerDomainError::RegistrationChanged);
+    }
+    if !pinned.tools.contains(tool) {
         return Err(RunnerDomainError::ToolUnavailable);
     }
     let declaration = registration
@@ -1139,6 +1225,29 @@ fn validate_dispatch(
         effect: declaration.effect,
         credential_authorization,
     })
+}
+
+fn registration_preserves_snapshot(
+    request: &SessionRunnerPlacementRequest,
+    pinned: &PinnedRunnerPlacement,
+    registration: &ValidatedRunnerRegistration,
+) -> bool {
+    pinned.runner == registration.runner
+        && registration.satisfies(&request.selector)
+        && pinned
+            .tools
+            .iter()
+            .all(|tool| registration.tool(tool).is_some())
+        && pinned
+            .credential_profile
+            .as_ref()
+            .is_none_or(|profile| registration.profile(profile).is_some())
+        && match &request.workspace {
+            WorkspaceRequirement::None => true,
+            WorkspaceRequirement::RepositoryWorktree { .. } => {
+                registration.supports_workspace(WorkspaceCapability::WorktreePerSession)
+            }
+        }
 }
 
 fn validate_placement(
@@ -1451,9 +1560,18 @@ mod tests {
         ToolName::try_new(name.to_owned()).expect("fixture tool names are valid")
     }
 
+    fn model_definition(name: &str) -> RunnerToolModelDefinition {
+        RunnerToolModelDefinition::try_new(
+            format!("Run the {name} fixture operation"),
+            r#"{"type":"object"}"#.to_owned(),
+        )
+        .expect("fixture model definitions are valid")
+    }
+
     fn catalog() -> RunnerCatalog {
         let inspect = RunnerToolDeclaration::new(
             tool("inspect"),
+            model_definition("inspect"),
             ToolPermissionDefault::Auto,
             RunnerToolEffectClass::Pure,
             ToolAdmissibleLoci::DaemonOrRunner {
@@ -1462,6 +1580,7 @@ mod tests {
         );
         let deploy = RunnerToolDeclaration::new(
             tool("deploy"),
+            model_definition("deploy"),
             ToolPermissionDefault::Confirm,
             RunnerToolEffectClass::SideEffecting,
             ToolAdmissibleLoci::RunnerOnly {
@@ -1470,6 +1589,7 @@ mod tests {
         );
         let sync = RunnerToolDeclaration::new(
             tool("sync"),
+            model_definition("sync"),
             ToolPermissionDefault::Confirm,
             RunnerToolEffectClass::Idempotent,
             ToolAdmissibleLoci::RunnerOnly {
@@ -1498,14 +1618,21 @@ mod tests {
         .expect("the canonical catalog is internally consistent")
     }
 
-    fn registration_for(runner: RunnerId) -> ValidatedRunnerRegistration {
-        let enrollment = RunnerEnrollment::new(
+    fn enrollment_for(runner: RunnerId) -> RunnerEnrollment {
+        RunnerEnrollment::new(
             runner_enrollment_id(ENROLLMENT),
             runner,
             runner_authentication_id(AUTHENTICATION),
             [class()],
-        );
-        enrollment
+        )
+    }
+
+    fn enrollment() -> RunnerEnrollment {
+        enrollment_for(runner_id(RUNNER))
+    }
+
+    fn registration_for(runner: RunnerId) -> ValidatedRunnerRegistration {
+        enrollment_for(runner)
             .register(
                 RunnerAdvertisement::new(
                     [class()],
@@ -1536,6 +1663,19 @@ mod tests {
             .expect("fixture working directories are valid")
     }
 
+    fn lease_offer_request(
+        tool_name: &str,
+        attempt: ToolAttemptId,
+        generation: RunnerGeneration,
+    ) -> RunnerLeaseOfferRequest {
+        RunnerLeaseOfferRequest {
+            lease: runner_lease_id(LEASE),
+            attempt,
+            tool: tool(tool_name),
+            generation,
+        }
+    }
+
     fn pinned(profile_name: &str) -> (ValidatedRunnerRegistration, SessionRunnerPin) {
         let registration = registration();
         let pin = SessionRunnerPlacement::new(
@@ -1556,12 +1696,10 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
+                &enrollment(),
                 &registration,
                 pin.grant.as_ref(),
-                runner_lease_id(LEASE),
-                attempt,
-                tool(tool_name),
-                generation,
+                lease_offer_request(tool_name, attempt, generation),
             )
             .expect("pinned placement authorizes the fixture tool");
         (registration, pin, lease)
@@ -1594,6 +1732,26 @@ mod tests {
         );
         assert_eq!(
             RunnerCapabilityClass::try_new("x".repeat(NAME_MAX_BYTES + 1)),
+            Err(RunnerDomainError::TooLong)
+        );
+    }
+
+    #[test]
+    fn s30_runner_tool_model_definition_requires_a_json_object_schema() {
+        assert_eq!(
+            RunnerToolModelDefinition::try_new("Inspect the workspace".to_owned(), "[]".to_owned()),
+            Err(RunnerDomainError::InvalidToolInputSchema)
+        );
+    }
+
+    #[test]
+    fn s30_workspace_repository_keys_have_one_exact_byte_bound() {
+        let accepted = WorkspaceRepositoryKey::try_new("r".repeat(EXACT_VALUE_MAX_BYTES))
+            .expect("the exact maximum is accepted");
+
+        assert_eq!(accepted.as_str().len(), EXACT_VALUE_MAX_BYTES);
+        assert_eq!(
+            WorkspaceRepositoryKey::try_new("r".repeat(EXACT_VALUE_MAX_BYTES + 1)),
             Err(RunnerDomainError::TooLong)
         );
     }
@@ -1661,6 +1819,7 @@ mod tests {
     fn s30_inv042_catalog_rejects_tool_selector_for_undeclared_class() {
         let declaration = RunnerToolDeclaration::new(
             tool("specialized"),
+            model_definition("specialized"),
             ToolPermissionDefault::Auto,
             RunnerToolEffectClass::Pure,
             ToolAdmissibleLoci::RunnerOnly {
@@ -1702,6 +1861,7 @@ mod tests {
         );
         let daemon_only = RunnerToolDeclaration::new(
             tool("daemon"),
+            model_definition("daemon"),
             ToolPermissionDefault::Auto,
             RunnerToolEffectClass::Pure,
             ToolAdmissibleLoci::DaemonOnly,
@@ -1726,6 +1886,7 @@ mod tests {
         );
         let declaration = RunnerToolDeclaration::new(
             tool("specialized"),
+            model_definition("specialized"),
             ToolPermissionDefault::Auto,
             RunnerToolEffectClass::Pure,
             ToolAdmissibleLoci::RunnerOnly {
@@ -1756,6 +1917,40 @@ mod tests {
         assert_eq!(
             enrollment.register(RunnerAdvertisement::new([], [], [], []), &catalog()),
             Err(RunnerDomainError::EnrollmentRevoked)
+        );
+    }
+
+    #[test]
+    fn s31_inv042_revoked_enrollment_cannot_authorize_a_later_lease() {
+        let (registration, pin) = pinned("readonly");
+        let revoked = enrollment()
+            .revoke()
+            .expect("an active enrollment can be revoked");
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &revoked,
+                &registration,
+                pin.grant.as_ref(),
+                lease_offer_request("inspect", tool_attempt_id(ATTEMPT), RunnerGeneration::one(),),
+            ),
+            Err(RunnerDomainError::EnrollmentRevoked)
+        );
+    }
+
+    #[test]
+    fn s31_inv042_lease_rejects_a_foreign_active_enrollment() {
+        let (registration, pin) = pinned("readonly");
+        let foreign = enrollment_for(runner_id(REPLACEMENT_RUNNER));
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &foreign,
+                &registration,
+                pin.grant.as_ref(),
+                lease_offer_request("inspect", tool_attempt_id(ATTEMPT), RunnerGeneration::one(),),
+            ),
+            Err(RunnerDomainError::CorrelationMismatch)
         );
     }
 
@@ -1811,7 +2006,13 @@ mod tests {
         let loss = lease.lose().expect("an offered lease can be lost");
         let replacement = pin
             .placement
-            .offer_retry(&registration, pin.grant.as_ref(), loss, attempt)
+            .offer_retry(
+                &enrollment_for(registration.runner()),
+                &registration,
+                pin.grant.as_ref(),
+                loss,
+                attempt,
+            )
             .expect("unclaimed loss retains its never-executed attempt");
 
         assert_eq!(
@@ -1835,7 +2036,13 @@ mod tests {
         let loss = claimed.lose().expect("a claimed lease can be lost");
         let replacement = pin
             .placement
-            .offer_retry(&registration, pin.grant.as_ref(), loss, retry_attempt)
+            .offer_retry(
+                &enrollment_for(registration.runner()),
+                &registration,
+                pin.grant.as_ref(),
+                loss,
+                retry_attempt,
+            )
             .expect("pure claimed work permits a fresh physical attempt");
 
         assert_eq!(replacement.attempt(), retry_attempt);
@@ -1855,6 +2062,7 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_retry(
+                &enrollment_for(registration.runner()),
                 &registration,
                 pin.grant.as_ref(),
                 loss,
@@ -1945,6 +2153,79 @@ mod tests {
     }
 
     #[test]
+    fn s30_inv042_inv044_reregistration_additions_do_not_widen_a_pinned_snapshot() {
+        let narrow_registration = enrollment()
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect")],
+                    [profile("readonly")],
+                    [WorkspaceCapability::WorktreePerSession],
+                ),
+                &catalog(),
+            )
+            .expect("the narrow advertisement is allowed");
+        let pin = SessionRunnerPlacement::new(
+            session_id(SESSION),
+            placement_request(profile("readonly")),
+        )
+        .pin(&narrow_registration, directory("/workspace/session"), None)
+        .expect("the narrow registration satisfies placement");
+        let expanded_registration = registration();
+        let reconciled = pin
+            .placement
+            .reconcile_registration(&expanded_registration)
+            .expect("an expanded registration preserves the pin");
+
+        assert_eq!(
+            reconciled.offer_lease(
+                &enrollment(),
+                &expanded_registration,
+                pin.grant.as_ref(),
+                lease_offer_request("deploy", tool_attempt_id(ATTEMPT), RunnerGeneration::one(),),
+            ),
+            Err(RunnerDomainError::ToolUnavailable)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_inv044_reregistration_omission_reconciles_to_runner_loss() {
+        let (_, pin) = pinned("readonly");
+        let narrowed_registration = enrollment()
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect"), tool("deploy")],
+                    [profile("readonly")],
+                    [WorkspaceCapability::WorktreePerSession],
+                ),
+                &catalog(),
+            )
+            .expect("the narrowed advertisement remains allowed");
+        let expected = pin
+            .placement
+            .clone()
+            .mark_runner_lost()
+            .expect("the fixture placement is pinned");
+
+        assert_eq!(
+            pin.placement.offer_lease(
+                &enrollment(),
+                &narrowed_registration,
+                pin.grant.as_ref(),
+                lease_offer_request("inspect", tool_attempt_id(ATTEMPT), RunnerGeneration::one(),),
+            ),
+            Err(RunnerDomainError::RegistrationChanged)
+        );
+        assert_eq!(
+            expected,
+            pin.placement
+                .reconcile_registration(&narrowed_registration)
+                .expect("registration narrowing is explicit runner loss")
+        );
+    }
+
+    #[test]
     fn s30_inv044_lost_placement_cannot_offer_another_lease() {
         let (registration, mut pin) = pinned("readonly");
         let grant = pin.grant.take().expect("profile selection creates a grant");
@@ -1955,12 +2236,10 @@ mod tests {
 
         assert_eq!(
             lost.offer_lease(
+                &enrollment_for(registration.runner()),
                 &registration,
                 Some(&grant),
-                runner_lease_id(LEASE),
-                tool_attempt_id(ATTEMPT),
-                tool("inspect"),
-                RunnerGeneration::one(),
+                lease_offer_request("inspect", tool_attempt_id(ATTEMPT), RunnerGeneration::one(),),
             ),
             Err(RunnerDomainError::InvalidState)
         );
@@ -2044,12 +2323,10 @@ mod tests {
         let lease = pin
             .placement
             .offer_lease(
+                &enrollment_for(registration.runner()),
                 &registration,
                 pin.grant.as_ref(),
-                runner_lease_id(LEASE),
-                tool_attempt_id(ATTEMPT),
-                tool("inspect"),
-                RunnerGeneration::one(),
+                lease_offer_request("inspect", tool_attempt_id(ATTEMPT), RunnerGeneration::one()),
             )
             .expect("the selected profile advertises the tool");
         let authorization = lease
@@ -2094,12 +2371,10 @@ mod tests {
 
         assert_eq!(
             pin.placement.offer_lease(
+                &enrollment_for(registration.runner()),
                 &registration,
                 Some(&revoked),
-                runner_lease_id(LEASE),
-                tool_attempt_id(ATTEMPT),
-                tool("inspect"),
-                RunnerGeneration::one(),
+                lease_offer_request("inspect", tool_attempt_id(ATTEMPT), RunnerGeneration::one(),),
             ),
             Err(RunnerDomainError::GrantRevoked)
         );
