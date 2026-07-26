@@ -1203,6 +1203,7 @@ where
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
         let effect_class = definition.effect_class();
+        let dispatched_tool = definition.name().clone();
         let expected_correlation = authorized.correlation();
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
@@ -1230,6 +1231,7 @@ where
                 .await;
         }
         let observation = admit_executor_evidence(evidence, effect_class);
+        report_tool_attempt(&dispatched_tool, &observation);
         self.commit_executor_observation(observation, dispatch_permit)
             .await
     }
@@ -1447,6 +1449,56 @@ fn admit_executor_evidence(
         ToolExecutorEvidence::Ambiguous => ToolAttemptObservation::Ambiguous,
     };
     evidence.correlation.bind(observation)
+}
+
+/// The operator-visible signal one admitted tool observation warrants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolAttemptSignal {
+    /// Nothing an operator needs: the attempt produced admitted content, or it
+    /// parked as ambiguous, which the loop's own outcomes already carry into
+    /// reconciliation.
+    Silent,
+    /// The attempt failed definitively, with this closed error kind.
+    Failed(ToolExecutionErrorKind),
+}
+
+/// Decides what an admitted observation owes an operator.
+const fn tool_attempt_signal(observation: &ToolAttemptObservation) -> ToolAttemptSignal {
+    match observation {
+        ToolAttemptObservation::KnownFailed { error } => ToolAttemptSignal::Failed(error.kind()),
+        ToolAttemptObservation::Completed { .. } | ToolAttemptObservation::Ambiguous => {
+            ToolAttemptSignal::Silent
+        }
+    }
+}
+
+/// Records one definitively failed tool attempt for operators.
+///
+/// A failed attempt is otherwise resolved entirely inside the next model
+/// round, so a deployment fault — an unusable credential, a code host refusing
+/// every call — reaches the model and nobody else. This site rather than each
+/// executor because the executors sit behind one trait and this layer already
+/// holds every typed fact the event carries, so one site covers every tool
+/// including the failures admission itself produces.
+///
+/// Sanitized by construction: the daemon-authored catalog name, two
+/// daemon-minted aggregate identifiers, and the closed error kind are the only
+/// fields, so no credential material, response body, tool argument, or
+/// conversation content can reach telemetry (INV-035). The bounded error
+/// detail is deliberately omitted — executors alone decide what it says.
+fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObservation) {
+    let ToolAttemptSignal::Failed(error_kind) = tool_attempt_signal(observation.observation())
+    else {
+        return;
+    };
+    let correlation = observation.correlation();
+    tracing::warn!(
+        tool = name.as_str(),
+        ?error_kind,
+        session_id = %correlation.session().as_uuid(),
+        turn_id = %correlation.turn().as_uuid(),
+        "tool attempt failed; the next model round observes the typed error"
+    );
 }
 
 /// Selects initial approval for one proposal from frozen posture and catalog.
@@ -2554,6 +2606,46 @@ mod tests {
             &ToolAttemptObservation::KnownFailed {
                 error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
             }
+        );
+    }
+
+    /// A definitively failed attempt is the one admitted observation an
+    /// operator cannot otherwise see, so it is the one that signals, carrying
+    /// the closed error kind that says which failure it was.
+    #[test]
+    fn failed_attempt_signals_its_error_kind() {
+        let observation = ToolAttemptObservation::KnownFailed {
+            error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+        };
+
+        assert_eq!(
+            tool_attempt_signal(&observation),
+            ToolAttemptSignal::Failed(ToolExecutionErrorKind::ExecutionFailed)
+        );
+    }
+
+    /// A completed attempt is ordinary progress; signalling it would turn every
+    /// working tool round into operator noise.
+    #[test]
+    fn completed_attempt_is_silent() {
+        let observation = ToolAttemptObservation::Completed {
+            result: ToolResultContent::Text(
+                ToolResultText::try_new(String::from("result"))
+                    .expect("fixture result is admitted"),
+            ),
+        };
+
+        assert_eq!(tool_attempt_signal(&observation), ToolAttemptSignal::Silent);
+    }
+
+    /// An ambiguous external effect is not a definitive failure: the loop parks
+    /// it for reconciliation and its own outcome carries it, so this site stays
+    /// quiet rather than reporting an outcome nobody has established.
+    #[test]
+    fn ambiguous_attempt_is_silent() {
+        assert_eq!(
+            tool_attempt_signal(&ToolAttemptObservation::Ambiguous),
+            ToolAttemptSignal::Silent
         );
     }
 
