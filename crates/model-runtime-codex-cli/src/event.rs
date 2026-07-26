@@ -297,6 +297,12 @@ impl<C: Clone> EventDecoder<C> {
                     redact_text(&call.name)
                 ));
             }
+            // The envelope carries the argument object as JSON text inside a
+            // string, because strict structured output forbids a free-form
+            // object (see `wire::EnvelopeToolCall`). Parsing here restores
+            // the trait contract: the contained JSON object reaches the
+            // caller byte-verbatim when it is credential-shape clean.
+            validate_tool_arguments(&call.arguments, &call.name)?;
             let sanitized = redact_text(&call.id);
             let id = if sanitized == call.id {
                 sanitized
@@ -307,7 +313,7 @@ impl<C: Clone> EventDecoder<C> {
             content.push(AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(call.name.clone()),
-                arguments_json: redact_json(call.arguments.get()),
+                arguments_json: redact_json(&call.arguments),
             }));
         }
         if let Some(contract_name) = &self.output_contract_name {
@@ -404,6 +410,30 @@ impl<C: Clone> EventDecoder<C> {
             .ok_or_else(|| DecodeFailure::new("response has too many ordered parts"))?;
         Ok(index)
     }
+}
+
+/// Requires a string-carried tool-argument payload to hold one JSON object
+/// within the provider nesting bound.
+///
+/// The argument text arrives inside a JSON string, so the line-level nesting
+/// validation in `push` never saw its structure. Failure detail names only
+/// the redacted tool name, never the argument text itself.
+fn validate_tool_arguments(arguments: &str, tool_name: &str) -> Result<(), String> {
+    validate_provider_json_nesting(arguments.as_bytes())
+        .map_err(|error| format!("tool `{}` arguments: {error}", redact_text(tool_name)))?;
+    let parsed: Value = serde_json::from_str(arguments).map_err(|_| {
+        format!(
+            "tool `{}` arguments are not valid JSON",
+            redact_text(tool_name)
+        )
+    })?;
+    if !parsed.is_object() {
+        return Err(format!(
+            "tool `{}` arguments are not a JSON object",
+            redact_text(tool_name)
+        ));
+    }
+    Ok(())
 }
 
 fn redacted_call_id(

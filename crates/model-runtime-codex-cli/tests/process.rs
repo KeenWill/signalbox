@@ -207,6 +207,73 @@ async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
     );
 }
 
+/// Defect regression (found by the gated compatibility smoke): the envelope
+/// carries each tool call's argument object as JSON text inside a string,
+/// because strict structured output forbids a free-form object member. A
+/// string that does not hold JSON is unintelligible-response boundary loss,
+/// never completion material.
+#[tokio::test]
+async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
+    let result = execute_scenario(
+        "tool_call_bad_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments are not valid JSON")
+    );
+}
+
+/// The provider nesting bound applies to the argument text carried inside
+/// the envelope string, which the line-level and agent-message-level checks
+/// cannot see because string content does not nest the outer JSON.
+#[tokio::test]
+async fn over_deep_string_carried_tool_arguments_are_boundary_loss() {
+    let result = execute_scenario(
+        "tool_call_deep_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments: provider JSON exceeds")
+    );
+}
+
+/// Defect regression (found by the gated compatibility smoke): the live API
+/// rejected the adapter's original output schema as `invalid_json_schema`
+/// because its `arguments` member was a free-form object
+/// (`additionalProperties: true`). The fake CLI validates the output schema
+/// of every spawn with `fixtures::strict_schema_violation`; this pins that
+/// the validator still rejects the retired shape, so the offline corpus can
+/// never again accept a schema the live API refuses.
+#[test]
+fn the_strict_schema_validator_rejects_the_retired_free_form_arguments_object() {
+    let retired_arguments_member = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "arguments": {"type": "object", "additionalProperties": true}
+        },
+        "required": ["arguments"],
+        "additionalProperties": false
+    });
+
+    let violation = fixtures::strict_schema_violation(&retired_arguments_member)
+        .expect("strict validation must reject a free-form arguments object");
+
+    assert!(
+        violation.contains("'additionalProperties' is required to be supplied and to be false")
+    );
+    assert!(violation.contains("'arguments'"));
+}
+
 #[tokio::test]
 async fn structured_output_uses_the_shared_forced_tool_decode() {
     let result = execute_scenario(

@@ -391,14 +391,23 @@ never completion.
 item decodes as the adapter's response envelope and satisfies the declared tool
 and structured-output constraints. The decoded envelope is checked against the
 shared JSON nesting bound independently of the escaped outer event. The envelope
-distinguishes completion from refusal. Buffered delivery retains its content
-without deltas; streamed delivery emits bounded CLI reasoning items and the
-final envelope content as ordered deltas before the same terminal evidence. Tool
-argument JSON remains byte-verbatim when it is credential-shape clean. Usage
-comes only from `turn.completed`; an omitted cache counter remains unreported
-rather than becoming a reported zero. Preparation rejects a zero output-token
-limit, non-finite sampling values, temperature outside zero through two, and
-top-p outside zero through one.
+distinguishes completion from refusal. Within the envelope each tool call
+carries its argument object as JSON text inside a string: strict
+structured-output validation refuses any schema object that does not supply
+`additionalProperties: false` and require all its properties, so a free-form
+argument object is not expressible in the output schema and the live API rejects
+one as `invalid_json_schema`. The adapter parses the string, requires exactly
+one JSON object within the provider nesting bound, and passes the contained text
+onward, so tool argument JSON still reaches the caller byte-verbatim when it is
+credential-shape clean. Buffered delivery retains its content without deltas;
+streamed delivery emits bounded CLI reasoning items and the final envelope
+content as ordered deltas before the same terminal evidence. Usage comes only
+from `turn.completed`; an omitted cache counter remains unreported rather than
+becoming a reported zero. Preparation rejects a zero output-token limit,
+non-finite sampling values, temperature outside zero through two, and top-p
+outside zero through one. The offline fake CLI applies the same strict-schema
+validation to every spawned exchange, so a schema shape the live API refuses
+cannot pass the fixture corpus.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Cancellation before spawn is proven unsent.
