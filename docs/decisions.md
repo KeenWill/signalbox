@@ -20,10 +20,10 @@ and uncited tagged files, while local Git records exact merge provenance.
 and every Rust test file tagged in its test name or attached doc comment must be
 cited by that row. Every historical subsystem-page verification token must match
 its exact PR and source branch in a merge reachable from `HEAD`. Tokens for one
-unmerged PR may instead match the local checkout branch or, in GitHub Actions, the
-pull-request event's exact number and branch. This reverses PR #246's mechanical
-exclusions without adding a dependency or network access to the checker; the CI
-validate job therefore supplies full history at checkout.
+unmerged PR may instead match the local checkout branch or, in GitHub Actions,
+the pull-request event's exact number and branch. This reverses PR #246's
+mechanical exclusions without adding a dependency or network access to the
+checker; the CI validate job therefore supplies full history at checkout.
 
 **Rejected alternatives.** Reviewer-only checks repeat deterministic work.
 GitHub calls or per-token fetches add mutable network state and do not inspect
@@ -31,8 +31,8 @@ one complete graph. Scanning every invariant mention would misread production
 documentation, so reverse discovery is limited to test declarations.
 
 **Affects.** `scripts/check_docs_consistency.py`, its tests, the validate
-checkout, and [the invariant catalog](invariants.md). Reachability does not judge
-whether a verification PR is the newest relevant implementation.
+checkout, and [the invariant catalog](invariants.md). Reachability does not
+judge whether a verification PR is the newest relevant implementation.
 
 ## 2026-07-26 — Reconcile an ambiguity wait through an explicit owner request
 
