@@ -1620,7 +1620,7 @@ async fn load_attempts(
 ) -> Result<Vec<ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT attempt.*
-           FROM tool_attempt AS attempt
+           FROM runner_current_tool_attempt AS attempt
            JOIN tool_request AS request
              ON request.request_id = attempt.request_id
           WHERE request.producing_model_call_id = $1

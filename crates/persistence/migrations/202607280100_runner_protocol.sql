@@ -920,6 +920,13 @@ DECLARE
     prior runner_session_placement_record%ROWTYPE;
 BEGIN
     IF NEW.event_ordinal = 1 THEN
+        IF NEW.event_kind <> 'created'
+           OR NEW.state_kind <> 'unpinned'
+           OR NEW.placement_revision <> 1
+        THEN
+            RAISE EXCEPTION 'first runner placement must be created unpinned'
+                USING ERRCODE = '23514';
+        END IF;
         RETURN NEW;
     END IF;
     SELECT *
@@ -1007,6 +1014,11 @@ BEGIN
         IF prior.state_kind <> 'runner_lost'
            OR NEW.state_kind <> 'pinned'
            OR NEW.placement_revision <> prior.placement_revision + 1
+           OR (
+                NEW.credential_grant_revision IS NOT NULL
+                AND NEW.credential_grant_revision IS DISTINCT FROM
+                    COALESCE(prior.credential_grant_revision + 1, 1)
+           )
         THEN
             RAISE EXCEPTION 'runner replacement is not a checked successor'
                 USING ERRCODE = '23514';
@@ -1021,6 +1033,8 @@ BEGIN
            OR NEW.registration_enrollment_id <>
                 prior.registration_enrollment_id
            OR NEW.registration_revision <> prior.registration_revision
+           OR NEW.credential_grant_revision IS DISTINCT FROM
+                prior.credential_grant_revision + 1
            OR NEW.workspace_repository_key IS DISTINCT FROM
                 prior.workspace_repository_key
            OR NEW.workspace_working_directory IS DISTINCT FROM
@@ -1123,15 +1137,33 @@ BEGIN
                 )
                 OR (
                     placement.pinned_credential_profile_name IS NOT NULL
-                    AND NOT EXISTS (
-                        SELECT 1
-                          FROM runner_registration_profile
-                         WHERE enrollment_id =
-                            placement.registration_enrollment_id
-                           AND registration_revision =
-                            placement.registration_revision
-                           AND credential_profile_name =
-                            placement.pinned_credential_profile_name
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1
+                              FROM runner_registration_profile
+                             WHERE enrollment_id =
+                                placement.registration_enrollment_id
+                               AND registration_revision =
+                                placement.registration_revision
+                               AND credential_profile_name =
+                                placement.pinned_credential_profile_name
+                        )
+                        OR NOT EXISTS (
+                            SELECT 1
+                              FROM runner_credential_grant AS grant_record
+                             WHERE grant_record.session_id =
+                                placement.session_id
+                               AND grant_record.runner_id =
+                                placement.pinned_runner_id
+                               AND grant_record.grant_revision =
+                                placement.credential_grant_revision
+                               AND grant_record.credential_profile_name =
+                                placement.pinned_credential_profile_name
+                               AND grant_record.registration_enrollment_id =
+                                placement.registration_enrollment_id
+                               AND grant_record.registration_revision =
+                                placement.registration_revision
+                        )
                     )
                 )
                 OR (
@@ -1505,6 +1537,17 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_grant_complete();
 
+CREATE TABLE runner_physical_attempt_lease_binding (
+    attempt_id uuid PRIMARY KEY,
+    lease_id uuid NOT NULL,
+
+    CONSTRAINT runner_physical_attempt_lease_binding_attempt_fk
+        FOREIGN KEY (attempt_id)
+        REFERENCES tool_attempt (attempt_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+);
+
 CREATE TABLE runner_lease_generation (
     lease_id uuid NOT NULL,
     generation numeric(20, 0) NOT NULL,
@@ -1648,6 +1691,22 @@ CREATE TABLE runner_current_lease_event (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE VIEW runner_current_tool_attempt AS
+SELECT attempt.*
+  FROM tool_attempt AS attempt
+ WHERE NOT EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS prior_generation
+          JOIN runner_lease_generation AS successor_generation
+            ON successor_generation.lease_id =
+                prior_generation.lease_id
+           AND successor_generation.generation >
+                prior_generation.generation
+           AND successor_generation.attempt_id <>
+                prior_generation.attempt_id
+         WHERE prior_generation.attempt_id = attempt.attempt_id
+ );
+
 CREATE FUNCTION require_runner_initial_pin_has_lease()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1680,6 +1739,11 @@ BEFORE UPDATE OR DELETE ON runner_lease_generation
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER runner_physical_attempt_lease_binding_is_append_only
+BEFORE UPDATE OR DELETE ON runner_physical_attempt_lease_binding
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER runner_lease_event_is_append_only
 BEFORE UPDATE OR DELETE ON runner_lease_event
 FOR EACH ROW
@@ -1697,6 +1761,7 @@ DECLARE
     attempted_state text;
     attempted_request uuid;
     registered_effect text;
+    bound_lease uuid;
     prior runner_lease_generation%ROWTYPE;
     prior_state text;
     prior_request uuid;
@@ -1717,14 +1782,28 @@ BEGIN
       JOIN tool_request AS request
         ON request.request_id = attempt.request_id
      WHERE attempt.attempt_id = NEW.attempt_id
-       AND attempt.session_id = NEW.session_id;
+       AND attempt.session_id = NEW.session_id
+       FOR UPDATE OF attempt;
     SELECT effect_class INTO registered_effect
-      FROM runner_registration_tool
-     WHERE enrollment_id = NEW.registration_enrollment_id
-       AND registration_revision = NEW.registration_revision
-       AND tool_name = NEW.tool_name;
+      FROM runner_current_registration AS current_registration
+      JOIN runner_registration_tool AS registered
+        ON registered.enrollment_id =
+            current_registration.enrollment_id
+       AND registered.registration_revision =
+            current_registration.registration_revision
+     WHERE current_registration.enrollment_id =
+            NEW.registration_enrollment_id
+       AND registered.tool_name = NEW.tool_name;
+    INSERT INTO runner_physical_attempt_lease_binding
+        (attempt_id, lease_id)
+    VALUES (NEW.attempt_id, NEW.lease_id)
+    ON CONFLICT (attempt_id) DO NOTHING;
+    SELECT lease_id INTO bound_lease
+      FROM runner_physical_attempt_lease_binding
+     WHERE attempt_id = NEW.attempt_id;
     IF registered_effect IS NULL
        OR attempted_request IS NULL
+       OR bound_lease IS DISTINCT FROM NEW.lease_id
        OR placement.state_kind IS DISTINCT FROM 'pinned'
        OR placement.event_ordinal IS DISTINCT FROM
             NEW.placement_event_ordinal

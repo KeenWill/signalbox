@@ -340,28 +340,7 @@ impl RunnerProtocolStore {
         registration: Option<&StoredValidatedRunnerRegistration>,
         grant: Option<&CredentialProfileGrant>,
     ) -> Result<StoredSessionRunnerPlacement, RunnerProtocolStoreError> {
-        SessionRunnerPlacement::reconstitute_from_facts(
-            SessionRunnerPlacementReconstitutionInput {
-                session: placement.session(),
-                revision: placement.revision(),
-                request: placement.request().clone(),
-                state: placement.state().clone(),
-            },
-            registration.map(StoredValidatedRunnerRegistration::registration),
-        )
-        .map_err(RunnerProtocolStoreError::Domain)?;
-        if let (Some(grant), Some(registration)) = (grant, registration) {
-            CredentialProfileGrant::reconstitute(
-                grant_input(grant),
-                placement.session(),
-                registration.registration(),
-            )
-            .map_err(RunnerProtocolStoreError::Domain)?;
-        } else if grant.is_some() {
-            return Err(RunnerProtocolStoreError::Corruption(
-                RunnerProtocolCorruption::MissingCanonicalRegistration,
-            ));
-        }
+        validate_placement_snapshot(placement, registration, grant)?;
 
         let mut transaction = self.pool.begin().await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
@@ -413,6 +392,12 @@ impl RunnerProtocolStore {
         pin: &SessionRunnerPin,
         registration: &StoredValidatedRunnerRegistration,
     ) -> Result<(), RunnerProtocolStoreError> {
+        validate_placement_snapshot(&pin.placement, Some(registration), pin.grant.as_ref())?;
+        if pin.lease.state() != RunnerLeaseState::Offered {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(pin.placement.session().into_uuid())
@@ -1638,6 +1623,63 @@ fn decode_lease(row: &PgRow) -> Result<RunnerLease, RunnerProtocolStoreError> {
         recorded_state: decode_lease_state(row.get("state_kind"))?,
     })
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+fn validate_placement_snapshot(
+    placement: &SessionRunnerPlacement,
+    registration: Option<&StoredValidatedRunnerRegistration>,
+    grant: Option<&CredentialProfileGrant>,
+) -> Result<(), RunnerProtocolStoreError> {
+    SessionRunnerPlacement::reconstitute_from_facts(
+        SessionRunnerPlacementReconstitutionInput {
+            session: placement.session(),
+            revision: placement.revision(),
+            request: placement.request().clone(),
+            state: placement.state().clone(),
+        },
+        registration.map(StoredValidatedRunnerRegistration::registration),
+    )
+    .map_err(RunnerProtocolStoreError::Domain)?;
+    match (grant, registration) {
+        (Some(grant), Some(registration)) => {
+            CredentialProfileGrant::reconstitute(
+                grant_input(grant),
+                placement.session(),
+                registration.registration(),
+            )
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        }
+        (Some(_), None) => {
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::MissingCanonicalRegistration,
+            ));
+        }
+        (None, _) => {}
+    }
+    let binding_matches = match (placement.state(), grant) {
+        (SessionRunnerPlacementState::Unpinned, None) => true,
+        (
+            SessionRunnerPlacementState::Pinned(pinned)
+            | SessionRunnerPlacementState::RunnerLost(pinned),
+            Some(grant),
+        ) => {
+            pinned.credential_profile.as_ref() == Some(grant.profile())
+                && placement.session() == grant.session()
+                && pinned.runner == grant.runner()
+        }
+        (
+            SessionRunnerPlacementState::Pinned(pinned)
+            | SessionRunnerPlacementState::RunnerLost(pinned),
+            None,
+        ) => pinned.credential_profile.is_none(),
+        (SessionRunnerPlacementState::Unpinned, Some(_)) => false,
+    };
+    if !binding_matches {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorruptStoredFacts,
+        ));
+    }
+    Ok(())
 }
 
 fn grant_input(grant: &CredentialProfileGrant) -> CredentialProfileGrantReconstitutionInput {

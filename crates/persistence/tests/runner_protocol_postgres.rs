@@ -6,21 +6,24 @@
 
 use std::error::Error;
 
+use rust_decimal::Decimal;
 use signalbox_domain::{
     AuthorizedToolAttempt, CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval,
     ReconstitutedToolAttempt, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
-    RunnerCatalog, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLeaseId,
-    RunnerLeaseOfferRequest, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId, SessionRunnerPlacement,
-    SessionRunnerPlacementRequest, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDispatchGeneration,
-    ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
+    RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration,
+    RunnerId, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolDispatchGeneration, ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId,
+    TurnAttemptId, TurnId, WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
-    runner_protocol::{RunnerProtocolStore, RunnerProtocolStoreError},
+    runner_protocol::{
+        RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
+    },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -39,6 +42,7 @@ const REPLACEMENT_ENROLLMENT: u128 = 0x9101;
 const REPLACEMENT_RUNNER: u128 = 0x9201;
 const REPLACEMENT_AUTHENTICATION: u128 = 0x9301;
 const SESSION: u128 = 0x9400;
+const FOREIGN_SESSION: u128 = 0x9401;
 const LEASE: u128 = 0x9500;
 const ATTEMPT: u128 = 0x9600;
 const RETRY_ATTEMPT: u128 = 0x9601;
@@ -59,6 +63,11 @@ const INITIAL_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
 };
 const RETRY_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
     attempt: RETRY_ATTEMPT,
+    request: INITIAL_PHYSICAL_ATTEMPT.request,
+    turn: INITIAL_PHYSICAL_ATTEMPT.turn,
+};
+const SECOND_RETRY_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = PhysicalAttemptFacts {
+    attempt: 0x9603,
     request: INITIAL_PHYSICAL_ATTEMPT.request,
     turn: INITIAL_PHYSICAL_ATTEMPT.turn,
 };
@@ -106,6 +115,11 @@ fn tool(name: &str) -> ToolName {
 fn profile() -> CredentialProfileName {
     CredentialProfileName::try_new("readonly".to_owned())
         .expect("the fixture profile name is valid")
+}
+
+fn replacement_profile() -> CredentialProfileName {
+    CredentialProfileName::try_new("operator".to_owned())
+        .expect("the replacement profile name is valid")
 }
 
 fn model_definition() -> RunnerToolModelDefinition {
@@ -198,10 +212,18 @@ fn catalog() -> RunnerCatalog {
         ],
     )
     .expect("the fixture profile references its declared tool");
+    let replacement_policy = CredentialProfilePolicy::try_new(
+        replacement_profile(),
+        [
+            (tool("inspect"), CredentialToolApproval::SessionPolicy),
+            (tool("catalog_only"), CredentialToolApproval::SessionPolicy),
+        ],
+    )
+    .expect("the replacement profile references declared tools");
     RunnerCatalog::try_new(
         [class()],
         [inspect, catalog_only],
-        [policy],
+        [policy, replacement_policy],
         [WorkspaceCapability::WorktreePerSession],
     )
     .expect("the fixture catalog is internally consistent")
@@ -211,12 +233,78 @@ fn advertisement() -> RunnerAdvertisement {
     RunnerAdvertisement::new(
         [class()],
         [tool("inspect")],
-        [profile()],
+        [profile(), replacement_profile()],
         [WorkspaceCapability::WorktreePerSession],
     )
 }
 
-async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
+fn narrowed_advertisement() -> RunnerAdvertisement {
+    RunnerAdvertisement::new(
+        [class()],
+        [],
+        [profile(), replacement_profile()],
+        [WorkspaceCapability::WorktreePerSession],
+    )
+}
+
+fn expanded_advertisement() -> RunnerAdvertisement {
+    RunnerAdvertisement::new(
+        [class()],
+        [tool("inspect"), tool("catalog_only")],
+        [profile(), replacement_profile()],
+        [WorkspaceCapability::WorktreePerSession],
+    )
+}
+
+async fn stored_pin_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
+    insert_session(pool).await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the validated registration pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    Ok((store, expected_enrollment, registration, pin))
+}
+
+async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
         .execute(pool)
         .await?;
@@ -224,13 +312,17 @@ async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES ($1, 'owner_initiated', 'none')",
     )
-    .bind(uuid(SESSION))
+    .bind(session)
     .execute(pool)
     .await?;
     sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
     Ok(())
+}
+
+async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
+    insert_session_for(pool, uuid(SESSION)).await
 }
 
 async fn insert_physical_attempt(
@@ -322,6 +414,25 @@ fn assert_store_check_violation(error: RunnerProtocolStoreError) {
     assert_check_violation(error);
 }
 
+#[track_caller]
+fn assert_store_domain_error(error: RunnerProtocolStoreError, expected: RunnerDomainError) {
+    let RunnerProtocolStoreError::Domain(actual) = error else {
+        panic!("the adapter must reject invalid domain evidence before writing")
+    };
+    assert_eq!(actual, expected);
+}
+
+#[track_caller]
+fn assert_one_store_succeeds_and_one_conflicts(
+    first: Result<(), RunnerProtocolStoreError>,
+    second: Result<(), RunnerProtocolStoreError>,
+) {
+    match (first, second) {
+        (Ok(()), Err(error)) | (Err(error), Ok(())) => assert_store_check_violation(error),
+        outcomes => panic!("one attempt binding must win exactly once: {outcomes:?}"),
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
@@ -357,6 +468,168 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
     assert_eq!(loaded_enrollment, expected_enrollment);
     assert_eq!(loaded_registration, stored);
     assert_eq!(historical_registration, stored);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    store
+        .register(
+            expected_enrollment.enrollment(),
+            expanded_advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let retained_tool_lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            authorized(RETRY_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("an additive registration retains the pinned tool");
+    store.store_lease(&retained_tool_lease).await?;
+    terminalize_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, SECOND_RETRY_PHYSICAL_ATTEMPT).await?;
+    store
+        .register(
+            expected_enrollment.enrollment(),
+            narrowed_advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let stale_registration_lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            authorized(SECOND_RETRY_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 2)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("historical domain evidence isolates the relational current-head gate");
+    let stale_registration = store
+        .store_lease(&stale_registration_lease)
+        .await
+        .expect_err("a withdrawn current tool cannot receive a later runner lease");
+
+    assert_store_check_violation(stale_registration);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv004_inv043_concurrent_attempt_binding_has_one_lease_lineage()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let first_lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            authorized(RETRY_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("the first lease candidate is valid in isolation");
+    let second_lease = pin
+        .placement
+        .offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            authorized(RETRY_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 2)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("the second lease candidate is valid in isolation");
+    let first_store = RunnerProtocolStore::new(pool.clone());
+    let second_store = RunnerProtocolStore::new(pool.clone());
+    let (first, second) = tokio::join!(
+        first_store.store_lease(&first_lease),
+        second_store.store_lease(&second_lease)
+    );
+
+    assert_one_store_succeeds_and_one_conflicts(first, second);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session_for(&pool, uuid(FOREIGN_SESSION)).await?;
+    let store = RunnerProtocolStore::new(pool.clone());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(
+            expected_enrollment.enrollment(),
+            advertisement(),
+            &catalog(),
+        )
+        .await?;
+    let malformed_first = sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_capability_class,
+             directory_selection_kind, requested_credential_profile_name,
+             workspace_requirement_kind, state_kind, pinned_runner_id,
+             pinned_working_directory, pinned_credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count, credential_grant_revision)
+         VALUES (
+             $1, 1, 1, 'runner_replaced',
+             'capability_class', $2,
+             'runner_default', $3,
+             'none', 'pinned', $4,
+             $5, $3,
+             $6, $7,
+             (
+                 SELECT count(*)
+                   FROM runner_registration_tool
+                  WHERE enrollment_id = $6
+                    AND registration_revision = $7
+             ),
+             1
+         )",
+    )
+    .bind(uuid(FOREIGN_SESSION))
+    .bind(class().as_str())
+    .bind(profile().as_str())
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind("/workspace/forged-first")
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(registration.revision().get()))
+    .execute(&pool)
+    .await
+    .expect_err("the first placement row cannot begin as a replacement");
+
+    assert_check_violation(malformed_first);
     drop(pool);
     Ok(())
 }
@@ -436,6 +709,21 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
             offer_request(),
         )
         .expect("the validated registration pins the placement");
+    let claimed_pin = SessionRunnerPin {
+        placement: pin.placement.clone(),
+        grant: pin.grant.clone(),
+        lease: pin
+            .lease
+            .clone()
+            .claim(pin.lease.correlation())
+            .expect("the exact fixture correlation claims its lease"),
+    };
+    let non_offered_pin = store
+        .store_pin(&claimed_pin, &registration)
+        .await
+        .expect_err("an atomic pin may store only its original offered lease");
+
+    assert_store_domain_error(non_offered_pin, RunnerDomainError::InvalidState);
     store.store_pin(&pin, &registration).await?;
 
     let loaded = store
@@ -475,6 +763,50 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("canonical profile selection requires its exact grant on every lease");
 
     assert_store_check_violation(missing_current_grant);
+    let profile_replacement = pin
+        .placement
+        .clone()
+        .replace_credential_profile(
+            pin.grant
+                .clone()
+                .expect("the fixture pin carries a credential grant"),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the replacement profile is valid for the pinned runner");
+    let predecessor_grant = store
+        .store_placement(
+            &profile_replacement.placement,
+            Some(&registration),
+            pin.grant.as_ref(),
+        )
+        .await
+        .expect_err("a replacement placement cannot retain its predecessor grant");
+
+    assert_store_domain_error(predecessor_grant, RunnerDomainError::CorruptStoredFacts);
+    let same_profile_replacement = pin
+        .placement
+        .clone()
+        .replace_credential_profile(
+            pin.grant
+                .clone()
+                .expect("the fixture pin carries a credential grant"),
+            registration.registration(),
+            profile(),
+            [tool("inspect")],
+        )
+        .expect("an explicit same-profile replacement still advances grant lineage");
+    let stale_grant_revision = store
+        .store_placement(
+            &same_profile_replacement.placement,
+            Some(&registration),
+            pin.grant.as_ref(),
+        )
+        .await
+        .expect_err("a replacement cannot retain its predecessor grant revision");
+
+    assert_store_check_violation(stale_grant_revision);
     let lost = pin
         .placement
         .clone()
@@ -515,6 +847,66 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
         .expect_err("a revoked predecessor cannot authorize its replacement");
 
     assert_store_check_violation(revoked_predecessor);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _) = stored_pin_fixture(&pool).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id,
+             selector_capability_class, directory_selection_kind,
+             requested_working_directory,
+             requested_credential_profile_name,
+             workspace_requirement_kind, requested_repository_key,
+             state_kind, pinned_runner_id, pinned_working_directory,
+             pinned_credential_profile_name, registration_enrollment_id,
+             registration_revision, pinned_tool_count,
+             workspace_repository_key, workspace_working_directory,
+             credential_grant_revision)
+         SELECT session_id, event_ordinal + 1, placement_revision + 1,
+                'profile_replaced',
+                selector_kind, selector_runner_id,
+                selector_capability_class, directory_selection_kind,
+                requested_working_directory,
+                $2,
+                workspace_requirement_kind, requested_repository_key,
+                state_kind, pinned_runner_id, pinned_working_directory,
+                $2, registration_enrollment_id,
+                registration_revision, pinned_tool_count,
+                workspace_repository_key, workspace_working_directory,
+                credential_grant_revision + 1
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = 2",
+    )
+    .bind(uuid(SESSION))
+    .bind(replacement_profile().as_str())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_tool
+            (session_id, event_ordinal, tool_name, runner_required)
+         SELECT session_id, event_ordinal + 1, tool_name, runner_required
+           FROM runner_session_placement_tool
+          WHERE session_id = $1 AND event_ordinal = 2",
+    )
+    .bind(uuid(SESSION))
+    .execute(&mut *transaction)
+    .await?;
+    let mismatched_grant = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .expect_err("a replacement profile cannot reference the predecessor profile grant");
+
+    assert_check_violation(mismatched_grant);
+    transaction.rollback().await?;
     drop(pool);
     Ok(())
 }
@@ -663,12 +1055,22 @@ async fn s31_inv004_inv043_claimed_retry_state_survives_reconstitution()
         .load_lease(RunnerLeaseId::from_uuid(uuid(LEASE)), retry.generation())
         .await?
         .expect("the retry generation is durable");
+    let batch_attempts: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT attempt_id
+           FROM runner_current_tool_attempt
+          WHERE request_id = $1
+          ORDER BY attempt_id",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.request))
+    .fetch_all(&pool)
+    .await?;
 
     assert_eq!(
         lost.state(),
         signalbox_domain::RunnerLeaseState::LostClaimed
     );
     assert_eq!(reconstituted, retry);
+    assert_eq!(batch_attempts, vec![retry.attempt().into_uuid()]);
     drop(pool);
     Ok(())
 }
