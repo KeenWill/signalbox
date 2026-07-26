@@ -11,8 +11,8 @@ ALTER TABLE replace_session_metadata_command
     DISABLE TRIGGER replace_session_metadata_command_is_append_only;
 
 UPDATE replace_session_metadata_command
-   SET issuer_kind = actor_kind,
-       issuer_tool_request_id = actor_tool_request_id;
+   SET issuer_kind = 'owner',
+       issuer_tool_request_id = NULL;
 
 ALTER TABLE replace_session_metadata_command
     ENABLE TRIGGER replace_session_metadata_command_is_append_only;

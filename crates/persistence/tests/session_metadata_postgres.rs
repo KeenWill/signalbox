@@ -142,17 +142,18 @@ fn replacement(
     ReplaceSessionMetadata::new(command(command_value), session(session_value), content)
 }
 
-/// INV-012: the issuer-evidence migration backfills an existing append-only
-/// metadata receipt before restoring its immutable guard.
+/// INV-012: the issuer-evidence migration preserves the fixed owner agency of
+/// legacy metadata receipts even when their actor projection was corrupted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_metadata_issuer_migration_backfills_existing_receipt() -> Result<(), Box<dyn Error>>
-{
+async fn inv012_metadata_issuer_migration_preserves_legacy_owner_agency()
+-> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres_before_metadata_issuer().await?;
     let command_id = Uuid::from_u128(0x901);
     let session_id = Uuid::from_u128(0x701);
     let tool_request_id = Uuid::from_u128(0xa01);
     let actor_kind = "tool";
+    let expected_issuer = ("owner".to_owned(), None);
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
@@ -190,7 +191,7 @@ async fn inv012_metadata_issuer_migration_backfills_existing_receipt() -> Result
     .bind(command_id)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(issuer, (actor_kind.to_owned(), Some(tool_request_id)));
+    assert_eq!(issuer, expected_issuer);
 
     pool.close().await;
     drop(container);

@@ -229,8 +229,8 @@ pub enum PostgresSessionStatusWriterError {
     InvalidCommandIdentity,
     /// PostgreSQL failed outside the final ambiguous commit acknowledgement.
     Database,
-    /// Durable command identity unexpectedly named another payload.
-    ConflictingReuse,
+    /// A freshly derived command identity collided with durable identity.
+    IdentityCollision,
     /// Stored metadata command facts were inconsistent.
     Corruption,
 }
@@ -240,7 +240,7 @@ impl fmt::Display for PostgresSessionStatusWriterError {
         formatter.write_str(match self {
             Self::InvalidCommandIdentity => "session status command identity is invalid",
             Self::Database => "session status database operation failed",
-            Self::ConflictingReuse => "session status command identity was reused",
+            Self::IdentityCollision => "session status command identity collided",
             Self::Corruption => "session status durable facts are inconsistent",
         })
     }
@@ -251,9 +251,8 @@ impl Error for PostgresSessionStatusWriterError {}
 impl ClassifyOperatorFailure for PostgresSessionStatusWriterError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::InvalidCommandIdentity | Self::ConflictingReuse => {
-                OperatorFailureClass::CallerOrHubBug
-            }
+            Self::InvalidCommandIdentity => OperatorFailureClass::CallerOrHubBug,
+            Self::IdentityCollision => OperatorFailureClass::IdentityCollision,
             Self::Database => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -290,7 +289,7 @@ impl SessionStatusWriter for PostgresSessionStatusWriter {
                 ),
             )) => Ok(SessionStatusWriteOutcome::SessionNotFound),
             Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { .. }) => {
-                Err(PostgresSessionStatusWriterError::ConflictingReuse)
+                Err(PostgresSessionStatusWriterError::IdentityCollision)
             }
             Err(SessionMetadataRepositoryError::CommitAmbiguous(_)) => {
                 Ok(SessionStatusWriteOutcome::Ambiguous)
@@ -698,6 +697,16 @@ mod tests {
             request,
             &replacement
         ));
+    }
+
+    /// A durable command already using the freshly attempt-derived identity is
+    /// an operational identity collision rather than a caller defect.
+    #[test]
+    fn session_status_command_reuse_is_identity_collision() {
+        assert_eq!(
+            PostgresSessionStatusWriterError::IdentityCollision.operator_failure_class(),
+            OperatorFailureClass::IdentityCollision
+        );
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
