@@ -16,7 +16,9 @@ are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The
 tool-attributed metadata command and reconstitution surface was verified through
-PR #265 (`agent/tool-batch-tier0`).
+PR #265 (`agent/tool-batch-tier0`). The current identity-generation,
+command-family, and ambiguity-ownership inventory was verified through PR #288
+(`agent/audit-fix-docs-coherence`).
 
 ## Identity model
 

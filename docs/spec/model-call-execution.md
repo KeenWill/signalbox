@@ -20,7 +20,9 @@ configuration and credentials in
 were verified through PR #258 (`agent/signalboxd-rename`); the
 [provider-target identity](#provider-target-identity) rule and the sanitized
 model-call cause codes were verified through PR #280
-(`agent/provider-identity-normalization`). Invariant tags cite
+(`agent/provider-identity-normalization`). The complete frontier-payload
+projection and identity-before-terminal-evidence precedence were verified
+through PR #288 (`agent/audit-fix-docs-coherence`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle

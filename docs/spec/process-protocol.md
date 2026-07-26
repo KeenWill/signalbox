@@ -21,9 +21,10 @@ owner turn-reconciliation stack adds protocol version seven for the single
 and message vocabularies unchanged, verified through PR #281
 (`agent/turn-reconciliation-recovery`). The implementation in this stack speaks
 versions one through seven, and its terminal client selects version seven. This
-page is the normative boundary between a local client process and `signalboxd`;
-domain values, PostgreSQL records, and wire messages remain distinct
-representations.
+page's version-four last-writer member spelling was verified through PR #288
+(`agent/audit-fix-docs-coherence`). This page is the normative boundary between
+a local client process and `signalboxd`; domain values, PostgreSQL records, and
+wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
