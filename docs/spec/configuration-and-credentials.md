@@ -1,16 +1,16 @@
 # Configuration and credentials
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against the implementing stack through PR #183
-(`agent/provider-call-security-parser`; hubd configuration loading in
-`apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
-catalog, and the provider bridge in `crates/model-provider-runtime`) together
+Signalbox, verified against the implementing stack through PR #217
+(`agent/credential-reference-total`). This includes hubd configuration loading
+in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
+catalog, and the provider bridge in `crates/model-provider-runtime`, together
 with the model-runtime crates it composes
 (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`); the database-channel refusals
 in [process configuration](#process-configuration) were verified through PR #237
-(`agent/fix-pg-env-surface`; `production_connection_options` in
-`crates/persistence/src/lib.rs`). Invariant law lives in
+(`agent/fix-pg-env-surface`), in `production_connection_options` under
+`crates/persistence/src/lib.rs`. Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration

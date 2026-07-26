@@ -1,19 +1,19 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as verified
-against the implementing stack: rendering a context frontier into provider
-messages, the staged prepare / authorize-send / commit-observation effects,
-assistant content, intra-turn tool rounds and final turn completion, provider
-failure classification into physical dispositions, and the retry prohibition.
-Tool requests, approvals, attempts, and continuation are owned by
-[tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
-storage protocol and the outbox in
-[persistence-protocol](persistence-protocol.md); the typed model-runtime layer
-and hub runtime in [runtime-substrate](runtime-substrate.md); model
-configuration and credentials in
-[configuration-and-credentials](configuration-and-credentials.md). Invariant
+against the implementing stack through PR #201 (`agent/tool-loop-proof`):
+rendering a context frontier into provider messages, the staged prepare /
+authorize-send / commit-observation effects, assistant content, intra-turn tool
+rounds and final turn completion, provider failure classification into physical
+dispositions, and the retry prohibition. Tool requests, approvals, attempts, and
+continuation are owned by [tool-loop](tool-loop.md). Turn and attempt lifecycle
+law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entries and frontiers in
+[sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
+outbox in [persistence-protocol](persistence-protocol.md); the typed
+model-runtime layer and hub runtime in
+[runtime-substrate](runtime-substrate.md); model configuration and credentials
+in [configuration-and-credentials](configuration-and-credentials.md). Invariant
 tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
