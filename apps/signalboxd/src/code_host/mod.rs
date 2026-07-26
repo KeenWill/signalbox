@@ -485,8 +485,14 @@ where
                 if let Some(class) = transport_failure_class(kind, failure) {
                     return Err(CodeHostExecutorError { class });
                 }
+                let detail = match transport_failure_detail(failure) {
+                    KnownFailureDetail::CredentialUnavailable => {
+                        self.credential_unavailable_detail.clone()
+                    }
+                    KnownFailureDetail::CodeHostRejected => self.code_host_rejected_detail.clone(),
+                };
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-                    detail: Some(self.code_host_rejected_detail.clone()),
+                    detail: Some(detail),
                 }));
             }
         };
@@ -506,6 +512,32 @@ where
             }));
         }
         Ok(invocation.bind(ToolExecutorEvidence::CompletedText(content)))
+    }
+}
+
+/// Which fixed detail a non-fatal transport failure shows the model and the
+/// durable transcript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KnownFailureDetail {
+    /// The daemon-held credential could not authenticate the request.
+    CredentialUnavailable,
+    /// The code host answered, and its answer ends the attempt.
+    CodeHostRejected,
+}
+
+/// Shapes a known-failure detail after its class is known to be non-fatal.
+///
+/// Credential bytes that cannot form the authentication header are a
+/// deployment fact the operator can act on, so they read as a credential
+/// failure rather than as something the code host decided; the code host never
+/// saw the request.
+const fn transport_failure_detail(failure: CodeHostTransportFailure) -> KnownFailureDetail {
+    match failure {
+        CodeHostTransportFailure::InvalidCredential => KnownFailureDetail::CredentialUnavailable,
+        CodeHostTransportFailure::Rejected
+        | CodeHostTransportFailure::InvalidResponse
+        | CodeHostTransportFailure::ResponseTooLarge
+        | CodeHostTransportFailure::DispatchUnknown => KnownFailureDetail::CodeHostRejected,
     }
 }
 
@@ -834,6 +866,37 @@ mod tests {
                 CodeHostTransportFailure::InvalidResponse,
             ),
             None
+        );
+    }
+
+    /// Credential bytes that cannot form the authentication header never reach
+    /// the code host, so the detail names the credential rather than blaming a
+    /// decision the code host never made.
+    #[test]
+    fn invalid_credential_presents_the_credential_detail() {
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::InvalidCredential),
+            KnownFailureDetail::CredentialUnavailable
+        );
+    }
+
+    /// A definitive answer from the code host keeps the rejection detail, so
+    /// the credential detail stays a credential claim.
+    #[test]
+    fn rejected_request_presents_the_code_host_detail() {
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::Rejected),
+            KnownFailureDetail::CodeHostRejected
+        );
+    }
+
+    /// A bounded response the typed contract refuses is the code host's
+    /// answer, not a credential fact.
+    #[test]
+    fn invalid_response_presents_the_code_host_detail() {
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::InvalidResponse),
+            KnownFailureDetail::CodeHostRejected
         );
     }
 
