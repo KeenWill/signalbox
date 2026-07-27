@@ -404,8 +404,8 @@ impl<C: Clone> EventDecoder<C> {
                 clean_ids.insert(sanitized);
             }
         }
-        let mut emitted_ids = HashSet::new();
-        for (index, call) in envelope.tool_calls.iter().enumerate() {
+        let mut redacted_id_cursor = 1_usize;
+        for call in &envelope.tool_calls {
             let allowed = self.declared_tools.contains(&call.name)
                 || self.output_contract_name.as_deref() == Some(call.name.as_str());
             if !allowed {
@@ -427,9 +427,8 @@ impl<C: Clone> EventDecoder<C> {
             let id = if sanitized == call.id {
                 sanitized
             } else {
-                redacted_call_id(index, &clean_ids, &emitted_ids)
+                next_redacted_call_id(&mut redacted_id_cursor, &clean_ids)
             };
-            emitted_ids.insert(id.clone());
             content.push(AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(call.name.clone()),
@@ -571,18 +570,17 @@ fn validate_tool_arguments(arguments: &str, tool_name: &str) -> Result<(), Strin
     Ok(())
 }
 
-fn redacted_call_id(
-    index: usize,
-    clean_ids: &HashSet<String>,
-    emitted_ids: &HashSet<String>,
-) -> String {
-    let mut ordinal = index + 1;
+/// Allocates the next distinct redacted-call surrogate from a monotonic
+/// cursor, skipping only names that collide with a clean provider id. The
+/// cursor never resets, so total work across a completion is linear in the
+/// tool-call count plus the fixed clean-id set rather than quadratic.
+fn next_redacted_call_id(cursor: &mut usize, clean_ids: &HashSet<String>) -> String {
     loop {
-        let candidate = format!("codex-redacted-call-{ordinal}");
-        if !clean_ids.contains(&candidate) && !emitted_ids.contains(&candidate) {
+        let candidate = format!("codex-redacted-call-{cursor}");
+        *cursor += 1;
+        if !clean_ids.contains(&candidate) {
             return candidate;
         }
-        ordinal += 1;
     }
 }
 
