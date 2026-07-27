@@ -62,6 +62,8 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
                 "insufficient quota",
                 "insufficient_quota",
                 "usage limit reached",
+                "hit your usage limit",
+                "usagelimitreached",
             ],
         ) =>
         {
@@ -129,6 +131,10 @@ mod tests {
         );
         assert_eq!(
             classify_error("insufficient_quota"),
+            ProviderErrorKind::QuotaExhausted
+        );
+        assert_eq!(
+            classify_error("You've hit your usage limit."),
             ProviderErrorKind::QuotaExhausted
         );
         assert_eq!(
