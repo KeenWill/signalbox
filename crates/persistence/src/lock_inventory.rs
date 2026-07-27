@@ -75,12 +75,16 @@ pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
               WHERE enrollment_id = $1
               FOR SHARE";
 
-pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT credential_profile_name
-               FROM runner_credential_grant
-              WHERE session_id = $1
-                AND runner_id = $2
-                AND grant_revision = $3
-              FOR SHARE";
+pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.credential_profile_name
+               FROM runner_current_credential_grant_audit AS current_audit
+               JOIN runner_credential_grant AS grant_record
+                 ON grant_record.session_id = current_audit.session_id
+                AND grant_record.runner_id = current_audit.runner_id
+                AND grant_record.grant_revision = current_audit.grant_revision
+              WHERE current_audit.session_id = $1
+                AND current_audit.runner_id = $2
+                AND current_audit.grant_revision = $3
+              FOR SHARE OF current_audit";
 
 pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
                FROM runner_current_registration

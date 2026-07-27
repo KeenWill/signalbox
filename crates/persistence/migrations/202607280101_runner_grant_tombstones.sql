@@ -90,12 +90,14 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $function$
 DECLARE
-    prior_runner uuid;
+    prior_grant_runner uuid;
+    prior_grant_revision numeric;
 BEGIN
     IF NEW.state_kind IN ('pinned', 'runner_lost')
        AND NEW.pinned_credential_profile_name IS NULL
        AND NEW.credential_grant_revision IS NOT NULL
-       AND NOT EXISTS (
+    THEN
+        IF NOT EXISTS (
             SELECT 1
               FROM runner_credential_grant AS grant_record
               JOIN runner_credential_grant_audit AS audit
@@ -106,18 +108,41 @@ BEGIN
              WHERE grant_record.session_id = NEW.session_id
                AND grant_record.runner_id = NEW.credential_grant_runner_id
                AND grant_record.grant_revision = NEW.credential_grant_revision
-       )
-    THEN
-        RAISE EXCEPTION 'profileless grant authority must be a revoked tombstone'
-            USING ERRCODE = '23514';
+        ) THEN
+            RAISE EXCEPTION 'profileless grant authority must be a revoked tombstone'
+                USING ERRCODE = '23514';
+        END IF;
+        IF NEW.event_kind = 'runner_replaced' THEN
+            SELECT credential_grant_runner_id, credential_grant_revision
+              INTO prior_grant_runner, prior_grant_revision
+              FROM runner_session_placement_record
+             WHERE session_id = NEW.session_id
+               AND event_ordinal = NEW.event_ordinal - 1;
+            IF NOT FOUND
+               OR NEW.credential_grant_runner_id IS DISTINCT FROM
+                    prior_grant_runner
+               OR NEW.credential_grant_revision IS DISTINCT FROM
+                    prior_grant_revision + 1
+            THEN
+                RAISE EXCEPTION 'profileless grant tombstone does not succeed the immediate prior grant'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSIF NEW.event_kind <> 'runner_lost' THEN
+            RAISE EXCEPTION 'profileless grant tombstone lacks a canonical transition'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     IF NEW.event_kind = 'runner_lost' THEN
-        SELECT credential_grant_runner_id INTO prior_runner
+        SELECT credential_grant_runner_id, credential_grant_revision
+          INTO prior_grant_runner, prior_grant_revision
           FROM runner_session_placement_record
          WHERE session_id = NEW.session_id
            AND event_ordinal = NEW.event_ordinal - 1;
-        IF NEW.credential_grant_runner_id IS DISTINCT FROM prior_runner THEN
+        IF NEW.credential_grant_runner_id IS DISTINCT FROM prior_grant_runner
+           OR NEW.credential_grant_revision IS DISTINCT FROM
+                prior_grant_revision
+        THEN
             RAISE EXCEPTION 'runner loss changed grant authority'
                 USING ERRCODE = '23514';
         END IF;

@@ -1296,6 +1296,21 @@ async fn s30_inv042_current_registration_head_cannot_rewind() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s30_inv042_current_registration_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _) = stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_current_registration")
+        .execute(&pool)
+        .await
+        .expect_err("the registration head cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s30_inv042_appended_registration_must_advance_current_head() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
@@ -1543,23 +1558,6 @@ async fn s31_inv045_concurrent_grant_revocation_blocks_a_later_lease() -> Result
         .expect("the fixture pin carries a credential grant");
     let mut revocation = pool.begin().await?;
     sqlx::query(
-        "SELECT credential_profile_name
-           FROM runner_credential_grant
-          WHERE session_id = $1
-            AND runner_id = $2
-            AND grant_revision = $3
-          FOR UPDATE",
-    )
-    .bind(grant.session().into_uuid())
-    .bind(grant.runner().into_uuid())
-    .bind(Decimal::from(grant.revision().get()))
-    .fetch_one(&mut *revocation)
-    .await?;
-    let mut lease_store = Box::pin(store.store_lease(&lease));
-    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
-        .await
-        .expect_err("the lease insert must wait for credential-grant authority");
-    sqlx::query(
         "INSERT INTO runner_credential_grant_audit
             (session_id, runner_id, grant_revision, audit_ordinal,
              event_kind, credential_profile_name)
@@ -1571,6 +1569,10 @@ async fn s31_inv045_concurrent_grant_revocation_blocks_a_later_lease() -> Result
     .bind(grant.profile().as_str())
     .execute(&mut *revocation)
     .await?;
+    let mut lease_store = Box::pin(store.store_lease(&lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("the lease insert must wait for direct revocation authority");
     revocation.commit().await?;
     let rejected = lease_store
         .await
@@ -1599,29 +1601,8 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
             [tool("inspect")],
         )
         .expect("the active predecessor permits profile replacement");
-    let mut revocation = pool.begin().await?;
-    sqlx::query(
-        "SELECT credential_profile_name
-           FROM runner_credential_grant
-          WHERE session_id = $1
-            AND runner_id = $2
-            AND grant_revision = $3
-          FOR UPDATE",
-    )
-    .bind(original_grant.session().into_uuid())
-    .bind(original_grant.runner().into_uuid())
-    .bind(Decimal::from(original_grant.revision().get()))
-    .fetch_one(&mut *revocation)
-    .await?;
     let replacement_grant = duplicate_grant(&replacement.grant.grant, registration.registration());
-    let mut replacement_store = Box::pin(store.store_placement(
-        &replacement.placement,
-        Some(&registration),
-        Some(&replacement_grant),
-    ));
-    tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement_store)
-        .await
-        .expect_err("replacement must wait for predecessor grant authority");
+    let mut revocation = pool.begin().await?;
     sqlx::query(
         "INSERT INTO runner_credential_grant_audit
             (session_id, runner_id, grant_revision, audit_ordinal,
@@ -1634,17 +1615,20 @@ async fn s32_inv045_grant_revocation_serializes_profile_replacement() -> Result<
     .bind(original_grant.profile().as_str())
     .execute(&mut *revocation)
     .await?;
-    revocation.commit().await?;
-    replacement_store
+    let mut replacement_store = Box::pin(store.store_placement(
+        &replacement.placement,
+        Some(&registration),
+        Some(&replacement_grant),
+    ));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement_store)
         .await
-        .expect("the serialized successor does not reactivate its revoked predecessor");
-    let loaded = store
-        .load_placement(SessionId::from_uuid(uuid(SESSION)))
-        .await?
-        .expect("the successor placement remains loadable");
+        .expect_err("replacement must wait for direct revocation authority");
+    revocation.commit().await?;
+    let rejected = replacement_store
+        .await
+        .expect_err("profile replacement cannot reactivate a revoked predecessor");
 
-    assert_eq!(loaded.placement(), &replacement.placement);
-    assert_eq!(loaded.grant(), Some(&replacement_grant));
+    assert_store_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -2288,6 +2272,21 @@ async fn s32_inv044_current_placement_head_cannot_rewind() -> Result<(), Box<dyn
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv044_current_placement_head_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, _) = stored_pin_fixture(&pool).await?;
+    let truncated = sqlx::query("TRUNCATE runner_current_session_placement")
+        .execute(&pool)
+        .await
+        .expect_err("the placement head cannot be truncated");
+
+    assert_check_violation(truncated);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv044_appended_placement_must_advance_current_head() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -2877,6 +2876,22 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
         .await?
         .expect("the profile-free replacement remains loadable");
     assert_eq!(stored_profile_free.grant(), Some(&tombstone));
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    insert_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
+    let profileless_lease = profile_free
+        .placement
+        .offer_lease(
+            &second_enrollment,
+            second_registration.registration(),
+            None,
+            authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
+            RunnerLeaseOfferRequest {
+                lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
+                tool: tool("inspect"),
+            },
+        )
+        .expect("a revoked tombstone does not become profileless lease authority");
+    store.store_lease(&profileless_lease).await?;
     let second_lost = profile_free
         .placement
         .mark_runner_lost()
@@ -3640,7 +3655,7 @@ async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<
     sqlx::query("ALTER TABLE runner_registration_tool DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    sqlx::query(
+    let rejected = sqlx::query(
         "UPDATE runner_registration_tool
             SET model_input_schema = '{ \"x\" : 0 }'
           WHERE enrollment_id = $1
@@ -3651,16 +3666,12 @@ async fn s30_inv001_reconstitution_rejects_noncanonical_tool_schema() -> Result<
     .bind(Decimal::from(stored.revision().get()))
     .bind(tool("inspect").as_str())
     .execute(&pool)
-    .await?;
+    .await
+    .expect_err("noncanonical schema text is rejected at the durable boundary");
     sqlx::query("ALTER TABLE runner_registration_tool ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let malformed = store
-        .load_registration(expected_enrollment.enrollment(), stored.revision())
-        .await
-        .expect_err("noncanonical durable schema text must fail closed");
-
-    assert_store_corruption(malformed, RunnerProtocolCorruption::InvalidEncoding);
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }

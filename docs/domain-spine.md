@@ -5358,7 +5358,8 @@ impl CredentialProfilePolicy {
         name: CredentialProfileName,
         approvals: impl IntoIterator<Item = (ToolName, CredentialToolApproval)>,
     ) -> Result<Self, RunnerDomainError>;
-    // accessors: name(), approval_for(), approvals()
+    // accessors: name(), approval_for()
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)>;
 }
 pub enum WorkspaceCapability {
     WorktreePerSession,
@@ -5639,8 +5640,9 @@ pub struct CredentialProfileGrantReconstitutionInput {
     /* public complete typed grant and approval facts */
 }
 impl CredentialProfileGrant {
-    // accessors: state(), revision(), lineage(), profile(), session(), runner(),
-    //   tools(), approvals()
+    // accessors: state(), revision(), lineage(), profile(), session(), runner()
+    pub fn tools(&self) -> impl Iterator<Item = &ToolName>;
+    pub fn approvals(&self) -> impl Iterator<Item = (&ToolName, CredentialToolApproval)>;
     pub fn revoke(self) -> Result<Self, RunnerDomainError>;
     pub fn reconstitute(
         input: CredentialProfileGrantReconstitutionInput,

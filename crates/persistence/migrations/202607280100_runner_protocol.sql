@@ -499,8 +499,9 @@ CREATE TABLE runner_registration_tool (
         ),
     CONSTRAINT runner_registration_tool_model_schema
         CHECK (
-            left(model_input_schema, 1) = '{'
-            AND jsonb_typeof(model_input_schema::jsonb) = 'object'
+            canonical_tool_json(model_input_schema) IS NOT NULL
+            AND model_input_schema = canonical_tool_json(model_input_schema)
+            AND left(model_input_schema, 1) = '{'
         ),
     CONSTRAINT runner_registration_tool_registration_fk
         FOREIGN KEY (enrollment_id, registration_revision)
@@ -685,6 +686,11 @@ CREATE TRIGGER runner_current_registration_advances
 BEFORE INSERT OR UPDATE OR DELETE ON runner_current_registration
 FOR EACH ROW
 EXECUTE FUNCTION guard_runner_current_registration();
+
+CREATE TRIGGER runner_current_registration_rejects_truncate
+BEFORE TRUNCATE ON runner_current_registration
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER runner_registration_is_append_only
 BEFORE UPDATE OR DELETE ON runner_registration
@@ -1116,6 +1122,11 @@ BEFORE INSERT OR UPDATE OR DELETE ON runner_current_session_placement
 FOR EACH ROW
 EXECUTE FUNCTION guard_runner_current_placement();
 
+CREATE TRIGGER runner_current_session_placement_rejects_truncate
+BEFORE TRUNCATE ON runner_current_session_placement
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER runner_session_placement_record_is_append_only
 BEFORE UPDATE OR DELETE ON runner_session_placement_record
 FOR EACH ROW
@@ -1132,6 +1143,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     prior runner_session_placement_record%ROWTYPE;
+    prior_grant_state text;
 BEGIN
     IF NEW.event_ordinal = 1 THEN
         IF NEW.event_kind <> 'created'
@@ -1238,6 +1250,12 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
     ELSIF NEW.event_kind = 'profile_replaced' THEN
+        SELECT event_kind INTO prior_grant_state
+          FROM runner_current_credential_grant_audit
+         WHERE session_id = prior.session_id
+           AND runner_id = prior.credential_grant_runner_id
+           AND grant_revision = prior.credential_grant_revision
+         FOR SHARE;
         IF prior.state_kind <> 'pinned'
            OR NEW.state_kind <> 'pinned'
            OR NEW.placement_revision <> prior.placement_revision + 1
@@ -1249,6 +1267,8 @@ BEGIN
            OR NEW.registration_revision <> prior.registration_revision
            OR NEW.credential_grant_revision IS DISTINCT FROM
                 prior.credential_grant_revision + 1
+           OR prior_grant_state IS NULL
+           OR prior_grant_state NOT IN ('issued', 'replaced')
            OR NEW.workspace_repository_key IS DISTINCT FROM
                 prior.workspace_repository_key
            OR NEW.workspace_working_directory IS DISTINCT FROM
@@ -1589,6 +1609,14 @@ CREATE TABLE runner_credential_grant_audit (
             grant_revision,
             audit_ordinal
         ),
+    CONSTRAINT runner_credential_grant_audit_head_key
+        UNIQUE (
+            session_id,
+            runner_id,
+            grant_revision,
+            audit_ordinal,
+            event_kind
+        ),
     CONSTRAINT runner_credential_grant_audit_shape
         CHECK (
             (
@@ -1627,6 +1655,35 @@ CREATE TABLE runner_credential_grant_audit (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE TABLE runner_current_credential_grant_audit (
+    session_id uuid NOT NULL,
+    runner_id uuid NOT NULL,
+    grant_revision numeric(20, 0) NOT NULL,
+    audit_ordinal numeric(20, 0) NOT NULL,
+    event_kind text NOT NULL,
+
+    CONSTRAINT runner_current_credential_grant_audit_pk
+        PRIMARY KEY (session_id, runner_id, grant_revision),
+    CONSTRAINT runner_current_credential_grant_audit_fk
+        FOREIGN KEY (
+            session_id,
+            runner_id,
+            grant_revision,
+            audit_ordinal,
+            event_kind
+        )
+        REFERENCES runner_credential_grant_audit (
+            session_id,
+            runner_id,
+            grant_revision,
+            audit_ordinal,
+            event_kind
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
 CREATE TRIGGER runner_credential_grant_is_append_only
 BEFORE UPDATE OR DELETE ON runner_credential_grant
 FOR EACH ROW
@@ -1646,6 +1703,86 @@ CREATE TRIGGER runner_credential_grant_audit_rejects_truncate
 BEFORE TRUNCATE ON runner_credential_grant_audit
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION guard_runner_current_grant_audit()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE'
+       OR (
+            TG_OP = 'INSERT'
+            AND (
+                NEW.audit_ordinal <> 1
+                OR NEW.event_kind NOT IN ('issued', 'replaced')
+            )
+       )
+       OR (
+            TG_OP = 'UPDATE'
+            AND (
+                ROW(NEW.session_id, NEW.runner_id, NEW.grant_revision)
+                    IS DISTINCT FROM
+                    ROW(OLD.session_id, OLD.runner_id, OLD.grant_revision)
+                OR OLD.audit_ordinal <> 1
+                OR OLD.event_kind NOT IN ('issued', 'replaced')
+                OR NEW.audit_ordinal <> 2
+                OR NEW.event_kind <> 'revoked'
+            )
+       )
+    THEN
+        RAISE EXCEPTION 'runner grant audit head is not a canonical advance'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_current_grant_audit_is_guarded
+BEFORE INSERT OR UPDATE OR DELETE ON runner_current_credential_grant_audit
+FOR EACH ROW
+EXECUTE FUNCTION guard_runner_current_grant_audit();
+
+CREATE TRIGGER runner_current_credential_grant_audit_rejects_truncate
+BEFORE TRUNCATE ON runner_current_credential_grant_audit
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION advance_runner_current_grant_audit()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.audit_ordinal = 1 THEN
+        INSERT INTO runner_current_credential_grant_audit
+            (session_id, runner_id, grant_revision, audit_ordinal, event_kind)
+        VALUES (
+            NEW.session_id,
+            NEW.runner_id,
+            NEW.grant_revision,
+            NEW.audit_ordinal,
+            NEW.event_kind
+        );
+    ELSE
+        UPDATE runner_current_credential_grant_audit
+           SET audit_ordinal = NEW.audit_ordinal,
+               event_kind = NEW.event_kind
+         WHERE session_id = NEW.session_id
+           AND runner_id = NEW.runner_id
+           AND grant_revision = NEW.grant_revision
+           AND audit_ordinal = NEW.audit_ordinal - 1;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'runner grant audit does not advance its current head'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runner_grant_audit_advances_current_head
+AFTER INSERT ON runner_credential_grant_audit
+FOR EACH ROW
+EXECUTE FUNCTION advance_runner_current_grant_audit();
 
 CREATE FUNCTION assert_runner_grant_complete(
     checked_session uuid,
@@ -2276,6 +2413,7 @@ DECLARE
     prior runner_lease_generation%ROWTYPE;
     prior_state text;
     prior_request uuid;
+    grant_state text;
 BEGIN
     SELECT record.* INTO placement
       FROM runner_current_session_placement AS current_placement
@@ -2316,6 +2454,14 @@ BEGIN
             NEW.registration_enrollment_id
        AND registered.tool_name = NEW.tool_name
        FOR SHARE OF current_registration;
+    IF NEW.credential_grant_revision IS NOT NULL THEN
+        SELECT event_kind INTO grant_state
+          FROM runner_current_credential_grant_audit
+         WHERE session_id = NEW.session_id
+           AND runner_id = NEW.runner_id
+           AND grant_revision = NEW.credential_grant_revision
+         FOR SHARE;
+    END IF;
     INSERT INTO runner_tool_request_lease_binding
         (request_id, lease_id)
     VALUES (attempted_request, NEW.lease_id)
@@ -2344,8 +2490,15 @@ BEGIN
             NEW.registration_revision
        OR placement.pinned_credential_profile_name IS DISTINCT FROM
             NEW.credential_profile_name
-       OR placement.credential_grant_revision IS DISTINCT FROM
-            NEW.credential_grant_revision
+       OR (
+            NEW.credential_profile_name IS NOT NULL
+            AND placement.credential_grant_revision IS DISTINCT FROM
+                NEW.credential_grant_revision
+       )
+       OR (
+            NEW.credential_profile_name IS NULL
+            AND NEW.credential_grant_revision IS NOT NULL
+       )
        OR current_registration_runner IS DISTINCT FROM NEW.runner_id
        OR (
             placement.selector_kind = 'identity'
@@ -2451,15 +2604,7 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF NEW.credential_grant_revision IS NOT NULL
-       AND EXISTS (
-            SELECT 1
-              FROM runner_credential_grant_audit AS audit
-             WHERE audit.session_id = NEW.session_id
-               AND audit.runner_id = NEW.runner_id
-               AND audit.grant_revision =
-                    NEW.credential_grant_revision
-               AND audit.event_kind = 'revoked'
-       )
+       AND grant_state NOT IN ('issued', 'replaced')
     THEN
         RAISE EXCEPTION 'revoked credential grant cannot authorize a lease'
             USING ERRCODE = '23514';
