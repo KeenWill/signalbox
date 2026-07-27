@@ -22,7 +22,7 @@ use crate::InvalidDurableCommandId;
 /// The selected frontier owns its imported-conversation identity, so this
 /// request accepts no second conversation field. Private fields keep reserved
 /// command sentinels out of canonical construction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateSessionFromImportedFrontierRequest {
     command_id: DurableCommandId,
     imported_frontier: ImportedTranscriptFrontier,
@@ -68,9 +68,9 @@ impl CreateSessionFromImportedFrontierRequest {
         self.relationship
     }
 
-    /// Returns the complete initial model-selection defaults.
-    pub const fn initial_configuration_defaults(&self) -> SessionConfigurationDefaults {
-        self.initial_configuration_defaults
+    /// Borrows the complete initial model-selection defaults.
+    pub const fn initial_configuration_defaults(&self) -> &SessionConfigurationDefaults {
+        &self.initial_configuration_defaults
     }
 }
 
@@ -487,7 +487,8 @@ mod tests {
         where
             NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId + Send,
         {
-            self.observed.push((command, session, seed_frontier));
+            self.observed
+                .push((command.clone(), session, seed_frontier));
             let response = self
                 .responses
                 .pop_front()
@@ -576,14 +577,14 @@ mod tests {
             identity,
             selected,
             relationship,
-            initial_defaults,
+            initial_defaults.clone(),
         )
         .expect("fixture request is admitted");
 
         assert_eq!(request.command_id(), identity);
         assert_eq!(request.imported_frontier(), selected);
         assert_eq!(request.relationship(), relationship);
-        assert_eq!(request.initial_configuration_defaults(), initial_defaults);
+        assert_eq!(request.initial_configuration_defaults(), &initial_defaults);
     }
 
     /// S28 / INV-001 / INV-002: production generation supplies fresh UUIDv7
@@ -635,7 +636,7 @@ mod tests {
             expected_command,
             selected,
             expected_relationship,
-            expected_defaults,
+            expected_defaults.clone(),
         )
         .expect("fixture request is admitted");
         let expected_session = session_id(30);
@@ -651,11 +652,10 @@ mod tests {
         );
 
         let outcome = run_ready(service.execute(request)).expect("handling succeeds");
-        assert!(matches!(
-            outcome,
-            CreateSessionFromImportedFrontierOutcome::Applied(result)
-                if result.session() == expected_session
-        ));
+        let CreateSessionFromImportedFrontierOutcome::Applied(result) = outcome else {
+            panic!("the imported-frontier creation must apply");
+        };
+        assert_eq!(result.session(), expected_session);
 
         let (ids, transaction) = service.into_parts();
         assert_eq!(ids.session_calls, 1);
@@ -666,7 +666,7 @@ mod tests {
         assert_eq!(command.command_id(), expected_command);
         assert_eq!(command.imported_frontier(), selected);
         assert_eq!(command.relationship(), expected_relationship);
-        assert_eq!(command.initial_configuration_defaults(), expected_defaults);
+        assert_eq!(command.initial_configuration_defaults(), &expected_defaults);
         assert_eq!(*session, expected_session);
         assert_eq!(*seed_frontier, expected_frontier);
         assert_eq!(
@@ -688,7 +688,7 @@ mod tests {
             replayed_command,
             selected,
             replayed_relationship,
-            replayed_defaults,
+            replayed_defaults.clone(),
         )
         .expect("fixture request is admitted");
         let recorded_session = session_id(99);
@@ -699,7 +699,7 @@ mod tests {
                 replayed_command,
                 selected,
                 replayed_relationship,
-                replayed_defaults,
+                replayed_defaults.clone(),
             )
             .prepare(&conversation, recorded_session, recorded_frontier, || {
                 recorded_entries

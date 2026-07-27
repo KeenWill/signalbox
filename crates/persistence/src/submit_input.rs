@@ -5768,6 +5768,15 @@ fn decode_optional_position(
         .transpose()
 }
 
+/// Reconstitutes the model selection and dangerous-tool posture one origin
+/// froze, deliberately without the epoch's system prompt.
+///
+/// This projection is batched over every command a session load reconstitutes,
+/// so selecting the epoch's prompt here would return and retain one copy of the
+/// same bounded megabyte text per row. The prompt has exactly two readers, both
+/// single-epoch: the session aggregate's current-defaults load
+/// (`crate::session`) and model-call preparation's frozen-epoch read
+/// (`crate::model_execution`). Neither reads it from a submit-input receipt.
 fn decode_defaults(
     kind: String,
     direct: Option<Uuid>,
