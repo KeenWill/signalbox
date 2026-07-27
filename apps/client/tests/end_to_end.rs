@@ -942,6 +942,241 @@ async fn s33_inv008_inv046_terminal_client_installs_a_forward_only_model_default
     Ok(())
 }
 
+struct ImportedContinuationFixture {
+    imported_user: String,
+    imported_assistant: String,
+    live_user: String,
+    live_assistant: String,
+}
+
+impl ImportedContinuationFixture {
+    fn new() -> Self {
+        Self {
+            imported_user: String::from("synthetic imported question"),
+            imported_assistant: String::from("synthetic imported answer"),
+            live_user: String::from("synthetic live continuation"),
+            live_assistant: String::from("synthetic live reply"),
+        }
+    }
+
+    fn source(&self) -> String {
+        format!(
+            "{{\"sessionId\":\"terminal-import-continue\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n{{\"sessionId\":\"terminal-import-continue\",\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"{}\"}}}}",
+            self.imported_user, self.imported_assistant,
+        )
+    }
+}
+
+/// S28 / S01 / INV-038 / INV-014: a synthetic imported prefix seeds a
+/// live session whose next real turn follows the imported entries in the
+/// authoritative terminal transcript.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv038_inv014_terminal_client_completes_an_offline_imported_continuation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ImportedContinuationFixture::new();
+    let (container, pool) = postgres().await?;
+    let socket_directory = SocketDirectory::create()?;
+    let source_directory = tempfile::tempdir()?;
+    let source_path = source_directory.path().join("synthetic-session.jsonl");
+    fs::write(&source_path, fixture.source())?;
+    let selection_uuid = Uuid::from_u128(0x9201);
+    let target_uuid = Uuid::from_u128(0x9202);
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
+    let model_configuration = HubModelConfiguration::parse(&format!(
+        r#"
+version = 1
+
+[[models]]
+selection_id = "{selection_uuid}"
+target_id = "{target_uuid}"
+provider = "anthropic"
+provider_model = "scripted-imported-continuation"
+max_output_tokens = 64
+"#
+    ))?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("the fixture target definition is unique");
+    let runtime_models =
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target,
+            String::from("scripted-imported-continuation"),
+            64,
+        )
+        .expect("the fixture runtime definition is valid")])
+        .expect("the fixture runtime target is unique");
+    let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
+        CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-imported-continuation")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(fixture.live_assistant.clone())],
+            usage: TokenUsage::unreported(),
+        },
+    )));
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let listener = LocalProcessListener::bind(socket_directory.socket())?;
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        InProcessToolDispatchGate::default(),
+        model_configuration,
+    );
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("scripted-imported-continuation"),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let process_task = tokio::spawn(process_runtime.run(shutdown_receiver.clone()));
+    let scheduler_task = tokio::spawn(async move {
+        scheduler
+            .run_until(wait_for_shutdown(shutdown_receiver))
+            .await
+    });
+
+    let imported = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![
+                String::from("import"),
+                String::from("--format"),
+                String::from("claude-code"),
+                source_path.display().to_string(),
+            ],
+            None,
+        ),
+    )
+    .await??;
+    assert!(imported.status.success());
+    let imported_output = String::from_utf8(imported.stdout)?;
+    let imported_conversation_id = imported_output
+        .strip_prefix("inserted imported_conversation_id=")
+        .expect("the synthetic import returns an inserted receipt")
+        .trim()
+        .to_owned();
+    Uuid::parse_str(&imported_conversation_id)?;
+
+    let continued = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![
+                String::from("continue"),
+                imported_conversation_id.clone(),
+                String::from("--through-position"),
+                String::from("2"),
+                String::from("--relationship"),
+                String::from("resume"),
+                String::from("--model"),
+                selection.into_uuid().hyphenated().to_string(),
+            ],
+            None,
+        ),
+    )
+    .await??;
+    assert!(continued.status.success());
+    let session_id = String::from_utf8(continued.stdout)?.trim().to_owned();
+    Uuid::parse_str(&session_id)?;
+    assert!(String::from_utf8(continued.stderr)?.starts_with("command_id="));
+
+    let sent = timeout(
+        Duration::from_secs(20),
+        run_client(
+            socket_directory.socket().to_owned(),
+            vec![String::from("send"), session_id.clone()],
+            Some(fixture.live_user.clone()),
+        ),
+    )
+    .await??;
+    assert!(
+        sent.status.success(),
+        "send failed: {}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(sent.stdout)?,
+        format!("{}\n", fixture.live_assistant)
+    );
+    assert!(!fatal_execution.is_triggered());
+
+    let transcript = run_client(
+        socket_directory.socket().to_owned(),
+        vec![String::from("transcript"), session_id],
+        None,
+    )
+    .await?;
+    assert!(transcript.status.success());
+    let transcript = String::from_utf8(transcript.stdout)?;
+    let imported_user_label = transcript
+        .find("imported_user ")
+        .expect("the transcript labels the imported user entry");
+    let imported_user_content = transcript
+        .find(&fixture.imported_user)
+        .expect("the transcript contains the imported user fixture");
+    let imported_assistant_label = transcript
+        .find("imported_assistant ")
+        .expect("the transcript labels the imported assistant entry");
+    let imported_assistant_content = transcript
+        .find(&fixture.imported_assistant)
+        .expect("the transcript contains the imported assistant fixture");
+    let live_user_label = transcript
+        .find("user turn=")
+        .expect("the transcript labels the live user entry");
+    let live_user_content = transcript
+        .find(&fixture.live_user)
+        .expect("the transcript contains the live user fixture");
+    let live_assistant_label = transcript
+        .find("assistant turn=")
+        .expect("the transcript labels the live assistant entry");
+    let live_assistant_content = transcript
+        .find(&fixture.live_assistant)
+        .expect("the transcript contains the live assistant fixture");
+    let turn_completed = transcript
+        .find("turn_completed ")
+        .expect("the transcript contains the live turn terminal marker");
+    assert!(imported_user_label < imported_user_content);
+    assert!(imported_user_content < imported_assistant_label);
+    assert!(imported_assistant_label < imported_assistant_content);
+    assert!(imported_assistant_content < live_user_label);
+    assert!(live_user_label < live_user_content);
+    assert!(live_user_content < live_assistant_label);
+    assert!(live_assistant_label < live_assistant_content);
+    assert!(live_assistant_content < turn_completed);
+
+    shutdown.send(true)?;
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler_task).await??,
+        SchedulerLoopExit::Shutdown
+    );
+    timeout(Duration::from_secs(10), process_task).await???;
+    pool.close().await;
+    socket_directory.cleanup()?;
+    drop(container);
+    Ok(())
+}
+
 /// S01 / S02 / INV-014 / INV-032: the daily terminal binary drives the real
 /// process server, durable outbox, scheduler, model-execution bridge, and
 /// authoritative reply reread without network access. A one-step provider

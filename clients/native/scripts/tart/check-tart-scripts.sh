@@ -113,6 +113,28 @@ test_host_xcode_shard_forwards_skip_selection() (
 	[[ "$xcode_plan" == *"SIGNALBOX_NATIVE_SKIP_TESTING=$caller_skip_identifier"* ]]
 )
 
+test_real_smoke_shard_stops_before_legacy_setup() (
+	local output
+	# shellcheck source=/dev/null
+	source "$SCRIPT_DIR/run-guest-shard.sh"
+
+	require_tool() {
+		echo "real-smoke unexpectedly required a tool." >&2
+		return 1
+	}
+	load_and_resolve_real_server_url() {
+		echo "real-smoke unexpectedly resolved a server URL." >&2
+		return 1
+	}
+	load_and_resolve_real_server_api_key() {
+		echo "real-smoke unexpectedly resolved an API key." >&2
+		return 1
+	}
+
+	output="$(run_real_smoke_shard)"
+	[[ "$output" == *"remote/mobile transport is an owner design gate"* ]]
+)
+
 bash -n "$SCRIPT_DIR/run-guest-shard.sh"
 bash -n "$SCRIPT_DIR/run-shard.sh"
 bash -n "$SCRIPT_DIR/run-matrix.sh"
@@ -133,6 +155,7 @@ test_real_server_api_key_resolution_stays_subshell_scoped
 test_xcode_shard_adds_real_server_smoke_to_existing_skips
 test_xcode_shard_preserves_caller_skip_environment
 test_host_xcode_shard_forwards_skip_selection
+test_real_smoke_shard_stops_before_legacy_setup
 "$SCRIPT_DIR/run-matrix.sh" --print-plan >/dev/null
 
 echo "Tart scripts passed dry-run validation."
