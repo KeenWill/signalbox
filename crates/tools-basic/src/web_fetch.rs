@@ -19,9 +19,11 @@ use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
 };
 
-use crate::tool_contract::{ToolContract, ToolContractCompileError, compile_contract_definition};
+use signalbox_tool_contract::{
+    ToolContract, ToolContractCompileError, compile_contract_definition,
+};
 
-pub(crate) const WEB_FETCH_NAME: &str = "web_fetch";
+pub const WEB_FETCH_NAME: &str = "web_fetch";
 const INVALID_ARGUMENTS_DETAIL: &str =
     "expected one absolute HTTP(S) URL without user information or a fragment";
 const REQUEST_FAILED_DETAIL: &str = "web fetch request failed";
@@ -81,7 +83,7 @@ impl<Transport> ToolContract for WebFetchTool<Transport> {
 /// Typed `web_fetch` argument shape; decoder and rendered schema share it.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct WebFetchArguments {
+pub struct WebFetchArguments {
     /// Absolute HTTP(S) URL without user information or a fragment.
     url: WebFetchUrl,
 }
@@ -365,7 +367,8 @@ async fn fetch_with_client(
 
 /// Whether a body stream still holds content after an exact-cap read. Empty
 /// trailing frames are legal and are not evidence that bytes were discarded.
-pub(crate) async fn has_more_response_bytes<S, B, E>(
+#[doc(hidden)]
+pub async fn has_more_response_bytes<S, B, E>(
     stream: &mut S,
 ) -> Result<bool, WebFetchTransportFailure>
 where
@@ -397,7 +400,8 @@ struct ResolvedPublicDestination {
 
 /// Builds one credential-free client pinned to a URL's complete admitted
 /// public DNS result.
-pub(crate) async fn public_destination_client(
+#[doc(hidden)]
+pub async fn public_destination_client(
     url: &Url,
     exchange_timeout: Duration,
 ) -> Result<Client, PublicDestinationClientError> {
@@ -414,7 +418,8 @@ pub(crate) async fn public_destination_client(
 /// A URL could not be resolved and pinned as a public-only destination before
 /// dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PublicDestinationClientError {
+#[doc(hidden)]
+pub enum PublicDestinationClientError {
     /// The destination shape or resolved address set was not public-only.
     DestinationRejected,
     /// DNS resolution or client construction failed before dispatch.

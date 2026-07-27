@@ -2186,10 +2186,8 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let outcome = scan.execute().await?;
-    assert!(outcome.is_complete());
     assert_eq!(outcome.recovered_turn_count(), 0);
     let repeated = scan.execute().await?;
-    assert!(repeated.is_complete());
     assert_eq!(repeated.recovered_turn_count(), 0);
     let parked: (String, Option<Uuid>, i64) = sqlx::query_as(
         "SELECT active_phase_kind, approval_tool_request_id,
@@ -2478,14 +2476,12 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
         "dispatch failure already classified the effect-free attempt and failed the turn"
     );
     let repeated_recovery = startup.execute().await?;
-    assert!(repeated_recovery.is_complete());
     assert_eq!(repeated_recovery.recovered_turn_count(), 0);
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
     let classified: (String, String, String, String) = sqlx::query_as(
@@ -2955,14 +2951,12 @@ async fn s06_inv005_inv024_inv025_inv026_inv034_external_crash_parks_without_ret
         PostgresStartupScanRepository::new(fixture.pool.clone()),
     );
     let recovery = startup.execute().await?;
-    assert!(recovery.is_complete());
     assert_eq!(
         recovery.recovered_turn_count(),
         0,
         "the ambiguous turn remains active while its attempt is recovered"
     );
     let repeated_recovery = startup.execute().await?;
-    assert!(repeated_recovery.is_complete());
     assert_eq!(
         repeated_recovery.recovered_turn_count(),
         0,

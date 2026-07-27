@@ -72,16 +72,16 @@ path's name.
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic or GitHub transport construction fails startup at the `Configuration`
 phase, before any database contact. Startup and shutdown logs carry the phase,
-an operator failure class, and small typed fields where present (blocker count,
-session and turn ids, recovered-turn count, grace-window seconds) — never
-configuration values, paths, or URLs. The typed configuration error does not
-survive to the log: `run_hub` collapses every catalog-parse and
-adapter-construction variant (and likewise connection and migration errors) into
-a generic `Infrastructure` class carrying only its phase, so an operator cannot
-distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The three file paths are accepted without I/O at
-configuration time; only the catalog file is actually read during startup.
-Neither credential file is read at startup (see credential lifecycle below).
+an operator failure class, and small typed fields where present (session and
+turn ids, recovered-turn count, grace-window seconds) — never configuration
+values, paths, or URLs. The typed configuration error does not survive to the
+log: `run_hub` collapses every catalog-parse and adapter-construction variant
+(and likewise connection and migration errors) into a generic `Infrastructure`
+class carrying only its phase, so an operator cannot distinguish an unreadable
+catalog from an unknown field, bad version, or invalid limit (see Open edges).
+The three file paths are accepted without I/O at configuration time; only the
+catalog file is actually read during startup. Neither credential file is read at
+startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -299,7 +299,7 @@ Enforcement as implemented:
   request-scoped token and its JSON-string-escaped form before the result can
   cross into tool evidence. Code-host transport failures and malformed responses
   expose only fixed details, never response bodies. INV-035-tagged tests in
-  `apps/signalboxd/src/code_host/mod.rs` and
+  `crates/tools-code-host/src/code_host/mod.rs` and
   `apps/signalboxd/tests/offline_tool_loop.rs` enforce the executor and durable
   transcript boundaries.
 

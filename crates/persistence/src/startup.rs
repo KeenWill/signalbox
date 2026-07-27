@@ -582,11 +582,6 @@ where
                     StartupScanSessionOutcome::NoActiveTurn,
                 ));
             }
-            AcceptedInputTurnFailureFailure::PendingSteering { accepted_input } => {
-                return Ok(TransactionDecision::Rollback(
-                    StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
-                ));
-            }
             AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
                 return Err(StartupScanRepositoryError::IdentityCollision(
                     StartupScanIdentityCollision::FailureEntry,
@@ -597,7 +592,8 @@ where
                     StartupScanIdentityCollision::TerminalFrontier,
                 ));
             }
-            AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+            AcceptedInputTurnFailureFailure::PendingSteering { .. }
+            | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
             | AcceptedInputTurnFailureFailure::ActiveStartMissing
             | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
             | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
@@ -804,6 +800,7 @@ fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryE
         }
         ToolLoopRepositoryError::Corruption(_)
         | ToolLoopRepositoryError::DifferentCommandKind
+        | ToolLoopRepositoryError::ConflictingCommandReuse
         | ToolLoopRepositoryError::InvalidTransition(_) => {
             StartupScanCorruption::Inconsistent("tool-attempt restart state").into()
         }
