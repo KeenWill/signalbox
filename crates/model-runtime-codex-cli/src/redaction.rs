@@ -1329,17 +1329,26 @@ mod tests {
             });
             sink.finish();
         }
-        let emitted: String = observed
-            .iter()
-            .filter_map(|observation| match &observation.fact {
-                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
 
-        assert!(!emitted.contains("sensitive-escaped-stream"));
-        assert!(!emitted.contains("sk"));
-        assert!(emitted.contains("[redacted]"));
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: REDACTED.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 1,
+                        text: REDACTED.to_string(),
+                    },
+                },
+            ]
+        );
     }
 
     #[test]
