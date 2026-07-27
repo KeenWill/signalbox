@@ -133,6 +133,14 @@ impl ReviewWorkflowStore {
         &self,
         run: ReviewRunId,
     ) -> Result<Option<ReviewRun>, ReviewWorkflowStoreError> {
+        Ok(self.load_run_with_pass(run).await?.map(|(run, _pass)| run))
+    }
+
+    /// Loads and validates one run and its recorded pass from one snapshot.
+    pub async fn load_run_with_pass(
+        &self,
+        run: ReviewRunId,
+    ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
             "SELECT workflow_run.run_id, workflow_run.target_id,
@@ -212,8 +220,9 @@ impl ReviewWorkflowStore {
             None => None,
         };
         let run = decode_run(&row, loaded_pass.as_ref())?;
+        let pass = loaded_pass.map(|loaded| loaded.pass);
         transaction.commit().await?;
-        Ok(Some(run))
+        Ok(Some((run, pass)))
     }
 
     /// Applies one domain-validated run transition under row lock.

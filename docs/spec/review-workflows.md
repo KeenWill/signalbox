@@ -396,9 +396,12 @@ representation choice and rejected alternatives are recorded in the
 
 The terminal client exposes target creation, run admission and activation,
 single-finding read-only completion, finding listing, and target, run, and
-finding reads. Mutation commands print their generated command identity before
-socket I/O so an ambiguous attempt can be retried exactly. Process-derived text
-uses the terminal-safe rendering contract owned by the process protocol.
+finding reads. A run read reconstructs the run and its optional recorded pass
+from one repeatable-read snapshot, so the response cannot combine lifecycle
+projections from different commits. Mutation commands print their generated
+command identity before socket I/O so an ambiguous attempt can be retried
+exactly. Process-derived text uses the terminal-safe rendering contract owned by
+the process protocol.
 
 ## Open edges
 

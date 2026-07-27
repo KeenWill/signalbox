@@ -4,7 +4,10 @@ use signalbox_application::{
     ReviewWorkflowCommand, ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult,
     ReviewWorkflowOperation, ReviewWorkflowOperationKind, ReviewWorkflowTransaction,
 };
-use signalbox_domain::{ReviewFinding, ReviewFindingStatus, ReviewKey, ReviewRun};
+use signalbox_domain::{
+    ReviewFinding, ReviewFindingStatus, ReviewKey, ReviewPass, ReviewPassState, ReviewRun,
+    ReviewRunState,
+};
 use sqlx::{Postgres, Row, Transaction, types::Uuid};
 
 use crate::{
@@ -67,7 +70,9 @@ impl ReviewWorkflowTransaction for ReviewWorkflowStore {
         }
 
         let result = apply_or_recover(self, command.operation()).await?;
-        insert_receipt(&mut claim, &command, &result).await?;
+        insert_receipt(&mut claim, &command, &result)
+            .await
+            .map_err(ReviewWorkflowStoreError::CommitAmbiguous)?;
         commit_claim(claim).await?;
         Ok(ReviewWorkflowCommandOutcome::Recorded(result))
     }
@@ -173,7 +178,7 @@ async fn apply_or_recover(
                 None => store.insert_run(run).await?,
             }
             match store.load_pass(pass.reference().pass()).await? {
-                Some(existing) if existing == *pass => {}
+                Some(existing) if same_pass_admission(&existing, pass) => {}
                 Some(_) => return Err(command_conflict("pass identity names another execution")),
                 None => store.insert_pass(pass).await?,
             }
@@ -310,7 +315,17 @@ fn same_run_admission(existing: &ReviewRun, requested: &ReviewRun) -> bool {
     existing.reference() == requested.reference()
         && existing.workflow() == requested.workflow()
         && existing.policy() == requested.policy()
-        && existing.state() == requested.state()
+        && existing.recorded_pass() == requested.recorded_pass()
+        && requested.state() == ReviewRunState::Queued
+}
+
+fn same_pass_admission(existing: &ReviewPass, requested: &ReviewPass) -> bool {
+    existing.reference() == requested.reference()
+        && existing.kind() == requested.kind()
+        && existing.session() == requested.session()
+        && existing.accepted_input() == requested.accepted_input()
+        && existing.origin_turn() == requested.origin_turn()
+        && requested.state() == &ReviewPassState::Queued
 }
 
 fn operation_kind(operation: ReviewWorkflowOperationKind) -> &'static str {
@@ -329,7 +344,7 @@ async fn insert_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     command: &ReviewWorkflowCommand,
     result: &ReviewWorkflowCommandResult,
-) -> Result<(), ReviewWorkflowStoreError> {
+) -> Result<(), sqlx::Error> {
     let encoded = encode_result(result);
     sqlx::query(
         "INSERT INTO review_workflow_command
@@ -513,11 +528,8 @@ fn command_conflict(detail: &str) -> ReviewWorkflowStoreError {
 async fn commit_claim(
     transaction: Transaction<'_, Postgres>,
 ) -> Result<(), ReviewWorkflowStoreError> {
-    transaction.commit().await.map_err(|error| {
-        if crate::commit_failure_is_ambiguous(&error) {
-            ReviewWorkflowStoreError::CommitAmbiguous(error)
-        } else {
-            ReviewWorkflowStoreError::Database(error)
-        }
-    })
+    transaction
+        .commit()
+        .await
+        .map_err(ReviewWorkflowStoreError::CommitAmbiguous)
 }

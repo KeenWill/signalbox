@@ -264,6 +264,14 @@ complete inventory, event, or attachment fails closed. The
 [durable review-command decision](../decisions.md#2026-07-26--recover-review-commands-from-their-exact-aggregate-effects)
 owns this representation choice.
 
+The daemon admits one review mutation at a time and retains that admission
+through claim inspection, aggregate effect recovery, and receipt recording.
+Review reads remain concurrent. This bound composes with the snapshot-reader
+reservation so an open claim cannot form a circular pool wait with its nested
+aggregate transaction; the
+[review-command admission decision](../decisions.md#2026-07-26--serialize-durable-review-command-claims)
+owns the capacity choice.
+
 Before application construction, `replace_session_defaults` validates the
 requested direct selection or alias against the process's immutable model
 catalog. An unknown catalog identity is `invalid_request` and claims no command
@@ -597,7 +605,9 @@ maps to `commit_ambiguous`; the client retries the exact command identity and
 payload to discover the recorded outcome. A `reconcile_turn` or
 `decide_tool_request` retry reaches that recorded outcome unconditionally,
 because a claimed command identity bypasses the precondition the first handling
-already satisfied. A definitely pre-commit infrastructure failure maps to
+already satisfied. Once a review aggregate effect has been applied or recovered,
+any typed-receipt insertion or claim-commit failure is likewise
+`commit_ambiguous`. A definitely pre-commit infrastructure failure maps to
 `unavailable`.
 
 Conversation import carries no durable command identity because exact

@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-26 — Serialize durable review-command claims
+
+**Context.** A review-command claim holds one application-pool connection while
+its already-focused aggregate operation acquires another. A pool-sized command
+burst can therefore occupy every connection with claims, and the snapshot reader
+budget deliberately leaves only two connections for non-snapshot work.
+
+**Decision.** Share one daemon-owned semaphore across all seven review mutation
+requests and admit exactly one such mutation at a time. Acquire its permit
+before opening the durable claim and retain it through effect recovery and
+receipt recording. Review reads remain concurrent. Together with the existing
+snapshot-reader reservation, one claim and its nested aggregate transaction fit
+without a circular pool wait.
+
+**Rejected alternatives.** A `pool size - 1` review limit still lets two claims
+consume both connections reserved outside snapshot work. Rebuilding each
+aggregate operation inside the claim transaction would replace its tested
+transaction boundary. A committed pre-effect claim still requires the takeover
+protocol rejected by the durable review-command decision.
+
+**Affects.** Version-eleven review mutation admission, process-runtime resource
+budgets, and their concurrency regression tests.
+
 ## 2026-07-26 — Recover review commands from their exact aggregate effects
 
 **Context.** Protocol-driven review operations can commit their aggregate effect

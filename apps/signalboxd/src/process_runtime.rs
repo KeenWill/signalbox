@@ -112,6 +112,7 @@ const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
 const MAX_CONCURRENT_IMPORTS: usize = 1;
+const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
@@ -125,6 +126,7 @@ struct ConnectionServices {
     updates: broadcast::Sender<ProcessUpdate>,
     inbound_frame_budget: Arc<Semaphore>,
     import_budget: Arc<Semaphore>,
+    review_command_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
 }
 
@@ -231,6 +233,7 @@ async fn serve_connections(
         updates,
         inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
+        review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
     };
     let mut connections = JoinSet::new();
@@ -290,6 +293,9 @@ fn inspect_connection_completion(
         }
         Some(Ok(Err(ProcessConnectionError::ImportBudgetClosed))) => {
             Err(ProcessRuntimeError::ImportBudgetClosed)
+        }
+        Some(Ok(Err(ProcessConnectionError::ReviewCommandBudgetClosed))) => {
+            Err(ProcessRuntimeError::ReviewCommandBudgetClosed)
         }
         Some(Err(error)) => Err(ProcessRuntimeError::ConnectionTask(error)),
     }
@@ -442,6 +448,18 @@ async fn acquire_import_permit(
     }
 }
 
+async fn acquire_review_command_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::ReviewCommandBudgetClosed),
+    }
+}
+
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
@@ -449,6 +467,19 @@ fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
         return None;
     }
     usize::try_from(available).ok()
+}
+
+const fn is_review_mutation(request: &ClientRequest) -> bool {
+    matches!(
+        request,
+        ClientRequest::CreateReviewTarget { .. }
+            | ClientRequest::StartReviewRun { .. }
+            | ClientRequest::ActivateReviewPass { .. }
+            | ClientRequest::RecordReviewFindings { .. }
+            | ClientRequest::RecordReviewFindingDisposition { .. }
+            | ClientRequest::ReserveReviewExternalLink { .. }
+            | ClientRequest::AttachReviewExternalLink { .. }
+    )
 }
 
 async fn handle_request<Writer>(
@@ -463,10 +494,28 @@ async fn handle_request<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let review_digest = serde_json::to_vec(&request).ok().map(|bytes| {
-        let digest: [u8; 32] = Sha256::digest(bytes).into();
-        digest
-    });
+    let review_request = is_review_mutation(&request);
+    let _review_command_permit = if review_request {
+        let Some(permit) = acquire_review_command_permit(
+            Arc::clone(&services.review_command_budget),
+            &mut shutdown,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        Some(permit)
+    } else {
+        None
+    };
+    let review_digest = if review_request {
+        serde_json::to_vec(&request).ok().map(|bytes| {
+            let digest: [u8; 32] = Sha256::digest(bytes).into();
+            digest
+        })
+    } else {
+        None
+    };
     match request {
         ClientRequest::CreateSession {
             command_id,
@@ -1806,24 +1855,15 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    let run = match store
-        .load_run(ReviewRunId::from_uuid(run_id.into_uuid()))
+    let (run, pass) = match store
+        .load_run_with_pass(ReviewRunId::from_uuid(run_id.into_uuid()))
         .await
     {
-        Ok(Some(run)) => run,
+        Ok(Some(aggregate)) => aggregate,
         Ok(None) => return write_review_not_found(writer, version, request_id).await,
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
-    let pass = match run.recorded_pass() {
-        Some(reference) => match store.load_pass(reference.pass()).await {
-            Ok(Some(pass)) => Some(review_pass_snapshot(&pass)),
-            Ok(None) => return write_review_internal(writer, version, request_id).await,
-            Err(error) => {
-                return write_review_store_error(writer, version, request_id, error).await;
-            }
-        },
-        None => None,
-    };
+    let pass = pass.as_ref().map(review_pass_snapshot);
     write_message(
         writer,
         version,
@@ -2681,6 +2721,7 @@ impl SnapshotSpoolError {
             ProcessConnectionError::EncodeInvariant
             | ProcessConnectionError::InboundFrameBudgetClosed
             | ProcessConnectionError::ImportBudgetClosed
+            | ProcessConnectionError::ReviewCommandBudgetClosed
             | ProcessConnectionError::SnapshotReaderBudgetClosed => Self::EncodeInvariant,
         }
     }
@@ -5571,6 +5612,7 @@ enum ProcessConnectionError {
     EncodeInvariant,
     InboundFrameBudgetClosed,
     ImportBudgetClosed,
+    ReviewCommandBudgetClosed,
     SnapshotReaderBudgetClosed,
 }
 
@@ -5604,6 +5646,9 @@ impl fmt::Display for ProcessConnectionError {
             Self::ImportBudgetClosed => {
                 "the local process connection lost its conversation import budget"
             }
+            Self::ReviewCommandBudgetClosed => {
+                "the local process connection lost its review-command budget"
+            }
             Self::SnapshotReaderBudgetClosed => {
                 "the local process connection lost its snapshot reader budget"
             }
@@ -5620,6 +5665,7 @@ impl Error for ProcessConnectionError {
             | Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
+            | Self::ReviewCommandBudgetClosed
             | Self::SnapshotReaderBudgetClosed => None,
         }
     }
@@ -5640,6 +5686,8 @@ pub enum ProcessRuntimeError {
     InboundFrameBudgetClosed,
     /// The runtime-owned conversation-import budget closed unexpectedly.
     ImportBudgetClosed,
+    /// The runtime-owned review-command budget closed unexpectedly.
+    ReviewCommandBudgetClosed,
     /// The runtime-owned snapshot-reader budget closed unexpectedly.
     SnapshotReaderBudgetClosed,
     /// The application pool cannot reserve capacity outside snapshot reads.
@@ -5669,6 +5717,9 @@ impl fmt::Display for ProcessRuntimeError {
             Self::ImportBudgetClosed => {
                 "the local process server lost its conversation import budget"
             }
+            Self::ReviewCommandBudgetClosed => {
+                "the local process server lost its review-command budget"
+            }
             Self::SnapshotReaderBudgetClosed => {
                 "the local process server lost its snapshot reader budget"
             }
@@ -5697,6 +5748,7 @@ impl Error for ProcessRuntimeError {
             Self::EncodeInvariant
             | Self::InboundFrameBudgetClosed
             | Self::ImportBudgetClosed
+            | Self::ReviewCommandBudgetClosed
             | Self::SnapshotReaderBudgetClosed
             | Self::InsufficientPoolCapacity
             | Self::UnexpectedDispatcherRetry => None,
@@ -5737,17 +5789,18 @@ mod tests {
 
     use super::{
         INBOUND_READ_AHEAD_BYTES, IncomingLine, MAX_ACTIVE_CONNECTIONS,
-        MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS, MAX_FRAME_BYTES,
-        MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
+        MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS,
+        MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, ProcessConnectionError,
         ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, SelectedSessionRepresentationFacts,
         SnapshotSpoolError, acquire_import_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_snapshot_reader_permit,
-        admitted_user_content, execute_import, inspect_connection_completion, map_rejection,
-        read_frame_line, replacement_model_is_admitted,
-        required_protocol_version_for_selected_session, run_until_shutdown,
-        snapshot_reader_capacity, wire_model_call_state, wire_tool_decision, wire_turn_state,
-        wire_uuid, write_content, write_snapshot_spool_error, write_transcript_entry,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_snapshot_reader_permit, admitted_user_content, execute_import,
+        inspect_connection_completion, map_rejection, read_frame_line,
+        replacement_model_is_admitted, required_protocol_version_for_selected_session,
+        run_until_shutdown, snapshot_reader_capacity, wire_model_call_state, wire_tool_decision,
+        wire_turn_state, wire_uuid, write_content, write_snapshot_spool_error,
+        write_transcript_entry,
     };
     use signalbox_persistence::{
         outbox::{
@@ -6216,6 +6269,39 @@ max_output_tokens = 256
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_command_budget_admits_one_claim_at_a_time() -> Result<(), Box<dyn Error>> {
+        assert_eq!(MAX_CONCURRENT_REVIEW_COMMANDS, 1);
+        let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS));
+        let (_shutdown, shutdown_receiver) = watch::channel(false);
+        let first =
+            acquire_review_command_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
+                .await?
+                .ok_or_else(|| {
+                    io::Error::other("the first review command must acquire its permit")
+                })?;
+
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                acquire_review_command_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+            )
+            .await
+            .is_err(),
+            "the second review command must wait for the first claim"
+        );
+
+        drop(first);
+        let second = timeout(
+            Duration::from_secs(1),
+            acquire_review_command_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+        )
+        .await??
+        .ok_or_else(|| io::Error::other("the second review command must acquire after release"))?;
+        drop(second);
         Ok(())
     }
 

@@ -6557,6 +6557,7 @@ async fn inv040_maximum_target_keys_do_not_overflow_indexes() -> Result<(), Box<
     Ok(())
 }
 
+/// INV-012: exact review-command replay and effect recovery preserve one result.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box<dyn Error>> {
@@ -6655,5 +6656,80 @@ async fn review_workflow_command_receipts_replay_and_recover() -> Result<(), Box
         store.load_target(recovered_target.id()).await?,
         Some(recovered_target),
     );
+    Ok(())
+}
+
+/// INV-012: run admission recovery ignores later lifecycle advancement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_start_run_receipt_recovers_after_lifecycle_advancement()
+-> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x764;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let queued_run = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("queued fixture run exists");
+    let queued_pass = fixture
+        .store
+        .load_pass(fixture.pass.pass())
+        .await?
+        .expect("queued fixture pass exists");
+    let command_id = DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY));
+    let command = ReviewWorkflowCommand::new(
+        command_id,
+        [10; 32],
+        ReviewWorkflowOperation::StartRun {
+            run: queued_run.clone(),
+            pass: queued_pass.clone(),
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::RunStarted {
+            run: fixture.run.run(),
+            pass: fixture.pass.pass(),
+        });
+
+    let (running_pass, _turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    let running_run = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("running fixture run exists");
+    assert_ne!(running_run.state(), queued_run.state());
+    assert_ne!(running_pass.state(), queued_pass.state());
+
+    let mut service = ReviewWorkflowCommandService::new(fixture.store);
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    Ok(())
+}
+
+/// INV-012: a findings receipt cannot omit its stable result count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_findings_receipt_rejects_missing_count() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x765;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO review_workflow_command
+            (command_id, command_kind, storage_version, semantic_digest,
+             operation_kind, result_kind, result_run_id, result_pass_id)
+         VALUES ($1, 'review_workflow', 1, $2, 'record_findings',
+                 'findings_recorded', $3, $4)",
+    )
+    .bind(uuid(COMMAND_IDENTITY))
+    .bind([11_u8; 32].as_slice())
+    .bind(uuid(0x766))
+    .bind(uuid(0x767))
+    .execute(&pool)
+    .await
+    .expect_err("the receipt shape requires a stable finding count");
+
+    assert_sqlstate(&error, "23514");
     Ok(())
 }

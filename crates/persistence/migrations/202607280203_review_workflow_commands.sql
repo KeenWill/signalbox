@@ -154,6 +154,7 @@ CREATE TABLE review_workflow_command (
                 AND result_pass_id IS NOT NULL
                 AND result_finding_id IS NULL
                 AND result_external_link_id IS NULL
+                AND result_finding_count IS NOT NULL
                 AND result_finding_count >= 0
                 AND result_finding_status IS NULL
                 AND result_external_object_key IS NULL
