@@ -604,6 +604,28 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.phase, .hello(generation: 1, reconnectAttempt: 0))
   }
 
+  func testRetainedDiagnosticMessageBytesAreBoundedWithoutTruncatingEffect() throws {
+    var transport = try SynchronizationFixture.transport()
+    _ = transport.send(.start)
+    _ = transport.send(.connected(generation: SynchronizationFixture.initialGeneration))
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.oversizedUnknownTopLevelMessage()
+      )
+    )
+
+    XCTAssertEqual(
+      transport.machine.diagnostics.last?.message.utf8.count,
+      SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.reportedDiagnosticMessage(in: effects),
+      SynchronizationFixture.oversizedUnknownDiagnosticMessage
+    )
+  }
+
   func testUnknownFrameDoesNotDiscardOtherwiseValidSnapshotPage() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     var transport = try SynchronizationFixture.transportInHistory(cursor: snapshotCursor)
@@ -797,7 +819,7 @@ final class SessionSynchronizationTests: XCTestCase {
   func testBufferedEventCountCapacityEntersBoundedRecovery() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor,
-      eventBufferCapacity: SynchronizationFixture.eventCountCapacity(maximumEvents: 1)
+      eventBufferCapacity: SynchronizationFixture.eventCountCapacity(maximumEvents: 2)
     )
 
     _ = transport.send(
@@ -836,7 +858,7 @@ final class SessionSynchronizationTests: XCTestCase {
   func testBufferedEventUTF8CapacityEntersBoundedRecovery() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor,
-      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 0)
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 1)
     )
 
     _ = transport.send(
@@ -852,6 +874,30 @@ final class SessionSynchronizationTests: XCTestCase {
         generation: 1,
         message: try SynchronizationFixture.inputAcceptedEvent(
           cursor: SynchronizationFixture.sideBufferedCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+  }
+
+  func testFutureSideTriggerJSONCountsTowardUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(
+        maximumUTF8Bytes: SynchronizationFixture.capacityBelowEncodedFutureEvent
+      )
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownEventWithNullNodes(
+          cursor: SynchronizationFixture.unknownCursor
         )
       )
     )
@@ -1497,6 +1543,12 @@ private enum SynchronizationFixture {
   static let modelCall = "55555555-5555-4555-8555-555555555555"
   static let entry = "66666666-6666-4666-8666-666666666666"
   static let frontier = "77777777-7777-4777-8777-777777777777"
+  static let oversizedDiagnosticKind = String(
+    repeating: "x",
+    count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
+  )
+  static let oversizedUnknownDiagnosticMessage =
+    "Ignored an unrecognized process-protocol frame kind: \(oversizedDiagnosticKind)."
 
   static let policy = SignalboxSessionSynchronizationPolicy(
     deadlines: SignalboxSynchronizationDeadlines(
@@ -2184,6 +2236,14 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func oversizedUnknownTopLevelMessage() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {"type":"\(oversizedDiagnosticKind)"}
+      """
+    )
+  }
+
   static func reportMoreThanRetainedDiagnosticCapacity(
     to transport: inout ScriptedSynchronizationTransport
   ) throws {
@@ -2233,6 +2293,17 @@ private enum SynchronizationFixture {
         return delay
       }
       return nil
+    }.first
+  }
+
+  static func reportedDiagnosticMessage(
+    in effects: [SignalboxSessionSynchronizationEffect]
+  ) -> String? {
+    effects.compactMap { effect -> String? in
+      guard case .reportDiagnostic(let diagnostic) = effect else {
+        return nil
+      }
+      return diagnostic.message
     }.first
   }
 
