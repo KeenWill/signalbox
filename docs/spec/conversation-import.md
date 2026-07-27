@@ -591,8 +591,8 @@ so neither private corpus is selected implicitly.
 
 ## Open edges
 
-- Exact mappings for further source formats and the unimplemented import
-  discovery, bulk, admission, and raw-access surfaces remain in the
+- Exact mappings for further source formats and the unimplemented file-watching,
+  admission, and raw-access surfaces remain in the
   [conversation-import questions](../open-questions.md#conversation-import).
 - Rich model rendering of imported source events, content absence, tools,
   results, thinking, and media remains in the

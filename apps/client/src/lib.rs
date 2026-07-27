@@ -84,10 +84,10 @@ enum ConversationImportOutcome {
 }
 
 #[derive(Default)]
-struct ImportScanSummary {
-    imported: usize,
-    already_imported: usize,
-    skipped: usize,
+pub(crate) struct ImportScanSummary {
+    pub(crate) imported: usize,
+    pub(crate) already_imported: usize,
+    pub(crate) skipped: usize,
 }
 
 /// Parses and runs one terminal-client invocation.
@@ -802,11 +802,7 @@ async fn scan_conversations(
             }
         }
     }
-    output.conversation_import_scan_summary(
-        summary.imported,
-        summary.already_imported,
-        summary.skipped,
-    )?;
+    output.conversation_import_scan_summary(&summary)?;
     if summary.skipped == 0 {
         Ok(())
     } else {
