@@ -51,6 +51,33 @@ and obscures what this capacity controls.
 **Affects.** Native process-service metadata pagination and its integration
 tests.
 
+## 2026-07-26 — Select bounded native-client operational policies
+
+**Context.** The native synchronization and application layers require concrete
+deadlines, reconnect schedules, memory capacities, metadata pagination limits,
+and ambiguous-mutation retry timing. The process protocol fixes none of these
+client-operational values, and the synchronization policy deliberately keeps
+deadlines separate from heartbeat concerns.
+
+**Decision.** The app allows 5 seconds for connect and hello, 20 seconds for
+initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
+second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
+records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
+MiB. One-shot application exchanges allow 20 seconds for connection opening and
+for each response frame. Metadata uses 100-row pages with a 100-page cap. An
+exact `commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds,
+then stops. Each list is the complete cap; there is no implicit retry.
+
+**Rejected alternatives.** Unbounded retries and memory permit indefinite work
+or heap growth. One shared timeout conflates stages with different costs.
+Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
+Using the wire frame limit as an aggregate history limit does not bound a
+multi-frame snapshot. Timing only response reads leaves socket opening
+unbounded.
+
+**Affects.** Native application composition, one-shot request exchange, metadata
+paging, mutation retry, and synchronization runtime behavior.
+
 ## 2026-07-26 — Bound retained native diagnostic messages at 4 KiB
 
 **Context.** The native synchronization machine retains the latest 128
@@ -73,6 +100,103 @@ immediate evidence even though the caller need not retain it.
 
 **Affects.** Native synchronization diagnostic retention and its scripted tests;
 diagnostic effects remain complete.
+
+## 2026-07-26 — Retire the superseded startup steering blocker
+
+**Context.** The 2026-07-22 pending-steering boundary commissioned a temporary
+startup blocker and required its replacement by the later atomic
+reclassification transition. That transition now covers every terminal restart
+branch, including evidence-free turns, but the application outcome, daemon
+failure path, and an unreachable PostgreSQL adapter arm still exposed the
+superseded guard and contradicted the implemented specification.
+
+**Decision.** Remove the pending-steering startup outcome, aggregate blocker
+state, and daemon failure path. Startup reports its recovered-turn count and
+continues after the finite scan. The PostgreSQL adapter retains fail-closed
+handling if loss preparation unexpectedly reports pending steering after the
+same checked projection reported none, but classifies that contradiction through
+the existing corruption path rather than as an operator-visible blocker. This
+records completion of the 2026-07-22 replacement obligation; the specification
+already owns the implemented reclassification semantics.
+
+**Rejected alternatives.** Keeping the dead surface for compatibility would
+preserve a public route that no production adapter can produce and that future
+code could accidentally revive. Documenting the blocker would contradict the
+implemented transition and the living specification. Editing an applied
+migration is unnecessary because the repair removes only superseded Rust
+composition.
+
+**Affects.** Startup-scan application outcomes and reporting, PostgreSQL startup
+recovery mapping, signalboxd startup composition and logging, and the
+application domain-spine declaration.
+
+## 2026-07-26 — Separate daemon tools into workspace crates
+
+**Context.** The daemon crate owned the Tier 0 and code-host tool
+implementations together with process composition. That coupled unrelated tool
+changes to the daemon build graph, prevented the tool suites from compiling and
+testing in isolation, and left their dependency direction implicit.
+
+**Decision.** Move the derive-based contract compiler to
+`signalbox-tool-contract`, the four Tier 0 tools to `signalbox-tools-basic`, and
+the ten code-host tools and their transport to `signalbox-tools-code-host`. Tool
+crates depend inward on domain/application contracts and the shared tool
+contract; the code-host transport reuses the basic crate's public-destination
+HTTP seam. `signalboxd` depends on the tool crates and owns only catalog and
+executor composition. This relocation changes no tool name, description, schema,
+permission, effect class, validation, execution, or result behavior.
+
+**Rejected alternatives.** Leaving implementations in `signalboxd` would keep
+the build and caching boundary coupled. One combined tools crate would isolate
+the daemon but not independent Tier 0 and code-host rebuilds. Moving tool
+implementations into domain or application crates would reverse the accepted
+dependency direction and mix infrastructure transports with policy types.
+
+**Affects.** Workspace membership and manifests; `crates/tool-contract`,
+`crates/tools-basic`, `crates/tools-code-host`; `apps/signalboxd` composition
+and re-exports; source-path citations in the invariant catalog and
+configuration-and-credentials specification.
+
+## 2026-07-26 — Surface turn control as the interrupt treatment and the canonical decision command
+
+**Context.** A client could observe a runaway or tool-parked turn but could not
+act on it: no wire request stopped the active turn or decided a pending tool
+request. The domain and persistence spine for both actions already exists — the
+applied-interrupt stop path with its durable cancellation requests, and the
+`DecideToolRequest` command with replay-equality — with no client surface.
+
+**Decision.** Protocol version eight adds two additive requests. `stop_turn` is
+the accepted `Interrupt` delivery on the wire: it names the observed active
+turn, carries the immediate-successor content the interrupt algebra requires,
+and projects the previously daemon-internal interrupt refusals as typed wire
+rejections. `decide_tool_request` issues the canonical decision command; its
+wire posture requires a denial reason, and the named session is a routing
+precondition refused before command recording rather than part of the canonical
+payload. Version eight was taken while version seven was still reserved by the
+then-open owner turn-reconciliation stack; that stack has since landed, so the
+admitted chain is complete. The tool-loop repository's replay-payload mismatch
+became the typed `ConflictingCommandReuse` error so the wire reports
+`conflicting_reuse` without string matching.
+
+**Rejected alternatives.** A standalone content-free cancellation command is the
+obvious verb shape, but the accepted algebra makes an applied interrupt — with
+its immediate successor — the only cancellation authority (INV-029), and the
+recorded open question reserves the standalone command for a future foundation
+decision with its own proof and disposition rules and a migration; fabricating
+synthetic successor content daemon-side would launder a stop into owner speech.
+An optional wire denial reason would mirror the domain, but every
+client-recorded denial is rendered to the model, and an unexplained denial
+invites a retry loop. Separate approve and deny wire requests would split one
+canonical command into two vocabularies.
+
+**Affects.** `crates/process-protocol` (version eight, two requests, one
+receipt, eight rejection details), the daemon request adapter and its
+session-correlation precondition read, `crates/persistence`
+(`ConflictingCommandReuse`, the `tool_request_session` read, the public
+recorded-decision probe), the terminal client's `stop`, `approve`, and `deny`
+verbs and version selection, the terminal-client CI suite filter, and the
+process-protocol, turn-lifecycle-and-scheduling, and tool-loop specification
+pages.
 
 ## 2026-07-26 — Narrow a credential file to its value, and name credential faults
 
@@ -411,33 +535,6 @@ forward narrowing.
 **Affects.** `RunnerToolAttemptAuthorization`, `AuthorizedToolAttempt`,
 `RunnerLease`, placement reconstitution, INV-043 and INV-044, S12, S30, S31, and
 the [runner-protocol specification](spec/runner-protocol.md).
-
-## 2026-07-26 — Select bounded native-client operational policies
-
-**Context.** The native synchronization and application layers require concrete
-deadlines, reconnect schedules, memory capacities, metadata pagination limits,
-and ambiguous-mutation retry timing. The process protocol fixes none of these
-client-operational values, and the synchronization policy deliberately keeps
-deadlines separate from heartbeat concerns.
-
-**Decision.** The app allows 5 seconds for connect and hello, 20 seconds for
-initial or side history, and 5 seconds for replay. Reconnect waits are 250 ms, 1
-second, 3 seconds, and 8 seconds, then stop. A snapshot admits at most 50,000
-records and 32 MiB of retained UTF-8; an event buffer admits 2,000 events and 8
-MiB. One-shot application exchanges allow 20 seconds for connection opening and
-for each response frame. Metadata uses 100-row pages with a 100-page cap. An
-exact `commit_ambiguous` mutation retries after 250 ms, 750 ms, and 2 seconds,
-then stops. Each list is the complete cap; there is no implicit retry.
-
-**Rejected alternatives.** Unbounded retries and memory permit indefinite work
-or heap growth. One shared timeout conflates stages with different costs.
-Heartbeat-derived deadlines add a concern absent from the Unix-socket protocol.
-Using the wire frame limit as an aggregate history limit does not bound a
-multi-frame snapshot. Timing only response reads leaves socket opening
-unbounded.
-
-**Affects.** Native application composition, one-shot request exchange, metadata
-paging, mutation retry, and synchronization runtime behavior.
 
 ## 2026-07-26 — Bound native followed-event buffering in memory
 
