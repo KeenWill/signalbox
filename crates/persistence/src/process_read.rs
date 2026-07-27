@@ -983,6 +983,13 @@ impl ProcessReadRepository {
         let Some(row) = row else {
             return Ok(ProcessSessionDefaultsRead::SessionNotFound);
         };
+        // An existing session must carry a current pointer even when a named
+        // historical epoch is selected: a missing pointer is corruption, not
+        // a servable read (INV-008).
+        let current_version: Option<Decimal> = row.try_get("current_version")?;
+        if current_version.is_none() {
+            return Err(ProcessReadCorruption::Missing("current defaults pointer").into());
+        }
         let selected_version: Option<Decimal> = row.try_get("selected_version")?;
         let Some(selected_version) = selected_version else {
             return if named.is_some() {

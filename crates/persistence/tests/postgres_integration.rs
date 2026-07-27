@@ -18087,6 +18087,34 @@ async fn s34_inv008_inv012_inv046_system_prompt_rides_the_frozen_defaults_epoch(
     };
     assert_eq!(disagreement_error.code().as_deref(), Some("23503"));
 
+    // A session that lost its current pointer fails a named historical read
+    // closed as corruption rather than serving the surviving epoch.
+    sqlx::query(
+        "ALTER TABLE session
+         DROP CONSTRAINT session_current_defaults_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM session_current_defaults
+         WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let missing_pointer = read
+        .read_session_defaults(
+            session,
+            SessionConfigurationDefaultsVersion::try_from_u64(1),
+        )
+        .await
+        .expect_err("a named read must fail closed without a current pointer");
+    assert!(
+        missing_pointer
+            .to_string()
+            .contains("current defaults pointer")
+    );
+
     pool.close().await;
     drop(container);
     Ok(())
