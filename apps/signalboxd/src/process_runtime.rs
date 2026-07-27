@@ -482,6 +482,57 @@ const fn is_review_mutation(request: &ClientRequest) -> bool {
     )
 }
 
+struct ReviewResponseWriter<'a, Writer> {
+    writer: &'a mut Writer,
+    command_permit: Option<OwnedSemaphorePermit>,
+}
+
+impl<'a, Writer> ReviewResponseWriter<'a, Writer> {
+    const fn new(writer: &'a mut Writer, command_permit: Option<OwnedSemaphorePermit>) -> Self {
+        Self {
+            writer,
+            command_permit,
+        }
+    }
+
+    fn release_command_permit(&mut self) {
+        self.command_permit.take();
+    }
+}
+
+impl<Writer> AsyncWrite for ReviewResponseWriter<'_, Writer>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let this = self.as_mut().get_mut();
+        this.release_command_permit();
+        std::pin::Pin::new(&mut *this.writer).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        this.release_command_permit();
+        std::pin::Pin::new(&mut *this.writer).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        this.release_command_permit();
+        std::pin::Pin::new(&mut *this.writer).poll_shutdown(context)
+    }
+}
+
 async fn handle_request<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -495,7 +546,7 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
-    let _review_command_permit = if review_request {
+    let mut review_command_permit = if review_request {
         let Some(permit) = acquire_review_command_permit(
             Arc::clone(&services.review_command_budget),
             &mut shutdown,
@@ -721,8 +772,10 @@ where
             base_revision,
             stack_parent_target_id,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_create_review_target(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -747,8 +800,10 @@ where
             session_id,
             accepted_input_id,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_start_review_run(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -769,8 +824,10 @@ where
             pass_id,
             turn_id,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_activate_review_pass(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -790,8 +847,10 @@ where
             output_frontier_id,
             findings,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_record_review_findings(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -815,8 +874,10 @@ where
             event_ordinal,
             disposition,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_record_review_disposition(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -839,8 +900,10 @@ where
             provider,
             object_kind,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_reserve_review_external_link(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -863,8 +926,10 @@ where
             external_object,
             event_ordinal,
         } => {
+            let mut response_writer =
+                ReviewResponseWriter::new(writer, review_command_permit.take());
             handle_attach_review_external_link(
-                writer,
+                &mut response_writer,
                 version,
                 request_id,
                 required_review_digest(review_digest)?,
@@ -1279,6 +1344,83 @@ where
     write_message(writer, version, request_id, message).await
 }
 
+fn review_activation_was_applied(run: &ReviewRun, pass: &ReviewPass, turn: TurnId) -> bool {
+    let reference = pass.reference();
+    let run_retains_pass = match run.state() {
+        ReviewRunState::Running { active_pass }
+        | ReviewRunState::Succeeded {
+            concluding_pass: active_pass,
+        }
+        | ReviewRunState::Failed {
+            failed_pass: active_pass,
+        }
+        | ReviewRunState::Blocked {
+            blocking_pass: active_pass,
+        }
+        | ReviewRunState::Cancelled {
+            last_pass: Some(active_pass),
+        } => active_pass == reference,
+        ReviewRunState::Queued | ReviewRunState::Cancelled { last_pass: None } => false,
+    };
+    let pass_retains_turn = match pass.state() {
+        ReviewPassState::Running { turn: retained }
+        | ReviewPassState::Succeeded { turn: retained, .. }
+        | ReviewPassState::Failed { turn: retained }
+        | ReviewPassState::Blocked { turn: retained, .. }
+        | ReviewPassState::Cancelled {
+            turn: Some(retained),
+        } => *retained == turn,
+        ReviewPassState::Queued | ReviewPassState::Cancelled { turn: None } => false,
+    };
+    run_retains_pass && pass_retains_turn
+}
+
+fn historical_review_activation(
+    current_run: &ReviewRun,
+    current_pass: &ReviewPass,
+    turn: TurnId,
+) -> Option<(ReviewRun, ReviewPass)> {
+    let mut run = ReviewRun::new(
+        current_run.reference(),
+        current_run.workflow(),
+        current_run.policy(),
+    );
+    let pass = ReviewPass::try_new(
+        current_pass.reference(),
+        current_pass.kind(),
+        &mut run,
+        current_pass.session(),
+        ReviewPassAcceptedInputEvidence::new(
+            current_pass.accepted_input(),
+            current_pass.session(),
+            Some(current_pass.origin_turn()),
+        ),
+    )
+    .ok()?;
+    let pass = pass
+        .transition(
+            ReviewPassState::Running { turn },
+            Some(ReviewPassTurnEvidence::new(
+                turn,
+                current_pass.session(),
+                current_pass.accepted_input(),
+                ReviewPassTurnOutcome::Active,
+                None,
+            )),
+        )
+        .ok()?;
+    let pass_evidence = ReviewPassEvidence::from_pass(&pass, current_run.policy());
+    let run = run
+        .transition(
+            ReviewRunState::Running {
+                active_pass: current_pass.reference(),
+            },
+            Some(pass_evidence),
+        )
+        .ok()?;
+    Some((run, pass))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_activate_review_pass<Writer>(
     writer: &mut Writer,
@@ -1351,7 +1493,7 @@ where
     };
     if canonical_session != current_pass.session().into_uuid()
         || canonical_input != current_pass.accepted_input().into_uuid()
-        || state != "active"
+        || (state != "active" && state != "terminal")
     {
         return write_review_invalid(writer, version, request_id).await;
     }
@@ -1367,7 +1509,8 @@ where
     let active_run_state = ReviewRunState::Running {
         active_pass: current_pass.reference(),
     };
-    let (run, pass) = if current_run.state() == ReviewRunState::Queued
+    let (run, pass) = if state == "active"
+        && current_run.state() == ReviewRunState::Queued
         && current_pass.state() == &ReviewPassState::Queued
     {
         let Ok(pass) = current_pass.transition(active_pass_state, Some(evidence)) else {
@@ -1378,9 +1521,12 @@ where
             return write_review_invalid(writer, version, request_id).await;
         };
         (run, pass)
-    } else if current_run.state() == active_run_state && current_pass.state() == &active_pass_state
-    {
-        (current_run, current_pass)
+    } else if review_activation_was_applied(&current_run, &current_pass, turn_id) {
+        let Some(activation) = historical_review_activation(&current_run, &current_pass, turn_id)
+        else {
+            return write_review_internal(writer, version, request_id).await;
+        };
+        activation
     } else {
         return write_review_invalid(writer, version, request_id).await;
     };
@@ -5767,9 +5913,13 @@ mod tests {
 
     use signalbox_application::ImportedConversationConverter;
     use signalbox_domain::{
-        ContextFrontierId, DirectModelSelection, DurableCommandId, ImportedConversation,
-        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        ModelSelectionRequest, SemanticTranscriptEntryId, SessionId, SubmitInputRejectedResult,
+        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
+        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+        ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest, ReviewPass,
+        ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+        ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
+        ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
+        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId, SubmitInputRejectedResult,
         ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
@@ -5814,6 +5964,32 @@ mod tests {
         },
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
+
+    struct PendingResponseWriter;
+
+    impl tokio::io::AsyncWrite for PendingResponseWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            _buffer: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
 
     fn server_error_code_and_message(message: &ServerMessage) -> (ErrorCode, &str) {
         match message {
@@ -6270,6 +6446,107 @@ max_output_tokens = 256
                 .is_none()
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_command_permit_releases_before_response_write() -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&budget).acquire_owned().await?;
+        let mut pending = PendingResponseWriter;
+        let mut response = super::ReviewResponseWriter::new(&mut pending, Some(permit));
+
+        std::future::poll_fn(|context| {
+            let pending = tokio::io::AsyncWrite::poll_write(
+                std::pin::Pin::new(&mut response),
+                context,
+                b"response",
+            );
+            assert!(pending.is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        let replacement = budget.try_acquire_owned()?;
+        drop(replacement);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_review_state_reconstructs_its_historical_activation() {
+        let reference = ReviewRunRef::new(
+            ReviewTargetId::from_uuid(Uuid::from_u128(1)),
+            ReviewRunId::from_uuid(Uuid::from_u128(2)),
+        );
+        let pass_reference =
+            ReviewPassRef::new(reference, ReviewPassId::from_uuid(Uuid::from_u128(3)));
+        let session = SessionId::from_uuid(Uuid::from_u128(4));
+        let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
+        let origin_turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let active_turn = origin_turn;
+        let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(7));
+        let policy = ReviewPolicy::version_one();
+        let mut queued_run = ReviewRun::new(reference, ReviewWorkflowKind::ReadOnlyReview, policy);
+        let queued_pass = ReviewPass::try_new(
+            pass_reference,
+            ReviewPassKind::ReadOnlyReview,
+            &mut queued_run,
+            session,
+            ReviewPassAcceptedInputEvidence::new(accepted_input, session, Some(origin_turn)),
+        )
+        .expect("the fixture pass owns its accepted input");
+        let running_pass = queued_pass
+            .transition(
+                ReviewPassState::Running { turn: active_turn },
+                Some(ReviewPassTurnEvidence::new(
+                    active_turn,
+                    session,
+                    accepted_input,
+                    ReviewPassTurnOutcome::Active,
+                    None,
+                )),
+            )
+            .expect("the fixture pass activates");
+        let running_run = queued_run
+            .transition(
+                ReviewRunState::Running {
+                    active_pass: pass_reference,
+                },
+                Some(ReviewPassEvidence::from_pass(&running_pass, policy)),
+            )
+            .expect("the fixture run activates");
+        let failed_pass = running_pass
+            .clone()
+            .transition(
+                ReviewPassState::Failed { turn: active_turn },
+                Some(ReviewPassTurnEvidence::new(
+                    active_turn,
+                    session,
+                    accepted_input,
+                    ReviewPassTurnOutcome::Failed,
+                    Some(terminal_frontier),
+                )),
+            )
+            .expect("the fixture pass concludes");
+        let failed_run = running_run
+            .clone()
+            .transition(
+                ReviewRunState::Failed {
+                    failed_pass: pass_reference,
+                },
+                Some(ReviewPassEvidence::from_pass(&failed_pass, policy)),
+            )
+            .expect("the fixture run concludes");
+
+        assert!(super::review_activation_was_applied(
+            &failed_run,
+            &failed_pass,
+            active_turn,
+        ));
+        let (reconstructed_run, reconstructed_pass) =
+            super::historical_review_activation(&failed_run, &failed_pass, active_turn)
+                .expect("terminal state retains the historical activation");
+        assert_eq!(reconstructed_run, running_run);
+        assert_eq!(reconstructed_pass, running_pass);
     }
 
     #[tokio::test]

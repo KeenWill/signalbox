@@ -6733,3 +6733,108 @@ async fn inv012_findings_receipt_rejects_missing_count() -> Result<(), Box<dyn E
     assert_sqlstate(&error, "23514");
     Ok(())
 }
+
+/// INV-012: activation recovery recognizes the same pass after completion.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_activation_receipt_recovers_after_pass_completion() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x768;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let (running_pass, turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    let running_run = fixture
+        .store
+        .load_run(fixture.run.run())
+        .await?
+        .expect("running fixture run exists");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [12; 32],
+        ReviewWorkflowOperation::ActivatePass {
+            run: running_run,
+            pass: running_pass,
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::PassActivated {
+            run: fixture.run.run(),
+            pass: fixture.pass.pass(),
+        });
+
+    synthetically_terminalize_turn(&pool, turn, "failed").await;
+    conclude_review_pass(
+        &fixture.store,
+        fixture.pass,
+        ReviewPassState::Failed { turn },
+    )
+    .await;
+
+    let mut service = ReviewWorkflowCommandService::new(fixture.store);
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    Ok(())
+}
+
+/// INV-012: findings recovery compares immutable proposals after disposition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_findings_receipt_recovers_after_later_disposition() -> Result<(), Box<dyn Error>> {
+    const COMMAND_IDENTITY: u128 = 0x769;
+    const JUDGE_PASS_IDENTITY: u128 = 0x76a;
+    const FINDING_IDENTITY: u128 = 0x76b;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let judge_pass =
+        insert_fixture_pass(&fixture, JUDGE_PASS_IDENTITY, ReviewPassKind::Judge).await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[fixture.pass, judge_pass]).await;
+    let finding_ref = ReviewFindingRef::new(
+        fixture.pass,
+        ReviewFindingId::from_uuid(uuid(FINDING_IDENTITY)),
+    );
+    let producing_pass = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
+    let recorded_finding = finding(
+        finding_ref,
+        producing_pass.clone(),
+        &fixture.target_snapshot,
+    );
+    let recorded_findings = vec![recorded_finding];
+    let finding_count = recorded_findings.len();
+    fixture
+        .store
+        .insert_findings(&producing_pass, &recorded_findings)
+        .await?;
+    fixture
+        .store
+        .append_finding_event(
+            finding_ref.finding(),
+            finding_event(
+                finding_ref,
+                ReviewEventOrdinal::one(),
+                evidence[1].clone(),
+                ReviewFindingEventKind::Accepted,
+            ),
+        )
+        .await?
+        .expect("the canonical finding accepts its disposition");
+    let command = ReviewWorkflowCommand::new(
+        DurableCommandId::from_uuid(uuid(COMMAND_IDENTITY)),
+        [13; 32],
+        ReviewWorkflowOperation::RecordFindings {
+            pass: producing_pass,
+            findings: recorded_findings,
+        },
+    );
+    let expected =
+        ReviewWorkflowCommandOutcome::Recorded(ReviewWorkflowCommandResult::FindingsRecorded {
+            run: fixture.run.run(),
+            pass: fixture.pass.pass(),
+            finding_count,
+        });
+
+    let mut service = ReviewWorkflowCommandService::new(fixture.store);
+    assert_eq!(service.execute(command.clone()).await?, expected);
+    assert_eq!(service.execute(command).await?, expected);
+    Ok(())
+}

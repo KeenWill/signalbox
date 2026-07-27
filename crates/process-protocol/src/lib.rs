@@ -1313,7 +1313,7 @@ pub enum ClientRequest {
         turn_id: CanonicalUuid,
         output_frontier_id: CanonicalUuid,
         finding_id: CanonicalUuid,
-        /// Atomically conclude a read-only pass and bind its finding inventory.
+        /// Exact contiguous event ordinal the appended disposition occupies.
         event_ordinal: CanonicalU64,
         disposition: ReviewFindingDisposition,
     },

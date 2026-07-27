@@ -190,7 +190,13 @@ async fn apply_or_recover(
         ReviewWorkflowOperation::ActivatePass { run, pass } => {
             let current_run = store.load_run(run.reference().run()).await?;
             let current_pass = store.load_pass(pass.reference().pass()).await?;
-            if current_run.as_ref() != Some(run) || current_pass.as_ref() != Some(pass) {
+            let activation_is_recoverable = current_run
+                .as_ref()
+                .zip(current_pass.as_ref())
+                .is_some_and(|(current_run, current_pass)| {
+                    same_activation_effect(current_run, current_pass, run, pass)
+                });
+            if !activation_is_recoverable {
                 let transitioned = store
                     .transition_run_and_pass(
                         run.reference().run(),
@@ -222,7 +228,7 @@ async fn apply_or_recover(
                 store.insert_findings(pass, findings).await?;
             }
             let loaded = store.list_findings(pass.reference().run().run()).await?;
-            if loaded != *findings {
+            if !same_finding_inventory(&loaded, findings) {
                 return Err(command_conflict(
                     "finding inventory differs from the recorded result",
                 ));
@@ -326,6 +332,73 @@ fn same_pass_admission(existing: &ReviewPass, requested: &ReviewPass) -> bool {
         && existing.accepted_input() == requested.accepted_input()
         && existing.origin_turn() == requested.origin_turn()
         && requested.state() == &ReviewPassState::Queued
+}
+
+fn same_activation_effect(
+    existing_run: &ReviewRun,
+    existing_pass: &ReviewPass,
+    requested_run: &ReviewRun,
+    requested_pass: &ReviewPass,
+) -> bool {
+    existing_run.reference() == requested_run.reference()
+        && existing_run.workflow() == requested_run.workflow()
+        && existing_run.policy() == requested_run.policy()
+        && existing_run.recorded_pass() == requested_run.recorded_pass()
+        && existing_pass.reference() == requested_pass.reference()
+        && existing_pass.kind() == requested_pass.kind()
+        && existing_pass.session() == requested_pass.session()
+        && existing_pass.accepted_input() == requested_pass.accepted_input()
+        && existing_pass.origin_turn() == requested_pass.origin_turn()
+        && activation_run_state_contains(existing_run.state(), requested_run.state())
+        && activation_pass_state_contains(existing_pass.state(), requested_pass.state())
+}
+
+fn activation_run_state_contains(existing: ReviewRunState, requested: ReviewRunState) -> bool {
+    let ReviewRunState::Running { active_pass } = requested else {
+        return false;
+    };
+    match existing {
+        ReviewRunState::Running {
+            active_pass: existing,
+        }
+        | ReviewRunState::Succeeded {
+            concluding_pass: existing,
+        }
+        | ReviewRunState::Failed {
+            failed_pass: existing,
+        }
+        | ReviewRunState::Blocked {
+            blocking_pass: existing,
+        }
+        | ReviewRunState::Cancelled {
+            last_pass: Some(existing),
+        } => existing == active_pass,
+        ReviewRunState::Queued | ReviewRunState::Cancelled { last_pass: None } => false,
+    }
+}
+
+fn activation_pass_state_contains(existing: &ReviewPassState, requested: &ReviewPassState) -> bool {
+    let ReviewPassState::Running { turn } = requested else {
+        return false;
+    };
+    match existing {
+        ReviewPassState::Running { turn: existing }
+        | ReviewPassState::Succeeded { turn: existing, .. }
+        | ReviewPassState::Failed { turn: existing }
+        | ReviewPassState::Blocked { turn: existing, .. }
+        | ReviewPassState::Cancelled {
+            turn: Some(existing),
+        } => existing == turn,
+        ReviewPassState::Queued | ReviewPassState::Cancelled { turn: None } => false,
+    }
+}
+
+fn same_finding_inventory(existing: &[ReviewFinding], requested: &[ReviewFinding]) -> bool {
+    existing.len() == requested.len()
+        && existing
+            .iter()
+            .zip(requested)
+            .all(|(existing, requested)| existing.proposal() == requested.proposal())
 }
 
 fn operation_kind(operation: ReviewWorkflowOperationKind) -> &'static str {

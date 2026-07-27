@@ -1830,14 +1830,15 @@ async fn review(
             let mut connection = client
                 .request(ClientRequest::ListReviewFindings { run_id })
                 .await?;
-            match connection.message().await? {
-                ServerMessage::ReviewFindingsStart { run_id: selected } if selected == run_id => {}
+            let start = connection.frame().await?;
+            match start.message() {
+                ServerMessage::ReviewFindingsStart { run_id: selected } if *selected == run_id => {}
                 ServerMessage::Error {
                     code,
                     message,
                     detail,
                 } => {
-                    return Err(ClientError::remote(code, message, detail));
+                    return Err(ClientError::remote(*code, message.clone(), *detail));
                 }
                 _ => {
                     return Err(ClientError::Protocol(
@@ -1845,10 +1846,12 @@ async fn review(
                     ));
                 }
             }
+            let mut spool = tempfile::tempfile()?;
             let mut count = 0_u64;
             let mut previous_finding_id: Option<CanonicalUuid> = None;
             loop {
-                match connection.message().await? {
+                let frame = connection.frame().await?;
+                match frame.message() {
                     ServerMessage::ReviewFindingItem { finding } if finding.run_id == run_id => {
                         let finding_id = finding.finding.finding_id;
                         if previous_finding_id
@@ -1862,19 +1865,19 @@ async fn review(
                         count = count.checked_add(1).ok_or(ClientError::Protocol(
                             "review finding list count overflowed",
                         ))?;
-                        output.review_finding(&finding)?;
+                        spool.write_all(&encode_server_line(&frame)?)?;
                     }
                     ServerMessage::ReviewFindingsEnd { finding_count }
                         if finding_count.value() == count =>
                     {
-                        return Ok(());
+                        break;
                     }
                     ServerMessage::Error {
                         code,
                         message,
                         detail,
                     } => {
-                        return Err(ClientError::remote(code, message, detail));
+                        return Err(ClientError::remote(*code, message.clone(), *detail));
                     }
                     _ => {
                         return Err(ClientError::Protocol(
@@ -1883,6 +1886,23 @@ async fn review(
                     }
                 }
             }
+            spool.seek(SeekFrom::Start(0))?;
+            let mut reader = BufReader::new(spool);
+            let mut line = Vec::new();
+            while reader.read_until(b'\n', &mut line)? != 0 {
+                match decode_server_line(&line)?.message() {
+                    ServerMessage::ReviewFindingItem { finding } => {
+                        output.review_finding(finding)?;
+                    }
+                    _ => {
+                        return Err(ClientError::Protocol(
+                            "review finding spool contained a non-finding frame",
+                        ));
+                    }
+                }
+                line.clear();
+            }
+            Ok(())
         }
     }
 }
@@ -1932,8 +1952,9 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, ToolBatchState,
-        ToolDecision, TurnState, decode_client_line, encode_server_line,
+        ModelCallState, ModelSelection, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewSeverity, ServerFrame, ServerMessage, SessionEvent,
+        ToolBatchState, ToolDecision, TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -1944,10 +1965,11 @@ mod tests {
 
     use super::{
         MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES, ProcessClient,
-        SessionMetadataPageRequest, SnapshotSelection, TurnTerminal, collect_import_paths, create,
-        decide, model_call_recovery_transition, open_scanned_import_source, read_input,
-        reconcile_turn, run, search, socket_path, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        ReviewCommand, SessionMetadataPageRequest, SnapshotSelection, TurnTerminal,
+        collect_import_paths, create, decide, model_call_recovery_transition,
+        open_scanned_import_source, read_input, reconcile_turn, review, run, search, socket_path,
+        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
+        terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -2455,6 +2477,90 @@ mod tests {
                 "session metadata page exceeded its requested bound"
             ))
         ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn review_list_rejects_terminal_count_before_writing_items() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let run_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let finding_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ListReviewFindings { run_id }
+            );
+            let frame = |message| {
+                ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
+                    .map_err(io::Error::other)
+            };
+            let finding = ReviewFindingSnapshot {
+                target_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                run_id,
+                producing_pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                finding: ReviewFindingInput {
+                    finding_id,
+                    file_path: String::from("src/review.rs"),
+                    line_start: Some(CanonicalU64::new(11)),
+                    line_end: Some(CanonicalU64::new(14)),
+                    diff_side: None,
+                    title: String::from("Retain the exact edge"),
+                    body: String::from("The terminal count must authenticate the list."),
+                    severity: ReviewSeverity::High,
+                    confidence: CanonicalU64::new(9_000),
+                    category: String::from("correctness"),
+                    recommended_fix: None,
+                },
+                status: ReviewFindingStatus::Open,
+                event_count: CanonicalU64::new(0),
+            };
+            let mut response = Vec::new();
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)
+                    .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ReviewFindingItem { finding })?)
+                    .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::ReviewFindingsEnd {
+                    finding_count: CanonicalU64::new(2),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&response).await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let error = review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ListFindings { run_id },
+        )
+        .await
+        .expect_err("the mismatched terminal count must reject the list");
+
+        assert_eq!(
+            error.to_string(),
+            "the server violated the process protocol: review finding list sequence or count was invalid"
+        );
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
         server.await??;
