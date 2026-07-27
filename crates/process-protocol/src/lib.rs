@@ -42,6 +42,11 @@ pub const TURN_RECONCILIATION_PROTOCOL_VERSION: u64 = 7;
 /// The client turn-control protocol version.
 pub const TURN_CONTROL_PROTOCOL_VERSION: u64 = 8;
 
+/// The imported-frontier session-creation protocol version.
+///
+/// Version nine was reserved by concurrent protocol work when this version was selected.
+pub const IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION: u64 = 10;
+
 /// One admitted process-protocol version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProtocolVersion {
@@ -61,6 +66,8 @@ pub enum ProtocolVersion {
     Seven,
     /// Client turn-control vocabulary.
     Eight,
+    /// Imported-frontier session-creation vocabulary.
+    Ten,
 }
 
 impl ProtocolVersion {
@@ -75,6 +82,7 @@ impl ProtocolVersion {
             Self::Six => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
             Self::Seven => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::Eight => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::Ten => IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION,
         }
     }
 
@@ -88,6 +96,7 @@ impl ProtocolVersion {
             MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION => Some(Self::Six),
             TURN_RECONCILIATION_PROTOCOL_VERSION => Some(Self::Seven),
             TURN_CONTROL_PROTOCOL_VERSION => Some(Self::Eight),
+            IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION => Some(Self::Ten),
             _ => None,
         }
     }
@@ -836,6 +845,16 @@ pub struct MetadataLastWriter {
     actor: MetadataActor,
 }
 
+/// How a new live session relates to one selected imported frontier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedSessionRelationship {
+    /// Continue from the selected imported boundary.
+    Resume,
+    /// Branch from the selected imported boundary.
+    Fork,
+}
+
 impl MetadataLastWriter {
     /// Constructs one exact last-writer stamp.
     pub const fn new(updated_at_unix_micros: CanonicalU64, actor: MetadataActor) -> Self {
@@ -940,6 +959,19 @@ pub enum ClientRequest {
         /// Exact complete source bytes.
         source: ConversationImportSource,
     },
+    /// Create a live session from one inclusive imported entry boundary.
+    CreateSessionFromImportedFrontier {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Immutable imported conversation to continue.
+        imported_conversation_id: CanonicalUuid,
+        /// Inclusive one-based imported entry position.
+        through_position: CanonicalU64,
+        /// Creation-time resume or fork intent.
+        relationship: ImportedSessionRelationship,
+        /// Initial session model-selection defaults.
+        initial_model_selection: ModelSelection,
+    },
     /// Reconcile the exact active turn parked on an ambiguous model call.
     ///
     /// The named turn must be the session's active turn and must be parked in
@@ -1016,6 +1048,9 @@ impl ClientRequest {
             Self::ReplaceSessionDefaults { .. } => MID_SESSION_MODEL_SELECTION_PROTOCOL_VERSION,
             Self::ReconcileTurn { .. } => TURN_RECONCILIATION_PROTOCOL_VERSION,
             Self::StopTurn { .. } | Self::DecideToolRequest { .. } => TURN_CONTROL_PROTOCOL_VERSION,
+            Self::CreateSessionFromImportedFrontier { .. } => {
+                IMPORTED_SESSION_CONTINUATION_PROTOCOL_VERSION
+            }
             Self::CreateSession { .. }
             | Self::ListSessions {}
             | Self::SubmitInput { .. }
@@ -1025,6 +1060,13 @@ impl ClientRequest {
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::CreateSessionFromImportedFrontier {
+            through_position, ..
+        } = self
+            && through_position.value() == 0
+        {
+            return Err(FrameValidationError::ImportedFrontierShape);
+        }
         if let Self::ListSessionMetadata {
             required_tags,
             title_contains,
@@ -2507,6 +2549,8 @@ pub enum FrameValidationError {
     TurnStateShape,
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
+    /// An imported-frontier request carried a nonpositive position.
+    ImportedFrontierShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -2521,6 +2565,7 @@ impl fmt::Display for FrameValidationError {
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
             Self::MetadataShape => "session metadata frame shape is inconsistent",
+            Self::ImportedFrontierShape => "imported frontier position is not positive",
         })
     }
 }
@@ -2574,7 +2619,7 @@ impl fmt::Display for FrameDecodeError {
                 formatter.write_str("process-protocol frame is malformed")
             }
             FrameDecodeErrorKind::UnsupportedVersion => formatter.write_str(
-                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, and 8",
+                "process-protocol version is unsupported; supported versions are 1, 2, 3, 4, 5, 6, 7, 8, and 10",
             ),
         }
     }
@@ -2785,7 +2830,7 @@ fn probe_header(
     }
     if !matches!(
         version_spelling,
-        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8"
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "10"
     ) {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
@@ -2897,6 +2942,7 @@ fn protocol_version_from_probe(probe: &RawHeaderProbe<'_>) -> Option<ProtocolVer
         "6" => Some(ProtocolVersion::Six),
         "7" => Some(ProtocolVersion::Seven),
         "8" => Some(ProtocolVersion::Eight),
+        "10" => Some(ProtocolVersion::Ten),
         _ => None,
     }
 }
@@ -2941,15 +2987,16 @@ mod tests {
         ConversationImportFormat, ConversationImportSource, CurrentModelCall,
         CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallDisposition,
         FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION,
-        ProtocolVersion, RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION,
-        ServerFrame, ServerMessage, SessionEvent, SessionMetadata, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker,
+        InputContent, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MetadataActor, MetadataLastWriter,
+        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, SESSION_METADATA_PROTOCOL_VERSION, ServerFrame, ServerMessage,
+        SessionEvent, SessionMetadata, ToolBatchState, ToolDecision, TranscriptEntry,
+        TranscriptTextEntry, TurnState, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -3031,7 +3078,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, and 8")
+                .contains("supported versions are 1, 2, 3, 4, 5, 6, 7, 8, and 10")
         );
     }
 
@@ -3852,6 +3899,106 @@ mod tests {
             "{\"version\":5,\"request_id\":\"1\",\"request\":{\"type\":\"import_conversation\",\
              \"format\":\"claude_code_session_jsonl_v2\",\"source\":\"AP8=\"}}\n"
         );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: version ten admits imported-frontier session creation with its
+    /// exact closed request shape while the reserved gap remains unsupported.
+    #[test]
+    fn inv033_version_ten_imported_frontier_creation_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request_id = request(1)?;
+        let request_value = ClientRequest::CreateSessionFromImportedFrontier {
+            command_id: command(4)?,
+            imported_conversation_id: uuid(5),
+            through_position: CanonicalU64::new(2),
+            relationship: ImportedSessionRelationship::Resume,
+            initial_model_selection: ModelSelection::Direct {
+                selection_id: uuid(6),
+            },
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::Seven,
+                request_id,
+                request_value.clone(),
+            ),
+            Err(FrameValidationError::RequestRequiresNewerVersion)
+        );
+
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::Ten, request_id, request_value)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":10,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"}}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: a version-ten imported-frontier request rejects position zero.
+    #[test]
+    fn inv033_version_ten_imported_frontier_rejects_zero_position()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Ten,
+            request(2)?,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command(4)?,
+                imported_conversation_id: uuid(5),
+                through_position: CanonicalU64::new(0),
+                relationship: ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: uuid(6),
+                },
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ImportedFrontierShape));
+        Ok(())
+    }
+
+    /// INV-033: version ten retains every earlier request unchanged.
+    #[test]
+    fn inv033_version_ten_retains_the_earlier_request_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Ten,
+            request(1)?,
+            ClientRequest::SubmitInput {
+                command_id: command(4)?,
+                session_id: uuid(6),
+                content: InputContent::new(String::from("ordinary work")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":10,"));
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: version ten retains version eight's turn-control vocabulary.
+    #[test]
+    fn inv033_version_ten_retains_version_eight_turn_control_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::Ten,
+            request(1)?,
+            ClientRequest::StopTurn {
+                command_id: command(4)?,
+                session_id: uuid(6),
+                expected_active_turn_id: uuid(7),
+                content: InputContent::new(String::from("continue after the stop")),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+
+        assert!(String::from_utf8(encoded.clone())?.starts_with("{\"version\":10,"));
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
