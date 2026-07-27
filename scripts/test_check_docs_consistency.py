@@ -275,6 +275,16 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_triple_star_block_comment_cannot_supply_doc_tag(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "/*** INV-001 is an ordinary block comment. */\n"
+            "#[test]\n"
+            "fn named_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
     def test_unrelated_test_attribute_does_not_register_invariant(self) -> None:
         (self.root / "src/ignored.rs").write_text(
             '#[ignore = "INV-001 is temporarily flaky"]\n'
@@ -299,6 +309,26 @@ class DocsConsistencyTests(unittest.TestCase):
             "| -- | -- | -- | -- | -- |\n"
             "| INV-001 | Law. | Domain | Accepted | INV-001-tagged tests in "
             "[`src/tests.rs`](../src/tests.rs). |\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), ["invariant-tag"])
+        self.assertIn("test name or attached doc comment", failures[0].message)
+
+    def test_tagged_link_label_requires_tagged_test_declaration(self) -> None:
+        (self.root / "src/tests.rs").write_text(
+            "#[test]\n"
+            "fn untagged_test() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/invariants.md").write_text(
+            "# Invariants\n\n"
+            "| ID | Invariant | Class | Status | Enforcement |\n"
+            "| -- | -- | -- | -- | -- |\n"
+            "| INV-001 | Law. | Domain | Accepted | "
+            "[INV-001-tagged tests](../src/tests.rs). |\n",
             encoding="utf-8",
         )
 
@@ -392,6 +422,47 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertIn("src/uncited.rs", failures[0].message)
 
+    def test_reverse_discovers_unicode_invariant_test_identifier(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "#[test]\n"
+            "fn café_inv_001_executes() {}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_invariant_tag_requires_identifier_boundary(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[test]\n"
+            "fn inv_001alpha_is_not_a_tag() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_reverse_discovers_invariant_tag_in_module_path(self) -> None:
+        (self.root / "src/uncited.rs").write_text(
+            "mod inv_001 {\n"
+            "    #[test]\n"
+            "    fn rejects() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-registration"],
+        )
+        self.assertIn("src/uncited.rs", failures[0].message)
+
     def test_reverse_discovers_cfg_attr_test(self) -> None:
         (self.root / "src/uncited.rs").write_text(
             "#[cfg_attr(test, test)]\n"
@@ -421,6 +492,42 @@ class DocsConsistencyTests(unittest.TestCase):
             ["invariant-registration"],
         )
         self.assertIn("src/uncited.rs", failures[0].message)
+
+    def test_cfg_disabled_functions_do_not_register_invariants(self) -> None:
+        (self.root / "src/context.rs").write_text(
+            "#[cfg(any())]\n"
+            "#[test]\n"
+            "fn s01_inv_001_disabled_test() {}\n"
+            "#[cfg_attr(any(), test)]\n"
+            "fn s01_inv_001_disabled_cfg_attr_test() {}\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(run_checks(self.root), [])
+
+    def test_test_generating_macro_is_rejected(self) -> None:
+        (self.root / "src/generated.rs").write_text(
+            "macro_rules! invariant_test {\n"
+            "    ($name:ident) => {\n"
+            "        #[test]\n"
+            "        fn $name() {}\n"
+            "    };\n"
+            "}\n"
+            "invariant_test!(s01_inv_001_generated);\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["invariant-test-generation"],
+        )
+        self.assertIn(
+            "`macro_rules! invariant_test` emits a test attribute",
+            failures[0].message,
+        )
+
 
     def test_cfg_predicate_test_token_does_not_mark_function_as_test(self) -> None:
         (self.root / "src/context.rs").write_text(
@@ -1721,6 +1828,33 @@ class DocsConsistencyTests(unittest.TestCase):
             failures = run_checks(self.root)
 
         self.assertEqual(failures, [])
+
+    def test_malformed_github_event_base_is_reported_without_crashing(self) -> None:
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 99, "pull_request": {'
+            '"head": {"ref": "agent/in-flight"}, "base": null}}',
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/in-flight`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "cannot inspect GitHub pull-request event", failures[0].message
+        )
 
     def test_github_event_accepts_verification_inherited_from_exact_base(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")

@@ -234,9 +234,10 @@ NATURAL_TEST_BINDING = re.compile(
     re.IGNORECASE,
 )
 INVARIANT_TAG = re.compile(
-    r"(?<![A-Za-z0-9])INV[-_]?(?P<number>[0-9]{3})(?![0-9])",
+    r"(?<![^\W_])INV[-_]?(?P<number>[0-9]{3})(?![^\W_])",
     re.IGNORECASE,
 )
+RUST_IDENTIFIER_PATTERN = r"(?:r#)?(?![0-9])\w+"
 RUST_TEST_DECLARATION = re.compile(
     r"(?P<prefix>(?:"
     r"^[ \t]*///[^\n]*(?:\n|$)"
@@ -249,7 +250,7 @@ RUST_TEST_DECLARATION = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
     r"(?:(?:const|async|unsafe)[ \t]+)*"
     r'(?:extern(?:[ \t]+"[^"\n]*")?[ \t]+)?'
-    r"fn[ \t]+(?P<name>(?:r#)?[A-Za-z_][A-Za-z0-9_]*)",
+    rf"fn[ \t]+(?P<name>{RUST_IDENTIFIER_PATTERN})",
     re.MULTILINE,
 )
 RUST_TEST_ATTRIBUTE = re.compile(
@@ -258,13 +259,28 @@ RUST_TEST_ATTRIBUTE = re.compile(
     re.IGNORECASE,
 )
 RUST_ATTRIBUTE = re.compile(r"#\[(?P<meta>[^\]]*)\]", re.DOTALL)
+RUST_CFG_META = re.compile(
+    r"^cfg[ \t\r\n]*\((?P<body>.*)\)[ \t\r\n]*$", re.DOTALL
+)
 RUST_CFG_ATTR_META = re.compile(
     r"^cfg_attr[ \t\r\n]*\((?P<body>.*)\)[ \t\r\n]*$", re.DOTALL
+)
+RUST_CFG_PREDICATE = re.compile(
+    r"^(?P<operator>all|any|not)[ \t\r\n]*"
+    r"\((?P<body>.*)\)[ \t\r\n]*$",
+    re.DOTALL,
 )
 RUST_TEST_META = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?=[ \t\r\n(]|$)", re.IGNORECASE
 )
 RUST_RAW_STRING_OPEN = re.compile(r'(?:br|rb|cr|r)(?P<hashes>#{0,255})"')
+RUST_INLINE_MODULE = re.compile(
+    rf"\bmod[ \t\r\n]+(?P<name>{RUST_IDENTIFIER_PATTERN})[ \t\r\n]*\{{"
+)
+RUST_MACRO_RULES = re.compile(
+    rf"\bmacro_rules![ \t\r\n]*(?P<name>{RUST_IDENTIFIER_PATTERN})"
+    r"[ \t\r\n]*(?P<opening>[\(\[\{])"
+)
 PULL_REQUEST_MERGE = re.compile(
     r"^Merge pull request #(?P<number>[1-9][0-9]*) from "
     r"[^/\s]+/(?P<branch>[^\r\n]+)$",
@@ -329,6 +345,16 @@ def rust_block_comment_end(text: str, start: int) -> int:
     return end
 
 
+def rust_outer_line_doc_at(text: str, index: int) -> bool:
+    """Return whether ``index`` begins an outer line documentation comment."""
+    return text.startswith("///", index) and not text.startswith("////", index)
+
+
+def rust_outer_block_doc_at(text: str, index: int) -> bool:
+    """Return whether ``index`` begins an outer block documentation comment."""
+    return text.startswith("/**", index) and not text.startswith("/***", index)
+
+
 def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str:
     """Mask Rust comments and literals while preserving offsets and newlines."""
     buffer = list(text)
@@ -337,13 +363,19 @@ def mask_rust_non_code(text: str, *, preserve_doc_comments: bool = False) -> str
         if text.startswith("//", index):
             end = text.find("\n", index + 2)
             end = len(text) if end == -1 else end
-            if not preserve_doc_comments or not text.startswith("///", index):
+            if (
+                not preserve_doc_comments
+                or not rust_outer_line_doc_at(text, index)
+            ):
                 mask_range(buffer, index, end)
             index = end
             continue
         if text.startswith("/*", index):
             end = rust_block_comment_end(text, index)
-            if not preserve_doc_comments or not text.startswith("/**", index):
+            if (
+                not preserve_doc_comments
+                or not rust_outer_block_doc_at(text, index)
+            ):
                 mask_range(buffer, index, end)
             index = end
             continue
@@ -408,13 +440,13 @@ def rust_doc_comments(prefix: str) -> list[str]:
     while index < len(metadata):
         line_start = metadata.rfind("\n", 0, index) + 1
         at_line_indent = not metadata[line_start:index].strip()
-        if at_line_indent and metadata.startswith("///", index):
+        if at_line_indent and rust_outer_line_doc_at(metadata, index):
             end = metadata.find("\n", index + 3)
             end = len(metadata) if end == -1 else end
             comments.append(prefix[index:end])
             index = end
             continue
-        if at_line_indent and metadata.startswith("/**", index):
+        if at_line_indent and rust_outer_block_doc_at(metadata, index):
             end = rust_block_comment_end(metadata, index)
             comments.append(prefix[index:end])
             index = end
@@ -440,6 +472,32 @@ def split_rust_meta_items(body: str) -> list[str]:
     return items
 
 
+def rust_cfg_truth(meta: str) -> bool | None:
+    """Evaluate cfg predicates whose truth is independent of the build."""
+    predicate = RUST_CFG_PREDICATE.fullmatch(meta.strip())
+    if predicate is None:
+        return None
+    body = predicate.group("body")
+    items = [] if not body.strip() else split_rust_meta_items(body)
+    values = [rust_cfg_truth(item) for item in items]
+    operator = predicate.group("operator")
+    if operator == "not":
+        if len(values) != 1 or values[0] is None:
+            return None
+        return not values[0]
+    if operator == "all":
+        if False in values:
+            return False
+        if all(value is True for value in values):
+            return True
+        return None
+    if True in values:
+        return True
+    if all(value is False for value in values):
+        return False
+    return None
+
+
 def rust_meta_applies_test(meta: str) -> bool:
     """Return whether one direct or recursively conditional meta is `test`."""
     meta = meta.strip()
@@ -449,6 +507,8 @@ def rust_meta_applies_test(meta: str) -> bool:
     if cfg_attr is None:
         return False
     items = split_rust_meta_items(cfg_attr.group("body"))
+    if not items or rust_cfg_truth(items[0]) is False:
+        return False
     return any(rust_meta_applies_test(item) for item in items[1:])
 
 
@@ -458,6 +518,62 @@ def rust_cfg_attr_has_test(prefix: str) -> bool:
         if rust_meta_applies_test(attribute.group("meta")):
             return True
     return False
+
+
+def rust_item_is_disabled(prefix: str) -> bool:
+    """Return whether attached cfg metadata disables an item in every build."""
+    for attribute in RUST_ATTRIBUTE.finditer(prefix):
+        cfg = RUST_CFG_META.fullmatch(attribute.group("meta").strip())
+        if cfg is not None and rust_cfg_truth(cfg.group("body")) is False:
+            return True
+    return False
+
+
+def rust_inline_module_spans(code: str) -> list[tuple[int, int, str]]:
+    """Return brace-delimited inline module spans from masked Rust code."""
+    stack: list[int] = []
+    closing_brace: dict[int, int] = {}
+    for index, character in enumerate(code):
+        if character == "{":
+            stack.append(index)
+        elif character == "}" and stack:
+            closing_brace[stack.pop()] = index
+
+    spans: list[tuple[int, int, str]] = []
+    for module in RUST_INLINE_MODULE.finditer(code):
+        opening = code.rfind("{", module.start(), module.end())
+        closing = closing_brace.get(opening)
+        if closing is not None:
+            spans.append((opening, closing, module.group("name")))
+    return spans
+
+
+def rust_matching_delimiters(code: str) -> dict[int, int]:
+    """Return matching Rust delimiter offsets from masked source."""
+    stack: list[tuple[str, int]] = []
+    pairs: dict[int, int] = {}
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    for index, character in enumerate(code):
+        if character in "([{":
+            stack.append((character, index))
+        elif character in ")]}" and stack:
+            opening, offset = stack[-1]
+            if opening == opening_for[character]:
+                stack.pop()
+                pairs[offset] = index
+    return pairs
+
+
+def rust_enclosing_module_names(
+    spans: list[tuple[int, int, str]], offset: int
+) -> list[str]:
+    """Return outer-to-inner module names enclosing one declaration."""
+    enclosing = [
+        (opening, name)
+        for opening, closing, name in spans
+        if opening < offset < closing
+    ]
+    return [name for _, name in sorted(enclosing)]
 
 
 def strip_block_quote_containers(line: str) -> str:
@@ -1506,6 +1622,7 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
     """Return distinct INV tags and declaration lines from Rust tests."""
     found: dict[str, int] = {}
     code = mask_rust_non_code(text)
+    module_spans = rust_inline_module_spans(code)
     for declaration in RUST_TEST_DECLARATION.finditer(code):
         raw_prefix = text[
             declaration.start("prefix") : declaration.end("prefix")
@@ -1516,8 +1633,15 @@ def rust_test_invariant_tags(text: str) -> list[tuple[str, int]]:
             and not rust_cfg_attr_has_test(code_prefix)
         ):
             continue
+        if rust_item_is_disabled(code_prefix):
+            continue
         doc_comments = "\n".join(rust_doc_comments(raw_prefix))
-        material = f"{doc_comments}\n{declaration.group('name')}"
+        module_names = rust_enclosing_module_names(
+            module_spans, declaration.start()
+        )
+        material = "\n".join(
+            [doc_comments, *module_names, declaration.group("name")]
+        )
         declaration_line = line_number(text, declaration.start("name"))
         for tag in INVARIANT_TAG.finditer(material):
             invariant = f"INV-{tag.group('number')}"
@@ -1536,6 +1660,40 @@ def rust_invariant_test_files(root: Path) -> dict[tuple[str, str], int]:
         for invariant, line in rust_test_invariant_tags(text):
             found[(invariant, source_label)] = line
     return found
+
+
+def check_rust_test_generation(root: Path) -> list[Violation]:
+    """Reject macros whose expanded tests cannot be registered from source."""
+    violations: list[Violation] = []
+    for source in sorted(root.rglob("*.rs")):
+        if ".git" in source.parts or "target" in source.parts:
+            continue
+        source_label = repository_path(root, source)
+        text = source.read_text(encoding="utf-8", errors="replace")
+        code = mask_rust_non_code(text)
+        delimiters = rust_matching_delimiters(code)
+        for macro in RUST_MACRO_RULES.finditer(code):
+            opening = macro.start("opening")
+            closing = delimiters.get(opening)
+            if closing is None:
+                continue
+            body = code[opening + 1 : closing]
+            if (
+                RUST_TEST_ATTRIBUTE.search(body) is None
+                and not rust_cfg_attr_has_test(body)
+            ):
+                continue
+            violations.append(
+                Violation(
+                    source_label,
+                    line_number(text, macro.start()),
+                    "invariant-test-generation",
+                    f"`macro_rules! {macro.group('name')}` emits a test "
+                    "attribute; write explicit test declarations so "
+                    "invariant registration remains mechanically visible",
+                )
+            )
+    return violations
 
 
 def check_invariant_citations(
@@ -1590,6 +1748,10 @@ def check_invariant_citations(
             )
             if last_marker >= 0 or last_boundary >= 0:
                 tagged_active = last_marker > last_boundary
+            label_has_marker = tagged_marker.search(
+                mask_inline_code(link.label)
+            ) is not None
+            tagged_active = tagged_active or label_has_marker
             if tagged_active:
                 tagged_destinations.add(link.destination)
             preceding_offset = link.offset + 1
@@ -1961,7 +2123,14 @@ def github_pull_request_event(
             or re.fullmatch(r"[0-9a-fA-F]{40}", base_sha) is None
         ):
             raise ValueError("pull-request base SHA has the wrong type or shape")
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        AttributeError,
+    ) as error:
         return None, None, str(error)
     return (number, branch), base_sha, None
 
@@ -2117,6 +2286,7 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     failures.extend(check_relative_links(root, enforcement_links))
     failures.extend(check_decision_order(root))
     failures.extend(check_spec_verification_references(root))
+    failures.extend(check_rust_test_generation(root))
     return sorted(set(failures))
 
 
